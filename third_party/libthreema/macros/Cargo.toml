@@ -1,0 +1,21 @@
+[package]
+name = "libthreema-macros"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+convert_case = "0.11"
+quote = "1"
+subtle = { version = "2", features = ["const-generics"] }
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+rstest = "0.26"
+trybuild = "1"
+
+[lints]
+workspace = true
