@@ -27,6 +27,7 @@ use crate::{
                 UpdateContactsInstruction, UpdateContactsLoop, UpdateContactsResponse, UpdateContactsTask,
             },
         },
+        fs,
         message::{codec::CspMessageDecoder as _, payload::IncomingMessageWithMetadataBox},
         reflect::{ReflectFlags, ReflectInstruction, ReflectPayload, ReflectResponse, ReflectSubtask},
     },
@@ -104,6 +105,7 @@ enum DiscardReason {
     MessageDisallowedOuterType,
     MessageUnknownOuterType,
     MessageForwardSecurityUnsupported,
+    MessageForwardSecurityHandled,
     MessageDecodingFailed,
     MessageIdsDiverging,
     MessageIdReuse,
@@ -210,16 +212,20 @@ fn decrypt_and_decode_metadata(
     })
 }
 
+/// Decapsulates a forward security envelope (see [`fs::process_incoming`]).
+type FsDecapsulator<'context> = dyn FnMut(&[u8]) -> Result<fs::IncomingFsOutcome, ProviderError> + 'context;
+
 fn decrypt_and_decode_message(
     shared_secret: CspE2eKey,
     payload: &mut IncomingMessageWithMetadataBox,
     sender: &ContactOrInit,
-) -> ProcessingOutcome<IncomingMessageParts> {
+    decapsulate: Option<&mut FsDecapsulator<'_>>,
+) -> Result<ProcessingOutcome<IncomingMessageParts>, ProviderError> {
     // Decrypt and decode metadata (if any)
     let outer_metadata = match decrypt_and_decode_metadata(&shared_secret, payload) {
         ProcessingOutcome::Ok(outer_metadata) => outer_metadata,
         ProcessingOutcome::Discard { reason, acknowledge } => {
-            return ProcessingOutcome::Discard { reason, acknowledge };
+            return Ok(ProcessingOutcome::Discard { reason, acknowledge });
         },
     };
 
@@ -244,10 +250,10 @@ fn decrypt_and_decode_message(
             .is_err()
         {
             warn!("Discarding message whose data could not be decrypted");
-            return ProcessingOutcome::Discard {
+            return Ok(ProcessingOutcome::Discard {
                 reason: DiscardReason::MessageDecryptionFailed,
                 acknowledge: AcknowledgeContext::from(&*payload),
-            };
+            });
         }
 
         // Drop shared secret ASAP
@@ -259,10 +265,10 @@ fn decrypt_and_decode_message(
         let message_container_bytes = {
             let Some(padding_length) = message_container_bytes.last() else {
                 warn!("Discarding message without any PKCS#7 padding");
-                return ProcessingOutcome::Discard {
+                return Ok(ProcessingOutcome::Discard {
                     reason: DiscardReason::MessageMissingPkcs7PaddingForMessage,
                     acknowledge: AcknowledgeContext::from(&*payload),
-                };
+                });
             };
             let unpadded_length = if *padding_length > 0
                 && let Some(unpadded_length) = message_container_bytes
@@ -272,10 +278,10 @@ fn decrypt_and_decode_message(
                 unpadded_length
             } else {
                 warn!("Discarding message with invalid PKCS#7 padding");
-                return ProcessingOutcome::Discard {
+                return Ok(ProcessingOutcome::Discard {
                     reason: DiscardReason::MessageInvalidPkcs7Padding,
                     acknowledge: AcknowledgeContext::from(&*payload),
-                };
+                });
             };
             message_container_bytes
                 .get(..unpadded_length)
@@ -285,10 +291,10 @@ fn decrypt_and_decode_message(
         // Decode message type
         let Some(outer_type) = message_container_bytes.first() else {
             warn!("Discarding message without an outer type");
-            return ProcessingOutcome::Discard {
+            return Ok(ProcessingOutcome::Discard {
                 reason: DiscardReason::MessageMissingOuterType,
                 acknowledge: AcknowledgeContext::from(&*payload),
-            };
+            });
         };
 
         // The remaining data is the message data
@@ -306,32 +312,52 @@ fn decrypt_and_decode_message(
     // to keep this indefinitely.
     if outer_type == 0xff {
         warn!("Discarding message with disallowed outer type 0xff");
-        return ProcessingOutcome::Discard {
+        return Ok(ProcessingOutcome::Discard {
             reason: DiscardReason::MessageDisallowedOuterType,
             acknowledge: AcknowledgeContext::from(&*payload),
-        };
+        });
     }
 
     // Ensure it's a known type
     let Ok(outer_type) = CspE2eMessageType::try_from(i32::from(outer_type)) else {
         warn!(?outer_type, "Discarding message with unknown outer type");
-        return ProcessingOutcome::Discard {
+        return Ok(ProcessingOutcome::Discard {
             reason: DiscardReason::MessageUnknownOuterType,
             acknowledge: AcknowledgeContext::from(&*payload),
-        };
+        });
     };
 
-    // TODO(LIB-42): Handle FS, decode inner metadata
+    // Forward security: decapsulate (the inner message shares the outer metadata). Control
+    // messages are handled completely by `fs` and only need to be acknowledged.
+    let decapsulated: Vec<u8>;
     let (inner_metadata, inner_type, inner_message_data) =
         if outer_type == CspE2eMessageType::ForwardSecurityEnvelope {
-            error!("TODO(LIB-42): Handle FS envelope");
-
-            // TODO(LIB-42): Disallow usage of FS encapsulation within an FS encapsulated message
-
-            return ProcessingOutcome::Discard {
-                reason: DiscardReason::MessageForwardSecurityUnsupported,
-                acknowledge: AcknowledgeContext::from(&*payload),
+            let Some(decapsulate) = decapsulate else {
+                warn!("Discarding FS envelope, forward security is disabled");
+                return Ok(ProcessingOutcome::Discard {
+                    reason: DiscardReason::MessageForwardSecurityUnsupported,
+                    acknowledge: AcknowledgeContext::from(&*payload),
+                });
             };
+            match decapsulate(outer_message_data)? {
+                fs::IncomingFsOutcome::Handled => {
+                    return Ok(ProcessingOutcome::Discard {
+                        reason: DiscardReason::MessageForwardSecurityHandled,
+                        acknowledge: AcknowledgeContext::from(&*payload),
+                    });
+                },
+                fs::IncomingFsOutcome::Inner { inner_type, data } => {
+                    let Ok(inner_type) = CspE2eMessageType::try_from(i32::from(inner_type)) else {
+                        warn!(?inner_type, "Discarding FS message with unknown inner type");
+                        return Ok(ProcessingOutcome::Discard {
+                            reason: DiscardReason::MessageUnknownOuterType,
+                            acknowledge: AcknowledgeContext::from(&*payload),
+                        });
+                    };
+                    decapsulated = data;
+                    (outer_metadata, inner_type, decapsulated.as_slice())
+                },
+            }
         } else {
             (outer_metadata, outer_type, outer_message_data)
         };
@@ -353,7 +379,7 @@ fn decrypt_and_decode_message(
             u64::from(payload.legacy_created_at).saturating_mul(1000),
             |metadata| metadata.created_at,
         ),
-        body: match IncomingMessageBody::decode(inner_type, inner_message_data) {
+        body: match IncomingMessageBody::decode(sender.inner().identity, inner_type, inner_message_data) {
             Ok(message) => message,
             Err(error) => {
                 warn!(
@@ -361,20 +387,20 @@ fn decrypt_and_decode_message(
                     ?error,
                     "Discarding message that could not be decoded",
                 );
-                return ProcessingOutcome::Discard {
+                return Ok(ProcessingOutcome::Discard {
                     reason: DiscardReason::MessageDecodingFailed,
                     acknowledge: AcknowledgeContext::from(&*payload),
-                };
+                });
             },
         },
     };
 
     // Done
-    ProcessingOutcome::Ok(IncomingMessageParts {
+    Ok(ProcessingOutcome::Ok(IncomingMessageParts {
         outer: outer_message,
         inner: inner_message,
         metadata: inner_metadata,
-    })
+    }))
 }
 
 struct InitState {
@@ -595,7 +621,40 @@ impl State {
                 acknowledge: AcknowledgeContext::from(&*payload),
             });
         };
-        let message = match decrypt_and_decode_message(shared_secret, payload, &sender) {
+        let csp_e2e = &mut context.csp_e2e;
+        let message = {
+            let (user_identity, client_key, sender_identity, sender_public_key) = (
+                csp_e2e.user_identity,
+                &csp_e2e.client_key,
+                sender.inner().identity,
+                sender.inner().public_key,
+            );
+            let outer_message_id = payload.id.0;
+            let mut decapsulate = csp_e2e.fs.as_mut().map(|fs| {
+                // A stale commit from a message that was never acknowledged must not be applied.
+                fs.pending_commit = None;
+                move |envelope: &[u8]| {
+                    fs::process_incoming(
+                        fs,
+                        user_identity,
+                        client_key,
+                        sender_identity,
+                        &sender_public_key,
+                        outer_message_id,
+                        envelope,
+                    )
+                }
+            });
+            decrypt_and_decode_message(
+                shared_secret,
+                payload,
+                &sender,
+                decapsulate
+                    .as_mut()
+                    .map(|decapsulate| decapsulate as &mut FsDecapsulator<'_>),
+            )?
+        };
+        let message = match message {
             ProcessingOutcome::Ok(message) => message,
             ProcessingOutcome::Discard { reason, acknowledge } => {
                 return Ok(ProcessingOutcome::Discard { reason, acknowledge });
@@ -930,12 +989,34 @@ impl State {
                 ContactMessageBody::Text(_)
                 | ContactMessageBody::Location(_)
                 | ContactMessageBody::DeliveryReceipt(_)
-                | ContactMessageBody::LegacyReaction(_) => {
+                | ContactMessageBody::LegacyReaction(_)
+                | ContactMessageBody::Reaction(_)
+                | ContactMessageBody::File(_)
+                | ContactMessageBody::PollSetup(_)
+                | ContactMessageBody::PollVote(_)
+                | ContactMessageBody::SetProfilePicture(_)
+                | ContactMessageBody::DeleteProfilePicture(_)
+                | ContactMessageBody::RequestProfilePicture(_)
+                | ContactMessageBody::Edit(_)
+                | ContactMessageBody::Delete(_)
+                | ContactMessageBody::CallOffer(_)
+                | ContactMessageBody::CallAnswer(_)
+                | ContactMessageBody::CallIceCandidate(_)
+                | ContactMessageBody::CallHangup(_)
+                | ContactMessageBody::CallRinging(_) => {
                     info!(?inner_type, "Adding message to 1:1 conversation");
                     context
                         .conversations
                         .borrow_mut()
                         .add_or_update_incoming_message(message.inner.clone())?;
+                },
+
+                ContactMessageBody::TypingIndicator(typing_indicator) => {
+                    // Run the _Common Typing Indicator Receive Steps_
+                    context
+                        .conversations
+                        .borrow_mut()
+                        .set_typing_indicator(message.inner.sender_identity, typing_indicator.is_typing)?;
                 },
 
                 ContactMessageBody::WebSessionResume(_) => {
@@ -948,13 +1029,14 @@ impl State {
                 },
             },
 
-            // All group messages...
-            //
-            // TODO(LIB-53): Handle them
+            // All group messages: the provider runs the _Common Group Receive Steps_ and the
+            // message's own receive steps (it knows the groups).
             IncomingMessageBody::Group(_) => {
-                return Err(CspE2eProtocolError::DesyncError(
-                    "Ain't nobody got time to implement handling group messages".to_owned(),
-                ));
+                info!(?inner_type, "Adding message to group conversation");
+                context
+                    .conversations
+                    .borrow_mut()
+                    .add_or_update_incoming_message(message.inner.clone())?;
             },
         }
 
@@ -1094,8 +1176,11 @@ impl State {
                 .add_many(vec![message_nonce.clone()])?;
         }
 
-        // TODO(LIB-42): Run `fs-commit-fn` if applicable. Ensure this does not get executed if called prior
-        // to decapsulation.
+        // Run the `fs-commit-fn`: turn the peer ratchet past this message. Only set by a successful
+        // decapsulation of the current message.
+        if let Some(fs) = context.fs.as_mut() {
+            fs::commit_peer_ratchet(fs)?;
+        }
 
         // Acknowledge only if needed
         Ok(
@@ -1711,6 +1796,7 @@ mod tests {
                     client_key: ClientKey::from(&RawClientKey::from_hex(init.client_key).unwrap()),
                     flavor: init.flavor,
                     nonce_storage: Box::new(RefCell::new(database.csp_e2e_nonce_provider())),
+                    fs_sessions: None,
                 },
                 d2x: init.device_group_key.map(|device_group_key| D2xContextInit {
                     device_id: D2xDeviceId(0x01),

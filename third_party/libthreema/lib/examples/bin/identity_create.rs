@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
             client_info: ClientInfo::Libthreema,
             config: config.config,
             flavor: config.flavor,
+            serial_license: None,
         },
     )
     .await?;

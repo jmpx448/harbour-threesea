@@ -301,6 +301,12 @@ mod tests {
         os_name: String::default(),
         os_architecture: String::default(),
     }, "Threema Desktop/3.4.5")]
+    #[case(ClientInfo::Threesea {
+        version: "0.1.0".to_owned(),
+        locale: String::default(),
+        device_model: String::default(),
+        os_version: String::default(),
+    }, "Threesea/0.1.0")]
     #[rstest]
     fn https_headers_user_agent(#[case] client_info: ClientInfo, #[case] user_agent: String) {
         let headers = HttpsHeadersBuilder::default().build(&client_info);

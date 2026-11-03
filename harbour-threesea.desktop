@@ -1,0 +1,29 @@
+[Desktop Entry]
+Type=Application
+X-Nemo-Application-Type=silica-qt5
+Icon=harbour-threesea
+Exec=harbour-threesea
+Name=Threesea
+Comment=Unofficial Threema client
+# Launch through D-Bus: if Threesea is still running without a window (it keeps the chat
+# connection), the launcher asks it to show its window instead of trying to start it again.
+X-Maemo-Service=org.threesea.harbour-threesea
+X-Maemo-Object-Path=/
+X-Maemo-Method=org.threesea.harbourthreesea.activate
+# Threema links (threema://…, https://threema.id/…, https://go.threema.ch/…) open in Threesea:
+# libcontentaction calls activate(as) with the URL.
+MimeType=x-scheme-handler/threema;x-url-handler/threema.id;x-url-handler/go.threema.ch;
+# "Share" from other apps (Sailfish.Share's app share methods): D-Bus object /share/threesea.
+X-Share-Methods=threesea
+
+[X-Share Method threesea]
+Description=Send in a chat
+Capabilities=image/*;video/*;audio/*;text/*;application/*
+SupportsMultipleFiles=true
+
+[X-Sailjail]
+# The Full flavour appends Sensors (voice messages at the ear; not Harbour-allowed, spec).
+Permissions=Internet;Secrets;Pictures;Videos;Music;Documents;Downloads;MediaIndexing;Microphone;Camera;Contacts;Location
+OrganizationName=org.threesea
+ApplicationName=harbour-threesea
+ExecDBus=harbour-threesea

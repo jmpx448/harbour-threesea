@@ -80,6 +80,11 @@ pub mod protobuf {
         include!(concat!(env!("OUT_DIR"), "/csp_e2e.rs"));
     }
 
+    /// Forward security (PFS) for end-to-end encrypted messages.
+    pub mod csp_e2e_fs {
+        include!(concat!(env!("OUT_DIR"), "/csp_e2e_fs.rs"));
+    }
+
     /// Device to Device Protocol messages.
     pub mod d2d {
         include!(concat!(env!("OUT_DIR"), "/d2d.rs"));
@@ -103,6 +108,26 @@ pub mod protobuf {
     /// Directory server messages.
     pub mod directory {
         include!(concat!(env!("OUT_DIR"), "/directory.rs"));
+    }
+
+    /// Device Join Protocol messages.
+    pub mod d2d_join {
+        include!(concat!(env!("OUT_DIR"), "/d2d_join.rs"));
+    }
+
+    /// URL payloads (e.g. the device join request or offer in a QR code).
+    pub mod url {
+        include!(concat!(env!("OUT_DIR"), "/url.rs"));
+    }
+
+    /// 1:1 call messages (the call's data channel).
+    pub mod o2o_call {
+        include!(concat!(env!("OUT_DIR"), "/o2o_call.rs"));
+    }
+
+    /// Group call messages (SFU and participants).
+    pub mod group_call {
+        include!(concat!(env!("OUT_DIR"), "/group_call.rs"));
     }
 }
 

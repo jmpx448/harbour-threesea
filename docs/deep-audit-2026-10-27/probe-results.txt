@@ -1,0 +1,22 @@
+   Compiling threesea-core v0.1.0 (${AUDIT_SNAPSHOT}/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.01s
+     Running unittests src/lib.rs (${REPOSITORY}/target/debug/deps/threesea_core-8d1a2b594f50b119)
+
+running 6 tests
+test app_web::deep_audit_probes::audit_measure_history_scaling ... AUDIT_PERF chats=10 messages=1000 list_ms=1.116 list_sql_ms=0.264 absent_search_ms=0.287 unchanged_web_refresh_ms=0.573
+AUDIT_PERF chats=100 messages=10000 list_ms=10.038 list_sql_ms=2.055 absent_search_ms=2.162 unchanged_web_refresh_ms=4.361
+AUDIT_PERF chats=100 messages=100000 list_ms=32.891 list_sql_ms=24.574 absent_search_ms=34.772 unchanged_web_refresh_ms=32.785
+AUDIT_PERF chats=1000 messages=100000 list_ms=114.691 list_sql_ms=34.121 absent_search_ms=33.047 unchanged_web_refresh_ms=60.045
+AUDIT_PLAN SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+AUDIT_PLAN LIST SUBQUERY 1
+AUDIT_PLAN SCAN messages USING COVERING INDEX messages_by_conversation_id
+ok
+test app_web::deep_audit_probes::audit_msgpack_decoded_expansion ... AUDIT_MSGPACK wire_bytes=65541 value_size=40 array_allocation_bytes=2621440
+ok
+test app_web::deep_audit_probes::audit_peer_controlled_log_fields ... ok
+test app_web::deep_audit_probes::audit_private_vote_and_reaction_return_content ... ok
+test app_web::deep_audit_probes::audit_reused_session_id_accepts_revoked_commands ... ok
+test app_web::deep_audit_probes::audit_stale_end_deletes_replacement_session ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 161 filtered out; finished in 10.36s
+

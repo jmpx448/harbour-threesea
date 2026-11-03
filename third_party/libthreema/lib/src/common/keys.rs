@@ -12,6 +12,7 @@ use zeroize::ZeroizeOnDrop;
 use crate::{
     common::ThreemaId,
     crypto::{
+        aead::AeadRandomNonceAhead as _,
         blake2b,
         cipher::KeyInit as _,
         digest::{FixedOutput as _, Mac as _},
@@ -117,6 +118,30 @@ impl ClientKey {
         ))
     }
 
+    /// Derive the X25519HSalsa20 shared secret with `public_key`, as used by the forward security
+    /// key derivations (2DH/4DH).
+    ///
+    /// `None` is returned in case the shared secret is derived from a non-contributory key.
+    #[must_use]
+    pub(crate) fn derive_fs_shared_secret(
+        &self,
+        public_key: &PublicKey,
+    ) -> Option<x25519::SharedSecretHSalsa20> {
+        Some(x25519::SharedSecretHSalsa20::from(
+            self.0.diffie_hellman(&public_key.0)?,
+        ))
+    }
+
+    /// Derive the `X25519HSalsa20` shared secret with `public_key` (`crypto_box_beforenm`), for
+    /// protocols that libthreema doesn't implement itself (e.g. the group call handshake).
+    ///
+    /// `None` is returned in case the shared secret is derived from a non-contributory key.
+    #[must_use]
+    pub fn derive_shared_secret(&self, public_key: &PublicKey) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        let secret = x25519::SharedSecretHSalsa20::from(self.0.diffie_hellman(&public_key.0)?);
+        Some(zeroize::Zeroizing::new(secret.to_bytes()))
+    }
+
     /// Derive the key to solve an authentication challenge against the directory server.
     ///
     /// `None` is returned in case the shared secret is derived from a non-contributory key.
@@ -135,6 +160,28 @@ impl ClientKey {
             blake2b::Blake2bMac256::new_with_salt_and_personal(Some(&key), &[], &[])
                 .expect("Blake2bMac256 failed"),
         ))
+    }
+
+    /// Solve an authentication challenge of the directory server, given the challenge's public key
+    /// (`tokenRespKeyPub`) and the challenge itself (`token`). Returns the `response` to be sent.
+    ///
+    /// For directory endpoints that are not (yet) implemented as tasks in libthreema.
+    ///
+    /// `None` is returned in case the challenge public key is non-contributory.
+    #[must_use]
+    pub fn solve_directory_challenge(
+        &self,
+        challenge_public_key: &PublicKey,
+        challenge: &[u8],
+    ) -> Option<[u8; PublicKey::LENGTH]> {
+        Some(
+            self.derive_directory_authentication_key(challenge_public_key)?
+                .0
+                .chain_update(challenge)
+                .finalize()
+                .into_bytes()
+                .into(),
+        )
     }
 
     /// Derive the key to solve an authentication challenge against the work directory server.
@@ -291,6 +338,11 @@ impl DeviceGroupPathKey {
     }
 }
 
+/// Encrypting or decrypting with a key derived from the [`DeviceGroupKey`] failed.
+#[derive(Debug, thiserror::Error)]
+#[error("Device group encryption or decryption failed")]
+pub struct DeviceGroupCryptoError;
+
 /// Cipher associated to the Device Group Reflect Key (DGRK).
 pub(crate) struct DeviceGroupReflectCipher(pub(crate) salsa20::XSalsa20Poly1305);
 
@@ -339,6 +391,74 @@ impl DeviceGroupKey {
     #[must_use]
     pub(crate) fn transaction_scope_key(&self) -> DeviceGroupTransactionScopeCipher {
         DeviceGroupTransactionScopeCipher(salsa20::XSalsa20Poly1305::new(&self.derive_key(b"ts")))
+    }
+
+    /// The Device Group ID (DGID, the public key of the DGPK), e.g. for blob mirror requests.
+    #[must_use]
+    pub fn device_group_id(&self) -> [u8; 32] {
+        *self.path_key().public_key().0.as_bytes()
+    }
+
+    /// Encrypt an encoded D2D `Envelope` for reflection (DGRK, random nonce ahead), for clients that
+    /// reflect outside of libthreema's tasks.
+    ///
+    /// Returns the nonce and `nonce || ciphertext`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceGroupCryptoError`] if encryption fails.
+    pub fn encrypt_envelope(&self, envelope: &[u8]) -> Result<([u8; 24], Vec<u8>), DeviceGroupCryptoError> {
+        let (nonce, data) = self
+            .reflect_key()
+            .0
+            .encrypt_random_nonce_ahead(envelope)
+            .map_err(|_| DeviceGroupCryptoError)?;
+        Ok((nonce.into(), data))
+    }
+
+    /// Decrypt a reflected D2D `Envelope` (`nonce || ciphertext`, DGRK).
+    ///
+    /// Returns the nonce (to be checked against and added to the D2D nonce storage) and the encoded
+    /// envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceGroupCryptoError`] if decryption fails.
+    pub fn decrypt_envelope(&self, data: &[u8]) -> Result<([u8; 24], Vec<u8>), DeviceGroupCryptoError> {
+        let (nonce, envelope) = self
+            .reflect_key()
+            .0
+            .decrypt_random_nonce_ahead(data)
+            .map_err(|_| DeviceGroupCryptoError)?;
+        Ok((nonce.into(), envelope))
+    }
+
+    /// Decrypt a device's encrypted `DeviceInfo` (`nonce || ciphertext`, DGDIK), e.g. from `DevicesInfo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceGroupCryptoError`] if decryption fails.
+    pub fn decrypt_device_info(&self, data: &[u8]) -> Result<Vec<u8>, DeviceGroupCryptoError> {
+        let (_, device_info) = self
+            .device_info_key()
+            .0
+            .decrypt_random_nonce_ahead(data)
+            .map_err(|_| DeviceGroupCryptoError)?;
+        Ok(device_info)
+    }
+
+    /// Encrypt an encoded D2D `TransactionScope` for a `BeginTransaction` (DGTSK, random nonce ahead).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceGroupCryptoError`] if encryption fails.
+    pub fn encrypt_transaction_scope(&self, scope: &[u8]) -> Result<Vec<u8>, DeviceGroupCryptoError> {
+        let (_, data) = self
+            .transaction_scope_key()
+            .0
+            .encrypt_random_nonce_ahead(scope)
+            .map_err(|_| DeviceGroupCryptoError)?;
+        Ok(data)
     }
 
     fn derive_key(&self, salt: &[u8]) -> salsa20::Key {
@@ -581,9 +701,23 @@ mod tests {
     use rstest::rstest;
 
     use crate::{
-        common::keys::{ClientKey, DeviceGroupPathKey, PublicKey},
+        common::keys::{ClientKey, DeviceGroupKey, DeviceGroupPathKey, PublicKey},
         crypto::x25519,
     };
+
+    #[test]
+    fn shared_secret_is_symmetric() {
+        let (alice, bob) = (ClientKey::random(), ClientKey::random());
+        let ab = alice.derive_shared_secret(&bob.public_key()).unwrap();
+        let ba = bob.derive_shared_secret(&alice.public_key()).unwrap();
+        assert_eq!(*ab, *ba);
+        // A non-contributory (all-zero) public key yields none.
+        assert!(
+            alice
+                .derive_shared_secret(&PublicKey::from([0; PublicKey::LENGTH]))
+                .is_none()
+        );
+    }
 
     #[rstest]
     #[case(PublicKey::from([0; PublicKey::LENGTH]), PublicKey::from([0; PublicKey::LENGTH]))]
@@ -625,5 +759,19 @@ mod tests {
                 .authentication_cipher(&PublicKey::from([0; PublicKey::LENGTH]))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn envelope_round_trip() {
+        let device_group_key = DeviceGroupKey::from([7; DeviceGroupKey::LENGTH]);
+        let (nonce, encrypted) = device_group_key.encrypt_envelope(b"envelope").unwrap();
+        assert_eq!(encrypted.get(..24), Some(nonce.as_slice()));
+        let (decrypted_nonce, envelope) = device_group_key.decrypt_envelope(&encrypted).unwrap();
+        assert_eq!(decrypted_nonce, nonce);
+        assert_eq!(envelope, b"envelope");
+
+        // Another device group can't read it
+        let other = DeviceGroupKey::from([8; DeviceGroupKey::LENGTH]);
+        assert!(other.decrypt_envelope(&encrypted).is_err());
     }
 }

@@ -1,0 +1,7 @@
+[submodule "third_party/threema-android"]
+	path = third_party/threema-android
+	url = https://github.com/threema-ch/threema-android.git
+	shallow = true
+[submodule "third_party/webrtc-audio-processing"]
+	path = third_party/webrtc-audio-processing
+	url = https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing.git

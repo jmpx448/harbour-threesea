@@ -40,6 +40,7 @@ impl TryFrom<CreateIdentityContext> for identity::create::CreateIdentityContext 
             client_info: context.client_info,
             config: Arc::new(config),
             flavor: context.flavor,
+            serial_license: None,
         })
     }
 }

@@ -1,0 +1,61 @@
+Separate AI-run security, rules and performance re-audit — 2026-10-27
+
+Snapshot: 2026-10-27T11:38:53.056628+00:00
+Git HEAD: a commit from before the public history plus working-tree changes.
+Snapshot hashes: snapshot-manifest.json (319 project files).
+The manifest precedes injection of the audit test module in the disposable copy.
+Vendored directories were shared read-only by convention, not copied; no edits made there.
+Rust: rustc/cargo 1.95.0. Tests use the host debug/test profile.
+
+Completed checks:
+- cargo test --workspace --locked --offline
+  154 passed, 0 failed, 7 ignored. Doc tests: 0.
+- cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+  Passed with no warnings before adding the audit-only module.
+- cargo fmt -p threesea-core -- --check
+  Passed on the live application tree; no source was reformatted by the audit.
+- cargo test --manifest-path third_party/libthreema/Cargo.toml -p libthreema --lib --locked --offline
+  3680 passed, 0 failed, 0 ignored.
+- cargo audit --db /tmp/threesea-audit-advisory-db --json
+  Advisory DB refreshed to 99670cfc0bc574433034b75876a4b791ccaa2efb.
+  Updated 2026-10-27T11:02:42+01:00; 1380 advisories, 286 packages scanned.
+  0 vulnerabilities, warnings {}. Raw output in dependencies.json.
+- Offline review probes: 6 passed, 0 failed, 161 baseline tests filtered out.
+  Four defect reproductions, one bounded decoded-size demonstration, one scaling measurement.
+  See probe-results.txt. Passing defect probes demonstrate the defect, not a fix.
+- scripts/check-logging.py: passed, but independent taint and scanner-negative probes show gaps.
+- TLS pin comparison: all four domain/pin sets, 19 pins total, match the pinned Android XML.
+- Translation scan: 642 literal qsTrId IDs; none missing in either catalog.
+  German: 0 unfinished entries. English unfinished entries are intentionally retained as fallback.
+- SPDX scan: no missing SPDX markers in inspected first-party core/bridge/QML/scripts source files.
+- Native syntax check: five source files compile with -std=c++14 -fPIC -fsyntax-only against
+  SailfishOS-5.1.0.11-i486 Qt 5.6.3: jsonlistmodel.cpp, contactlistmodel.cpp,
+  dbusinterface.cpp, callmanager.cpp, groupcallmanager.cpp (Lite preprocessor configuration).
+  Ran in a disposable SDK container, network disabled; source mounted read-only and copied
+  into the container's SDK-visible home. Not a linked build, Full-engine test or RPM validation.
+  Full native checks unavailable with installed headers: sailfishsecrets and
+  gstreamer-webrtc-1.0 development metadata absent. SDK inventory in sdk-inventory.txt.
+
+Core test commands used:
+PROTOC=${REPOSITORY}/tools/protoc/bin/protoc
+CARGO_TARGET_DIR=${REPOSITORY}/target
+Both point to existing cached build tools/artifacts; production sources were not modified.
+
+Performance method:
+Synthetic encrypted stores: 10x100, 100x100, 100x1000, 1000x100 messages per conversation.
+Fixture insertion in one transaction; one warm-up, five measured iterations; median wall time.
+Each refresh has one subscribed browser stand-in. Timing includes core list/refresh work but
+excludes network, GUI rendering and device battery behavior. Two runs gave similar scaling.
+Final run's values are in probe-results.txt and the report.
+
+Not performed:
+Live-service messaging, user-data access, destructive OOM, emulator changes, physical-phone
+measurements, Full call-engine integration, native sanitizer/fuzz campaigns or complete Git-history
+secret analysis.
+
+Late concurrent changes reviewed separately:
+CI/release YAML, release/version helper, SDK preparation/pinning, release documentation,
+SECURITY.md, CHANGELOG.md, README.md, CLAUDE.md and docs/ffi.md.
+See late-review-manifest.json for exact hashes and time.
+Both workflow YAML files parsed. Publication dependencies: version + build, not checks.
+scripts/release-version.sh returned 0.1.0. No workflow, release or destructive CI cleanup ran.

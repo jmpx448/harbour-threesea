@@ -116,7 +116,6 @@ pub(crate) mod aead {
         /// let ciphertext = b"...";
         /// let plaintext = cipher.decrypt_random_nonce_ahead(ciphertext)?;
         /// ```
-        #[expect(dead_code, reason = "May use later")]
         fn decrypt_random_nonce_ahead<'message, 'aad, TCiphertext: Into<Payload<'message, 'aad>>>(
             &self,
             ciphertext: TCiphertext,

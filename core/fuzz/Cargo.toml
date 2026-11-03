@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Coverage-guided fuzzing of the decoders that take input from outside (deep audit open item).
+# Not part of the app or the workspace: `cargo +nightly fuzz run <target>` in core/ (docs/build.md).
+[package]
+name = "threesea-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+threesea-core = { path = ".." }
+
+# Its own workspace: fuzzing builds with nightly and sanitizers, never with the app.
+[workspace]
+
+[patch.crates-io]
+blake2 = { path = "../../third_party/libthreema/patches/blake2" }
+opus-pure = { path = "../../third_party/opus-pure" }
+
+[[bin]]
+name = "voice_decode"
+path = "fuzz_targets/voice_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdp_patch"
+path = "fuzz_targets/sdp_patch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_chunks"
+path = "fuzz_targets/web_chunks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_images"
+path = "fuzz_targets/web_images.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codes"
+path = "fuzz_targets/codes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backup_csv"
+path = "fuzz_targets/backup_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_text"
+path = "fuzz_targets/message_text.rs"
+test = false
+doc = false
+bench = false

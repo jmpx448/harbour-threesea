@@ -1,0 +1,17 @@
+{
+  "utc": "2026-10-27T11:56:34.911538+00:00",
+  "sha256": {
+    "CLAUDE.md": "7a7afe6eba63624eb1cc3aaf3807cc3b3d08f2062e6d86f10e652ab907f32e0b",
+    "README.md": "7f075d7935e45d377db2fe05810e9ecde891cd056964f44979d74cebc0285661",
+    "docs/ffi.md": "eebe797dba50b03ea9217740893df72b2fe897e54bff25cb73c85f7075da9b15",
+    "scripts/sdk/Dockerfile": "2d3c14dadf30ece72d1799ee4becd539db8f9bfe3f49599eaaedf3595b40d696",
+    "docs/decisions/0014-lite-full-github-updates.md": "48094265041b3c420e0cb0a12ad563ac7cd5f377535d13007fc0659f7fa39c34",
+    ".github/workflows/ci.yml": "649a07fa82ab6b2a012b04fefca3d37842263841cadbf5f451f92f0615b28c4e",
+    ".github/workflows/release.yml": "ed4d92551827685f3f4b21016e376ca21a9f4076e47b4d074b9a355049e59274",
+    "scripts/ci-prepare-sdk.sh": "d0655146bdb3971d9af5de77ae19aaf22a19f09b4d68b97efab25d37d7ee892e",
+    "scripts/release-version.sh": "46990fb95ec1b540a979059ee75924875b9d4735b438490b62956e72d067f8e3",
+    "docs/release.md": "44dd9208a3a511c3f203e8e17fda35e4e90eceab5ef6324cda909416f41fac14",
+    "SECURITY.md": "e5b5d5d8abd157321901b746747cbab5153ab1e9f7cd21a2e1eae4d83f9b009f",
+    "CHANGELOG.md": "adc648f967fbc312e04c425470fc48966466eca25c8cc15f62417c84de799f06"
+  }
+}

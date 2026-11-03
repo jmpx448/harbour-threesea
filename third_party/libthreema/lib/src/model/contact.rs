@@ -114,6 +114,16 @@ pub struct Contact {
     pub conversation_visibility: protobuf::d2d_sync::ConversationVisibility,
 }
 
+impl Contact {
+    /// Encode as a D2D sync contact (e.g. for the device join's `EssentialData`), without profile
+    /// pictures (they are added by the client).
+    #[must_use]
+    pub fn to_d2d_sync(&self) -> protobuf::d2d_sync::Contact {
+        use crate::csp_e2e::contacts::codec::D2dContactEncoder as _;
+        self.encode()
+    }
+}
+
 /// All protocol relevant data associated to create a contact with the following exclusions:
 ///
 /// - _contact-defined_ profile picture

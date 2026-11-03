@@ -142,9 +142,11 @@ impl Reflected {
             })?;
 
         // Move beyond the header and extract the envelope
+        //
+        // Note: The header length includes the header length byte itself, which has already been read.
         let envelope = reader
             .run_owned(|mut reader| {
-                reader.skip(header_length as usize)?;
+                reader.skip(usize::from(header_length).saturating_sub(1))?;
                 Ok(reader.read_remaining_owned())
             })
             .map_err(|error| D2mProtocolError::DecodingFailed {
@@ -602,5 +604,24 @@ impl PayloadEncoder for OutgoingPayload {
 
             OutgoingPayload::ReflectedAck(reflected_ack) => reflected_ack.encode_into(writer),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reflected_envelope_starts_after_the_header() {
+        let mut data = vec![16_u8, 0];
+        data.extend_from_slice(&1_u16.to_le_bytes());
+        data.extend_from_slice(&7_u32.to_le_bytes());
+        data.extend_from_slice(&42_u64.to_le_bytes());
+        data.extend_from_slice(b"envelope");
+        let reflected = Reflected::decode(OwnedVecByteReader::new(data)).unwrap();
+        assert_eq!(reflected.reflect_id, 7);
+        assert_eq!(reflected.timestamp, 42);
+        assert_eq!(reflected.flags.0, ReflectFlags::EPHEMERAL_MARKER);
+        assert_eq!(reflected.envelope, b"envelope");
     }
 }

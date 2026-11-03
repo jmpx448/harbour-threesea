@@ -1,0 +1,7 @@
+/target
+/tools/
+/RPMS/
+*.user
+/.idea/
+/.local/
+__pycache__/

@@ -395,6 +395,7 @@ impl FullIdentityConfig {
             client_key: ClientKey::from(&self.minimal.client_key),
             flavor: self.minimal.common.flavor.clone(),
             nonce_storage,
+            fs_sessions: None,
         }
     }
 

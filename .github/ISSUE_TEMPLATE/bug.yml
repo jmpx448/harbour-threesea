@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Security problems:** please report them privately instead
+        (Security tab → Report a vulnerability; see SECURITY.md).
+
+        **Never post** your Threema ID's backup, passwords, license keys, phone numbers, e-mail
+        addresses, other people's Threema IDs or messages. Remove them from logs and screenshots.
+  - type: input
+    id: version
+    attributes:
+      label: Threesea version and flavour
+      description: Settings → About. Full or Lite?
+      placeholder: 0.1.0, Full
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and Sailfish OS version
+      placeholder: Xperia 10 III, Sailfish OS 5.1.0.11
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Tap …
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (optional)
+      description: |
+        Settings → Advanced → Log → "Detailed", reproduce the problem, then in the phone's
+        terminal (developer mode): `devel-su journalctl --since "-10min" | grep -i threesea`. Threesea doesn't log message
+        content, keys or phone numbers, but please look through it before posting.
+      render: text

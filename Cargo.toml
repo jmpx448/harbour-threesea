@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+# Path dependencies inside the workspace dir would otherwise become implicit members and inherit
+# our workspace settings instead of libthreema's own (lints etc.).
+exclude = ["third_party", "core/fuzz"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.95"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# libthreema carries a patched blake2 (non-keyed hashing with parameters, upstream TODO LIB-7).
+# `[patch]` is only honoured in the root workspace, so we must repeat it here.
+[patch.crates-io]
+blake2 = { path = "third_party/libthreema/patches/blake2" }
+# opus-pure 0.2.2 imports std::arch::x86_64 in code gated for 32-bit x86 too (breaks the i486
+# emulator build); vendored with that one fix, see third_party/opus-pure/THREESEA-PATCH.md.
+opus-pure = { path = "third_party/opus-pure" }

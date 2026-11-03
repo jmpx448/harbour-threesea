@@ -1,0 +1,83 @@
+[package]
+name = "threesea-core"
+description = "Application core of harbour-threesea, a Threema client for Sailfish OS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "threesea_core"
+crate-type = ["staticlib", "lib"]
+
+[features]
+# Made-up chats for the emulator (`demoData`, core/src/demo.rs). Switched on for i486 only
+# (scripts/build-core.sh); never in a build for a phone.
+demo = []
+
+[dependencies]
+# Voice-message fallback where the platform has no AAC: pure-Rust Opus/Ogg (BSD-3-Clause, no
+# dependencies, no C), royalty-free codec. See docs/protocol-notes.md "Voice messages".
+opus-pure = "=0.2.2"
+# Contact verification QR codes (Threema's 3mid: format): generate and decode, pure Rust,
+# MIT/Apache, without their optional image dependencies.
+# Address book matching: HMAC-SHA256 of normalised e-mails / phone numbers (as Android); the
+# same RustCrypto version libthreema already uses.
+hmac = "=0.12.1"
+# Threema links (threema://, threema.id): URL and query parsing; already in the tree via reqwest.
+url = "=2.5.8"
+qrcode = { version = "=0.14.1", default-features = false }
+rqrr = { version = "=0.11.0", default-features = false }
+libthreema = { path = "../third_party/libthreema/lib" }
+
+# Runtime + HTTPS. Same families libthreema's own CLI uses (tokio, reqwest, rustls); TLS via rustls
+# with the ring provider (no system OpenSSL on the network path), our own verifier does pinning.
+tokio = { version = "1.52", default-features = false, features = ["rt", "macros", "sync", "time", "net", "io-util"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1"
+# Multi-device (Threema Desktop): WebSockets to the mediator and rendezvous servers (Threema's
+# only), over the same rustls configuration with pinning (https::tls_config). The version
+# libthreema's own examples use for exactly this.
+tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "__rustls-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Encoding/decoding libthreema's generated protobuf messages (D2D envelopes, device info); the
+# version libthreema itself uses, already in the tree.
+prost = "=0.14.4"
+
+# Encrypted store (SQLCipher, statically bundled; links the system libcrypto, Harbour-allowed).
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
+
+# Threema Safe: same RustCrypto crates/versions libthreema uses (it has no Safe implementation).
+scrypt = { version = "0.11", default-features = false }
+crypto_secretbox = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "salsa20"] }
+# Group calls: keyed BLAKE2b with salt and personalisation (libthreema keeps its own private);
+# the version libthreema uses, already in the tree.
+blake2 = { version = "=0.10.6", default-features = false, features = ["std"] }
+# Group call media frames: AES-256-GCM (Threema's frame encryption; libthreema has none).
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
+# Threema Web: msgpack values (the app remote protocol and SaltyRTC are msgpack).
+rmpv = { version = "=1.3.1", default-features = false }
+# Threema Web: thumbnails, previews and profile pictures in Android's sizes (JPEG/PNG only).
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
+# gzip container of Safe backups (pure-Rust miniz_oxide backend).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Android full data backups: Zip4j writes AES-256 (WinZip AE) ZIP entries with DEFLATE
+# (FileHandlingZipOutputStream.kt); read-only here, minimal features (no zopfli/zstd/…),
+# the same flate2 as above. MIT, MSRV 1.88, pinned.
+zip = { version = "=9.1.2", default-features = false, features = ["aes-crypto", "deflate-flate2"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2.9"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1.8", features = ["derive", "serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"

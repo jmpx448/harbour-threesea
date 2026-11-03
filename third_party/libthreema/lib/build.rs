@@ -24,7 +24,9 @@ fn main() -> Result<()> {
     // General protobuf annotations to apply.
     let builder = builder
         .message_attribute(".", "#[libthreema_macros::protobuf_annotations]")
-        .enable_type_names();
+        .enable_type_names()
+        // The SFU HTTP request docs contain indented URL examples that rustdoc would compile.
+        .disable_comments([".group_call.SfuHttpRequest"]);
 
     // Apply attributes as required by above definition section.
     let builder = clap_convertable_enums.iter().fold(builder, |builder, path| {
@@ -50,11 +52,16 @@ fn main() -> Result<()> {
         &[
             "../threema-protocols/src/common.proto",
             "../threema-protocols/src/csp-e2e.proto",
+            "../threema-protocols/src/csp-e2e-fs.proto",
             "../threema-protocols/src/directory.proto",
             "../threema-protocols/src/md-d2d.proto",
             "../threema-protocols/src/md-d2d-sync.proto",
             "../threema-protocols/src/md-d2d-rendezvous.proto",
+            "../threema-protocols/src/md-d2d-join.proto",
             "../threema-protocols/src/md-d2m.proto",
+            "../threema-protocols/src/url-payloads.proto",
+            "../threema-protocols/src/o2o-call.proto",
+            "../threema-protocols/src/group-call.proto",
         ],
         &["../threema-protocols/src/"],
     )?;

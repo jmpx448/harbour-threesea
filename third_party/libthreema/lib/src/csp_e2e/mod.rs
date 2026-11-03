@@ -27,6 +27,7 @@ use crate::{
 };
 
 pub mod contacts;
+pub mod fs;
 pub mod identity;
 pub mod message;
 pub mod reflect;
@@ -175,6 +176,13 @@ pub struct CspE2eContextInit {
 
     /// CSP nonce storage.
     pub nonce_storage: Box<RefCell<dyn NonceStorage>>,
+
+    /// Forward security session storage. `None` disables forward security: incoming FS envelopes
+    /// are discarded (the behaviour before forward security was implemented).
+    ///
+    /// Note: Forward security must not be enabled together with multi-device (see
+    /// `csp.struct.yml`, SE-199).
+    pub fs_sessions: Option<Box<RefCell<dyn fs::FsSessionStore>>>,
 }
 
 /// Initializer for a [`D2xContext`].
@@ -229,6 +237,9 @@ pub struct CspE2eContext {
 
     /// CSP nonce storage.
     nonce_storage: Rc<RefCell<dyn NonceStorage>>,
+
+    /// Forward security, if enabled.
+    fs: Option<fs::FsContext>,
 }
 impl From<CspE2eContextInit> for CspE2eContext {
     fn from(init: CspE2eContextInit) -> Self {
@@ -237,6 +248,7 @@ impl From<CspE2eContextInit> for CspE2eContext {
             client_key: init.client_key,
             flavor: init.flavor,
             nonce_storage: init.nonce_storage.into(),
+            fs: init.fs_sessions.map(fs::FsContext::new),
         }
     }
 }

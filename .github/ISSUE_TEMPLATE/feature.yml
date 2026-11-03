@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Feature request
+description: Something Threema can do that Threesea can't yet, or an idea.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like?
+      description: If Threema's own apps have it, say where it is there.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why, and how should it look on Sailfish OS?

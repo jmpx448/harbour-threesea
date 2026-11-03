@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Before every commit: no private data in what is committed, logging rules, formatting.
+# Enable with `git config core.hooksPath scripts/hooks` (scripts/check.sh has the rest).
+exec "$(git rev-parse --show-toplevel)/scripts/check.sh" --quick --staged

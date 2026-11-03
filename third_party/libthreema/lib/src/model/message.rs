@@ -6,7 +6,7 @@ use educe::Educe;
 use libthreema_macros::Name;
 
 use crate::{
-    common::{GroupIdentity, MessageFlags, MessageId, ThreemaId},
+    common::{BlobId, GroupIdentity, MessageFlags, MessageId, ThreemaId},
     protobuf::common::CspE2eMessageType,
     utils::{
         apply::Apply,
@@ -21,7 +21,6 @@ pub(crate) enum MessageLifetime {
     Indefinite,
 
     /// The message is kept for a short amount of time until it is silently dropped (usually 30s).
-    #[expect(dead_code, reason = "Will use later")]
     Brief,
 
     /// The message is only transmitted if the receiver is currently online.
@@ -242,7 +241,7 @@ impl LocationMessage {
         reflect_outgoing: true,
         reflect_sent_update: true,
     };
-    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::Location;
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupLocation;
 }
 impl fmt::Debug for LocationMessage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -367,6 +366,444 @@ impl WebSessionResumeMessage {
     const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::WebSessionResume;
 }
 
+/// How a [`FileMessage`] should be rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileRenderingType {
+    /// Render as a file.
+    File,
+    /// Render as media (e.g. an image, audio or video).
+    Media,
+    /// Render as a sticker (for transparent images).
+    Sticker,
+}
+
+/// Optional metadata of a [`FileMessage`] (depends on the media type).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileMetadata {
+    /// Width in px (images, videos).
+    pub width: Option<u32>,
+    /// Height in px (images, videos).
+    pub height: Option<u32>,
+    /// Whether the image is animated.
+    pub animated: Option<bool>,
+    /// Duration in seconds (audio, videos).
+    pub duration: Option<f64>,
+}
+
+/// A `file` message: a file (or media) uploaded to the blob server, encrypted with `key` (file
+/// with nonce `00..01`, thumbnail with nonce `00..02`).
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct FileMessage {
+    /// Rendering type.
+    pub rendering_type: FileRenderingType,
+
+    /// Random symmetric key used to encrypt the file and thumbnail blobs.
+    #[educe(Debug(ignore))]
+    pub key: [u8; 32],
+
+    /// Blob ID of the file data.
+    pub blob_id: BlobId,
+
+    /// Media type of the file.
+    pub media_type: String,
+
+    /// Optional file name.
+    #[educe(Debug(ignore))]
+    pub name: Option<String>,
+
+    /// File size in bytes.
+    pub size: u64,
+
+    /// Optional blob ID of the thumbnail.
+    pub thumbnail_blob_id: Option<BlobId>,
+
+    /// Media type of the thumbnail (`image/jpeg` if not set).
+    pub thumbnail_media_type: Option<String>,
+
+    /// Optional caption.
+    #[educe(Debug(ignore))]
+    pub caption: Option<String>,
+
+    /// Optional 32 byte ASCII string to collocate multiple media files.
+    pub correlation_id: Option<String>,
+
+    /// Optional metadata.
+    pub metadata: FileMetadata,
+}
+impl FileMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = TextMessage::CONTACT_PROPERTIES;
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::File;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    const GROUP_PROPERTIES: GroupMessageProperties = TextMessage::GROUP_PROPERTIES;
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupFile;
+}
+
+/// A `poll-setup` message: creates (state open) or closes (state closed, with the results) a
+/// poll. `poll` is the protocol's JSON object, interpreted by the application.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct PollSetupMessage {
+    /// Poll ID, unique per creator within the conversation.
+    pub poll_id: u64,
+    /// UTF-8 JSON of the poll (see `csp.struct.yml`).
+    #[educe(Debug(ignore))]
+    pub poll: String,
+}
+impl PollSetupMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = TextMessage::CONTACT_PROPERTIES;
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::PollSetup;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    const GROUP_PROPERTIES: GroupMessageProperties = TextMessage::GROUP_PROPERTIES;
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupPollSetup;
+}
+
+/// A `poll-vote` message: the sender's choices for a poll.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct PollVoteMessage {
+    /// Creator of the poll.
+    pub creator_identity: ThreemaId,
+    /// Poll ID.
+    pub poll_id: u64,
+    /// UTF-8 JSON list of `[choice id, 0|1]` for every choice.
+    #[educe(Debug(ignore))]
+    pub choices: String,
+}
+impl PollVoteMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: true,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::PollVote;
+    // Exempt from blocking in groups (the poll state must stay consistent).
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: true,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupPollVote;
+}
+
+/// What a [`ReactionMessage`] does with its emoji.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub enum ReactionAction {
+    /// Apply the emoji reaction (additive, multiple reactions per sender are allowed).
+    Apply(String),
+
+    /// Withdraw a specific emoji reaction.
+    Withdraw(String),
+}
+
+/// A `Reaction` message: apply or withdraw an emoji reaction to a referred message.
+///
+/// Peers without `REACTION_SUPPORT` only understand legacy reactions, see [`LegacyReactionMessage`].
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct ReactionMessage {
+    /// Unique ID of the referred message.
+    pub message_id: MessageId,
+
+    /// The emoji to apply or withdraw.
+    pub action: ReactionAction,
+}
+impl ReactionMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: true,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::Reaction;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: true,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupReaction;
+}
+
+/// An `EditMessage` message: replace the text (or caption) of a message the sender sent before.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct EditMessage {
+    /// Unique ID of the referred message to be edited.
+    pub message_id: MessageId,
+
+    /// Text (or caption) to update the referred message with (should be ≤ 6000 bytes).
+    pub text: String,
+}
+impl EditMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::EditMessage;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupEditMessage;
+}
+
+/// A `GroupCallStart` message: announces and immediately starts a group call.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct GroupCallStartMessage {
+    /// Protocol version used for group calls of this group (currently `1`).
+    pub protocol_version: u32,
+
+    /// The secret Group Call Key (`GCK`) used for this call.
+    pub gck: [u8; 32],
+
+    /// The base URL of the SFU, used to peek and join the call.
+    pub sfu_base_url: String,
+}
+impl GroupCallStartMessage {
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: true,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupCallStart;
+}
+
+/// A `DeleteMessage` message: remove a message the sender sent before.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct DeleteMessage {
+    /// Unique ID of the referred message to be removed.
+    pub message_id: MessageId,
+}
+impl DeleteMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::DeleteMessage;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupDeleteMessage;
+}
+
+/// A `typing-indicator` message: whether the sender is currently typing in the 1:1 conversation.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct TypingIndicatorMessage {
+    /// Whether the sender is typing (`1`) or stopped typing (`0`).
+    pub is_typing: bool,
+}
+impl TypingIndicatorMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Ephemeral,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: false,
+        reflect_incoming: true,
+        reflect_outgoing: false,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::TypingIndicator;
+}
+
+/// A `call-offer` message: an offer starting a call. The body is the message's UTF-8 JSON object
+/// (`csp.struct.yml`), handled by the application.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct CallOfferMessage {
+    /// The JSON-encoded body.
+    #[educe(Debug(method(debug_slice_length)))]
+    pub json: Vec<u8>,
+}
+impl CallOfferMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Brief,
+        user_profile_distribution: true,
+        requires_direct_contact: true,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::CallOffer;
+}
+
+/// A `call-answer` message: an answer (accept or reject) to a call offer. The body is the message's UTF-8 JSON object
+/// (`csp.struct.yml`), handled by the application.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct CallAnswerMessage {
+    /// The JSON-encoded body.
+    #[educe(Debug(method(debug_slice_length)))]
+    pub json: Vec<u8>,
+}
+impl CallAnswerMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Brief,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::CallAnswer;
+}
+
+/// A `call-ice-candidate` message: ICE candidates for an ongoing call. The body is the message's UTF-8 JSON object
+/// (`csp.struct.yml`), handled by the application.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct CallIceCandidateMessage {
+    /// The JSON-encoded body.
+    #[educe(Debug(method(debug_slice_length)))]
+    pub json: Vec<u8>,
+}
+impl CallIceCandidateMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Brief,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: false,
+        reflect_incoming: true,
+        reflect_outgoing: false,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::CallIceCandidate;
+}
+
+/// A `call-hangup` message: the end of a call. The body is the message's UTF-8 JSON object
+/// (`csp.struct.yml`), handled by the application.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct CallHangupMessage {
+    /// The JSON-encoded body.
+    #[educe(Debug(method(debug_slice_length)))]
+    pub json: Vec<u8>,
+}
+impl CallHangupMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::CallHangup;
+}
+
+/// A `call-ringing` message: that the callee's device is ringing. The body is the message's UTF-8 JSON object
+/// (`csp.struct.yml`), handled by the application.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct CallRingingMessage {
+    /// The JSON-encoded body.
+    #[educe(Debug(method(debug_slice_length)))]
+    pub json: Vec<u8>,
+}
+impl CallRingingMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: true,
+        lifetime: MessageLifetime::Brief,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::CallRinging;
+}
+
 /// Message body of a 1:1 message.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -385,6 +822,51 @@ pub enum ContactMessageBody {
 
     /// See [`WebSessionResumeMessage`].
     WebSessionResume(WebSessionResumeMessage),
+
+    /// See [`TypingIndicatorMessage`].
+    TypingIndicator(TypingIndicatorMessage),
+
+    /// See [`ReactionMessage`].
+    Reaction(ReactionMessage),
+
+    /// See [`FileMessage`].
+    File(FileMessage),
+
+    /// See [`SetProfilePictureMessage`].
+    SetProfilePicture(SetProfilePictureMessage),
+
+    /// See [`DeleteProfilePictureMessage`].
+    DeleteProfilePicture(DeleteProfilePictureMessage),
+
+    /// See [`RequestProfilePictureMessage`].
+    RequestProfilePicture(RequestProfilePictureMessage),
+
+    /// See [`PollSetupMessage`].
+    PollSetup(PollSetupMessage),
+
+    /// See [`PollVoteMessage`].
+    PollVote(PollVoteMessage),
+
+    /// See [`EditMessage`].
+    Edit(EditMessage),
+
+    /// See [`DeleteMessage`].
+    Delete(DeleteMessage),
+
+    /// See [`CallOfferMessage`].
+    CallOffer(CallOfferMessage),
+
+    /// See [`CallAnswerMessage`].
+    CallAnswer(CallAnswerMessage),
+
+    /// See [`CallIceCandidateMessage`].
+    CallIceCandidate(CallIceCandidateMessage),
+
+    /// See [`CallHangupMessage`].
+    CallHangup(CallHangupMessage),
+
+    /// See [`CallRingingMessage`].
+    CallRinging(CallRingingMessage),
     // TODO(LIB-16): Complete
 }
 impl ContactMessageBody {
@@ -396,6 +878,21 @@ impl ContactMessageBody {
             ContactMessageBody::DeliveryReceipt(_) => DeliveryReceiptMessage::CONTACT_TYPE,
             ContactMessageBody::LegacyReaction(_) => LegacyReactionMessage::CONTACT_TYPE,
             ContactMessageBody::WebSessionResume(_) => WebSessionResumeMessage::CONTACT_TYPE,
+            ContactMessageBody::TypingIndicator(_) => TypingIndicatorMessage::CONTACT_TYPE,
+            ContactMessageBody::Reaction(_) => ReactionMessage::CONTACT_TYPE,
+            ContactMessageBody::File(_) => FileMessage::CONTACT_TYPE,
+            ContactMessageBody::SetProfilePicture(_) => SetProfilePictureMessage::CONTACT_TYPE,
+            ContactMessageBody::DeleteProfilePicture(_) => DeleteProfilePictureMessage::CONTACT_TYPE,
+            ContactMessageBody::RequestProfilePicture(_) => RequestProfilePictureMessage::CONTACT_TYPE,
+            ContactMessageBody::PollSetup(_) => PollSetupMessage::CONTACT_TYPE,
+            ContactMessageBody::PollVote(_) => PollVoteMessage::CONTACT_TYPE,
+            ContactMessageBody::Edit(_) => EditMessage::CONTACT_TYPE,
+            ContactMessageBody::Delete(_) => DeleteMessage::CONTACT_TYPE,
+            ContactMessageBody::CallOffer(_) => CallOfferMessage::CONTACT_TYPE,
+            ContactMessageBody::CallAnswer(_) => CallAnswerMessage::CONTACT_TYPE,
+            ContactMessageBody::CallIceCandidate(_) => CallIceCandidateMessage::CONTACT_TYPE,
+            ContactMessageBody::CallHangup(_) => CallHangupMessage::CONTACT_TYPE,
+            ContactMessageBody::CallRinging(_) => CallRingingMessage::CONTACT_TYPE,
         }
     }
 
@@ -407,6 +904,21 @@ impl ContactMessageBody {
             ContactMessageBody::DeliveryReceipt(_) => DeliveryReceiptMessage::CONTACT_PROPERTIES,
             ContactMessageBody::LegacyReaction(_) => LegacyReactionMessage::CONTACT_PROPERTIES,
             ContactMessageBody::WebSessionResume(_) => WebSessionResumeMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::TypingIndicator(_) => TypingIndicatorMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::Reaction(_) => ReactionMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::File(_) => FileMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::SetProfilePicture(_) => SetProfilePictureMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::DeleteProfilePicture(_) => DeleteProfilePictureMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::RequestProfilePicture(_) => RequestProfilePictureMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::PollSetup(_) => PollSetupMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::PollVote(_) => PollVoteMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::Edit(_) => EditMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::Delete(_) => DeleteMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::CallOffer(_) => CallOfferMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::CallAnswer(_) => CallAnswerMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::CallIceCandidate(_) => CallIceCandidateMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::CallHangup(_) => CallHangupMessage::CONTACT_PROPERTIES,
+            ContactMessageBody::CallRinging(_) => CallRingingMessage::CONTACT_PROPERTIES,
         }
     }
 
@@ -418,6 +930,27 @@ impl ContactMessageBody {
             ContactMessageBody::DeliveryReceipt(_) => DeliveryReceiptMessage::CONTACT_EXEMPT_FROM_BLOCKING,
             ContactMessageBody::LegacyReaction(_) => LegacyReactionMessage::CONTACT_EXEMPT_FROM_BLOCKING,
             ContactMessageBody::WebSessionResume(_) => WebSessionResumeMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::TypingIndicator(_) => TypingIndicatorMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::Reaction(_) => ReactionMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::File(_) => FileMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::SetProfilePicture(_) => {
+                SetProfilePictureMessage::CONTACT_EXEMPT_FROM_BLOCKING
+            },
+            ContactMessageBody::DeleteProfilePicture(_) => {
+                DeleteProfilePictureMessage::CONTACT_EXEMPT_FROM_BLOCKING
+            },
+            ContactMessageBody::RequestProfilePicture(_) => {
+                RequestProfilePictureMessage::CONTACT_EXEMPT_FROM_BLOCKING
+            },
+            ContactMessageBody::PollSetup(_) => PollSetupMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::PollVote(_) => PollVoteMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::Edit(_) => EditMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::Delete(_) => DeleteMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::CallOffer(_) => CallOfferMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::CallAnswer(_) => CallAnswerMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::CallIceCandidate(_) => CallIceCandidateMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::CallHangup(_) => CallHangupMessage::CONTACT_EXEMPT_FROM_BLOCKING,
+            ContactMessageBody::CallRinging(_) => CallRingingMessage::CONTACT_EXEMPT_FROM_BLOCKING,
         }
     }
 }
@@ -465,6 +998,177 @@ impl DistributionListMessageBody {
     }
 }
 
+/// A `group-setup` message (creator → members): the members besides the creator. An empty list
+/// disbands the group; members not in the list have been removed.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct GroupSetupMessage {
+    /// The members (without the creator).
+    pub members: Vec<ThreemaId>,
+}
+impl GroupSetupMessage {
+    // Dedicated blocking steps (the receiver checks whether the group exists).
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: true,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupSetup;
+}
+
+/// A `group-name` message (creator → members).
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct GroupNameMessage {
+    /// The group's name.
+    pub name: String,
+}
+impl GroupNameMessage {
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupName;
+}
+
+/// A `group-leave` message (member → members and creator).
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct GroupLeaveMessage;
+impl GroupLeaveMessage {
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupLeave;
+}
+
+/// A `group-sync-request` message (member → creator).
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct GroupSyncRequestMessage;
+impl GroupSyncRequestMessage {
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupSyncRequest;
+}
+
+/// A `set-profile-picture` message: a contact's (1:1) or group's (creator → members) picture.
+#[derive(Clone, Educe)]
+#[educe(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct SetProfilePictureMessage {
+    /// Blob ID of the picture.
+    pub blob_id: BlobId,
+    /// Picture size in bytes.
+    pub size: u32,
+    /// Key of the picture blob (nonce `00..01`).
+    #[educe(Debug(ignore))]
+    pub key: [u8; 32],
+}
+impl SetProfilePictureMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::ContactSetProfilePicture;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupSetProfilePicture;
+}
+
+/// A `delete-profile-picture` message (1:1, or group: creator → members).
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct DeleteProfilePictureMessage;
+impl DeleteProfilePictureMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::ContactDeleteProfilePicture;
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
+    const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: true,
+        reflect_sent_update: false,
+    };
+    const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupDeleteProfilePicture;
+}
+
+/// A `contact-request-profile-picture` message: the sender wants our profile picture again.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct RequestProfilePictureMessage;
+impl RequestProfilePictureMessage {
+    const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
+    const CONTACT_PROPERTIES: MessageProperties = MessageProperties {
+        push: false,
+        lifetime: MessageLifetime::Indefinite,
+        user_profile_distribution: false,
+        requires_direct_contact: false,
+        replay_protection: true,
+        reflect_incoming: true,
+        reflect_outgoing: false,
+        reflect_sent_update: false,
+        delivery_receipts: false,
+    };
+    const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::ContactRequestProfilePicture;
+}
+
 /// Message body of a group message.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -477,15 +1181,67 @@ pub enum GroupMessageBody {
 
     /// See [`LegacyReactionMessage`].
     LegacyReaction(LegacyReactionMessage),
-    // TODO(LIB-53): Complete
+
+    /// See [`FileMessage`].
+    File(FileMessage),
+
+    /// See [`PollSetupMessage`].
+    PollSetup(PollSetupMessage),
+
+    /// See [`PollVoteMessage`].
+    PollVote(PollVoteMessage),
+
+    /// See [`ReactionMessage`].
+    Reaction(ReactionMessage),
+
+    /// See [`EditMessage`].
+    Edit(EditMessage),
+
+    /// See [`DeleteMessage`].
+    Delete(DeleteMessage),
+
+    /// See [`GroupSetupMessage`].
+    Setup(GroupSetupMessage),
+
+    /// See [`GroupNameMessage`].
+    Name(GroupNameMessage),
+
+    /// See [`GroupLeaveMessage`].
+    Leave(GroupLeaveMessage),
+
+    /// See [`GroupSyncRequestMessage`].
+    SyncRequest(GroupSyncRequestMessage),
+
+    /// See [`SetProfilePictureMessage`].
+    SetProfilePicture(SetProfilePictureMessage),
+
+    /// See [`DeleteProfilePictureMessage`].
+    DeleteProfilePicture(DeleteProfilePictureMessage),
+
+    /// See [`GroupCallStartMessage`].
+    CallStart(GroupCallStartMessage),
+    // TODO(LIB-53): polls
 }
 impl GroupMessageBody {
     /// Get the group message's type.
-    const fn message_type(&self) -> CspE2eMessageType {
+    pub(crate) const fn message_type(&self) -> CspE2eMessageType {
         match &self {
             GroupMessageBody::Text(_) => TextMessage::GROUP_TYPE,
             GroupMessageBody::Location(_) => LocationMessage::GROUP_TYPE,
             GroupMessageBody::LegacyReaction(_) => LegacyReactionMessage::GROUP_TYPE,
+            GroupMessageBody::File(_) => FileMessage::GROUP_TYPE,
+            GroupMessageBody::PollSetup(_) => PollSetupMessage::GROUP_TYPE,
+            GroupMessageBody::PollVote(_) => PollVoteMessage::GROUP_TYPE,
+            GroupMessageBody::Reaction(_) => ReactionMessage::GROUP_TYPE,
+            GroupMessageBody::Edit(_) => EditMessage::GROUP_TYPE,
+            GroupMessageBody::Delete(_) => DeleteMessage::GROUP_TYPE,
+            GroupMessageBody::Setup(_) => GroupSetupMessage::GROUP_TYPE,
+            GroupMessageBody::Name(_) => GroupNameMessage::GROUP_TYPE,
+            GroupMessageBody::Leave(_) => GroupLeaveMessage::GROUP_TYPE,
+            GroupMessageBody::SyncRequest(_) => GroupSyncRequestMessage::GROUP_TYPE,
+            GroupMessageBody::SetProfilePicture(_) => SetProfilePictureMessage::GROUP_TYPE,
+            GroupMessageBody::DeleteProfilePicture(_) => DeleteProfilePictureMessage::GROUP_TYPE,
+            GroupMessageBody::CallStart(_) => GroupCallStartMessage::GROUP_TYPE,
         }
     }
 
@@ -495,7 +1251,33 @@ impl GroupMessageBody {
             GroupMessageBody::Text(_) => TextMessage::GROUP_PROPERTIES,
             GroupMessageBody::Location(_) => LocationMessage::GROUP_PROPERTIES,
             GroupMessageBody::LegacyReaction(_) => LegacyReactionMessage::GROUP_PROPERTIES,
+            GroupMessageBody::File(_) => FileMessage::GROUP_PROPERTIES,
+            GroupMessageBody::PollSetup(_) => PollSetupMessage::GROUP_PROPERTIES,
+            GroupMessageBody::PollVote(_) => PollVoteMessage::GROUP_PROPERTIES,
+            GroupMessageBody::Reaction(_) => ReactionMessage::GROUP_PROPERTIES,
+            GroupMessageBody::Edit(_) => EditMessage::GROUP_PROPERTIES,
+            GroupMessageBody::Delete(_) => DeleteMessage::GROUP_PROPERTIES,
+            GroupMessageBody::Setup(_) => GroupSetupMessage::GROUP_PROPERTIES,
+            GroupMessageBody::Name(_) => GroupNameMessage::GROUP_PROPERTIES,
+            GroupMessageBody::Leave(_) => GroupLeaveMessage::GROUP_PROPERTIES,
+            GroupMessageBody::SyncRequest(_) => GroupSyncRequestMessage::GROUP_PROPERTIES,
+            GroupMessageBody::SetProfilePicture(_) => SetProfilePictureMessage::GROUP_PROPERTIES,
+            GroupMessageBody::DeleteProfilePicture(_) => DeleteProfilePictureMessage::GROUP_PROPERTIES,
+            GroupMessageBody::CallStart(_) => GroupCallStartMessage::GROUP_PROPERTIES,
         }
+    }
+
+    /// Whether the message is wrapped by `group-creator-container` (sent by the creator) instead of
+    /// `group-member-container`.
+    #[must_use]
+    pub const fn uses_creator_container(&self) -> bool {
+        matches!(
+            self,
+            GroupMessageBody::Setup(_)
+                | GroupMessageBody::Name(_)
+                | GroupMessageBody::SetProfilePicture(_)
+                | GroupMessageBody::DeleteProfilePicture(_)
+        )
     }
 
     /// Determine whether the group message is exempt from blocking.
@@ -505,6 +1287,21 @@ impl GroupMessageBody {
             GroupMessageBody::Text(_) => TextMessage::GROUP_EXEMPT_FROM_BLOCKING,
             GroupMessageBody::Location(_) => LocationMessage::GROUP_EXEMPT_FROM_BLOCKING,
             GroupMessageBody::LegacyReaction(_) => LegacyReactionMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::File(_) => FileMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::PollSetup(_) => PollSetupMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::PollVote(_) => PollVoteMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::Reaction(_) => ReactionMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::Edit(_) => EditMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::Delete(_) => DeleteMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::Setup(_) => GroupSetupMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::Name(_) => GroupNameMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::Leave(_) => GroupLeaveMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::SyncRequest(_) => GroupSyncRequestMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::SetProfilePicture(_) => SetProfilePictureMessage::GROUP_EXEMPT_FROM_BLOCKING,
+            GroupMessageBody::DeleteProfilePicture(_) => {
+                DeleteProfilePictureMessage::GROUP_EXEMPT_FROM_BLOCKING
+            },
+            GroupMessageBody::CallStart(_) => GroupCallStartMessage::GROUP_EXEMPT_FROM_BLOCKING,
         }
     }
 }
@@ -531,6 +1328,24 @@ pub enum IncomingMessageBody {
     Group(IncomingGroupMessageBody),
 }
 impl IncomingMessageBody {
+    /// Decode a message body from its CSP type and data, e.g. from a reflected D2D
+    /// `IncomingMessage` or `OutgoingMessage` (type and body as in the envelope). `sender_identity`
+    /// is the sender (for outgoing messages: the user), used for `group-creator-container`s.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message if the type is unknown or the data does not decode.
+    pub fn decode_reflected(
+        sender_identity: ThreemaId,
+        message_type: i32,
+        message_data: &[u8],
+    ) -> Result<Self, String> {
+        use crate::csp_e2e::message::codec::CspMessageDecoder as _;
+        let message_type = CspE2eMessageType::try_from(message_type)
+            .map_err(|_| format!("Unknown message type {message_type}"))?;
+        Self::decode(sender_identity, message_type, message_data).map_err(|error| error.to_string())
+    }
+
     /// Get the incoming message's type.
     const fn message_type(&self) -> CspE2eMessageType {
         match &self {

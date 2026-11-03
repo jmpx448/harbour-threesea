@@ -1,0 +1,7 @@
+# Not part of upstream: reconstructed so that `cargo fmt` reproduces upstream libthreema's
+# formatting (verified: no changes on the pristine vendor/libthreema tree). Our changes to the
+# vendored crate must be formatted with this, never with the workspace defaults.
+edition = "2024"
+style_edition = "2024"
+max_width = 110
+match_block_trailing_comma = true

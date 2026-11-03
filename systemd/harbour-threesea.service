@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Full flavour only (ADR 0010): start Threesea without a window at login, so messages arrive even
+# if it was never opened. It is started like every launch, by D-Bus activation (Sailjail only runs
+# the .desktop's Exec line, so the sandbox is the same); background() asks for no window. With
+# "Keep running in the background" off the app quits again at once.
+[Unit]
+Description=Threesea (unofficial Threema client) in the background
+Requires=lipstick.service
+After=lipstick.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/gdbus call --session --timeout 120 --dest org.threesea.harbour-threesea --object-path / --method org.threesea.harbourthreesea.background
+
+[Install]
+WantedBy=post-user-session.target

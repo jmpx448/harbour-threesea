@@ -1,0 +1,44 @@
+Security audit validation — 2026-10-27
+
+Source baseline: 197133ee35f83a01d1e477ac5d4b4d88b449dfb3
+Host: Linux; rustc 1.95.0 (59807616e 2026-04-14)
+cargo 1.95.0 (f2d3ce0bd 2026-03-21); cargo-audit 0.22.2
+All commands below run from the repository root.
+
+1. cargo test --workspace --locked --offline
+   142 passed; 0 failed; 7 ignored. Doc tests: 0.
+
+2. cargo clippy --workspace --all-targets --locked --offline
+   Passed without warnings.
+
+3. PROTOC="$PWD/tools/protoc/bin/protoc" CARGO_TARGET_DIR="$PWD/target" \
+   cargo test --manifest-path third_party/libthreema/Cargo.toml \
+   -p libthreema --lib --locked --offline
+   3680 passed; 0 failed; 0 ignored.
+
+4. cargo audit --db /tmp/threesea-audit-advisory-db --json
+   Refreshed advisory database; see dependencies.json.
+   286 lockfile packages; 0 vulnerabilities; warnings {}.
+   Advisory commit 3279c99911354c400e1d41e47c7d60e39258b147.
+   Last updated 2026-10-26T22:32:25+01:00.
+
+5. sh docs/security-audit-2026-10-27/run-probes.sh
+   8 passed; 0 failed; 149 filtered out.
+   PASS for the first seven named vulnerability probes below demonstrates
+   the vulnerable behavior, NOT successful remediation.
+
+   audit_browser_can_add_member_to_private_group — reproduced S02
+   audit_browser_survives_identity_deletion — reproduced S01
+   audit_invalid_frame_poisoning_and_replay — reproduced S05
+   audit_pending_web_download_discloses_blob_after_chat_becomes_private — reproduced S03
+   audit_private_core_commands_bypass_read_gate — reproduced S04
+   audit_queued_browser_command_runs_after_session_deletion — reproduced S01
+   audit_web_subscription_discloses_edit_after_chat_becomes_private — reproduced S03
+   audit_parser_smoke_no_panic — no panic on the bounded corpus
+
+Scope limits:
+No live-service messaging or destructive resource tests.
+No real browser or device DTLS exploit was performed.
+No native Qt/C++ build, native sanitizer run, or on-device D-Bus testing.
+No coverage-guided fuzz campaign or complete history secret scan.
+Native/device dependencies are not covered by the RustSec result alone.

@@ -1,0 +1,11 @@
+qt5-qtcore-5.6.3+git60-1.19.5.jolla.i486
+qt5-qtdeclarative-5.6.3+git28-1.9.2.jolla.i486
+gstreamer1.0-1.26.11+git1-1.15.1.jolla.i486
+libnice-0.1.21+git1-1.6.5.jolla.i486
+openssl-3.5.6+git1-1.14.1.jolla.i486
+package sqlcipher is not installed
+5.6.3
+Package gstreamer-webrtc-1.0 was not found in the pkg-config search path.
+Perhaps you should add the directory containing `gstreamer-webrtc-1.0.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'gstreamer-webrtc-1.0' found

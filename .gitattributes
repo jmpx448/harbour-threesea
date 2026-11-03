@@ -1,0 +1,2 @@
+# SDP needs CRLF line ends (RFC 4566); keep the test fixtures byte for byte.
+*.sdp -text

@@ -470,7 +470,9 @@ impl D2mProtocol {
             let client_url_info = HEXLOWER_PERMISSIVE.encode(
                 &protobuf::ClientUrlInfo {
                     device_group_id: device_group_id.0.as_bytes().to_vec(),
-                    server_group: context.csp_server_group.0.clone().to_string(),
+                    // The server group as the CSP uses it (two hex digits, e.g. `e0`), not the
+                    // decimal value of its byte: the mediator drops the connection otherwise.
+                    server_group: context.csp_server_group.to_string(),
                 }
                 .encode_to_vec(),
             );
@@ -596,5 +598,40 @@ impl D2mProtocol {
             outgoing_datagram: Some(outgoing_datagram),
             incoming_payload: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use data_encoding::HEXLOWER_PERMISSIVE;
+    use prost::Message as _;
+
+    use crate::{
+        common::{ChatServerGroup, ClientInfo, D2xDeviceId, config::Config, keys::DeviceGroupKey},
+        d2m::{D2mContext, D2mProtocol},
+        protobuf::d2m as protobuf,
+    };
+
+    #[test]
+    fn client_url_info_carries_the_server_group_as_hex() {
+        let config = Config::testing();
+        let (_, url) = D2mProtocol::new(D2mContext {
+            mediator_server_url: config.multi_device.unwrap().mediator_server_url,
+            device_group_key: DeviceGroupKey::from([1; 32]),
+            csp_server_group: ChatServerGroup::try_from("e0").unwrap(),
+            device_id: D2xDeviceId(1),
+            device_slots_exhausted_policy: protobuf::client_hello::DeviceSlotsExhaustedPolicy::Reject,
+            device_slot_expiration_policy: protobuf::DeviceSlotExpirationPolicy::Persistent,
+            expected_device_slot_state: protobuf::DeviceSlotState::New,
+            client_info: ClientInfo::Libthreema,
+            device_label: None,
+        });
+        let encoded = url.rsplit('/').next().unwrap();
+        let info = protobuf::ClientUrlInfo::decode(
+            HEXLOWER_PERMISSIVE.decode(encoded.as_bytes()).unwrap().as_slice(),
+        )
+        .unwrap();
+        // As the chat server's hostname uses it, not the byte in decimal ("224")
+        assert_eq!(info.server_group, "e0");
     }
 }

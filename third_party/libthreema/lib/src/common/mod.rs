@@ -96,6 +96,25 @@ pub enum ClientInfo {
         os_architecture: String,
     },
 
+    /// Threesea, the unofficial client for Sailfish OS. Says so to the server: its own name in the
+    /// version and its own platform code (`S`).
+    Threesea {
+        /// Version string (without the name).
+        version: String,
+
+        /// Locale, i.e. `<language>/<country-code>` where:
+        ///
+        /// - `<language>` is an ISO 639-1:2002-ish language code
+        /// - `<country-code>` is an ISO 3166-1-ish country code
+        locale: String,
+
+        /// Device model.
+        device_model: String,
+
+        /// OS version.
+        os_version: String,
+    },
+
     /// libthreema standalone (CLI, testing, ...)
     Libthreema,
 }
@@ -107,6 +126,7 @@ impl ClientInfo {
             ClientInfo::Android { version, .. } => format!("Threema Android/{version}"),
             ClientInfo::Ios { version, .. } => format!("Threema iOS/{version}"),
             ClientInfo::Desktop { version, .. } => format!("Threema Desktop/{version}"),
+            ClientInfo::Threesea { version, .. } => format!("Threesea/{version}"),
             ClientInfo::Libthreema => format!("libthreema/{version}", version = env!("CARGO_PKG_VERSION")),
         }
     }
@@ -164,6 +184,21 @@ impl ClientInfo {
                 )
             },
 
+            ClientInfo::Threesea {
+                version,
+                locale,
+                device_model,
+                os_version,
+            } => {
+                format!(
+                    "Threesea/{version};S;{locale};{device_model};{os_version}",
+                    version = version.replace(';', "_"),
+                    locale = locale.replace(';', "_"),
+                    device_model = device_model.replace(';', "_"),
+                    os_version = os_version.replace(';', "_")
+                )
+            },
+
             ClientInfo::Libthreema => {
                 format!(
                     "{version};L;en/CH;{os_name};{os_architecture}",
@@ -209,6 +244,16 @@ impl ClientInfo {
             } => (
                 protobuf::d2d::device_info::Platform::Desktop,
                 format!("{renderer_name} {renderer_version} ({os_name})"),
+                version.clone(),
+            ),
+
+            ClientInfo::Threesea {
+                version,
+                device_model,
+                ..
+            } => (
+                protobuf::d2d::device_info::Platform::Unspecified,
+                format!("Threesea ({device_model})"),
                 version.clone(),
             ),
 
@@ -620,6 +665,8 @@ impl FeatureMask {
     pub const EDIT_MESSAGE_SUPPORT: u64 =     0b_0000_0001_0000_0000;
     /// Supports deleting messages.
     pub const DELETE_MESSAGE_SUPPORT: u64 =   0b_0000_0010_0000_0000;
+    /// Supports emoji reactions.
+    pub const REACTION_SUPPORT: u64 =         0b_0000_0100_0000_0000;
 }
 
 /// A 24-byte nonce for use with XSalsa20Poly1305 or XChaCha20Poly1305.
@@ -944,5 +991,35 @@ impl<T: Default + Eq> Delta<T> {
             },
             Self::Remove => Some(T::default()),
         }
+    }
+}
+
+#[cfg(test)]
+mod client_info_tests {
+    use super::ClientInfo;
+
+    fn threesea() -> ClientInfo {
+        ClientInfo::Threesea {
+            version: "0.1.0".to_owned(),
+            locale: "de/CH".to_owned(),
+            device_model: "Jolla;C2".to_owned(),
+            os_version: "5.1.0.11".to_owned(),
+        }
+    }
+
+    #[test]
+    fn threesea_names_itself_in_the_handshake() {
+        assert_eq!(
+            threesea().to_semicolon_separated(),
+            "Threesea/0.1.0;S;de/CH;Jolla_C2;5.1.0.11"
+        );
+    }
+
+    #[test]
+    fn threesea_names_itself_to_other_devices() {
+        let device_info = threesea().to_device_info(Some("Phone".to_owned()));
+        assert_eq!(device_info.platform_details, "Threesea (Jolla;C2)");
+        assert_eq!(device_info.app_version, "0.1.0");
+        assert_eq!(device_info.label, "Phone");
     }
 }

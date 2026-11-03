@@ -285,6 +285,18 @@ struct CreateIdentityAuthenticatedRequest<'creds> {
 
     #[serde(flatten)]
     credentials: Option<WorkCredentials<'creds>>,
+
+    #[serde(flatten)]
+    serial_license: Option<SerialLicense<'creds>>,
+}
+
+#[derive(Serialize)]
+struct SerialLicense<'license> {
+    #[serde(rename = "licenseKey")]
+    license_key: &'license str,
+
+    #[serde(rename = "deviceId")]
+    device_id: &'license str,
 }
 
 /// Create an identity.
@@ -292,6 +304,7 @@ pub(crate) fn create_identity_request(
     client_info: &ClientInfo,
     directory_server_url: &DirectoryServerBaseUrl,
     mode: &Flavor,
+    serial_license: Option<&crate::csp_e2e::identity::create::SerialLicense>,
     authentication: AuthenticationChallengeResponse,
     public_key: PublicKey,
 ) -> HttpsRequest {
@@ -310,6 +323,10 @@ pub(crate) fn create_identity_request(
             },
             authentication,
             credentials,
+            serial_license: serial_license.map(|license| SerialLicense {
+                license_key: &license.license_key,
+                device_id: &license.device_id,
+            }),
         })
         .expect("Failed to create directory identity creation request body"),
     }
@@ -421,8 +438,14 @@ mod tests {
     use assert_matches::assert_matches;
     use serde_json::json;
 
+    use super::{AuthenticationChallengeResponse, create_identity_request};
     use crate::{
-        common::keys::ClientKey,
+        common::{
+            ClientInfo,
+            config::{Config, Flavor},
+            keys::{ClientKey, PublicKey},
+        },
+        csp_e2e::identity::create::SerialLicense,
         https::{HttpsResponse, directory::handle_authentication_challenge, endpoint::HttpsEndpointError},
         utils::test::ResultUnwrapErrorQuiet as _,
     };
@@ -442,5 +465,76 @@ mod tests {
         )
         .unwrap_err_quiet();
         assert_matches!(error, HttpsEndpointError::InvalidChallenge);
+    }
+
+    #[test]
+    fn solve_directory_challenge_matches_internal_challenge_handling() {
+        let client_key = ClientKey::from([7; ClientKey::LENGTH]);
+        let challenge_key = ClientKey::from([9; ClientKey::LENGTH]).public_key();
+        let challenge = b"some challenge token".to_vec();
+        let internal = handle_authentication_challenge(
+            &client_key,
+            Ok(HttpsResponse {
+                status: 200,
+                body: serde_json::to_vec(&json!({
+                    "tokenRespKeyPub": data_encoding::BASE64.encode(&challenge_key.0.to_bytes()),
+                    "token": data_encoding::BASE64.encode(&challenge),
+                }))
+                .unwrap(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            client_key.solve_directory_challenge(&challenge_key, &challenge),
+            Some(internal.response)
+        );
+        assert_eq!(
+            client_key.solve_directory_challenge(&PublicKey::from([0; PublicKey::LENGTH]), &challenge),
+            None
+        );
+    }
+
+    #[test]
+    fn create_identity_request_includes_serial_license() {
+        let config = Config::production();
+        let license = SerialLicense {
+            license_key: "ABCDE-FGHIJ".to_owned(),
+            device_id: "c0ffee00-0000-4000-8000-000000000000".to_owned(),
+        };
+        let request = create_identity_request(
+            &ClientInfo::Libthreema,
+            &config.directory_server_url,
+            &Flavor::Consumer,
+            Some(&license),
+            AuthenticationChallengeResponse {
+                challenge: vec![1, 2, 3],
+                response: [0; PublicKey::LENGTH],
+            },
+            ClientKey::from([1; ClientKey::LENGTH]).public_key(),
+        );
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["licenseKey"], "ABCDE-FGHIJ");
+        assert_eq!(body["deviceId"], "c0ffee00-0000-4000-8000-000000000000");
+        assert_eq!(body["token"], "AQID");
+        assert!(body.get("licenseUsername").is_none());
+    }
+
+    #[test]
+    fn create_identity_request_without_serial_license() {
+        let config = Config::production();
+        let request = create_identity_request(
+            &ClientInfo::Libthreema,
+            &config.directory_server_url,
+            &Flavor::Consumer,
+            None,
+            AuthenticationChallengeResponse {
+                challenge: vec![1, 2, 3],
+                response: [0; PublicKey::LENGTH],
+            },
+            ClientKey::from([1; ClientKey::LENGTH]).public_key(),
+        );
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(body.get("licenseKey").is_none());
+        assert!(body.get("deviceId").is_none());
     }
 }

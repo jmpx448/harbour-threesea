@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A release for every merge into `release` (docs/release.md): the version from the spec (checked
+# against Cargo.toml, the .pro file and CHANGELOG.md), both flavours for all three
+# architectures, tag v<version>, a GitHub release with the RPMs, SHA256SUMS and build
+# provenance attestations. The in-app update check (ADR 0014) finds it by that tag.
+name: Release
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # The full checks (tests, clippy, format, logging rule, cargo audit) gate everything below.
+  checks:
+    if: github.ref == 'refs/heads/release'
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    needs: checks
+    # Only the release branch is ever released, also when started by hand.
+    if: github.ref == 'refs/heads/release'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - id: version
+        run: echo "version=$(scripts/release-version.sh --new-tag)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        flavour: [full, lite]
+        arch: [aarch64, armv7hl, i486]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Sailfish SDK image
+        run: scripts/ci-prepare-sdk.sh
+      - name: Build
+        run: FLAVOUR=${{ matrix.flavour }} scripts/sdk-build.sh ${{ matrix.arch }}
+      - name: Only the installable package
+        # mb2 also produces debug info packages; the release carries the app only.
+        run: |
+          mkdir out
+          cp RPMS/${{ matrix.flavour }}/harbour-threesea-${{ matrix.flavour }}-${{ needs.version.outputs.version }}-*.${{ matrix.arch }}.rpm out/
+          ls -l out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm-${{ matrix.flavour }}-${{ matrix.arch }}
+          path: out/*.rpm
+          if-no-files-found: error
+
+  publish:
+    needs: [checks, version, build]
+    if: github.ref == 'refs/heads/release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rpm-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums and release notes
+        run: |
+          ls dist/*.rpm | wc -l | grep -qx 6
+          (cd dist && sha256sum *.rpm > SHA256SUMS && cat SHA256SUMS)
+          scripts/release-version.sh --new-tag --notes notes.md
+          cat >> notes.md <<'EOF'
+
+          ---
+          Install **one** flavour for your phone's architecture (`aarch64` for current devices,
+          `armv7hl` for older ones), e.g. `pkcon install-local harbour-threesea-full-….aarch64.rpm`
+          in developer mode. `SHA256SUMS` lists the files' checksums; `gh attestation verify
+          <file> --repo ${{ github.repository }}` checks that a file was built here from this
+          release's source.
+          EOF
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.rpm
+      - name: Tag and release
+        run: |
+          gh release create "v$VERSION" dist/*.rpm dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --title "Threesea $VERSION" --notes-file notes.md

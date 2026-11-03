@@ -1,18 +1,26 @@
 //! Trait and implementations to encode/decode CSP E2E messages.
 use core::str::{FromStr as _, Split, Utf8Error};
 
+use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
+use duplicate::duplicate_item;
+use prost::Message as _;
 use rand::Rng as _;
 use tracing::warn;
 
 use crate::{
-    common::{GroupIdentity, MessageId, ThreemaId},
+    common::{BlobId, GroupIdentity, MessageId, ThreemaId},
     model::message::{
-        ContactMessageBody, DeliveryReceiptMessage, DeliveryReceiptType, DistributionListMessageBody,
-        GroupMessageBody, IncomingGroupMessageBody, IncomingMessageBody, LegacyReactionMessage,
-        LegacyReactionType, LocationMessage, OutgoingContactMessageBody, OutgoingDistributionListMessageBody,
-        OutgoingGroupMessageBody, OutgoingMessageBody, TextMessage, WebSessionResumeMessage,
+        CallAnswerMessage, CallHangupMessage, CallIceCandidateMessage, CallOfferMessage, CallRingingMessage,
+        ContactMessageBody, DeleteMessage, DeleteProfilePictureMessage, DeliveryReceiptMessage,
+        DeliveryReceiptType, DistributionListMessageBody, EditMessage, FileMessage, FileMetadata,
+        FileRenderingType, GroupCallStartMessage, GroupLeaveMessage, GroupMessageBody, GroupNameMessage,
+        GroupSetupMessage, GroupSyncRequestMessage, IncomingGroupMessageBody, IncomingMessageBody,
+        LegacyReactionMessage, LegacyReactionType, LocationMessage, OutgoingContactMessageBody,
+        OutgoingDistributionListMessageBody, OutgoingGroupMessageBody, OutgoingMessageBody, PollSetupMessage,
+        PollVoteMessage, ReactionAction, ReactionMessage, RequestProfilePictureMessage,
+        SetProfilePictureMessage, TextMessage, TypingIndicatorMessage, WebSessionResumeMessage,
     },
-    protobuf::common::CspE2eMessageType,
+    protobuf::{self, common::CspE2eMessageType},
     utils::{
         bytes::{ByteReader, ByteReaderError, ByteWriter, ByteWriterError, SliceByteReader},
         number::CheckedExactDiv as _,
@@ -40,8 +48,13 @@ pub enum CspMessageDecodeError {
 
 /// Decoder for CSP messages.
 pub(crate) trait CspMessageDecoder: Sized {
-    /// Decode a CSP E2E message from the protocol type and the raw data.
-    fn decode(message_type: CspE2eMessageType, message_data: &[u8]) -> Result<Self, CspMessageDecodeError>;
+    /// Decode a CSP E2E message from the protocol type and the raw data. `sender_identity` is the
+    /// creator of groups addressed by a `group-creator-container`.
+    fn decode(
+        sender_identity: ThreemaId,
+        message_type: CspE2eMessageType,
+        message_data: &[u8],
+    ) -> Result<Self, CspMessageDecodeError>;
 }
 
 /// Encoder for CSP messages.
@@ -251,10 +264,455 @@ impl InternalCspMessageEncoder for WebSessionResumeMessage {
     }
 }
 
+#[duplicate_item(
+    message_type;
+    [ CallOfferMessage ];
+    [ CallAnswerMessage ];
+    [ CallIceCandidateMessage ];
+    [ CallHangupMessage ];
+    [ CallRingingMessage ];
+)]
+impl InternalCspMessageDecoder for message_type {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        Ok(Self {
+            json: reader.read_remaining().to_vec(),
+        })
+    }
+}
+#[duplicate_item(
+    message_type;
+    [ CallOfferMessage ];
+    [ CallAnswerMessage ];
+    [ CallIceCandidateMessage ];
+    [ CallHangupMessage ];
+    [ CallRingingMessage ];
+)]
+impl InternalCspMessageEncoder for message_type {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(&self.json)
+    }
+}
+
+impl InternalCspMessageDecoder for TypingIndicatorMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let is_typing = match reader.read_u8()? {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(CspMessageDecodeError::InvalidMessage(format!(
+                    "Invalid is-typing value {value}"
+                )));
+            },
+        };
+        Ok(Self { is_typing })
+    }
+}
+impl InternalCspMessageEncoder for TypingIndicatorMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write_u8(u8::from(self.is_typing))
+    }
+}
+
+/// Maximum byte length of a reaction's emoji.
+const REACTION_EMOJI_LENGTH_MAX: usize = 64;
+
+impl InternalCspMessageDecoder for ReactionMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let reaction = protobuf::csp_e2e::Reaction::decode(reader.read_remaining())
+            .map_err(|error| CspMessageDecodeError::InvalidMessage(format!("Invalid reaction: {error}")))?;
+        let emoji = |bytes: Vec<u8>| -> Result<String, CspMessageDecodeError> {
+            if bytes.len() > REACTION_EMOJI_LENGTH_MAX {
+                return Err(CspMessageDecodeError::InvalidMessage(
+                    "Reaction emoji too long".to_owned(),
+                ));
+            }
+            let emoji = String::from_utf8(bytes)
+                .map_err(|error| CspMessageDecodeError::InvalidMessage(error.to_string()))?;
+            if emoji.is_empty() {
+                return Err(CspMessageDecodeError::InvalidMessage(
+                    "Empty reaction emoji".to_owned(),
+                ));
+            }
+            Ok(emoji)
+        };
+        let action = match reaction.action {
+            Some(protobuf::csp_e2e::reaction::Action::Apply(bytes)) => ReactionAction::Apply(emoji(bytes)?),
+            Some(protobuf::csp_e2e::reaction::Action::Withdraw(bytes)) => {
+                ReactionAction::Withdraw(emoji(bytes)?)
+            },
+            None => {
+                return Err(CspMessageDecodeError::InvalidMessage(
+                    "Reaction without action".to_owned(),
+                ));
+            },
+        };
+        Ok(Self {
+            message_id: MessageId(reaction.message_id),
+            action,
+        })
+    }
+}
+impl InternalCspMessageEncoder for ReactionMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        let action = match &self.action {
+            ReactionAction::Apply(emoji) => {
+                protobuf::csp_e2e::reaction::Action::Apply(emoji.as_bytes().to_vec())
+            },
+            ReactionAction::Withdraw(emoji) => {
+                protobuf::csp_e2e::reaction::Action::Withdraw(emoji.as_bytes().to_vec())
+            },
+        };
+        writer.write(
+            &protobuf::csp_e2e::Reaction {
+                message_id: self.message_id.0,
+                action: Some(action),
+            }
+            .encode_to_vec(),
+        )
+    }
+}
+
+impl InternalCspMessageDecoder for EditMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let edit = protobuf::csp_e2e::EditMessage::decode(reader.read_remaining()).map_err(|error| {
+            CspMessageDecodeError::InvalidMessage(format!("Invalid edit message: {error}"))
+        })?;
+        Ok(Self {
+            message_id: MessageId(edit.message_id),
+            text: edit.text,
+        })
+    }
+}
+impl InternalCspMessageEncoder for EditMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(
+            &protobuf::csp_e2e::EditMessage {
+                message_id: self.message_id.0,
+                text: self.text.clone(),
+            }
+            .encode_to_vec(),
+        )
+    }
+}
+
+impl InternalCspMessageDecoder for GroupCallStartMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let start = protobuf::csp_e2e::GroupCallStart::decode(reader.read_remaining()).map_err(|error| {
+            CspMessageDecodeError::InvalidMessage(format!("Invalid group call start message: {error}"))
+        })?;
+        let gck = start.gck.try_into().map_err(|_| {
+            CspMessageDecodeError::InvalidMessage(
+                "Invalid group call start message: GCK not 32 bytes".to_owned(),
+            )
+        })?;
+        Ok(Self {
+            protocol_version: start.protocol_version,
+            gck,
+            sfu_base_url: start.sfu_base_url,
+        })
+    }
+}
+impl InternalCspMessageEncoder for GroupCallStartMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(
+            &protobuf::csp_e2e::GroupCallStart {
+                protocol_version: self.protocol_version,
+                gck: self.gck.to_vec(),
+                sfu_base_url: self.sfu_base_url.clone(),
+            }
+            .encode_to_vec(),
+        )
+    }
+}
+
+impl InternalCspMessageDecoder for DeleteMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let delete = protobuf::csp_e2e::DeleteMessage::decode(reader.read_remaining()).map_err(|error| {
+            CspMessageDecodeError::InvalidMessage(format!("Invalid delete message: {error}"))
+        })?;
+        Ok(Self {
+            message_id: MessageId(delete.message_id),
+        })
+    }
+}
+impl InternalCspMessageEncoder for DeleteMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(
+            &protobuf::csp_e2e::DeleteMessage {
+                message_id: self.message_id.0,
+            }
+            .encode_to_vec(),
+        )
+    }
+}
+
+/// Maximum byte length of a file name.
+const FILE_NAME_LENGTH_MAX: usize = 256;
+/// Maximum byte length of a caption.
+const FILE_CAPTION_LENGTH_MAX: usize = 6000;
+
+/// The JSON of a `file` message (see `csp.struct.yml`). Unknown fields are ignored; `i` is the
+/// deprecated fallback for `j`.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct FileMessageJson {
+    #[serde(rename = "j", default, skip_serializing_if = "Option::is_none")]
+    rendering_type: Option<u8>,
+    #[serde(rename = "i", default, skip_serializing_if = "Option::is_none")]
+    deprecated_rendering_type: Option<u8>,
+    #[serde(rename = "k")]
+    key: String,
+    #[serde(rename = "b")]
+    blob_id: String,
+    #[serde(rename = "m", default)]
+    media_type: String,
+    #[serde(rename = "n", default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(rename = "s")]
+    size: u64,
+    #[serde(rename = "t", default, skip_serializing_if = "Option::is_none")]
+    thumbnail_blob_id: Option<String>,
+    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
+    thumbnail_media_type: Option<String>,
+    #[serde(rename = "d", default, skip_serializing_if = "Option::is_none")]
+    caption: Option<String>,
+    #[serde(rename = "c", default, skip_serializing_if = "Option::is_none")]
+    correlation_id: Option<String>,
+    #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<FileMetadataJson>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct FileMetadataJson {
+    #[serde(rename = "w", default, skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(rename = "h", default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+    #[serde(rename = "a", default, skip_serializing_if = "Option::is_none")]
+    animated: Option<bool>,
+    #[serde(rename = "d", default, skip_serializing_if = "Option::is_none")]
+    duration: Option<f64>,
+}
+
+impl InternalCspMessageDecoder for FileMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let invalid =
+            |reason: &str| CspMessageDecodeError::InvalidMessage(format!("Invalid file message: {reason}"));
+        let json: FileMessageJson =
+            serde_json::from_slice(reader.read_remaining()).map_err(|error| invalid(&error.to_string()))?;
+        let key: [u8; 32] = HEXLOWER_PERMISSIVE
+            .decode(json.key.as_bytes())
+            .ok()
+            .and_then(|key| key.try_into().ok())
+            .ok_or_else(|| invalid("key"))?;
+        let blob_id = |hex: &str| -> Result<BlobId, CspMessageDecodeError> {
+            HEXLOWER_PERMISSIVE
+                .decode(hex.as_bytes())
+                .ok()
+                .and_then(|id| <[u8; BlobId::LENGTH]>::try_from(id).ok())
+                .map(BlobId)
+                .ok_or_else(|| invalid("blob id"))
+        };
+        if json
+            .name
+            .as_ref()
+            .is_some_and(|name| name.len() > FILE_NAME_LENGTH_MAX)
+        {
+            return Err(invalid("name too long"));
+        }
+        if json
+            .caption
+            .as_ref()
+            .is_some_and(|caption| caption.len() > FILE_CAPTION_LENGTH_MAX)
+        {
+            return Err(invalid("caption too long"));
+        }
+        let rendering_type = match json.rendering_type.or(json.deprecated_rendering_type) {
+            Some(1) => FileRenderingType::Media,
+            Some(2) => FileRenderingType::Sticker,
+            _ => FileRenderingType::File,
+        };
+        let metadata = json.metadata.unwrap_or_default();
+        Ok(Self {
+            rendering_type,
+            key,
+            blob_id: blob_id(&json.blob_id)?,
+            media_type: json.media_type,
+            name: json.name.filter(|name| !name.is_empty()),
+            size: json.size,
+            thumbnail_blob_id: json
+                .thumbnail_blob_id
+                .filter(|id| !id.is_empty())
+                .map(|id| blob_id(&id))
+                .transpose()?,
+            thumbnail_media_type: json.thumbnail_media_type,
+            caption: json.caption.filter(|caption| !caption.is_empty()),
+            correlation_id: json.correlation_id,
+            metadata: FileMetadata {
+                width: metadata.width,
+                height: metadata.height,
+                animated: metadata.animated,
+                duration: metadata.duration,
+            },
+        })
+    }
+}
+impl InternalCspMessageEncoder for FileMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        let rendering_type = match self.rendering_type {
+            FileRenderingType::File => 0,
+            FileRenderingType::Media => 1,
+            FileRenderingType::Sticker => 2,
+        };
+        let metadata = &self.metadata;
+        let has_metadata = metadata.width.is_some()
+            || metadata.height.is_some()
+            || metadata.animated.is_some()
+            || metadata.duration.is_some();
+        let json = FileMessageJson {
+            rendering_type: Some(rendering_type),
+            deprecated_rendering_type: Some(u8::from(rendering_type != 0)),
+            key: HEXLOWER.encode(&self.key),
+            blob_id: HEXLOWER.encode(&self.blob_id.0),
+            media_type: self.media_type.clone(),
+            name: self.name.clone(),
+            size: self.size,
+            thumbnail_blob_id: self.thumbnail_blob_id.map(|id| HEXLOWER.encode(&id.0)),
+            thumbnail_media_type: self.thumbnail_media_type.clone(),
+            caption: self.caption.clone(),
+            correlation_id: self.correlation_id.clone(),
+            metadata: has_metadata.then(|| FileMetadataJson {
+                width: metadata.width,
+                height: metadata.height,
+                animated: metadata.animated,
+                duration: metadata.duration,
+            }),
+        };
+        writer.write(&serde_json::to_vec(&json).expect("file message JSON must serialize"))
+    }
+}
+
+impl InternalCspMessageDecoder for GroupSetupMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let data = reader.read_remaining();
+        if data.len() % ThreemaId::LENGTH != 0 {
+            return Err(CspMessageDecodeError::InvalidMessage(
+                "Misaligned member identities in group setup".to_owned(),
+            ));
+        }
+        let members = data
+            .chunks_exact(ThreemaId::LENGTH)
+            .map(ThreemaId::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                CspMessageDecodeError::InvalidMessage(format!(
+                    "Invalid member identity in group setup: {error}"
+                ))
+            })?;
+        Ok(Self { members })
+    }
+}
+impl InternalCspMessageEncoder for GroupSetupMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        for member in &self.members {
+            writer.write(&member.to_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+impl InternalCspMessageDecoder for GroupNameMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let name = String::from_utf8(reader.read_remaining().to_vec())
+            .map_err(|error| CspMessageDecodeError::InvalidMessage(format!("Invalid group name: {error}")))?;
+        Ok(Self { name })
+    }
+}
+impl InternalCspMessageEncoder for GroupNameMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(self.name.as_bytes())
+    }
+}
+
+impl InternalCspMessageDecoder for SetProfilePictureMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        Ok(Self { blob_id, size, key })
+    }
+}
+impl InternalCspMessageEncoder for SetProfilePictureMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(&self.blob_id.0)?;
+        writer.write_u32_le(self.size)?;
+        writer.write(&self.key)
+    }
+}
+
+/// Messages without content (`group-leave`, `group-sync-request`, `delete-profile-picture`).
+macro_rules! empty_message {
+    ($($message:ident),*) => {$(
+        impl InternalCspMessageDecoder for $message {
+            fn decode(_reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+                Ok(Self)
+            }
+        }
+        impl InternalCspMessageEncoder for $message {
+            fn encode_into(&self, _writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+                Ok(())
+            }
+        }
+    )*};
+}
+empty_message!(
+    GroupLeaveMessage,
+    GroupSyncRequestMessage,
+    DeleteProfilePictureMessage,
+    RequestProfilePictureMessage
+);
+
+impl InternalCspMessageDecoder for PollSetupMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let poll_id = reader.read_u64_le()?;
+        let poll = String::from_utf8(reader.read_remaining().to_vec())
+            .map_err(|error| CspMessageDecodeError::InvalidMessage(format!("Invalid poll: {error}")))?;
+        Ok(Self { poll_id, poll })
+    }
+}
+impl InternalCspMessageEncoder for PollSetupMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write_u64_le(self.poll_id)?;
+        writer.write(self.poll.as_bytes())
+    }
+}
+
+impl InternalCspMessageDecoder for PollVoteMessage {
+    fn decode(reader: &mut impl ByteReader) -> Result<Self, CspMessageDecodeError> {
+        let creator_identity = ThreemaId::try_from(reader.read_fixed::<{ ThreemaId::LENGTH }>()?.as_slice())
+            .map_err(|error| {
+                CspMessageDecodeError::InvalidMessage(format!("Invalid poll creator: {error}"))
+            })?;
+        let poll_id = reader.read_u64_le()?;
+        let choices = String::from_utf8(reader.read_remaining().to_vec())
+            .map_err(|error| CspMessageDecodeError::InvalidMessage(format!("Invalid poll vote: {error}")))?;
+        Ok(Self {
+            creator_identity,
+            poll_id,
+            choices,
+        })
+    }
+}
+impl InternalCspMessageEncoder for PollVoteMessage {
+    fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
+        writer.write(&self.creator_identity.to_bytes())?;
+        writer.write_u64_le(self.poll_id)?;
+        writer.write(self.choices.as_bytes())
+    }
+}
+
 struct IncomingMessageBodyExtension;
 impl IncomingMessageBodyExtension {
     #[inline]
-    #[expect(unused, reason = "TODO(LIB-53)")]
     fn decode_group_creator_header(
         sender_identity: ThreemaId,
         reader: &mut impl ByteReader,
@@ -286,8 +744,31 @@ impl IncomingMessageBodyExtension {
 
 impl CspMessageDecoder for IncomingMessageBody {
     /// Try to decode the incoming message's body from the protocol type and the raw data.
-    fn decode(message_type: CspE2eMessageType, message_data: &[u8]) -> Result<Self, CspMessageDecodeError> {
+    fn decode(
+        sender_identity: ThreemaId,
+        message_type: CspE2eMessageType,
+        message_data: &[u8],
+    ) -> Result<Self, CspMessageDecodeError> {
         let mut reader = SliceByteReader::new(message_data);
+        let member =
+            |reader: &mut SliceByteReader,
+             body: fn(&mut SliceByteReader) -> Result<GroupMessageBody, CspMessageDecodeError>| {
+                let group_identity = IncomingMessageBodyExtension::decode_group_member_header(reader)?;
+                Ok::<_, CspMessageDecodeError>(Self::Group(IncomingGroupMessageBody {
+                    group_identity,
+                    body: body(reader)?,
+                }))
+            };
+        let creator =
+            |reader: &mut SliceByteReader,
+             body: fn(&mut SliceByteReader) -> Result<GroupMessageBody, CspMessageDecodeError>| {
+                let group_identity =
+                    IncomingMessageBodyExtension::decode_group_creator_header(sender_identity, reader)?;
+                Ok::<_, CspMessageDecodeError>(Self::Group(IncomingGroupMessageBody {
+                    group_identity,
+                    body: body(reader)?,
+                }))
+            };
 
         // Decode message body.
         let message = match message_type {
@@ -313,6 +794,65 @@ impl CspMessageDecoder for IncomingMessageBody {
             CspE2eMessageType::WebSessionResume => Self::Contact(ContactMessageBody::WebSessionResume(
                 WebSessionResumeMessage::decode(&mut reader)?,
             )),
+
+            CspE2eMessageType::CallOffer => Self::Contact(ContactMessageBody::CallOffer(
+                CallOfferMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::CallAnswer => Self::Contact(ContactMessageBody::CallAnswer(
+                CallAnswerMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::CallIceCandidate => Self::Contact(ContactMessageBody::CallIceCandidate(
+                CallIceCandidateMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::CallHangup => Self::Contact(ContactMessageBody::CallHangup(
+                CallHangupMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::CallRinging => Self::Contact(ContactMessageBody::CallRinging(
+                CallRingingMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::TypingIndicator => Self::Contact(ContactMessageBody::TypingIndicator(
+                TypingIndicatorMessage::decode(&mut reader)?,
+            )),
+
+            CspE2eMessageType::Reaction => Self::Contact(ContactMessageBody::Reaction(
+                ReactionMessage::decode(&mut reader)?,
+            )),
+
+            CspE2eMessageType::File => {
+                Self::Contact(ContactMessageBody::File(FileMessage::decode(&mut reader)?))
+            },
+
+            CspE2eMessageType::ContactSetProfilePicture => Self::Contact(
+                ContactMessageBody::SetProfilePicture(SetProfilePictureMessage::decode(&mut reader)?),
+            ),
+            CspE2eMessageType::ContactDeleteProfilePicture => Self::Contact(
+                ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage::decode(&mut reader)?),
+            ),
+            CspE2eMessageType::ContactRequestProfilePicture => Self::Contact(
+                ContactMessageBody::RequestProfilePicture(RequestProfilePictureMessage::decode(&mut reader)?),
+            ),
+            CspE2eMessageType::PollSetup => Self::Contact(ContactMessageBody::PollSetup(
+                PollSetupMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::PollVote => Self::Contact(ContactMessageBody::PollVote(
+                PollVoteMessage::decode(&mut reader)?,
+            )),
+            CspE2eMessageType::GroupPollSetup => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::PollSetup(PollSetupMessage::decode(
+                    group_reader,
+                )?))
+            })?,
+            CspE2eMessageType::GroupPollVote => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::PollVote(PollVoteMessage::decode(group_reader)?))
+            })?,
+
+            CspE2eMessageType::EditMessage => {
+                Self::Contact(ContactMessageBody::Edit(EditMessage::decode(&mut reader)?))
+            },
+
+            CspE2eMessageType::DeleteMessage => {
+                Self::Contact(ContactMessageBody::Delete(DeleteMessage::decode(&mut reader)?))
+            },
 
             CspE2eMessageType::GroupText => {
                 let group_identity = IncomingMessageBodyExtension::decode_group_member_header(&mut reader)?;
@@ -341,6 +881,49 @@ impl CspMessageDecoder for IncomingMessageBody {
                 Self::Group(IncomingGroupMessageBody { group_identity, body })
             },
 
+            CspE2eMessageType::GroupFile => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(FileMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupReaction => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::Reaction(ReactionMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupEditMessage => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::Edit(EditMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupDeleteMessage => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::Delete(DeleteMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupLeave => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::Leave(GroupLeaveMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupSyncRequest => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::SyncRequest(GroupSyncRequestMessage::decode(
+                    group_reader,
+                )?))
+            })?,
+            CspE2eMessageType::GroupSetup => creator(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::Setup(GroupSetupMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupName => creator(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::Name(GroupNameMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupSetProfilePicture => creator(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::SetProfilePicture(
+                    SetProfilePictureMessage::decode(group_reader)?,
+                ))
+            })?,
+            CspE2eMessageType::GroupDeleteProfilePicture => creator(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::DeleteProfilePicture(
+                    DeleteProfilePictureMessage::decode(group_reader)?,
+                ))
+            })?,
+
+            CspE2eMessageType::GroupCallStart => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::CallStart(GroupCallStartMessage::decode(
+                    group_reader,
+                )?))
+            })?,
+
             // TODO(LIB-16): Decode the rest.
             _ => {
                 return Err(CspMessageDecodeError::InvalidMessage(
@@ -358,7 +941,6 @@ impl CspMessageDecoder for IncomingMessageBody {
 struct OutgoingGroupMessageBodyExtension;
 impl OutgoingGroupMessageBodyExtension {
     #[inline]
-    #[expect(unused, reason = "TODO(LIB-53)")]
     fn encode_group_creator_header_into(
         group_identity: &GroupIdentity,
         writer: &mut impl ByteWriter,
@@ -380,30 +962,32 @@ impl InternalCspMessageEncoder for OutgoingGroupMessageBody {
     /// Encode the group message with its respective header (either `group-creator-container` or
     /// `group-member-container`).
     fn encode_into(&self, writer: &mut impl ByteWriter) -> Result<(), ByteWriterError> {
-        match &self.body {
-            GroupMessageBody::Text(message) => {
-                OutgoingGroupMessageBodyExtension::encode_group_member_header_into(
-                    &self.group_identity,
-                    writer,
-                )?;
-                message.encode_into(writer)?;
-            },
-            GroupMessageBody::Location(message) => {
-                OutgoingGroupMessageBodyExtension::encode_group_member_header_into(
-                    &self.group_identity,
-                    writer,
-                )?;
-                message.encode_into(writer)?;
-            },
-            GroupMessageBody::LegacyReaction(message) => {
-                OutgoingGroupMessageBodyExtension::encode_group_member_header_into(
-                    &self.group_identity,
-                    writer,
-                )?;
-                message.encode_into(writer)?;
-            },
+        if self.body.uses_creator_container() {
+            OutgoingGroupMessageBodyExtension::encode_group_creator_header_into(
+                &self.group_identity,
+                writer,
+            )?;
+        } else {
+            OutgoingGroupMessageBodyExtension::encode_group_member_header_into(&self.group_identity, writer)?;
         }
-        Ok(())
+        match &self.body {
+            GroupMessageBody::Text(message) => message.encode_into(writer),
+            GroupMessageBody::Location(message) => message.encode_into(writer),
+            GroupMessageBody::LegacyReaction(message) => message.encode_into(writer),
+            GroupMessageBody::File(message) => message.encode_into(writer),
+            GroupMessageBody::PollSetup(message) => message.encode_into(writer),
+            GroupMessageBody::PollVote(message) => message.encode_into(writer),
+            GroupMessageBody::Reaction(message) => message.encode_into(writer),
+            GroupMessageBody::Edit(message) => message.encode_into(writer),
+            GroupMessageBody::Delete(message) => message.encode_into(writer),
+            GroupMessageBody::Setup(message) => message.encode_into(writer),
+            GroupMessageBody::Name(message) => message.encode_into(writer),
+            GroupMessageBody::Leave(message) => message.encode_into(writer),
+            GroupMessageBody::SyncRequest(message) => message.encode_into(writer),
+            GroupMessageBody::SetProfilePicture(message) => message.encode_into(writer),
+            GroupMessageBody::DeleteProfilePicture(message) => message.encode_into(writer),
+            GroupMessageBody::CallStart(message) => message.encode_into(writer),
+        }
     }
 }
 
@@ -416,6 +1000,21 @@ impl InternalCspMessageEncoder for OutgoingContactMessageBody {
             ContactMessageBody::DeliveryReceipt(message) => message.encode_into(writer),
             ContactMessageBody::LegacyReaction(message) => message.encode_into(writer),
             ContactMessageBody::WebSessionResume(message) => message.encode_into(writer),
+            ContactMessageBody::TypingIndicator(message) => message.encode_into(writer),
+            ContactMessageBody::Reaction(message) => message.encode_into(writer),
+            ContactMessageBody::File(message) => message.encode_into(writer),
+            ContactMessageBody::PollSetup(message) => message.encode_into(writer),
+            ContactMessageBody::PollVote(message) => message.encode_into(writer),
+            ContactMessageBody::SetProfilePicture(message) => message.encode_into(writer),
+            ContactMessageBody::DeleteProfilePicture(message) => message.encode_into(writer),
+            ContactMessageBody::RequestProfilePicture(message) => message.encode_into(writer),
+            ContactMessageBody::Edit(message) => message.encode_into(writer),
+            ContactMessageBody::Delete(message) => message.encode_into(writer),
+            ContactMessageBody::CallOffer(message) => message.encode_into(writer),
+            ContactMessageBody::CallAnswer(message) => message.encode_into(writer),
+            ContactMessageBody::CallIceCandidate(message) => message.encode_into(writer),
+            ContactMessageBody::CallHangup(message) => message.encode_into(writer),
+            ContactMessageBody::CallRinging(message) => message.encode_into(writer),
         }
     }
 }
@@ -468,5 +1067,411 @@ impl CspMessageEncoder for OutgoingMessageBody {
 
         // Done.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_sender() -> ThreemaId {
+        ThreemaId::try_from("ECHOECHO").unwrap()
+    }
+    use crate::utils::bytes::OwnedVecByteWriter;
+
+    #[test]
+    fn group_call_start_round_trip() {
+        let start = GroupCallStartMessage {
+            protocol_version: 1,
+            gck: [7; 32],
+            sfu_base_url: "https://sfu.threema.ch".to_owned(),
+        };
+        let mut writer = OwnedVecByteWriter::new_empty();
+        start.encode_into(&mut writer).unwrap();
+        // group-member-container: creator identity and group id, then the message
+        let mut data = b"ECHOECHO".to_vec();
+        data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        data.extend_from_slice(&writer.into_inner());
+        let decoded =
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::GroupCallStart, &data).unwrap();
+        assert!(matches!(
+            decoded,
+            IncomingMessageBody::Group(IncomingGroupMessageBody { body: GroupMessageBody::CallStart(decoded), .. })
+                if decoded == start
+        ));
+        // A GCK of the wrong length is refused.
+        let mut writer = OwnedVecByteWriter::new_empty();
+        writer
+            .write(
+                &protobuf::csp_e2e::GroupCallStart {
+                    protocol_version: 1,
+                    gck: vec![7; 31],
+                    sfu_base_url: String::new(),
+                }
+                .encode_to_vec(),
+            )
+            .unwrap();
+        let mut data = b"ECHOECHO".to_vec();
+        data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        data.extend_from_slice(&writer.into_inner());
+        assert!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::GroupCallStart, &data).is_err()
+        );
+    }
+
+    #[test]
+    fn call_offer_keeps_its_json() {
+        let json = br#"{"callId":42,"offer":{"sdpType":"offer","sdp":"v=0"}}"#.to_vec();
+        let mut writer = OwnedVecByteWriter::new_empty();
+        CallOfferMessage { json: json.clone() }
+            .encode_into(&mut writer)
+            .unwrap();
+        assert_eq!(writer.into_inner(), json);
+        let decoded =
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::CallOffer, &json).unwrap();
+        assert!(matches!(
+            decoded,
+            IncomingMessageBody::Contact(ContactMessageBody::CallOffer(CallOfferMessage { json: decoded }))
+                if decoded == json
+        ));
+        // Hangup and ringing may be empty
+        let decoded = IncomingMessageBody::decode(test_sender(), CspE2eMessageType::CallHangup, &[]).unwrap();
+        assert!(matches!(
+            decoded,
+            IncomingMessageBody::Contact(ContactMessageBody::CallHangup(CallHangupMessage { json })) if json.is_empty()
+        ));
+    }
+
+    #[test]
+    fn typing_indicator_roundtrip() {
+        for is_typing in [false, true] {
+            let mut writer = OwnedVecByteWriter::new_empty();
+            TypingIndicatorMessage { is_typing }
+                .encode_into(&mut writer)
+                .unwrap();
+            let data = writer.into_inner();
+            assert_eq!(data, vec![u8::from(is_typing)]);
+            let decoded =
+                IncomingMessageBody::decode(test_sender(), CspE2eMessageType::TypingIndicator, &data)
+                    .unwrap();
+            assert!(matches!(
+                decoded,
+                IncomingMessageBody::Contact(ContactMessageBody::TypingIndicator(TypingIndicatorMessage {
+                    is_typing: decoded
+                })) if decoded == is_typing
+            ));
+        }
+        assert!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::TypingIndicator, &[2]).is_err()
+        );
+        assert!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::TypingIndicator, &[1, 0]).is_err()
+        );
+    }
+
+    fn decode_reaction(data: &[u8]) -> Result<ReactionMessage, CspMessageDecodeError> {
+        match IncomingMessageBody::decode(test_sender(), CspE2eMessageType::Reaction, data)? {
+            IncomingMessageBody::Contact(ContactMessageBody::Reaction(reaction)) => Ok(reaction),
+            _ => panic!("expected a reaction"),
+        }
+    }
+
+    #[test]
+    fn reaction_roundtrip() {
+        for action in [
+            ReactionAction::Apply("👍🏽".to_owned()),
+            ReactionAction::Withdraw("❤️".to_owned()),
+        ] {
+            let reaction = ReactionMessage {
+                message_id: MessageId(0x0123_4567_89ab_cdef),
+                action,
+            };
+            let mut writer = OwnedVecByteWriter::new_empty();
+            reaction.encode_into(&mut writer).unwrap();
+            assert_eq!(decode_reaction(&writer.into_inner()).unwrap(), reaction);
+        }
+    }
+
+    #[test]
+    fn reaction_wire_format() {
+        // fixed64 message_id = 1, bytes apply = 2
+        let mut data = vec![0x09];
+        data.extend_from_slice(&42_u64.to_le_bytes());
+        data.extend_from_slice(&[0x12, 0x04]);
+        data.extend_from_slice("👍".as_bytes());
+        assert_eq!(
+            decode_reaction(&data).unwrap(),
+            ReactionMessage {
+                message_id: MessageId(42),
+                action: ReactionAction::Apply("👍".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_reactions_are_rejected() {
+        let encode = |reaction: protobuf::csp_e2e::Reaction| reaction.encode_to_vec();
+        let with = |action| {
+            encode(protobuf::csp_e2e::Reaction {
+                message_id: 1,
+                action,
+            })
+        };
+        assert!(decode_reaction(&with(None)).is_err());
+        assert!(
+            decode_reaction(&with(Some(
+                protobuf::csp_e2e::reaction::Action::Apply(Vec::new())
+            )))
+            .is_err()
+        );
+        assert!(
+            decode_reaction(&with(Some(protobuf::csp_e2e::reaction::Action::Apply(vec![
+                0xff
+            ]))))
+            .is_err()
+        );
+        assert!(
+            decode_reaction(&with(Some(protobuf::csp_e2e::reaction::Action::Withdraw(
+                vec![b'a'; 65]
+            ))))
+            .is_err()
+        );
+        assert!(
+            decode_reaction(&with(Some(protobuf::csp_e2e::reaction::Action::Apply(vec![
+                b'a';
+                64
+            ]))))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn edit_and_delete_roundtrip() {
+        let edit = EditMessage {
+            message_id: MessageId(0x0123_4567_89ab_cdef),
+            text: "corrected ✓".to_owned(),
+        };
+        let mut writer = OwnedVecByteWriter::new_empty();
+        edit.encode_into(&mut writer).unwrap();
+        assert!(matches!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::EditMessage, &writer.into_inner()).unwrap(),
+            IncomingMessageBody::Contact(ContactMessageBody::Edit(decoded)) if decoded == edit
+        ));
+
+        let delete = DeleteMessage {
+            message_id: MessageId(42),
+        };
+        let mut writer = OwnedVecByteWriter::new_empty();
+        delete.encode_into(&mut writer).unwrap();
+        let data = writer.into_inner();
+        // fixed64 message_id = 1
+        let mut expected = vec![0x09];
+        expected.extend_from_slice(&42_u64.to_le_bytes());
+        assert_eq!(data, expected);
+        assert!(matches!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::DeleteMessage, &data).unwrap(),
+            IncomingMessageBody::Contact(ContactMessageBody::Delete(decoded)) if decoded == delete
+        ));
+        assert!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::DeleteMessage, &[0x09, 1]).is_err()
+        );
+    }
+
+    #[test]
+    fn file_message_from_android() {
+        // Shape of an image message sent by the Android app.
+        let json = br#"{"j":1,"i":1,"k":"0101010101010101010101010101010101010101010101010101010101010101","b":"00112233445566778899aabbccddeeff","m":"image/jpeg","n":"IMG_1.jpg","s":12345,"t":"ffeeddccbbaa99887766554433221100","p":"image/jpeg","x":{"w":800,"h":600},"unknown":true}"#;
+        let IncomingMessageBody::Contact(ContactMessageBody::File(file)) =
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::File, json).unwrap()
+        else {
+            panic!("expected a file message")
+        };
+        assert_eq!(file.rendering_type, FileRenderingType::Media);
+        assert_eq!(file.key, [1; 32]);
+        assert_eq!(file.blob_id.0[15], 0xff);
+        assert_eq!(file.size, 12345);
+        assert_eq!(file.name.as_deref(), Some("IMG_1.jpg"));
+        assert_eq!(file.thumbnail_blob_id.unwrap().0[0], 0xff);
+        assert_eq!(file.metadata.width, Some(800));
+        assert_eq!(file.caption, None);
+
+        // Round trip.
+        let mut writer = OwnedVecByteWriter::new_empty();
+        file.encode_into(&mut writer).unwrap();
+        let IncomingMessageBody::Contact(ContactMessageBody::File(again)) =
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::File, &writer.into_inner())
+                .unwrap()
+        else {
+            panic!("expected a file message")
+        };
+        assert_eq!(again, file);
+    }
+
+    #[test]
+    fn invalid_file_messages_are_rejected() {
+        let decode =
+            |json: &str| IncomingMessageBody::decode(test_sender(), CspE2eMessageType::File, json.as_bytes());
+        // Fallback to the deprecated rendering type, no thumbnail.
+        assert!(decode(r#"{"i":0,"k":"0101010101010101010101010101010101010101010101010101010101010101","b":"00112233445566778899aabbccddeeff","m":"application/pdf","s":1}"#).is_ok());
+        // Short key, missing blob id, long name.
+        assert!(decode(r#"{"k":"01","b":"00112233445566778899aabbccddeeff","m":"a","s":1}"#).is_err());
+        assert!(
+            decode(
+                r#"{"k":"0101010101010101010101010101010101010101010101010101010101010101","m":"a","s":1}"#
+            )
+            .is_err()
+        );
+        let long_name = format!(
+            r#"{{"k":"0101010101010101010101010101010101010101010101010101010101010101","b":"00112233445566778899aabbccddeeff","m":"a","s":1,"n":"{}"}}"#,
+            "x".repeat(257)
+        );
+        assert!(decode(&long_name).is_err());
+    }
+
+    fn group_roundtrip(sender: &str, body: GroupMessageBody) -> (Vec<u8>, IncomingMessageBody) {
+        let creator = ThreemaId::try_from("CREATOR1").unwrap();
+        let outgoing = OutgoingGroupMessageBody {
+            group_identity: GroupIdentity {
+                group_id: 0x0102_0304_0506_0708,
+                creator_identity: creator,
+            },
+            body,
+        };
+        let mut writer = OwnedVecByteWriter::new_empty();
+        outgoing.encode_into(&mut writer).unwrap();
+        let data = writer.into_inner();
+        let message_type = outgoing.body.message_type();
+        let decoded =
+            IncomingMessageBody::decode(ThreemaId::try_from(sender).unwrap(), message_type, &data).unwrap();
+        (data, decoded)
+    }
+
+    #[test]
+    fn group_containers() {
+        // Creator messages: group id only, the sender is the creator.
+        let members = vec![
+            ThreemaId::try_from("ECHOECHO").unwrap(),
+            ThreemaId::try_from("00000BOB").unwrap(),
+        ];
+        let (data, decoded) = group_roundtrip(
+            "CREATOR1",
+            GroupMessageBody::Setup(GroupSetupMessage {
+                members: members.clone(),
+            }),
+        );
+        assert_eq!(data.len(), 8 + 16);
+        assert_eq!(&data[..8], &0x0102_0304_0506_0708_u64.to_le_bytes());
+        let IncomingMessageBody::Group(group) = decoded else {
+            panic!("expected a group message")
+        };
+        assert_eq!(group.group_identity.creator_identity.as_str(), "CREATOR1");
+        assert_eq!(group.body, GroupMessageBody::Setup(GroupSetupMessage { members }));
+
+        let (_, decoded) = group_roundtrip(
+            "CREATOR1",
+            GroupMessageBody::Name(GroupNameMessage {
+                name: "Sailors ⛵".to_owned(),
+            }),
+        );
+        assert!(matches!(
+            decoded,
+            IncomingMessageBody::Group(IncomingGroupMessageBody { body: GroupMessageBody::Name(ref n), .. })
+                if n.name == "Sailors ⛵"
+        ));
+
+        // Member messages: creator identity + group id, from any member.
+        let (data, decoded) = group_roundtrip(
+            "00000BOB",
+            GroupMessageBody::Text(TextMessage {
+                text: "hi group".to_owned(),
+            }),
+        );
+        assert_eq!(&data[..8], b"CREATOR1");
+        let IncomingMessageBody::Group(group) = decoded else {
+            panic!("expected a group message")
+        };
+        assert_eq!(group.group_identity.creator_identity.as_str(), "CREATOR1");
+        assert_eq!(group.group_identity.group_id, 0x0102_0304_0506_0708);
+
+        for body in [
+            GroupMessageBody::Leave(GroupLeaveMessage),
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+            GroupMessageBody::Delete(DeleteMessage {
+                message_id: MessageId(7),
+            }),
+        ] {
+            let (_, decoded) = group_roundtrip("00000BOB", body.clone());
+            let IncomingMessageBody::Group(group) = decoded else {
+                panic!("expected a group message")
+            };
+            assert_eq!(group.body, body);
+        }
+        // Misaligned setup.
+        assert!(
+            IncomingMessageBody::decode(
+                ThreemaId::try_from("CREATOR1").unwrap(),
+                CspE2eMessageType::GroupSetup,
+                &[1, 2, 3, 4, 5, 6, 7, 8, b'A']
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn polls() {
+        let setup = PollSetupMessage {
+            poll_id: 0x1122_3344_5566_7788,
+            poll: r#"{"d":"Lunch?","s":0,"a":0,"t":1,"o":0,"c":[{"i":0,"n":"Pizza","o":0}]}"#.to_owned(),
+        };
+        let mut writer = OwnedVecByteWriter::new_empty();
+        setup.encode_into(&mut writer).unwrap();
+        let data = writer.into_inner();
+        assert_eq!(&data[..8], &0x1122_3344_5566_7788_u64.to_le_bytes());
+        assert!(matches!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::PollSetup, &data).unwrap(),
+            IncomingMessageBody::Contact(ContactMessageBody::PollSetup(decoded)) if decoded == setup
+        ));
+        let vote = GroupMessageBody::PollVote(PollVoteMessage {
+            creator_identity: ThreemaId::try_from("00000BOB").unwrap(),
+            poll_id: 7,
+            choices: "[[0,1],[1,0]]".to_owned(),
+        });
+        let (data, decoded) = group_roundtrip("ECHOECHO", vote.clone());
+        assert_eq!(&data[16..24], b"00000BOB");
+        let IncomingMessageBody::Group(group) = decoded else {
+            panic!("expected a group message")
+        };
+        assert_eq!(group.body, vote);
+    }
+
+    #[test]
+    fn contact_profile_pictures() {
+        let set = SetProfilePictureMessage {
+            blob_id: BlobId([7; 16]),
+            size: 1234,
+            key: [9; 32],
+        };
+        let mut writer = OwnedVecByteWriter::new_empty();
+        set.encode_into(&mut writer).unwrap();
+        let data = writer.into_inner();
+        assert_eq!(data.len(), 16 + 4 + 32);
+        assert!(matches!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::ContactSetProfilePicture, &data).unwrap(),
+            IncomingMessageBody::Contact(ContactMessageBody::SetProfilePicture(decoded)) if decoded == set
+        ));
+        assert!(matches!(
+            IncomingMessageBody::decode(
+                test_sender(),
+                CspE2eMessageType::ContactRequestProfilePicture,
+                &[]
+            )
+            .unwrap(),
+            IncomingMessageBody::Contact(ContactMessageBody::RequestProfilePicture(_))
+        ));
+        assert!(matches!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::ContactDeleteProfilePicture, &[])
+                .unwrap(),
+            IncomingMessageBody::Contact(ContactMessageBody::DeleteProfilePicture(_))
+        ));
     }
 }

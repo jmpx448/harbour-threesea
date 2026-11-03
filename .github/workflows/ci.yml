@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Checks on every push and pull request (scripts/check.sh). Pull requests into `release` are
+# also built with the Sailfish SDK, so a release can't fail on the build after merging.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  # The release workflow runs the same checks before it builds (and publishes nothing without).
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # As a called workflow it shares the caller's run; only a standalone CI run cancels its
+  # predecessor on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/release' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml) and protoc
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          echo "PROTOC=$(scripts/fetch-protoc.sh)" >> "$GITHUB_ENV"
+      - name: cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Checks
+        run: scripts/check.sh
+
+  sdk-build:
+    if: github.event_name == 'pull_request' && github.base_ref == 'release'
+    needs: checks
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        flavour: [full, lite]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Sailfish SDK image
+        run: scripts/ci-prepare-sdk.sh
+      - name: Build (i486)
+        run: FLAVOUR=${{ matrix.flavour }} FLAVOUR_SUFFIX=0 scripts/sdk-build.sh i486
+      # The Lite flavour is what the Jolla Store takes: Jolla's own validator must pass.
+      - name: Harbour validation (Lite)
+        if: matrix.flavour == 'lite'
+        run: scripts/validate-rpm.sh RPMS/lite/harbour-threesea-*-1.i486.rpm

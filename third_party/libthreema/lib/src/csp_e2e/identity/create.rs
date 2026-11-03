@@ -27,6 +27,21 @@ pub struct CreateIdentityContext {
 
     /// Application flavour.
     pub flavor: Flavor,
+
+    /// Serial license (Threema Shop / Libre) to register the identity with, if any.
+    pub serial_license: Option<SerialLicense>,
+}
+
+/// A serial license as sold in the Threema Shop (used by e.g. the Libre flavour).
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SerialLicense {
+    /// License key, e.g. `ABCDE-FGHIJ`.
+    #[educe(Debug(ignore))]
+    pub license_key: String,
+
+    /// Random, persistent device identifier.
+    pub device_id: String,
 }
 
 /// 1. Run the HTTPS request as defined by [`HttpsRequest`] and let `response` be the result.
@@ -142,6 +157,7 @@ impl State {
                     &context.client_info,
                     &context.config.directory_server_url,
                     &context.flavor,
+                    context.serial_license.as_ref(),
                     authentication,
                     public_key,
                 ),

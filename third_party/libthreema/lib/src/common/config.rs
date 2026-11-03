@@ -410,7 +410,7 @@ mod device_group_id_template_url {
             .expect("Device Group Path Key should contain at least one byte");
         let base_url = url.map_placeholders(|key| match key {
             PREFIX_4 => Some(format!("{:x}", prefix >> 4_u8)),
-            PREFIX_8 => Some(format!("{prefix:x}")),
+            PREFIX_8 => Some(format!("{prefix:02x}")),
             _ => None,
         });
         match path {
@@ -435,7 +435,7 @@ mod blob_id_template_url {
             .first()
             .expect("Blob ID should contain at least one byte");
         url.map_placeholders(|key| match key {
-            PREFIX_8 => Some(format!("{prefix:x}")),
+            PREFIX_8 => Some(format!("{prefix:02x}")),
             FULL => Some(HEXLOWER_PERMISSIVE.encode(&blob_id.0)),
             _ => None,
         })
@@ -466,8 +466,8 @@ mod device_group_id_and_blob_id_template_url {
             device_group_id_template_url::PREFIX_4 => {
                 Some(format!("{:x}", device_group_path_key_prefix >> 4_u8))
             },
-            device_group_id_template_url::PREFIX_8 => Some(format!("{device_group_path_key_prefix:x}")),
-            blob_id_template_url::PREFIX_8 => Some(format!("{blob_id_prefix:x}")),
+            device_group_id_template_url::PREFIX_8 => Some(format!("{device_group_path_key_prefix:02x}")),
+            blob_id_template_url::PREFIX_8 => Some(format!("{blob_id_prefix:02x}")),
             blob_id_template_url::FULL => Some(HEXLOWER_PERMISSIVE.encode(&blob_id.0)),
             _ => None,
         })
@@ -502,7 +502,9 @@ impl ChatServerAddress {
     #[must_use]
     pub fn addresses(&self, server_group: ChatServerGroup) -> Vec<(String, u16)> {
         let hostname = map_placeholders(&self.hostname, |key| match key {
-            Self::PREFIX_8 => Some(format!("{:x}", server_group.0)),
+            // Two hex digits like every chat server hostname (`ds.g-0a`); `{:x}` gave `ds.g-a`,
+            // which does not exist, for the groups 00 to 0f.
+            Self::PREFIX_8 => Some(format!("{:02x}", server_group.0)),
             _ => None,
         });
         self.ports.iter().map(|port| (hostname.clone(), *port)).collect()
@@ -615,7 +617,7 @@ impl SafeServerBaseUrl {
             .first()
             .expect("Backup ID should contain at least one byte");
         let base_url = self.0.0.map_placeholders(|key| match key {
-            Self::PREFIX_8 => Some(format!("{prefix:x}")),
+            Self::PREFIX_8 => Some(format!("{prefix:02x}")),
             _ => None,
         });
         format!("{base_url}{path}")
@@ -637,7 +639,7 @@ impl RendezvousServerBaseUrl {
             .expect("Rendezvous Path should contain at least one byte");
         let base_url = self.0.0.map_placeholders(|key| match key {
             Self::PREFIX_4 => Some(format!("{:x}", prefix >> 4_u8)),
-            Self::PREFIX_8 => Some(format!("{prefix:x}")),
+            Self::PREFIX_8 => Some(format!("{prefix:02x}")),
             _ => None,
         });
         format!("{base_url}{path}")
@@ -1560,6 +1562,46 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn chat_server_hostname_has_two_hex_digits() {
+        let config = Config::production();
+        let addresses = config
+            .chat_server_address
+            .addresses(ChatServerGroup::try_from("0a").unwrap());
+        assert_eq!(addresses[0].0, "ds.g-0a.0.threema.ch");
+        let addresses = config
+            .chat_server_address
+            .addresses(ChatServerGroup::try_from("e0").unwrap());
+        assert_eq!(addresses[0].0, "ds.g-e0.0.threema.ch");
+    }
+
+    #[test]
+    fn url_prefixes_are_two_hex_digits() {
+        let config = Config::production();
+        let blob_id = BlobId([0x05; BlobId::LENGTH]);
+        assert!(
+            config
+                .blob_server
+                .download_url
+                .path(blob_id)
+                .starts_with("https://ds-blobp-05.threema.ch/0505")
+        );
+
+        // A device group ID starting with a byte below 0x10
+        let device_group_key = (0_u8..=u8::MAX)
+            .map(|byte| crate::common::keys::DeviceGroupKey::from([byte; 32]))
+            .find(|key| key.path_key().public_key().0.as_bytes()[0] < 0x10)
+            .unwrap();
+        let prefix = device_group_key.path_key().public_key().0.as_bytes()[0];
+        let multi_device = config.multi_device.unwrap();
+        assert!(
+            multi_device
+                .mediator_server_url
+                .path(&device_group_key.path_key(), format_args!("x"))
+                .starts_with(&format!("wss://mediator-0.threema.ch/{prefix:02x}/"))
+        );
+    }
 
     mod on_prem {
         use super::*;
