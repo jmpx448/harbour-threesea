@@ -169,13 +169,45 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Incoming: libthreema's incoming task decapsulates (`CspE2eContextInit::fs_sessions`); the peer
   ratchet is turned in `acknowledge()` (`fs-commit-fn`). Control replies (Accept/Reject/Terminate)
   are queued through the store and sent by `core::connection`.
-- Outgoing: only to contacts whose feature mask has `FORWARD_SECURITY_SUPPORT` (0x40). We publish
-  our mask (`identity/set_featuremask`, challenge–response) = 0x40.
-- A peer Reject puts the message back into the queue and it is re-sent (new session) — Android
-  asks the user first.
+  An answer carries the key of whoever wrote (`enqueue_control`): a stranger's Init comes before
+  the message that creates the contact, and a lost Accept costs a rejected first reply. Not with
+  "block unknown senders" on (`providers::control_receiver`).
+- Outgoing: only to contacts whose feature mask has `FORWARD_SECURITY_SUPPORT` (0x40), the mask
+  alone decides, like Android; an existing session doesn't. We publish our mask
+  (`identity/set_featuremask`, challenge–response) = 0x40. Encapsulated group messages name their
+  group, as the spec requires (`group_identity`), and a Reject repeats it.
+- The feature mask follows the peer: a Terminate (of a known session, or DISABLED_BY_LOCAL), a
+  Reject, a message without forward secrecy, or an Init from someone whose stored mask says no looks
+  up that one contact inside the connection (`fs_support_after`), and so does sending to someone with
+  a session whose stored mask says no. At most once a minute per contact, across reconnects; an Init
+  every 5 s, and it trusts only a lookup made for it, since the "no" from just before may be from a
+  linking that was rolled back. What the lookup finds is stored on a fresh read of the contact. If the
+  directory answers no FS, what's left of the sessions ends with a Terminate; without an answer they stay
+  (DISABLED_BY_REMOTE) and the chat gets its line, as also when the daily refresh finds it
+  (`fs_support_lost`, Android's `OnFSFeatureMaskDowngradedTask`).
+- A peer Reject puts the message back into the queue at once, so that nothing can lose it, and it is
+  re-sent after the mask lookup — Android asks the user first. With a group named: the Common Group Receive Steps, a message we
+  don't have counts as a sync request if the group is ours, and only a message of ours goes out
+  again, to the sender of the Reject. Without one (older clients, or our own messages from before
+  we named it): by ID, and only for a member of that group.
+- Forward secrecy off (multi-device, or Settings → Privacy): `fs_answering_only`. No sessions, but a
+  message in an envelope gets a Reject with DISABLED_BY_LOCAL, as the spec says, so it is sent again
+  without; other variants are discarded. Android answers with a Terminate, which loses the message.
+- A message without an envelope on a session covering its type (`minimum_incoming_applied_version`,
+  like Android's `warnIfMessageWithoutForwardSecurityReceived`) gives a status line if the contact's
+  mask, just looked up, still says FS. Every such visible message gets its line, as on Android, right
+  after it; a run of receipts or typing, which add no rows, gets one.
+- Status lines (`fs_status_line`) only for sessions that existed, and only what we know: `fsReset`,
+  `fsMessageRejected` (a message really goes out again), `fsUnavailable` (the mask says no),
+  `fsMessageWithoutFs`, `fsEstablished`. `fsTerminated` only survives in old rows.
+- A row that can't be a session counts as none and is removed; a session in an impossible state is
+  ended and replaced when sending (`encapsulate_or_replace`). Should encapsulating still fail, the
+  message counts as not sent. None of this ends the connection.
+- Deleting a contact deletes its sessions without a Terminate, like Android
+  (`MarkContactAsDeletedBackgroundTask`): one would show them a reset line the moment they are
+  deleted. Their next message gets a Reject.
 - Simplifications vs Android (TODO): new sessions are stored right away (Android waits for the
-  server ack of the Init); no "message without forward secrecy" warnings; no 24 h keep-alive
-  `empty` messages; no Terminate when deleting a contact (sessions are just deleted).
+  server ack of the Init); no 24 h keep-alive `empty` messages.
 - ECHOECHO does not support FS (mask 0x9). Interop verified with the official Android app
   (2026-10-21). Android turns FS off (mask without 0x40) while multi-device is active.
 
