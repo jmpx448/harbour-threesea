@@ -221,6 +221,16 @@ impl RendezvousLink {
     }
 }
 
+/// A code as Threema for Desktop shows it, with this D2D protocol version.
+#[cfg(test)]
+pub(crate) fn test_join_code(d2d_protocol_version: u32) -> String {
+    tests::code(
+        Type::RequestToJoin(libthreema::protobuf::common::Unit {}),
+        d2d_protocol_version,
+        "wss://rendezvous-1.threema.ch/11/abc",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use libthreema::protobuf::{
@@ -231,7 +241,7 @@ mod tests {
 
     use super::*;
 
-    fn code(variant: Type, version: u32, url: &str) -> String {
+    pub(super) fn code(variant: Type, version: u32, url: &str) -> String {
         let offer = DeviceGroupJoinRequestOrOffer {
             version: 0,
             d2d_protocol_version: version,

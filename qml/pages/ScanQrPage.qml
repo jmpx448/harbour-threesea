@@ -7,8 +7,11 @@ import "../components/Errors.js" as Errors
 
 // Scan a contact's QR code to verify them in person (and add them if new), or (deviceLink)
 // the code Threema for Desktop shows to link it, or (webPair) the code of Threema Web, or
-// (anyCode, from the contacts page) whichever of the three it is. Looks at the camera a few
-// times a second; a picture (e.g. a screenshot someone sent) works too.
+// (anyCode, from the contacts page) whichever it is, a link to a Threema ID too. Looks at the
+// camera a few times a second; a picture (e.g. a screenshot someone sent) works too.
+//
+// Everything goes one way: the core says what a code is (qrKind), refusal() says what this
+// scanner can't do with it, and what connects a browser or adds from a link asks first.
 Page {
     id: page
     allowedOrientations: Orientation.Portrait
@@ -17,125 +20,195 @@ Page {
     property string expectedIdentity
     property bool busy: false
 
-    // Linking Threema for Desktop: any code but a contact's continues to the linking page.
+    // Linking Threema for Desktop: only its code continues to the linking page.
     property bool deviceLink
-    property string scannedCode
 
     // Threema Web: pair the browser whose code this is.
     property bool webPair
 
-    // Any of the three: contacts are verified here, Threema Web pairs and then shows its
-    // sessions, Threema for Desktop continues to the linking dialog.
+    // Any of them: contacts are verified here, Threema Web pairs and then shows its sessions,
+    // Threema for Desktop continues to the linking dialog, a link adds the contact.
     property bool anyCode
 
     signal verified(var contact)
     signal webPaired()
 
-    function pairWeb(text, allowHost) {
-        backend.call("webPair", { qr: text, allowHost: allowHost }, function(ok, result, kind, message) {
-            if (!ok) {
-                page.busy = false
-                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                return
-            }
-            if (result.confirmHost) {
-                var dialog = pageStack.push(Qt.resolvedUrl("settings/WebHostDialog.qml"), { host: result.confirmHost })
-                dialog.accepted.connect(function() { page.pairWeb(text, true) })
-                dialog.rejected.connect(function() { page.busy = false })
-                return
-            }
-            page.webPaired()
-            if (page.anyCode) showWebSessions.start()
-            else closeWhenIdle.start()
+    // A code refused or declined stays quiet while the camera still sees it: no notice twice a
+    // second, no dialog coming back. Frames fail to decode now and then, so it takes several in
+    // a row without it to count as gone. After a failure that may pass, retryAt tries it again.
+    property string restingCode
+    property double retryAt
+    property int framesWithoutCode
+
+    function rest(text, mayPass) {
+        restingCode = text
+        retryAt = mayPass ? Date.now() + 5000 : 0
+        framesWithoutCode = 0
+    }
+
+    function cameraFrame(text) {
+        if (busy || status !== PageStatus.Active) return
+        if (!text) {
+            if (restingCode && ++framesWithoutCode >= 5) restingCode = ""
+            return
+        }
+        if (text === restingCode) {
+            framesWithoutCode = 0
+            if (retryAt === 0 || Date.now() < retryAt) return
+        }
+        restingCode = ""
+        check(text, false)
+    }
+
+    // Not this code. A picture was chosen and always gets an answer; there is nothing to rest.
+    function refuse(message, text, fromPicture, mayPass) {
+        busy = false
+        if (!fromPicture) rest(text, mayPass === true)
+        Notices.show(message, Notice.Long, Notice.Center)
+    }
+
+    function fail(kind, message, text, fromPicture) {
+        refuse(Errors.text(kind, message), text, fromPicture, kind === "network" || kind === "server")
+    }
+
+    function decline(text, fromPicture) {
+        busy = false
+        if (!fromPicture) rest(text, false)
+    }
+
+    // Why this scanner won't go on with the code, or nothing.
+    function refusal(code, fromPicture) {
+        var someones = code.kind === "contact" || code.kind === "link"
+        if (webPair && code.kind !== "web") {
+            return someones
+                    //% "This is a contact's code. Scan the code web.threema.ch shows."
+                    ? qsTrId("threesea-la-qr-not-web")
+                    : Errors.text("webCodeInvalid")
+        }
+        if (deviceLink && code.kind !== "device") {
+            return someones
+                    //% "This is a contact's code. Scan the code on the computer."
+                    ? qsTrId("threesea-la-qr-not-device")
+                    : Errors.text(code.kind === "web" ? "linkWebCode" : "linkUnknownCode")
+        }
+        var verifying = !anyCode && !webPair && !deviceLink
+        if (verifying && code.kind === "link") {
+            //% "This is a link to a Threema ID. To verify it, scan the QR code in the other person's app."
+            return qsTrId("threesea-la-qr-link-verify")
+        }
+        if (verifying && code.kind !== "contact") return Errors.text("qrInvalid")
+        if (code.error) return Errors.text(code.error)
+        if (code.kind === "unknown") {
+            return fromPicture
+                    //% "No Threema QR code found in this picture."
+                    ? qsTrId("threesea-la-qr-not-found")
+                    //% "This is not a Threema QR code."
+                    : qsTrId("threesea-la-qr-unknown")
+        }
+        if (verifying && expectedIdentity && code.identity !== expectedIdentity) {
+            //% "This is someone else's code."
+            return qsTrId("threesea-la-qr-other-contact")
+        }
+        return ""
+    }
+
+    function check(text, fromPicture) {
+        if (busy) return
+        busy = true
+        backend.call("qrKind", { text: text }, function(ok, code) {
+            if (!ok) code = { kind: "unknown" }
+            var message = page.refusal(code, fromPicture)
+            if (message) page.refuse(message, text, fromPicture)
+            else if (code.kind === "web") page.askWeb(code, text, fromPicture)
+            else if (code.kind === "device") page.continueLinking(text)
+            else if (code.kind === "link") page.askAddContact(code.identity, text, fromPicture)
+            else page.verify(text, fromPicture)
         })
     }
 
-    function check(text) {
-        if (anyCode && text.indexOf("3mid:") !== 0) {
-            if (busy) return false
-            busy = true
-            backend.call("qrKind", { text: text }, function(ok, result) {
-                var kind = ok ? result.kind : "unknown"
-                if (kind === "web") {
-                    page.pairWeb(text, false)
-                } else if (kind === "device") {
-                    page.scannedCode = text
-                    continueLinking.start()
+    function askWeb(code, text, fromPicture) {
+        whenOnTop.run(function() {
+            var dialog = pageStack.push(Qt.resolvedUrl("settings/WebPairDialog.qml"),
+                                        { host: code.confirmHost ? code.host : "" })
+            dialog.accepted.connect(function() { page.pairWeb(code, text, fromPicture) })
+            dialog.rejected.connect(function() { page.decline(text, fromPicture) })
+        })
+    }
+
+    function pairWeb(code, text, fromPicture) {
+        backend.call("webPair", { qr: text, allowHost: code.confirmHost === true }, function(ok, result, kind, message) {
+            if (!ok) {
+                page.fail(kind, message, text, fromPicture)
+            } else if (result.confirmHost) {
+                // The server's permission is gone since the question.
+                code.confirmHost = true
+                code.host = result.confirmHost
+                page.askWeb(code, text, fromPicture)
+            } else {
+                page.webPaired()
+                if (page.anyCode) {
+                    whenOnTop.run(function() { pageStack.replace(Qt.resolvedUrl("settings/WebSessionsPage.qml")) })
                 } else {
-                    page.busy = false
+                    closeWhenIdle.start()
                 }
+            }
+        })
+    }
+
+    function continueLinking(text) {
+        whenOnTop.run(function() {
+            // From the contacts page: what linking means first, like Linked devices does.
+            if (page.anyCode) pageStack.replace(Qt.resolvedUrl("settings/LinkDeviceDialog.qml"), { code: text })
+            else pageStack.replace(Qt.resolvedUrl("settings/LinkDevicePage.qml"), { code: text })
+        })
+    }
+
+    function askAddContact(identity, text, fromPicture) {
+        whenOnTop.run(function() {
+            var dialog = pageStack.push(Qt.resolvedUrl("AddScannedContactDialog.qml"), { identity: identity })
+            dialog.accepted.connect(function() { page.addContact(identity, text, fromPicture) })
+            dialog.rejected.connect(function() { page.decline(text, fromPicture) })
+        })
+    }
+
+    function addContact(identity, text, fromPicture) {
+        backend.call("addContact", { identity: identity }, function(ok, result, kind, message) {
+            if (!ok) {
+                page.fail(kind, message, text, fromPicture)
+                return
+            }
+            backend.refreshContacts()
+            whenOnTop.run(function() {
+                pageStack.replace(Qt.resolvedUrl("ContactPage.qml"), { identity: identity })
             })
-            return true
-        }
-        if (webPair) {
-            if (busy) return false
-            if (text.indexOf("3mid:") === 0) {
-                //% "This is a contact's code. Scan the code web.threema.ch shows."
-                Notices.show(qsTrId("threesea-la-qr-not-web"), Notice.Short, Notice.Center)
-                return true
-            }
-            busy = true
-            pairWeb(text, false)
-            return true
-        }
-        if (deviceLink) {
-            if (busy) return false
-            if (text.indexOf("3mid:") === 0) {
-                //% "This is a contact's code. Scan the code on the computer."
-                Notices.show(qsTrId("threesea-la-qr-not-device"), Notice.Short, Notice.Center)
-                return true
-            }
-            busy = true
-            scannedCode = text
-            continueLinking.start()
-            return true
-        }
-        if (busy || text.indexOf("3mid:") !== 0) return false
-        var identity = text.substring(5, 13).toUpperCase()
-        if (expectedIdentity && identity !== expectedIdentity) {
-            //% "This is someone else's code."
-            Notices.show(qsTrId("threesea-la-qr-other-contact"), Notice.Short, Notice.Center)
-            return true
-        }
-        busy = true
+        })
+    }
+
+    function verify(text, fromPicture) {
         backend.call("verifyQrCode", { text: text }, function(ok, result, kind, message) {
-            page.busy = false
             if (ok) {
+                page.busy = false
                 //% "%1 is verified"
                 Notices.show(qsTrId("threesea-la-qr-verified").arg(result.displayName), Notice.Short, Notice.Center)
                 backend.refreshContacts()
                 page.verified(result)
                 closeWhenIdle.start()
             } else {
-                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.fail(kind, message, text, fromPicture)
             }
         })
-        return true
     }
 
-    // On to the linking page once the picker (if any) has gone.
+    // Once the picker (if any) and any transition have gone, with this page on top again.
     Timer {
-        id: continueLinking
+        id: whenOnTop
         interval: 100
         repeat: true
-        onTriggered: {
-            if (pageStack.busy || window.stackHeld) return
-            if (pageStack.currentPage !== page) {
-                pageStack.pop(page, PageStackAction.Immediate)
-                return
-            }
-            stop()
-            // From the contacts page: what linking means first, like Linked devices does.
-            if (page.anyCode) pageStack.replace(Qt.resolvedUrl("settings/LinkDeviceDialog.qml"), { code: page.scannedCode })
-            else pageStack.replace(Qt.resolvedUrl("settings/LinkDevicePage.qml"), { code: page.scannedCode })
+        property var action
+        function run(what) {
+            action = what
+            start()
         }
-    }
-
-    // Threema Web paired from the contacts page: its sessions, once the picker (if any) has gone.
-    Timer {
-        id: showWebSessions
-        interval: 100
-        repeat: true
         onTriggered: {
             if (pageStack.busy || window.stackHeld) return
             if (pageStack.currentPage !== page) {
@@ -143,7 +216,7 @@ Page {
                 return
             }
             stop()
-            pageStack.replace(Qt.resolvedUrl("settings/WebSessionsPage.qml"))
+            action()
         }
     }
 
@@ -236,8 +309,7 @@ Page {
         repeat: true
         running: viewfinder.visible && page.status === PageStatus.Active && !page.busy
         onTriggered: viewfinder.grabToImage(function(result) {
-            var text = backend.decodeQr(result.image)
-            if (text) page.check(text)
+            page.cameraFrame(backend.decodeQr(result.image))
         })
     }
 
@@ -246,10 +318,8 @@ Page {
         ImagePickerPage {
             onSelectedContentPropertiesChanged: {
                 var text = backend.decodeQrFile(selectedContentProperties.filePath)
-                if (!text || !page.check(text)) {
-                    //% "No Threema QR code found in this picture."
-                    Notices.show(qsTrId("threesea-la-qr-not-found"), Notice.Long, Notice.Center)
-                }
+                if (text) page.check(text, true)
+                else Notices.show(qsTrId("threesea-la-qr-not-found"), Notice.Long, Notice.Center)
             }
         }
     }

@@ -49,8 +49,7 @@ Page {
                     Notices.show(qsTrId("threesea-la-web-ended").arg(data.error), Notice.Long, Notice.Center)
                 }
             } else if (name === "webCertificateChanged") {
-                var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"),
-                                            { host: data.host, certificateChanged: true })
+                var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"), { host: data.host })
                 dialog.accepted.connect(function() {
                     backend.call("webAcceptCertificate", { session: data.id }, function(ok, result, kind, message) {
                         if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)

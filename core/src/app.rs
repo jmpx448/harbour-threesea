@@ -561,7 +561,7 @@ pub enum Command {
     VerifyQrCode {
         text: String,
     },
-    /// What a scanned QR code is: `{kind: "contact" | "web" | "device" | "unknown"}`.
+    /// What a scanned QR code is and whether it can be used (docs/ffi.md).
     QrKind {
         text: String,
     },
@@ -1759,7 +1759,7 @@ impl App {
             Command::MyQrCode => self.my_qr_code(),
             Command::MatchAddressBook { entries } => self.match_address_book(entries).await,
             Command::VerifyQrCode { text } => self.verify_qr_code(&text).await,
-            Command::QrKind { text } => Ok(json!({ "kind": qr_kind(&text) })),
+            Command::QrKind { text } => self.classify_qr(&text),
             Command::SetProfilePicture => self.set_profile_picture(),
             Command::RemoveProfilePicture => self.remove_profile_picture(),
             Command::SetProfilePictureShare { share, recipients } => {
@@ -2283,27 +2283,146 @@ fn sync_change(command: &Command) -> Option<crate::app_multidevice::SyncChange> 
     })
 }
 
-/// What a scanned QR code is: a contact's (`3mid:`), Threema Web's, or Threema for Desktop's
-/// linking code.
-fn qr_kind(text: &str) -> &'static str {
+/// What a scanned QR code is, for the one place that decides what to do with it, however it
+/// reached the scanner: `kind` (`contact`, `web`, `device`, `link`, `unknown`), and `error`, the
+/// error kind to show instead when the code can't be used. No network, nothing stored.
+pub(crate) fn qr_kind(text: &str, now_seconds: i64) -> Value {
+    use crate::{links::Link, rendezvous::LinkError, web::qr::QrError};
+
+    let text = text.trim();
     if text.starts_with("3mid:") {
-        "contact"
-    } else if crate::web::qr::parse(text).is_ok() {
-        "web"
-    } else if crate::rendezvous::parse_join_code(text).is_ok() {
-        "device"
-    } else {
-        "unknown"
+        return match crate::qr::parse(text) {
+            None => json!({ "kind": "contact", "error": ApiError::QrInvalid.kind() }),
+            Some(code) if code.is_expired(now_seconds) => {
+                json!({ "kind": "contact", "error": ApiError::QrExpired.kind(), "identity": code.identity })
+            }
+            Some(code) => json!({ "kind": "contact", "identity": code.identity }),
+        };
+    }
+    match crate::web::qr::parse(text) {
+        Ok(qr) => {
+            return json!({ "kind": "web", "host": qr.host });
+        }
+        // Any long enough Base64 has "a version": only a small number looks like Threema Web's.
+        Err(QrError::Version(version)) if (1..=0xff).contains(&version) => {
+            return json!({ "kind": "web", "error": ApiError::WebVersion.kind() });
+        }
+        Err(_) => {}
+    }
+    match crate::rendezvous::parse_join_code(text) {
+        Ok(_) => return json!({ "kind": "device" }),
+        // The join prefix leaves no doubt what it is.
+        Err(LinkError::Version) => {
+            return json!({ "kind": "device", "error": ApiError::LinkVersion.kind() });
+        }
+        Err(_) => {}
+    }
+    match crate::links::parse(text) {
+        Some(
+            Link::Contact { identity, .. }
+            | Link::Add { identity }
+            | Link::Compose {
+                identity: Some(identity),
+                ..
+            },
+        ) => json!({ "kind": "link", "identity": identity }),
+        _ => json!({ "kind": "unknown" }),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    fn web_code(version: u16, options: u8, host: &str) -> String {
+        let mut bytes = version.to_be_bytes().to_vec();
+        bytes.push(options);
+        bytes.extend([1; 32]);
+        bytes.extend([2; 32]);
+        bytes.extend([0; 32]);
+        bytes.extend(443_u16.to_be_bytes());
+        bytes.extend(host.as_bytes());
+        data_encoding::BASE64.encode(&bytes)
+    }
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn kind(text: &str) -> serde_json::Value {
+        super::qr_kind(text, NOW)
+    }
+
     #[test]
     fn qr_kinds() {
-        assert_eq!(super::qr_kind("3mid:ECHOECHO,4a6a1b34"), "contact");
-        assert_eq!(super::qr_kind("https://example.org"), "unknown");
-        assert_eq!(super::qr_kind(""), "unknown");
+        let key = "ab".repeat(32);
+        let contact = kind(&format!("3mid:abcd1234,{key}"));
+        assert_eq!(contact["kind"], "contact");
+        assert_eq!(contact["identity"], "ABCD1234");
+        assert!(contact.get("error").is_none());
+        assert_eq!(kind("https://example.org")["kind"], "unknown");
+        assert_eq!(kind("")["kind"], "unknown");
+    }
+
+    #[test]
+    fn a_damaged_or_expired_contact_code_says_so() {
+        let key = "ab".repeat(32);
+        assert_eq!(kind("3mid:ABCD1234,4a6a1b34")["error"], "qrInvalid");
+        let past = kind(&format!("3mid:ABCD1234,{key},{}", NOW - 1));
+        assert_eq!(past["kind"], "contact");
+        assert_eq!(past["error"], "qrExpired");
+        let future = kind(&format!("3mid:ABCD1234,{key},{}", NOW + 1));
+        assert!(future.get("error").is_none());
+        let unreadable = kind(&format!("3mid:ABCD1234,{key},soon"));
+        assert!(unreadable.get("error").is_none());
+    }
+
+    #[test]
+    fn a_web_code_says_where_it_goes() {
+        let code = kind(&web_code(2, 0x02, "saltyrtc-01.threema.ch"));
+        assert_eq!(code["kind"], "web");
+        assert_eq!(code["host"], "saltyrtc-01.threema.ch");
+    }
+
+    #[test]
+    fn only_a_small_version_makes_a_web_code_of_another_version() {
+        let old = kind(&web_code(1, 0, "x.threema.ch"));
+        assert_eq!(old["kind"], "web");
+        assert_eq!(old["error"], "webVersion");
+        // Long enough Base64 starting with anything else is not Threema Web's.
+        assert_eq!(
+            kind(&web_code(0x4142, 0, "x.threema.ch"))["kind"],
+            "unknown"
+        );
+        assert_eq!(kind(&web_code(0, 0, "x.threema.ch"))["kind"], "unknown");
+    }
+
+    #[test]
+    fn a_join_code_of_another_version_is_still_a_device_code() {
+        let good = kind(&crate::rendezvous::test_join_code(2));
+        assert_eq!(good["kind"], "device");
+        assert!(good.get("error").is_none());
+        let old = kind(&crate::rendezvous::test_join_code(1));
+        assert_eq!(old["kind"], "device");
+        assert_eq!(old["error"], "linkVersion");
+    }
+
+    #[test]
+    fn links_with_an_id_are_links_and_others_unknown() {
+        for text in [
+            "https://threema.id/ABCD1234",
+            "https://threema.id/ABCD1234?text=hello",
+            "threema://add?id=ABCD1234",
+            "https://go.threema.ch/add?id=ABCD1234",
+            "threema://compose?id=ABCD1234",
+        ] {
+            let code = kind(text);
+            assert_eq!(code["kind"], "link", "{text}");
+            assert_eq!(code["identity"], "ABCD1234", "{text}");
+        }
+        for text in [
+            "threema://compose?text=hello",
+            "threema://license?key=ABCDE-12345",
+            "https://threema.id/short",
+        ] {
+            assert_eq!(kind(text)["kind"], "unknown", "{text}");
+        }
     }
 
     use super::*;

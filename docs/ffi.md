@@ -231,7 +231,7 @@ QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, k
 | `setProfilePicture` / `removeProfilePicture` | attachment 0: JPEG / – | the profile |
 | `createPoll` | `identity`, `description`, `choices`, `multiple`, `announce` | the poll message |
 | `vote` / `closePoll` | `message` (local id) and `choices` (choice ids) / `message` | the changed poll message; closing also adds the `pollClosed` message. Error `locked` in a hidden private chat |
-| `qrKind` | `text` | `{kind: "contact" \| "web" \| "device" \| "unknown"}` |
+| `qrKind` | `text` | `{kind: "contact" \| "web" \| "device" \| "link" \| "unknown"}` for the scanner, no network; `error`: the error kind to show instead when the code can't be used (`qrInvalid`, `qrExpired`, `webVersion`, `linkVersion`); `identity` for contact codes and links; for `web` `host` and `confirmHost` (the server must be allowed: `webPair` with `allowHost`) |
 | `startLinking` | `code` (Threema for Desktop's QR code), `pin` | `{choices: [[emoji ×3] ×3], correct}` for the emoji check (ADR 0011) |
 | `confirmLinking` / `cancelLinking` | – | the linked devices once the new device registered / `{}` |
 | `groupCallRefresh` | `conversation` | `{}`; the state comes as the `groupCall` event (ADR 0012) |

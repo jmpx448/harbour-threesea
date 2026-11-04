@@ -327,6 +327,12 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   → verification level _fully verified_; a new contact is added as direct contact.
 - Generated with `qrcode`, decoded with `rqrr` (pure Rust); the camera viewfinder is grabbed
   (`VideoOutput.grabToImage`) every 600 ms and decoded as greyscale; a picture works too.
+- Every scanned text goes through `qrKind` first (`qr_kind` in `core/src/app.rs`). The contacts
+  page's scanner takes any kind, as Android's `AddContactActivity` does. Deliberately stricter
+  here: a Threema Web code always asks what it grants before it pairs, and a link to an ID (no
+  key: it adds, never verifies) asks before it adds. A refused or declined code stays quiet while
+  the camera sees it. The question always says a browser can ask to be remembered: the code's
+  permanent bit binds nothing, `keyPersisted` is honoured whatever it said, as on Android.
 
 
 ## Address book matching (opt-in)

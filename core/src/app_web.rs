@@ -189,7 +189,7 @@ impl App {
             qr::QrError::Invalid => ApiError::WebCodeInvalid,
             qr::QrError::Version(_) => ApiError::WebVersion,
         })?;
-        if !qr::is_threema_host(&qr.host) && self.store.web_host(&qr.host)?.is_none() {
+        if self.web_host_needs_asking(&qr.host)? {
             if !allow_host {
                 return Ok(json!({ "confirmHost": qr.host }));
             }
@@ -212,6 +212,20 @@ impl App {
         tracing::info!("Threema Web session paired");
         self.start_web_session(id, Some(qr.auth_token))?;
         Ok(json!({ "id": id }))
+    }
+
+    /// Not Threema's and not allowed by the user before (ADR 0013).
+    fn web_host_needs_asking(&self, host: &str) -> Result<bool, ApiError> {
+        Ok(!qr::is_threema_host(host) && self.store.web_host(host)?.is_none())
+    }
+
+    /// `qrKind`: what a scanned code is, and for Threema Web whether its server must be allowed.
+    pub(crate) fn classify_qr(&self, text: &str) -> Result<serde_json::Value, ApiError> {
+        let mut code = crate::app::qr_kind(text, crate::messages::now_ms() / 1000);
+        if let Some(host) = code["host"].as_str() {
+            code["confirmHost"] = json!(self.web_host_needs_asking(host)?);
+        }
+        Ok(code)
     }
 
     /// `webStart {session}`: connect a stored session (the browser must be waiting for us).

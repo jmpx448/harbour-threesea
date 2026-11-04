@@ -1127,6 +1127,41 @@ mod contact_policy_tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn qr_kind_asks_for_a_web_server_only_until_it_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let code = |host: &str| {
+            let mut bytes = 2_u16.to_be_bytes().to_vec();
+            bytes.push(0x03);
+            bytes.extend([1; 32]);
+            bytes.extend([2; 32]);
+            bytes.extend([0; 32]);
+            bytes.extend(443_u16.to_be_bytes());
+            bytes.extend(host.as_bytes());
+            data_encoding::BASE64.encode(&bytes)
+        };
+        let asked = call(
+            &mut app,
+            json!({"cmd": "qrKind", "text": code("web.example.org")}),
+        )
+        .await;
+        assert_eq!(asked["result"]["confirmHost"], true, "{asked}");
+        let ours = call(
+            &mut app,
+            json!({"cmd": "qrKind", "text": code("saltyrtc-01.threema.ch")}),
+        )
+        .await;
+        assert_eq!(ours["result"]["confirmHost"], false, "{ours}");
+        app.store.set_web_host("web.example.org", None).unwrap();
+        let allowed = call(
+            &mut app,
+            json!({"cmd": "qrKind", "text": code("web.example.org")}),
+        )
+        .await;
+        assert_eq!(allowed["result"]["confirmHost"], false, "{allowed}");
+    }
+
     // Deleting a contact who is in one of our groups keeps it as a group acquaintance, like
     // Android: the group needs the name and the public key, and the contact list hides it
     // either way.
