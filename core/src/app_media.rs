@@ -13,7 +13,7 @@
 use std::{rc::Rc, sync::Arc};
 
 use libthreema::model::message::{FileMessage, FileRenderingType};
-use rusqlite::params;
+use rusqlite::{named_params, params};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -131,26 +131,35 @@ pub fn file_keys(file: &FileMessage) -> FileKeys {
     }
 }
 
+/// A message's age for retention (SQL; `:now` the current time): when it arrived. Except that a
+/// `created_at` more than a day after its arrival, and no longer in the future, wins: this phone's
+/// clock was far behind when it came, and once corrected the message would look old and could go
+/// before anyone read it. A sender's clock ahead can only make its message stay longer this way.
+const AGE_SQL: &str = "COALESCE(CASE WHEN created_at > received_at + 86400000
+                                      AND created_at <= :now
+                                THEN created_at ELSE received_at END, created_at)";
+
 impl Store {
     /// File messages that reached this device before `before` (ms) whose file is on the device
     /// and may still be on a server: not starred, not still on their way out (their upload reads
     /// the file), and with a blob. A list's own copy or an unsent imported file has none, so its
     /// bytes here are the only ones. Age by arrival: an incoming `created_at` is the sender's clock.
     pub fn files_before(&self, before: i64) -> Result<Vec<i64>, StoreError> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT id FROM messages WHERE kind = 'file' AND starred = 0
-               AND COALESCE(received_at, created_at) < ?1
-               AND json_extract(body, '$.fileState') = ?2
-               AND NOT (outgoing = 1 AND state = ?3)
+               AND {AGE_SQL} < :before
+               AND json_extract(body, '$.fileState') = :local
+               AND NOT (outgoing = 1 AND state = :pending)
                AND EXISTS (SELECT 1 FROM files
-                           WHERE files.message = messages.id AND files.blob_id IS NOT NULL)",
-        )?;
+                           WHERE files.message = messages.id AND files.blob_id IS NOT NULL)"
+        ))?;
         let rows = statement.query_map(
-            params![
-                before,
-                STATE_LOCAL,
-                crate::messages::OutgoingState::Pending as i64
-            ],
+            named_params! {
+                ":now": crate::messages::now_ms(),
+                ":before": before,
+                ":local": STATE_LOCAL,
+                ":pending": crate::messages::OutgoingState::Pending as i64,
+            },
             |row| row.get(0),
         )?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -188,17 +197,20 @@ impl Store {
         spare_notes: bool,
     ) -> Result<usize, StoreError> {
         Ok(self.conn.execute(
-            "DELETE FROM messages
-             WHERE COALESCE(received_at, created_at) < ?1 AND starred = 0
-               AND NOT (outgoing = 1 AND state = ?2)
-               AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
-               AND NOT (?3 AND conversation IN
-                        (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))",
-            params![
-                before,
-                crate::messages::OutgoingState::Pending as i64,
-                spare_notes
-            ],
+            &format!(
+                "DELETE FROM messages
+                 WHERE {AGE_SQL} < :before AND starred = 0
+                   AND NOT (outgoing = 1 AND state = :pending)
+                   AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
+                   AND NOT (:spare_notes AND conversation IN
+                            (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))"
+            ),
+            named_params! {
+                ":now": crate::messages::now_ms(),
+                ":before": before,
+                ":pending": crate::messages::OutgoingState::Pending as i64,
+                ":spare_notes": spare_notes,
+            },
         )?)
     }
 
@@ -1889,6 +1901,40 @@ mod tests {
             .unwrap();
         assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 1);
         assert!(store.message(own.id).unwrap().is_none());
+    }
+
+    /// This phone's clock was far behind when a message came, so its arrival time is long past
+    /// once the clock is right. The message's own date, not in the future, shows it is new.
+    #[test]
+    fn a_message_received_under_a_clock_far_behind_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let now = crate::messages::now_ms();
+        let day = 86_400_000;
+        let week = 7 * day;
+        let insert = |id: u64, written: i64, arrived: i64| {
+            let message = store
+                .insert_incoming("AAAAAAAA", id, "text", "x", written)
+                .unwrap()
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE messages SET received_at = ?1 WHERE id = ?2",
+                    params![arrived, message.id],
+                )
+                .unwrap();
+            message.id
+        };
+        let behind = insert(1, now - 3_600_000, now - 365 * day);
+        let behind_but_old = insert(2, now - 2 * week, now - 365 * day);
+        let ahead_of_now = insert(3, now + 365 * day, now - 2 * week);
+        let small_skew = insert(4, now - 2 * week + 3_600_000, now - 2 * week);
+        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 3);
+        assert!(store.message(behind).unwrap().is_some());
+        for gone in [behind_but_old, ahead_of_now, small_skew] {
+            assert!(store.message(gone).unwrap().is_none());
+        }
     }
 
     #[test]

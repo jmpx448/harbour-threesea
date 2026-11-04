@@ -447,7 +447,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 Both go by when a message reached this device, as Android does: an incoming `created_at` is the
 sender's clock. The phone's own clock remains a weak spot: set far ahead, it makes everything look
 old and a maintenance run deletes too much. Android has the same limit and we leave it; a last-run
-stamp written under such a clock doesn't stop later runs.
+stamp written under such a clock doesn't stop later runs. Set far behind when a message came, its
+arrival time would later look old: a `created_at` over a day after the arrival, and not in the
+future, counts instead, which at worst keeps a message longer.
 
 ## Share target (Sailfish OS, not Threema)
 
