@@ -34,12 +34,22 @@ pub enum OutgoingMessageEncodeError {
     EncodingFailed(String),
 }
 
+/// The legacy nickname and the metadata's delta for a sender's nickname.
+fn sender_nicknames(sender_nickname: Delta<&str>) -> (Option<&str>, Delta<&str>) {
+    match sender_nickname {
+        Delta::Update("") => (None, Delta::Remove),
+        Delta::Update(nickname) => (Some(nickname), sender_nickname),
+        other => (None, other),
+    }
+}
+
 /// Encode and encrypt an outgoing 1:1 message into a CSP `message-with-metadata-box` payload.
 ///
 /// Stop-gap until the outgoing message task exists (TODO(LIB-51)): the caller is responsible for
 /// choosing a fresh `nonce` (and recording it as used), for sending the payload and for awaiting
 /// the server's message-ack. `sender_nickname` is sent in the (encrypted) metadata and, towards
-/// Gateway IDs, as the legacy nickname.
+/// Gateway IDs, as the legacy nickname. [`Delta::Remove`] tells the receiver to drop the name it
+/// knows, [`Delta::Unchanged`] leaves it alone. An empty name counts as a removal.
 ///
 /// # Errors
 ///
@@ -48,7 +58,7 @@ pub enum OutgoingMessageEncodeError {
 pub fn encode_outgoing_contact_message(
     sender_identity: ThreemaId,
     client_key: &ClientKey,
-    sender_nickname: Option<&str>,
+    sender_nickname: Delta<&str>,
     receiver_identity: ThreemaId,
     receiver_public_key: &PublicKey,
     message: &OutgoingMessage,
@@ -57,13 +67,9 @@ pub fn encode_outgoing_contact_message(
     let shared_secret = client_key
         .derive_csp_e2e_key(receiver_public_key)
         .ok_or(OutgoingMessageEncodeError::InvalidReceiverKey)?;
-    let nickname = match sender_nickname {
-        Some(nickname) if !nickname.is_empty() => Delta::Update(nickname),
-        _ => Delta::Remove,
-    };
     let encoded = encode_and_encrypt_message(
         sender_identity,
-        (sender_nickname.filter(|nickname| !nickname.is_empty()), nickname),
+        sender_nicknames(sender_nickname),
         receiver_identity,
         shared_secret,
         message,
@@ -114,7 +120,7 @@ pub fn encode_message_body(body: &OutgoingMessageBody) -> (u8, Vec<u8>) {
 pub fn encode_outgoing_contact_message_encapsulated(
     sender_identity: ThreemaId,
     client_key: &ClientKey,
-    sender_nickname: Option<&str>,
+    sender_nickname: Delta<&str>,
     receiver_identity: ThreemaId,
     receiver_public_key: &PublicKey,
     message: &OutgoingMessage,
@@ -124,13 +130,9 @@ pub fn encode_outgoing_contact_message_encapsulated(
     let shared_secret = client_key
         .derive_csp_e2e_key(receiver_public_key)
         .ok_or(OutgoingMessageEncodeError::InvalidReceiverKey)?;
-    let nickname = match sender_nickname {
-        Some(nickname) if !nickname.is_empty() => Delta::Update(nickname),
-        _ => Delta::Remove,
-    };
     let encoded = encode_and_encrypt_message_with_container(
         sender_identity,
-        (sender_nickname.filter(|nickname| !nickname.is_empty()), nickname),
+        sender_nicknames(sender_nickname),
         receiver_identity,
         shared_secret,
         message,
@@ -376,7 +378,7 @@ mod tests {
         let payload = encode_outgoing_contact_message(
             sender,
             &ClientKey::from([1; ClientKey::LENGTH]),
-            Some("Tester"),
+            Delta::Update("Tester"),
             receiver,
             &receiver_key,
             &text_message(receiver),
@@ -437,13 +439,43 @@ mod tests {
         );
     }
 
+    /// What the receiver reads about the sender's nickname: nothing leaves its name alone, and an
+    /// empty one makes it drop the name.
+    #[test]
+    fn nickname_delta_reaches_the_metadata() {
+        use prost::Message as _;
+
+        fn nickname_in_metadata(nickname: Delta<&str>) -> (Option<String>, Option<&str>) {
+            let (legacy, nickname) = sender_nicknames(nickname);
+            let message = text_message(ThreemaId::try_from("ECHOECHO").unwrap());
+            let metadata = encode_metadata(nickname, &message, &message.effective_properties());
+            (
+                crate::protobuf::csp_e2e::MessageMetadata::decode(metadata.as_slice())
+                    .unwrap()
+                    .nickname,
+                legacy,
+            )
+        }
+
+        assert_eq!(
+            nickname_in_metadata(Delta::Update("Tester")),
+            (Some("Tester".to_owned()), Some("Tester"))
+        );
+        assert_eq!(nickname_in_metadata(Delta::Remove), (Some(String::new()), None));
+        assert_eq!(
+            nickname_in_metadata(Delta::Update("")),
+            (Some(String::new()), None)
+        );
+        assert_eq!(nickname_in_metadata(Delta::Unchanged), (None, None));
+    }
+
     #[test]
     fn rejects_non_contributory_receiver_key() {
         let receiver = ThreemaId::try_from("ECHOECHO").unwrap();
         let result = encode_outgoing_contact_message(
             ThreemaId::try_from("AAAAAAAA").unwrap(),
             &ClientKey::from([1; ClientKey::LENGTH]),
-            None,
+            Delta::Remove,
             receiver,
             &PublicKey::from([0; PublicKey::LENGTH]),
             &text_message(receiver),

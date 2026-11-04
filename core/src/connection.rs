@@ -11,7 +11,7 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 
 use libthreema::{
     common::{
-        ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, DeviceCookie, GroupIdentity,
+        ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, Delta, DeviceCookie, GroupIdentity,
         MessageId, Nonce, ThreemaId,
         config::{Config, Flavor},
         keys::{ClientKey, PublicKey},
@@ -424,6 +424,11 @@ fn d2m_name(payload: &D2mIncoming) -> &'static str {
 
 fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Protocol(error.to_string())
+}
+
+/// What our messages say about our nickname.
+fn nickname_delta(nickname: Option<&str>) -> Delta<&str> {
+    nickname.map_or(Delta::Remove, Delta::Update)
 }
 
 /// Like [`protocol_error`], but a rate limit stays what it is: it has its own wait.
@@ -1594,7 +1599,7 @@ impl<'a> Session<'a> {
             Some(envelope) => encode_outgoing_contact_message_encapsulated(
                 self.setup.identity,
                 &client_key,
-                nickname.as_deref(),
+                nickname_delta(nickname.as_deref()),
                 receiver_identity,
                 &receiver_key,
                 &message,
@@ -1604,7 +1609,7 @@ impl<'a> Session<'a> {
             None => encode_outgoing_contact_message(
                 self.setup.identity,
                 &client_key,
-                nickname.as_deref(),
+                nickname_delta(nickname.as_deref()),
                 receiver_identity,
                 &receiver_key,
                 &message,

@@ -413,7 +413,7 @@ mod tests {
 
     use libthreema::{
         common::{
-            ClientInfo, FeatureMask, MessageId, Nonce, ThreemaId,
+            ClientInfo, Delta, FeatureMask, MessageId, Nonce, ThreemaId,
             config::{Config, ConfigEnvironment, Flavor},
             keys::ClientKey,
         },
@@ -583,7 +583,7 @@ mod tests {
                 encode_outgoing_contact_message_encapsulated(
                     self.id,
                     &key,
-                    Some("Nick"),
+                    Delta::Update("Nick"),
                     to.id,
                     &to_key,
                     &message,
@@ -773,7 +773,7 @@ mod tests {
         encode_outgoing_contact_message(
             from.id,
             &ClientKey::from(from.key),
-            None,
+            Delta::Remove,
             to.id,
             &ClientKey::from(to.key).public_key(),
             &message,
