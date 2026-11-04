@@ -2219,6 +2219,17 @@ mod tests {
             "threesea-file.jpg"
         );
         assert!(safe_file_name(Some(&"ä".repeat(300)), "").len() <= 200);
+        // A sender's file without a name still opens by its type.
+        for (media_type, name) in [
+            ("video/mp4", "threesea-file.mp4"),
+            ("video/quicktime", "threesea-file.mov"),
+            ("image/gif", "threesea-file.gif"),
+            ("image/webp", "threesea-file.webp"),
+            ("audio/aac", "threesea-file.aac"),
+            ("audio/ogg", "threesea-file.ogg"),
+        ] {
+            assert_eq!(safe_file_name(None, media_type), name);
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let first = save_target(dir.path(), "a.pdf", b"one");
