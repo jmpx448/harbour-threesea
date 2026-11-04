@@ -68,6 +68,7 @@ HEADERS += \
     bridge/filepreparer.h \
     bridge/jsonlistmodel.h \
     bridge/mediaimageprovider.h \
+    bridge/peerimage.h \
     bridge/proximitymonitor.h \
     bridge/offlinenetwork.h \
     bridge/secretstore.h \

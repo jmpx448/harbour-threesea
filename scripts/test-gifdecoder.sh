@@ -11,6 +11,6 @@ docker run --rm -i -e SFOS="$SFOS" -v "$ROOT:/src:ro" "$IMAGE" sh -euc '
     T=SailfishOS-$SFOS-i486
     sb2 -t $T -m sdk-install -R zypper --non-interactive in qt5-plugin-imageformat-gif >/dev/null
     B=$HOME/build; mkdir -p $B/tests $B/bridge
-    cp -r /src/tests/gifdecoder $B/tests/; cp /src/bridge/gifdecoder.* $B/bridge/
+    cp -r /src/tests/gifdecoder $B/tests/; cp /src/bridge/gifdecoder.* /src/bridge/peerimage.h $B/bridge/
     cd $B/tests/gifdecoder && sb2 -t $T qmake >/dev/null && sb2 -t $T make -s >/dev/null 2>&1 || sb2 -t $T make
     sb2 -t $T ./gifdecoder-test'

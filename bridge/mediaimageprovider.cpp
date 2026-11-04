@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QImageReader>
 
+#include "peerimage.h"
 #include "threesebackend.h"
 
 namespace {
@@ -72,16 +73,23 @@ QImage MediaImageProvider::requestImage(const QString &id, QSize *size, const QS
     if (data.isEmpty()) {
         return QImage();
     }
+    const QByteArray format = PeerImage::format(data);
+    if (format.isEmpty()) {
+        qWarning() << "media image" << message << "not in an accepted format";
+        data.fill('\0');
+        return QImage();
+    }
     QBuffer buffer(&data);
     buffer.open(QIODevice::ReadOnly);
     QImageReader reader(&buffer);
+    PeerImage::pinTo(reader, format);
     reader.setAutoTransform(true);
     const QSize full = reader.size();
     // Not decoded at all beyond what a phone can hold (a picture's header can claim any size;
     // security audit 2026-10-27, S06): JPEG decodes scaled down, other formats in full.
     const qint64 pixels = static_cast<qint64>(full.width()) * full.height();
     if (!full.isValid() || pixels > MAX_PIXELS
-        || (pixels > MAX_PIXELS_UNSCALED && reader.format() != QByteArrayLiteral("jpeg"))) {
+        || (pixels > MAX_PIXELS_UNSCALED && format != QByteArrayLiteral("jpeg"))) {
         qWarning() << "media image" << message << "too large:" << full;
         data.fill('\0');
         return QImage();

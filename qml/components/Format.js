@@ -196,7 +196,7 @@ function preview(message) {
         //% "Voice message"
         if (String(file.mediaType).indexOf("audio/") === 0 && file.rendering !== "file") return qsTrId("threesea-la-voice-message")
         //% "Photo"
-        if (String(file.mediaType).indexOf("image/") === 0 && file.rendering !== "file") return qsTrId("threesea-la-photo")
+        if (isPicture(file.mediaType) && file.rendering !== "file") return qsTrId("threesea-la-photo")
         //% "Video"
         if (String(file.mediaType).indexOf("video/") === 0 && file.rendering !== "file") return qsTrId("threesea-la-video")
         //% "File"
@@ -243,6 +243,12 @@ function reactedWith(reactions, emoji) {
         if (reactions[i].sender === "" && reactions[i].emoji === emoji) return true
     }
     return false
+}
+
+// Whether a picture of this media type shows in the app (bridge/peerimage.h decodes these and no
+// others); anything else is a file like any other, as on Android.
+function isPicture(mediaType) {
+    return /^image\/(jpeg|jpg|png|gif|webp)\s*(;|$)/i.test(String(mediaType))
 }
 
 // Theme icon for a file by the core's checked `fileType` (a download icon while it is not on the

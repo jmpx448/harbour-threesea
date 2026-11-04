@@ -6,12 +6,15 @@
 #include <QImageReader>
 #include <QThread>
 
+#include "peerimage.h"
+
 namespace {
 // Largest GIF frame decoded (pixels).
 const qint64 MAX_FRAME_PIXELS = 16 * 1000 * 1000;
 // A delay this short means "not set"; browsers play those at 10 frames a second, so do we.
 const int MIN_FRAME_DELAY_MS = 20;
 const int UNSET_FRAME_DELAY_MS = 100;
+const QByteArray GIF = QByteArrayLiteral("gif");
 }
 
 GifDecoder::GifDecoder(std::function<QByteArray()> read, QObject *parent)
@@ -74,12 +77,19 @@ void GifDecoder::load()
         wipe();
         return;
     }
+    if (PeerImage::format(m_data) != GIF) {
+        qWarning("animated image is not a GIF");
+        wipe();
+        return;
+    }
     // Every frame is decoded at full size: not beyond what a phone holds (a GIF's header can
     // claim any size; security audit 2026-10-27, S06).
     {
         QBuffer probe(&m_data);
         probe.open(QIODevice::ReadOnly);
-        const QSize size = QImageReader(&probe).size();
+        QImageReader reader(&probe);
+        PeerImage::pinTo(reader, GIF);
+        const QSize size = reader.size();
         if (!size.isValid() || static_cast<qint64>(size.width()) * size.height() > MAX_FRAME_PIXELS) {
             qWarning() << "animated image too large:" << size;
             wipe();
@@ -164,6 +174,7 @@ bool GifDecoder::rewind()
         return false;
     }
     m_reader.reset(new QImageReader(&m_buffer));
+    PeerImage::pinTo(*m_reader, GIF);
     m_framesThisPass = 0;
     return m_reader->canRead();
 }

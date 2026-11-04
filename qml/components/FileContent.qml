@@ -24,8 +24,7 @@ Item {
     property bool roundBottomLeft: true
     property bool roundBottomRight: true
 
-    readonly property bool isImage: body && body.rendering !== "file"
-                                    && String(body.mediaType).indexOf("image/") === 0
+    readonly property bool isImage: body && body.rendering !== "file" && Fmt.isPicture(body.mediaType)
     // An audio file rendered as media is a voice message (Threema Android's rule).
     // GIFs play in the bubble (Android's "Auto-play animated images"; off: in the viewer).
     readonly property bool isGif: isImage && String(body.mediaType).toLowerCase() === "image/gif"

@@ -2186,7 +2186,7 @@ Page {
                         } else {
                             page.playVoice(model.id)
                         }
-                    } else if (file.fileState === 2 && String(file.mediaType).indexOf("image/") === 0
+                    } else if (file.fileState === 2 && Fmt.isPicture(file.mediaType)
                                && file.rendering !== "file") {
                         pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), {
                             messageId: model.id,

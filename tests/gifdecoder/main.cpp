@@ -2,11 +2,14 @@
 // GifDecoder: what used to hold up the interface happens on its own thread, GIFs play and stop
 // as they say, and a file that claims too much is refused. Exit 0: passed.
 #include "gifdecoder.h"
+#include "peerimage.h"
 
 #include <QAtomicInt>
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QImage>
 #include <QThread>
 #include <QTimer>
 #include <cstdio>
@@ -203,6 +206,62 @@ void refused()
     check(empty.frames == 0, "nothing to read");
 }
 
+// A picture GifDecoder isn't for: PNG's reader is built into Qt, JPEG's a plugin like GIF's.
+QByteArray encoded(const char *format)
+{
+    QImage image(2, 2, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QByteArray out;
+    QBuffer buffer(&out);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, format);
+    return out;
+}
+
+void onlyTheAcceptedFormats()
+{
+    const QByteArray pbm("P1\n2 2\n1 0\n0 1\n");
+    {
+        // Without the pin Qt finds a reader for it (the bytes are valid): the test means something.
+        QByteArray bytes = pbm;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::ReadOnly);
+        check(!QImageReader(&buffer).read().isNull(), "Qt reads a PBM when left to itself");
+    }
+    check(PeerImage::format(pbm).isEmpty(), "PBM isn't accepted");
+    check(PeerImage::format(QByteArray("II*\0", 4)).isEmpty(), "TIFF isn't accepted");
+    check(PeerImage::format("<svg xmlns='http://www.w3.org/2000/svg'/>").isEmpty(), "SVG isn't accepted");
+    check(PeerImage::format(QByteArray("RIFF\0\0\0\0WAVE", 12)).isEmpty(), "a WAV isn't a WebP");
+    check(PeerImage::format("\xff\xd8\xff\xe0") == "jpeg", "JPEG");
+    check(PeerImage::format(encoded("PNG")) == "png", "PNG");
+    check(PeerImage::format(encoded("JPEG")) == "jpeg", "a JPEG as Qt writes it");
+    check(PeerImage::format(gif(1, 1, 1, false)) == "gif", "GIF");
+    check(PeerImage::format(QByteArray("RIFF\0\0\0\0WEBPVP8 ", 16)) == "webp", "WebP");
+
+    // Pinned, a reader takes its own format and no other.
+    for (const char *format : {"PNG", "JPEG"}) {
+        QByteArray bytes = encoded(format);
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer);
+        PeerImage::pinTo(reader, PeerImage::format(bytes));
+        check(reader.size() == QSize(2, 2) && !reader.read().isNull(), "reads in its own format");
+    }
+    {
+        QByteArray bytes = pbm;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer);
+        PeerImage::pinTo(reader, "png");
+        check(reader.read().isNull(), "a pinned reader asks no other format");
+    }
+
+    Run picture(encoded("PNG"));
+    picture.load();
+    wait(500);
+    check(picture.frames == 0, "the GIF decoder takes GIFs only");
+}
+
 void cancelledBeforeLoading()
 {
     Run run(gif(16, 16, 2, true));
@@ -248,6 +307,7 @@ int main(int argc, char **argv)
     playsOnce();
     singleFrame();
     refused();
+    onlyTheAcceptedFormats();
     cancelledBeforeLoading();
     unconsumedFramesDontPileUp();
     targetChangesWhilePaused();

@@ -97,7 +97,7 @@ Page {
     function open(id, kind, body) {
         if (body.fileState !== 2) {
             if (body.fileState !== 1) backend.call("downloadFile", { message: id })
-        } else if (kind === "image" || kind === "gif") {
+        } else if ((kind === "image" || kind === "gif") && Fmt.isPicture(body.mediaType)) {
             pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), { messageId: id, animated: kind === "gif" })
         } else if (kind === "voice") {
             if (voicePlayer.messageId === id && voicePlayer.playing) {
@@ -177,7 +177,8 @@ Page {
             id: tile
             readonly property var body: JSON.parse(model.body)
             readonly property bool isVideo: model.kind === "video"
-            readonly property bool isPicture: model.kind === "image" || model.kind === "gif"
+            readonly property bool isPicture: (model.kind === "image" || model.kind === "gif")
+                                              && Fmt.isPicture(body.mediaType)
             readonly property bool hasThumbnail: body.thumbnailState === 2
             readonly property bool playing: voicePlayer.messageId === model.id && voicePlayer.playing
             width: grid.cellWidth
