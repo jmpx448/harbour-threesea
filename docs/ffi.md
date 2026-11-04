@@ -224,9 +224,11 @@ Threema server's unexpected status or unreadable answer; its text stays out of t
 `backupDecrypt`, `backupVersion`, `passwordTooShort`, `passwordTooLong`, `safeNotFound`,
 `safeTooLarge`, `safeDamaged`,
 `identityFormat`, `contactInvalid`, `contactIsSelf`, `contactNotFound`, `messageTooLong`,
-`internal`.
+`storeKey`, `storeDamaged`, `storeTooNew`, `diskFull`, `upgradeNoRoom`, `storeUnreadable` (the store failed, see
+`fatal`; the message is only a code for support), `internal`.
 
-QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, kind, message) {…})`.
+QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, kind, message) {…})`. A `null` result
+stays `null` in the callback; a reply without one (an error) gives an empty object.
 `backend.state` / `backend.identity` follow `status` replies and drive the root page.
 
 ### Groups, polls, pictures, linking, group calls, Threema Web, emoji
