@@ -2451,26 +2451,30 @@ impl<'a> Session<'a> {
         .await
     }
 
-    /// Another device's reflection: apply it, then acknowledge (also when it can't be used,
-    /// or the mediator would send it again at every login).
+    /// Another device's reflection: apply it, then acknowledge (also when it can't be used, or the
+    /// mediator would send it again at every login; but not when our store failed on it).
     async fn handle_reflected(
         &mut self,
         reflected: libthreema::d2m::payload::Reflected,
     ) -> Result<(), ConnectionError> {
         let device_group_key = self.device_group_key()?;
         let store = Rc::clone(&self.setup.store);
-        match crate::reflected::open(&store, &device_group_key, &reflected.envelope) {
-            Ok(envelope) => {
+        let applied = crate::reflected::open(&store, &device_group_key, &reflected.envelope)
+            .and_then(|opened| {
                 // log-ok: the kind of content, not the content
                 tracing::info!(
-                    content = crate::reflected::content_name(envelope.content.as_ref()),
+                    content = crate::reflected::content_name(opened.envelope.content.as_ref()),
                     "reflected"
                 );
-                if let Err(error) =
-                    crate::reflected::apply(&store, self.setup.identity, envelope, &self.events)
-                {
-                    tracing::warn!(%error, "reflected envelope not applied");
-                }
+                crate::reflected::apply_once(&store, self.setup.identity, opened, &self.events)
+            });
+        match applied {
+            Ok(()) => self.storage_works(),
+            // Unacknowledged, it comes again at the next login: this is its only way here.
+            Err(error) if error.storage_code().is_some() => {
+                return Err(ConnectionError::Storage {
+                    code: error.storage_code().unwrap_or_default(),
+                });
             }
             Err(error) => tracing::warn!(
                 %error,
@@ -4254,6 +4258,68 @@ mod sync_order_tests {
         assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
         assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
         assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+    }
+
+    /// The mediator hands out again only what wasn't acknowledged. On this socket the attempt to
+    /// acknowledge shows as an error of its own.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reflection_the_store_failed_on_is_not_acknowledged() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let envelope = libthreema::protobuf::d2d::Envelope {
+            content: Some(
+                libthreema::protobuf::d2d::envelope::Content::IncomingMessageUpdate(
+                    libthreema::protobuf::d2d::IncomingMessageUpdate {
+                        updates: vec![libthreema::protobuf::d2d::incoming_message_update::Update {
+                            conversation: d2d_conversation(CREATOR),
+                            message_id: 1,
+                            update: Some(
+                                libthreema::protobuf::d2d::incoming_message_update::update::Update::Read(
+                                    libthreema::protobuf::d2d::incoming_message_update::Read { at: 1 },
+                                ),
+                            ),
+                        }],
+                    },
+                ),
+            ),
+            ..Default::default()
+        };
+        let (_, data) = key
+            .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
+            .unwrap();
+        let reflected = |data: &[u8]| libthreema::d2m::payload::Reflected {
+            reflect_id: 1,
+            flags: D2mReflectFlags(0),
+            timestamp: 1,
+            envelope: data.to_vec(),
+        };
+
+        setup
+            .store
+            .conn
+            .execute_batch("PRAGMA query_only = ON")
+            .unwrap();
+        let error = session
+            .handle_reflected(reflected(&data))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConnectionError::Storage { .. }), "{error}");
+
+        setup
+            .store
+            .conn
+            .execute_batch("PRAGMA query_only = OFF")
+            .unwrap();
+        let error = session
+            .handle_reflected(reflected(&data))
+            .await
+            .unwrap_err();
+        assert!(!matches!(error, ConnectionError::Storage { .. }), "{error}");
     }
 
     #[test]

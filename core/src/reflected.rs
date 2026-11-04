@@ -33,8 +33,8 @@ use crate::{
     store::{Store, StoreError},
 };
 
-/// A reflected envelope could not be used (it is still acknowledged: the mediator would
-/// otherwise send it again forever).
+/// A reflected envelope could not be used. It is still acknowledged, as the mediator would
+/// otherwise send it again forever, unless the store failed ([`Self::storage_code`]).
 #[derive(Debug, thiserror::Error)]
 pub enum ReflectedError {
     #[error("decrypt: {0}")]
@@ -45,6 +45,31 @@ pub enum ReflectedError {
     Decode(String),
     #[error("store: {0}")]
     Store(#[from] StoreError),
+    /// A store failure that came through libthreema's provider interface: SQLite's code.
+    #[error("store: code {0}")]
+    StoreCode(i32),
+}
+
+impl ReflectedError {
+    /// SQLite's code if the store failed and this device still needs the envelope: then the
+    /// mediator is to send it again, as no other route brings it here. A broken rule of ours
+    /// (`SQLITE_CONSTRAINT`) would fail the same way every time, and hold up all that follows.
+    #[must_use]
+    pub fn storage_code(&self) -> Option<i32> {
+        const SQLITE_CONSTRAINT: i32 = 19;
+        let code = match self {
+            Self::Store(error) => error.sqlite_code(),
+            Self::StoreCode(code) => *code,
+            Self::Decrypt(_) | Self::Replay | Self::Decode(_) => return None,
+        };
+        (code & 0xff != SQLITE_CONSTRAINT).then_some(code)
+    }
+}
+
+/// A decrypted reflected envelope seen for the first time.
+pub struct Opened {
+    pub envelope: d2d::Envelope,
+    nonce: [u8; 24],
 }
 
 /// What an envelope was about (for logs: never content).
@@ -80,20 +105,51 @@ fn conversation_key(conversation: Option<&ConversationId>) -> Option<String> {
     }
 }
 
-/// Decrypt, check the nonce, decode. Returns the envelope.
+/// Decrypt, check the nonce, decode. The nonce of an envelope to apply counts once that is done
+/// ([`apply_once`]): killed in between, the mediator's next copy must not look like a replay.
 pub fn open(
     store: &Store,
     device_group_key: &libthreema::common::keys::DeviceGroupKey,
     data: &[u8],
-) -> Result<d2d::Envelope, ReflectedError> {
+) -> Result<Opened, ReflectedError> {
     let (nonce, plain) = device_group_key
         .decrypt_envelope(data)
         .map_err(|e| ReflectedError::Decrypt(e.to_string()))?;
     if store.has_d2d_nonce(&nonce)? {
         return Err(ReflectedError::Replay);
     }
-    store.add_d2d_nonce(&nonce)?;
-    d2d::Envelope::decode(plain.as_slice()).map_err(|e| ReflectedError::Decode(e.to_string()))
+    match d2d::Envelope::decode(plain.as_slice()) {
+        Ok(envelope) => Ok(Opened { envelope, nonce }),
+        Err(error) => {
+            store.add_d2d_nonce(&nonce)?;
+            Err(ReflectedError::Decode(error.to_string()))
+        }
+    }
+}
+
+/// Apply an opened envelope and note its nonce, in one store step. An envelope this can't use
+/// leaves nothing behind but the nonce, and one the store failed on not even that. Events only for
+/// what holds.
+pub fn apply_once(
+    store: &Rc<Store>,
+    user: ThreemaId,
+    opened: Opened,
+    events: &EventSink,
+) -> Result<(), ReflectedError> {
+    let announced = events.borrow().len();
+    let Opened { envelope, nonce } = opened;
+    let step = store.step()?;
+    let applied = apply(store, user, envelope, events).and_then(|()| {
+        store.add_d2d_nonce(&nonce)?;
+        Ok(step.commit()?)
+    });
+    if let Err(error) = &applied {
+        events.borrow_mut().truncate(announced);
+        if error.storage_code().is_none() {
+            store.add_d2d_nonce(&nonce)?;
+        }
+    }
+    applied
 }
 
 /// Apply an envelope; events for the UI go to `events`.
@@ -152,7 +208,11 @@ pub fn apply(
                     created_at: message.created_at,
                     body,
                 })
-                .map_err(|e| ReflectedError::Decode(e.to_string()))?;
+                .map_err(|error| {
+                    let error = error.to_string();
+                    crate::providers::storage_code(&error)
+                        .map_or(ReflectedError::Decode(error), ReflectedError::StoreCode)
+                })?;
             // The leader sent the delivery receipt already: none from here.
             for event in events.borrow_mut().iter_mut() {
                 if let CoreEvent::MessageAdded {
@@ -544,6 +604,119 @@ mod tests {
             rows.iter()
                 .any(|m| m.kind == crate::polls::KIND_CLOSED && m.outgoing)
         );
+    }
+
+    /// An envelope with a text, encrypted for the device group.
+    fn sealed(key: &libthreema::common::keys::DeviceGroupKey, id: u64) -> (Vec<u8>, d2d::Envelope) {
+        let body =
+            ContactMessageBody::Text(libthreema::model::message::TextMessage { text: "hi".into() });
+        let envelope = reflected_outgoing("B0B0B0B0", id, body);
+        let (_, sealed) = key.encrypt_envelope(&envelope.encode_to_vec()).unwrap();
+        (sealed, envelope)
+    }
+
+    /// The store failing leaves nothing that would make the mediator's next copy a replay, and
+    /// that copy is applied. From then on it is one.
+    #[test]
+    fn a_nonce_counts_only_once_its_envelope_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let key = libthreema::common::keys::DeviceGroupKey::from([7; 32]);
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let events: EventSink = Rc::default();
+        let (data, _) = sealed(&key, 5);
+
+        store.conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        let opened = open(&store, &key, &data).unwrap();
+        let error = apply_once(&store, user, opened, &events).unwrap_err();
+        assert!(error.storage_code().is_some(), "{error}");
+        assert!(events.borrow().is_empty());
+        assert!(store.conn.is_autocommit());
+
+        store.conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+        let opened = open(&store, &key, &data).unwrap();
+        apply_once(&store, user, opened, &events).unwrap();
+        assert!(store.message_by_id("B0B0B0B0", true, 5).unwrap().is_some());
+        assert!(!events.borrow().is_empty());
+
+        assert!(matches!(
+            open(&store, &key, &data),
+            Err(ReflectedError::Replay)
+        ));
+    }
+
+    /// A reflected incoming message passes the provider interface, which only keeps text.
+    #[test]
+    fn a_store_failure_on_a_reflected_message_stays_one() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let mut contact = crate::contacts::test_contact("B0B0B0B0");
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
+        store.upsert_contact(&contact).unwrap();
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let (message_type, data) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: user,
+                body: ContactMessageBody::Text(libthreema::model::message::TextMessage {
+                    text: "hi".into(),
+                }),
+            }));
+        let envelope = d2d::Envelope {
+            content: Some(envelope::Content::IncomingMessage(d2d::IncomingMessage {
+                sender_identity: "B0B0B0B0".into(),
+                message_id: 5,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body: data,
+                nonce: vec![1; 24],
+            })),
+            ..Default::default()
+        };
+        let events: EventSink = Rc::default();
+        store.conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        let error = apply(&store, user, envelope, &events).unwrap_err();
+        assert!(error.storage_code().is_some(), "{error}");
+    }
+
+    /// What can't be used is acknowledged and counts as seen; a broken rule of ours is that too,
+    /// or it would come back at every login and hold up what follows.
+    #[test]
+    fn an_unusable_envelope_is_dropped_and_leaves_its_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let key = libthreema::common::keys::DeviceGroupKey::from([7; 32]);
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let events: EventSink = Rc::default();
+
+        let (_, garbage) = key.encrypt_envelope(&[0xff; 8]).unwrap();
+        let error = open(&store, &key, &garbage).map(|_| ()).unwrap_err();
+        assert!(matches!(error, ReflectedError::Decode(_)), "{error}");
+        assert!(error.storage_code().is_none());
+        assert!(matches!(
+            open(&store, &key, &garbage),
+            Err(ReflectedError::Replay)
+        ));
+
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON messages
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let (data, _) = sealed(&key, 5);
+        let opened = open(&store, &key, &data).unwrap();
+        let error = apply_once(&store, user, opened, &events).unwrap_err();
+        assert!(error.storage_code().is_none(), "{error}");
+        assert!(matches!(
+            open(&store, &key, &data),
+            Err(ReflectedError::Replay)
+        ));
     }
 
     /// A caption edited on another device changes here too.
