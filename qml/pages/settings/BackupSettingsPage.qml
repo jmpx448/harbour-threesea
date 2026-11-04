@@ -8,6 +8,9 @@ Page {
     id: page
     allowedOrientations: Orientation.All
 
+    // Turning Threema Safe on or off happens on the page above and sends no event.
+    onStatusChanged: if (status === PageStatus.Active) safeItem.refresh()
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
