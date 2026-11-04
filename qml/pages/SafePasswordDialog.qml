@@ -34,8 +34,8 @@ Dialog {
             }
 
             InfoLabel {
-                //% "Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, once a day. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered."
-                text: qsTrId("threesea-la-safe-password-intro")
+                //% "Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, updated when something changes. For your chats, use Data backup. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered."
+                text: qsTrId("threesea-la-safe-password-intro-changes")
             }
 
             PasswordField {

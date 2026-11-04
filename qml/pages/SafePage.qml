@@ -116,8 +116,8 @@ Page {
                 busy: page.working
                 //% "Threema Safe"
                 text: qsTrId("threesea-la-threema-safe")
-                //% "Encrypted daily backup of your ID, profile, contacts, groups and settings."
-                description: qsTrId("threesea-la-safe-description")
+                //% "Encrypted backup of your ID, profile, contacts, groups and settings, updated when something changes. For your chats, use Data backup."
+                description: qsTrId("threesea-la-safe-description-changes")
                 onClicked: {
                     if (page.working) return
                     if (page.status.enabled) {
