@@ -332,14 +332,35 @@ void ThreeseBackend::removeAllData(const QString &pin)
     m_stateBeforeRemoval = m_state;
     m_state = QStringLiteral("removing");
     emit stateChanged();
+    // The PIN first: a refusal must leave a running call and a recording alone. `unlock` without
+    // `privateChats` only checks it; with no lock there is nothing to check.
+    request(QStringLiteral("unlock"), QVariantMap{{QStringLiteral("pin"), pin}},
+            [this, pin](bool ok, const QVariantMap &result, const QString &kind) {
+                if (!ok && kind != QLatin1String("lockNeeded")) {
+                    dataRemovalRefused(result, kind);
+                    return;
+                }
+                // First, so that their last commands reach the core ahead of the removal.
+                emit dataRemovalStarted();
+                requestDataRemoval(pin);
+            });
+}
+
+void ThreeseBackend::dataRemovalRefused(const QVariantMap &error, const QString &kind)
+{
+    m_removingData = false;
+    m_state = m_stateBeforeRemoval;
+    emit stateChanged();
+    emit dataRemovalFailed(kind, error.value(QStringLiteral("message")).toString());
+}
+
+void ThreeseBackend::requestDataRemoval(const QString &pin)
+{
     // The core stops what runs, leaves the device group (that can take a while) and wipes.
     request(QStringLiteral("deleteAllData"), QVariantMap{{QStringLiteral("pin"), pin}},
             [this](bool ok, const QVariantMap &result, const QString &kind) {
                 if (!ok) {
-                    m_removingData = false;
-                    m_state = m_stateBeforeRemoval;
-                    emit stateChanged();
-                    emit dataRemovalFailed(kind, result.value(QStringLiteral("message")).toString());
+                    dataRemovalRefused(result, kind);
                     return;
                 }
                 QSettings settings;

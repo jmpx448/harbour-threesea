@@ -347,10 +347,12 @@ signals:
     void logLevelChanged();
     void notificationSettingsChanged();
     void dataEncryptionChanged();
+    // The PIN was accepted: calls and players stop now, the core can take a while.
+    void dataRemovalStarted();
     // The ID's data is going, with what the UI and the players hold of it. `linkedDevicesRemain`:
     // the device group could not be left, so linked devices keep the ID.
     void dataRemoved(bool linkedDevicesRemain);
-    // Nothing was removed; the previous state is back.
+    // Refused (the PIN) before anything happened; the previous state is back.
     void dataRemovalFailed(const QString &kind, const QString &message);
     // Internal: key work done on a worker thread (queued back to this thread).
     void keyWorkDone(quint64 id, const QByteArray &result);
@@ -371,6 +373,8 @@ private:
     void sendSquarePicture(const QString &path, QVariantMap request, const QJSValue &callback,
                            bool safeCopy = false);
     void fail(const QString &reason);
+    void requestDataRemoval(const QString &pin);
+    void dataRemovalRefused(const QVariantMap &error, const QString &kind);
     void removeTempSources(quint64 id);
     QString startConfigJson() const;
 

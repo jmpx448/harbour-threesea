@@ -208,17 +208,27 @@ int main(int argc, char *argv[])
         calls->endCallWithMicrophone();
         groupCalls->leave();
     }, view->engine()));
-    // Removing the ID: nothing of it goes on playing, recording or calling.
-    QObject::connect(backend, &ThreeseBackend::dataRemoved, view->engine(),
-                     [calls, groupCalls, voicePlayer, videoPlayer, voiceRecorder]() {
-                         calls->forget();
-                         groupCalls->forget();
-                         voicePlayer->stop();
-                         videoPlayer->stop();
-                         voiceRecorder->cancel();
-                     });
-    // Not removed after all, but the core already left the group call: the media engine follows.
-    QObject::connect(backend, &ThreeseBackend::dataRemovalFailed, groupCalls, &GroupCallManager::leave);
+    // Removing the ID: nothing of it goes on playing, recording or calling, from the moment the
+    // PIN is accepted (the device group alone can take a minute) and in any case once it happens.
+    const auto stopPlayers = [voicePlayer, videoPlayer, voiceRecorder]() {
+        voicePlayer->stop();
+        videoPlayer->stop();
+        voiceRecorder->cancel();
+    };
+    QObject::connect(backend, &ThreeseBackend::dataRemovalStarted, view->engine(), [calls, groupCalls, stopPlayers]() {
+        if (calls->state() == QLatin1String("incoming")) {
+            calls->reject();
+        } else {
+            calls->endCallWithMicrophone();
+        }
+        groupCalls->leave();
+        stopPlayers();
+    });
+    QObject::connect(backend, &ThreeseBackend::dataRemoved, view->engine(), [calls, groupCalls, stopPlayers]() {
+        calls->forget();
+        groupCalls->forget();
+        stopPlayers();
+    });
     // An incoming call brings the window up (also when it was closed, the Full flavour's background run).
     QObject::connect(calls, &CallManager::incoming, view.data(), [&view]() {
         view->showFullScreen();
