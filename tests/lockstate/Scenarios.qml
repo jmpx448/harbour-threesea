@@ -1041,6 +1041,25 @@ QtObject {
                 check("no banner", window.notifications["appLocked"].previewBody, "")
             }, 0],
         ],
+        // The app ending under a lock: nobody keeps the grace time from here on.
+        quitHidesWhatIsShown: [
+            [function() { ready(true, 60) }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                Qt.application.aboutToQuit()
+                check("no chat notification", window.notifications[chat], undefined)
+                checkAppLocked(1)
+            }, 0],
+        ],
+        // Without a lock it stays.
+        quitLeavesWithoutLock: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                Qt.application.aboutToQuit()
+                check("still there", window.notifications[chat].body, "the words")
+            }, 0],
+        ],
         // Before the first look at the lock nothing is known: these wait for the answer.
         messagesWaitForTheLockAnswer: [
             [function() {
