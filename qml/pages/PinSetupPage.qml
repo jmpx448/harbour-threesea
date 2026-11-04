@@ -17,6 +17,8 @@ Page {
     property bool startKeyboard: false
     property string first
     property bool firstKeyboard
+    // The last repeat didn't match: said on the first step, until a new code is entered there.
+    property bool mismatch: false
 
     signal chosen(string pin, bool keyboard)
 
@@ -40,24 +42,28 @@ Page {
                   ? qsTrId("threesea-he-repeat-passphrase")
                   //% "Enter the PIN again"
                   : qsTrId("threesea-he-repeat-pin"))
-        errorText: page.first.length > 0 ? "" : page.minimumLength > 4
-                   //% "At least %1 characters"
-                   ? qsTrId("threesea-la-passphrase-hint").arg(page.minimumLength)
-                   : keyboard
-                     ? qsTrId("threesea-la-passphrase-hint").arg(page.minimumLength)
-                     //% "At least 4 digits"
-                     : qsTrId("threesea-la-pin-hint")
+        errorText: page.first.length > 0 ? ""
+                   : page.mismatch
+                     //% "They did not match. Try again."
+                     ? qsTrId("threesea-la-pin-mismatch")
+                     : page.minimumLength > 4
+                       //% "At least %1 characters"
+                       ? qsTrId("threesea-la-passphrase-hint").arg(page.minimumLength)
+                       : keyboard
+                         ? qsTrId("threesea-la-passphrase-hint").arg(page.minimumLength)
+                         //% "At least 4 digits"
+                         : qsTrId("threesea-la-pin-hint")
         onCanceled: pageStack.pop()
         onEntered: {
             if (page.first.length === 0) {
                 page.first = pin
                 page.firstKeyboard = keyboard
+                page.mismatch = false
             } else if (pin === page.first) {
                 page.chosen(pin, keyboard)
             } else {
                 page.first = ""
-                //% "They did not match. Try again."
-                errorText = qsTrId("threesea-la-pin-mismatch")
+                page.mismatch = true
             }
             clear()
         }

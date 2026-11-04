@@ -264,6 +264,31 @@ QtObject {
                 check("says so", entry.errorText, qsTrId("threesea-la-wrong-pin"))
             }, 0],
         ],
+        // The mismatch stays with the step it belongs to, and the hints keep working.
+        pinMismatchHint: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var setup = push("pages/PinSetupPage.qml")
+                var entry = entryOf(setup)
+                var hint = qsTrId("threesea-la-pin-hint")
+                var mismatch = qsTrId("threesea-la-pin-mismatch")
+                check("hint", entry.errorText, hint)
+                entry.entered("1234", false)
+                check("nothing under the repeat", entry.errorText, "")
+                entry.entered("9999", false)
+                check("first step again", setup.first, "")
+                check("mismatch", entry.errorText, mismatch)
+                entry.entered("1234", false)
+                check("repeat after a mismatch", entry.errorText, "")
+                entry.entered("9999", false)
+                check("mismatch again", entry.errorText, mismatch)
+                var chosen = ""
+                setup.chosen.connect(function(pin) { chosen = pin })
+                entry.entered("1234", false)
+                entry.entered("1234", false)
+                check("chosen", chosen, "1234")
+            }, 0],
+        ],
         // The license refused under the lock: the lock stays over the license page, and a new key
         // doesn't ask twice.
         licenseRefused: [
