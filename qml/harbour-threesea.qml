@@ -651,6 +651,9 @@ ApplicationWindow {
             // Made by us, unlike one taken over after a restart.
             readonly property bool own: true
             property string identity
+            // The message it shows, and who in a group wrote it.
+            property var messageId
+            property string sender
             // A new token for every new notification; one taken over after a restart keeps its
             // chat's token, which lipstick still holds (bridge/dbusinterface.h).
             property bool renewToken: true
@@ -848,6 +851,23 @@ ApplicationWindow {
         n.closed.connect(function() { window.notificationClosed(identity, n) })
     }
 
+    // Taken over after a restart: it needs our actions again, so one of ours takes its place on
+    // the screen.
+    function ownNotification(identity, taken) {
+        var n = notificationComponent.createObject(window, { identity: identity, renewToken: false,
+                                                             replacesId: taken.replacesId, itemCount: taken.itemCount,
+                                                             summary: taken.summary, body: taken.body })
+        notifications[identity] = n
+        return n
+    }
+
+    function notificationText(sender, message) {
+        return backend.notificationPreview
+                ? (sender ? sender + ": " : "") + Fmt.preview(message)
+                //% "New message"
+                : qsTrId("threesea-la-new-message")
+    }
+
     function publish(identity, title, sender, message) {
         if (lockActive()) {
             notifyLocked(message, false)
@@ -859,19 +879,47 @@ ApplicationWindow {
             notifications[identity] = n
             n.itemCount = 0
         } else if (n.own !== true) {
-            // Taken over after a restart: it needs our actions again, so one of ours takes its
-            // place on the screen.
-            n = notificationComponent.createObject(window, { identity: identity, renewToken: false,
-                                                             replacesId: n.replacesId, itemCount: n.itemCount })
-            notifications[identity] = n
+            n = ownNotification(identity, n)
         }
         n.itemCount = n.itemCount + 1
-        var text = backend.notificationPreview
-                   ? (sender ? sender + ": " : "") + Fmt.preview(message)
-                   //% "New message"
-                   : qsTrId("threesea-la-new-message")
+        n.messageId = message.id
+        n.sender = sender
         n.timestamp = new Date(message.createdAt)
-        alert(n, identity, identity.indexOf("g:") === 0, title, text)
+        alert(n, identity, identity.indexOf("g:") === 0, title, notificationText(sender, message))
+    }
+
+    // Quietly, as this isn't news: no sound or vibration (this category only has the light), and
+    // no banner. The next message's alert() sets them all again.
+    function publishQuietly(n, summary, body, banner) {
+        n.category = "im.received"
+        n.sound = ""
+        n.summary = summary
+        n.body = body
+        n.previewSummary = banner ? summary : ""
+        n.previewBody = banner ? body : ""
+        n.publish()
+    }
+
+    // Its sender deleted or edited a message: what the notification shows of it follows, or the
+    // words stay readable on the lock screen.
+    function messagesChanged(messages) {
+        if (lockActive()) return
+        messages.forEach(function(message) {
+            var n = notifications[message.conversation]
+            if (!n || message.outgoing) return
+            var text
+            if (n.own === true) {
+                if (n.messageId !== message.id) return
+                text = notificationText(n.sender, message)
+            } else {
+                // Taken over after a restart, it isn't known which one it shows, so any of them
+                // may be it. Only for these two: reactions and the like change messages as well.
+                if (message.kind !== "deleted" && !message.editedAt) return
+                text = qsTrId("threesea-la-new-message")
+                n = ownNotification(message.conversation, n)
+            }
+            if (n.body !== text) publishQuietly(n, n.summary, text, false)
+        })
     }
 
     // Private chats: neither who nor what, and tapping only opens the app (ADR 0009).
@@ -928,13 +976,7 @@ ApplicationWindow {
         if (!added && notifications["appLocked"] && notifications["appLocked"].body === body) return
         var n = appLockedNotification()
         n.itemCount = Math.max(n.itemCount + added, 1)
-        n.category = "im.received"
-        n.sound = ""
-        n.summary = qsTrId("threesea-la-locked-notification")
-        n.body = body
-        n.previewSummary = banner ? n.summary : ""
-        n.previewBody = banner ? body : ""
-        n.publish()
+        publishQuietly(n, qsTrId("threesea-la-locked-notification"), body, banner)
     }
 
     // The lock came on: what is on the screen about a chat goes, with its Reply and Mark as read.
@@ -1303,6 +1345,8 @@ ApplicationWindow {
             } else if (name === "messageNotify" && data.notify !== false) {
                 // A forwarded message still unread after its grace time (multi-device).
                 window.notify(data.message, data.private === true, true)
+            } else if (name === "messagesChanged") {
+                window.messagesChanged(data.messages)
             } else if (name === "conversationRead") {
                 // Read in Threema Web, on another device, or from a notification.
                 window.clearNotification(data.identity)

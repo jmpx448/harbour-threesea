@@ -77,6 +77,13 @@ QtObject {
         backend.coreEvent("messageAdded", { message: message, notify: true })
     }
 
+    // A message of that chat changed.
+    function changed(message) {
+        message.conversation = chat
+        if (message.outgoing === undefined) message.outgoing = false
+        backend.coreEvent("messagesChanged", { messages: [message] })
+    }
+
     // The one notification while locked: neither who nor what, tapping it only opens the app.
     function checkAppLocked(count) {
         var n = window.notifications["appLocked"]
@@ -1209,6 +1216,103 @@ QtObject {
                 window.openChat = ""
                 window.openChat = chat
                 check("gone with the chat opened", window.notifications["replyNotSent:" + chat], undefined)
+            }, 0],
+        ],
+        // Deleted by its sender: the words leave the notification, without another alert.
+        deletedLeavesNotification: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                check("the text", n.body, "the words")
+                check("the banner", n.previewBody, "the words")
+                changed({ id: "mthe words", kind: "deleted" })
+                check("the words are gone", n.body, "threesea-la-message-deleted")
+                check("no banner", n.previewBody, "")
+                check("no sound", n.sound, "")
+                check("only the light", n.category, "im.received")
+                check("not counted", n.itemCount, 1)
+                check("the same title", n.summary, "A Contact")
+            }, 0],
+        ],
+        // Edited: the new words, with who wrote them in a group.
+        editedChangesNotification: [
+            [function() {
+                ready(false)
+                backend.results["group"] = { title: "A Group", left: false,
+                                             members: [{ identity: "EFGH5678", displayName: "A Member" }] }
+            }, 100],
+            [function() {
+                backend.coreEvent("messageAdded", { notify: true, message: {
+                    id: "m1", conversation: "g:KEY", outgoing: false, kind: "text", text: "old",
+                    sender: "EFGH5678", createdAt: Date.now() } })
+            }, 50],
+            [function() {
+                check("the text", window.notifications["g:KEY"].body, "A Member: old")
+                backend.coreEvent("messagesChanged", { messages: [{ id: "m1", conversation: "g:KEY", outgoing: false,
+                                                                    kind: "text", text: "new", editedAt: 1 }] })
+                check("the new text", window.notifications["g:KEY"].body, "A Member: new")
+            }, 0],
+        ],
+        // Past the grace time by the clock, an edit brings no new words onto the screen.
+        editedPastTheGrace: [
+            [function() { ready(true, 60) }, 100],
+            [function() { harness.setActive(false) }, 20],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                window.leftAt = Date.now() - 61000
+                changed({ id: "mthe words", kind: "text", text: "new words", editedAt: 1 })
+                check("locked by now", window.locked, true)
+                check("no chat notification", window.notifications[chat], undefined)
+                checkAppLocked(1)
+            }, 0],
+        ],
+        // What it doesn't show, or what hasn't changed, leaves it alone.
+        otherChangesLeaveNotification: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                changed({ id: "another", kind: "deleted" })
+                check("another message", n.body, "the words")
+                changed({ id: "mthe words", kind: "text", text: "own", outgoing: true })
+                check("an outgoing one", n.body, "the words")
+                changed({ id: "mthe words", kind: "text", text: "the words" })
+                check("the banner stays: not published", n.previewBody, "the words")
+            }, 0],
+        ],
+        // Previews off: it stays generic.
+        deletedWithoutPreview: [
+            [function() {
+                ready(false)
+                backend.notificationPreview = false
+            }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                check("generic", n.body, "threesea-la-new-message")
+                changed({ id: "mthe words", kind: "deleted" })
+                check("still generic", n.body, "threesea-la-new-message")
+                check("not published", n.previewBody, "threesea-la-new-message")
+            }, 0],
+        ],
+        // Taken over after a restart: which message it shows isn't known, so any deletion counts.
+        deletedLeavesTakenOver: [
+            [function() { ready(false) }, 100],
+            [function() {
+                // Publishing without a session bus sets its id to 0, so seen here, before that.
+                var taken = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { replacesId: 42 }", root)
+                check("the same place", window.ownNotification(chat, taken).replacesId, 42)
+                window.notifications[chat] = Qt.createQmlObject(
+                    "import Nemo.Notifications 1.0; Notification { replacesId: 42; summary: \"A Contact\"; body: \"the words\" }", root)
+                changed({ id: "unknown", kind: "text", text: "a reaction changed" })
+                check("only for a deletion or edit", window.notifications[chat].own, undefined)
+                changed({ id: "unknown", kind: "deleted" })
+                var n = window.notifications[chat]
+                check("one of ours now", n.own, true)
+                check("the same title", n.summary, "A Contact")
+                check("the words are gone", n.body, "threesea-la-new-message")
+                check("no sound", n.sound, "")
             }, 0],
         ],
         // A failure of a running core with the lock up: no PIN page for a dead core.

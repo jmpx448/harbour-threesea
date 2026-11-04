@@ -351,6 +351,9 @@ Notifications:
      Expect: after a Reply, "Threesea is locked" says that the reply waits. After entering the
      passphrase, the reply is sent and the chat is read. Until then nothing is sent and the chat
      stays unread.
+   - With a notification showing a message, have the sender delete it; again, edit it.
+     Expect: the notification says "Message deleted", or the new text, without a sound, a vibration
+     or a banner, and the next message alerts as usual. Mind the light: it may blink for this.
    - App lock on, app in the background past the grace time, with a notification showing.
      Expect: it closes and "Threesea is locked" takes its place, without a sound. A new message
      then gives that one notification with the usual sound and vibration, no name, no text, no
