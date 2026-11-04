@@ -411,3 +411,39 @@ device; what is left here is the real cover, the real window manager and the rea
 8. App lock switched off, but with a PIN set for the private chats. Mark a chat private, open it
    from the contacts, enter the PIN and put the app aside past the grace time.
    - Expect: coming back, the chat is closed.
+
+## One call has the microphone
+
+Two phones needed for the 1:1 parts; a group with at least one other member for the rest.
+
+1. Open a group call and tap mute while it still says "Joining…".
+   - Expect: the button stays highlighted, your tile shows the crossed-out microphone once in the
+     call, and the others hear nothing and see you as muted.
+2. Accept a 1:1 call and tap mute on the call page at once, or start one and tap mute while it
+   says "Calling…".
+   - Expect: the peer hears nothing and sees you as muted.
+3. Join a group call with four or more others already in it.
+   - Expect: you start muted, the others hear nothing until you unmute. With three others you
+     start unmuted.
+4. In a group call, have someone call you; answer on the call page, once more from the cover.
+   - Expect: you are out of the group call the moment you answer (the others see you leave and
+     hear nothing of the private call), only the caller's voice plays, and after the 1:1 call you
+     land in the chat, not on a stale group call page.
+5. In a 1:1 call, open a group chat through a notification and start or join its group call.
+   - Expect: the 1:1 call ends, then the group call connects.
+6. Go to the home screen during a group call.
+   - Expect: the cover shows the group's name and the time, with mute and hang up acting on the
+     group call. "Hide content on the cover" and a private group hide the name. A 1:1 call ringing meanwhile takes
+     over the cover with answer and decline.
+7. Close the window (not minimize) during a 1:1 call, then during a group call.
+   - Expect: the call ends in both cases and the others see you leave. Closing while a call only
+     rings leaves it ringing.
+8. Take away the microphone in a group call if you can (another app holding it exclusively, or
+   the Microphone permission off).
+   - Expect: the call ends with a notice instead of showing the microphone on. In a normal group
+     call, no such notice comes out of nowhere: if one does, the log line to look for is
+     `group call pipeline error` (it names what failed).
+9. With more logging on (Settings → Advanced) and "Always relay calls" off, call an unverified
+   contact and look at the log.
+   - Expect: `call candidates: relay` only, no `host` or `srflx`, on both an outgoing and an
+     incoming call. A verified contact also shows `host` and `srflx`.
