@@ -953,6 +953,22 @@ mod tests {
         sync.action.unwrap()
     }
 
+    /// What the connection would reflect next for a contact, removed from the queue.
+    fn next_contact_sync(app: &App) -> libthreema::protobuf::d2d_sync::Contact {
+        use prost::Message as _;
+        let (id, scope, content) = app.store.next_sync().unwrap().unwrap();
+        app.store.sync_done(id).unwrap();
+        assert_eq!(scope, Scope::ContactSync as i32);
+        let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+        let Some(Content::ContactSync(ContactSync {
+            action: Some(contact_sync::Action::Update(update)),
+        })) = envelope.content
+        else {
+            panic!("not a contact update");
+        };
+        update.contact.unwrap()
+    }
+
     fn update_of(action: group_sync::Action) -> group_sync::Update {
         let group_sync::Action::Update(update) = action else {
             panic!("not an update");
@@ -1861,5 +1877,58 @@ mod tests {
         let result = app.finish_linking(JoinOutcome::Joined, false).await;
         assert_eq!(result.unwrap()["active"], true);
         assert!(app.store.multi_device().unwrap().is_some());
+    }
+
+    /// A deleted contact is out of the contact list on the other devices too.
+    #[test]
+    fn deleting_a_contact_is_reflected_as_its_level() {
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        app.store.upsert_contact(&contact).unwrap();
+
+        let reply = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(app.handle(r#"{"id":1,"cmd":"deleteContact","identity":"BBBBBBBB"}"#));
+        assert!(reply.contains(r#""ok":true"#), "{reply}");
+
+        // First the exclusion list, then the contact.
+        let (id, scope, _) = app.store.next_sync().unwrap().unwrap();
+        assert_eq!(scope, Scope::SettingsSync as i32);
+        app.store.sync_done(id).unwrap();
+        let synced = next_contact_sync(&app);
+        assert_eq!(
+            synced.acquaintance_level,
+            Some(AcquaintanceLevel::GroupOrDeleted as i32)
+        );
+    }
+
+    /// A pin is kept on the other devices too, so it goes there with the chat.
+    #[test]
+    fn deleting_a_pinned_chat_is_reflected_as_its_visibility() {
+        use libthreema::protobuf::d2d_sync::ConversationVisibility;
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.store.set_pinned("BBBBBBBB", true).unwrap();
+
+        let reply = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(app.handle(r#"{"id":1,"cmd":"deleteConversation","identity":"BBBBBBBB"}"#));
+        assert!(reply.contains(r#""ok":true"#), "{reply}");
+
+        let synced = next_contact_sync(&app);
+        assert_eq!(
+            synced.conversation_visibility,
+            Some(ConversationVisibility::Normal as i32)
+        );
     }
 }

@@ -11,11 +11,39 @@ Page {
 
     property string identity
     property var contact: ({})
+    // An ID without a contact (earlier versions left chats like that behind).
+    property bool noContact: false
 
     function load() {
-        backend.call("contact", { identity: identity }, function(ok, result) {
-            if (ok) page.contact = result
+        backend.call("contact", { identity: identity }, function(ok, result, kind) {
+            if (ok) {
+                page.noContact = false
+                page.contact = result
+            } else if (kind === "contactNotFound") {
+                page.noContact = true
+            }
         })
+    }
+
+    function addToContacts() {
+        backend.call("addContact", { identity: identity }, function(ok, result, kind, message) {
+            if (ok) {
+                page.noContact = false
+                page.contact = result
+                backend.refreshContacts()
+            } else {
+                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            }
+        })
+    }
+
+    // The chat went with the contact: back past it, if this page is attached to it.
+    function leaveDeleted() {
+        var below = pageStack.previousPage(page)
+        if (below && below.inputField !== undefined && below.identity === identity) {
+            below = pageStack.previousPage(below)
+        }
+        pageStack.pop(below || undefined)
     }
 
     function edit() {
@@ -49,15 +77,23 @@ Page {
 
         PullDownMenu {
             MenuItem {
+                // Someone a group of ours needs stays until they leave it.
+                visible: page.contact.neededByGroup !== true
                 //% "Delete"
                 text: qsTrId("threesea-me-delete")
-                //% "Deleting contact"
+                //% "Deleting contact and chat"
                 onClicked: remorse.execute(qsTrId("threesea-la-deleting-contact"), function() {
                     backend.call("deleteContact", { identity: page.identity }, function() {
                         backend.refreshContacts()
-                        pageStack.pop()
+                        page.leaveDeleted()
                     })
                 })
+            }
+            MenuItem {
+                visible: page.contact.hidden === true || page.noContact
+                //% "Add to contacts"
+                text: qsTrId("threesea-me-add-to-contacts")
+                onClicked: page.addToContacts()
             }
             MenuItem {
                 text: page.contact.blocked
@@ -94,6 +130,7 @@ Page {
                 }
             }
             MenuItem {
+                visible: !page.noContact
                 //% "Edit"
                 text: qsTrId("threesea-me-edit")
                 onClicked: page.edit()
@@ -167,11 +204,13 @@ Page {
             }
 
             ChatNotificationsButton {
+                visible: !page.noContact
                 identity: page.identity
                 settings: page.contact.notifications || ({})
             }
             // Device-local, like the tone of all chats.
             ToneButton {
+                visible: !page.noContact
                 property int revision: 0
                 tone: revision >= 0 ? backend.chatTone(page.identity) : ""
                 //% "Same as all chats"
@@ -183,9 +222,11 @@ Page {
             }
 
             SectionHeader {
+                visible: !page.noContact
                 text: qsTrId("threesea-se-privacy")
             }
             ContactPolicyButton {
+                visible: !page.noContact
                 identity: page.identity
                 field: "readReceipts"
                 choice: page.contact.readReceipts || 0
@@ -196,6 +237,7 @@ Page {
             }
 
             ContactPolicyButton {
+                visible: !page.noContact
                 identity: page.identity
                 field: "typing"
                 choice: page.contact.typing || 0
@@ -206,6 +248,7 @@ Page {
             }
 
             SectionHeader {
+                visible: !page.noContact
                 //% "Public key"
                 text: qsTrId("threesea-se-public-key")
             }

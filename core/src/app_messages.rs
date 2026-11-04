@@ -157,6 +157,24 @@ impl App {
         Ok((key, conversation))
     }
 
+    /// A chat that may be read now, also one without a conversation to write to (`None`): earlier
+    /// versions removed a deleted contact's row and left its chat behind (ADR 0022).
+    pub(crate) fn readable_chat(
+        &self,
+        identity: &str,
+    ) -> Result<(String, Option<Conversation>), ApiError> {
+        let (key, conversation) = match self.conversation(identity) {
+            Ok((key, conversation)) => (key, Some(conversation)),
+            Err(ApiError::ContactNotFound) => {
+                let id = contacts::parse_identity(identity).ok_or(ApiError::IdentityFormat)?;
+                (id.to_string(), None)
+            }
+            Err(error) => return Err(error),
+        };
+        self.check_readable(&key)?;
+        Ok((key, conversation))
+    }
+
     /// The media readers for the UI (other threads) follow the lock: while private chats are
     /// hidden, their messages' media are not handed out.
     pub(crate) fn update_media_gate(&self) {
@@ -700,8 +718,7 @@ impl App {
         before: Option<i64>,
         after: Option<i64>,
     ) -> Result<Value, ApiError> {
-        let key = self.conversation(identity)?.0;
-        self.check_readable(&key)?;
+        let (key, conversation) = self.readable_chat(identity)?;
         // Scrolling: just the page on that side of the message, nothing else.
         if before.is_some() || after.is_some() {
             let messages = match (before, after) {
@@ -724,8 +741,7 @@ impl App {
         // Opening a 1:1 chat (the initial load, not the follow-ups) may ask the contact for a
         // missing picture: bounded by the request backoff, never for blocked contacts.
         if around.is_none()
-            && crate::groups::parse_key(&key).is_none()
-            && !crate::distribution_lists::is_key(&key)
+            && matches!(conversation, Some(Conversation::Contact(_)))
             && !self.app_settings()?.blocked_contacts.contains(&key)
             && self.store.request_picture(&key)?
         {
@@ -967,7 +983,7 @@ impl App {
 
     /// Mark a conversation read; sends read receipts if enabled (globally or per contact).
     pub(crate) fn mark_read(&mut self, identity: &str) -> Result<Value, ApiError> {
-        let (id, conversation) = self.readable_conversation(identity)?;
+        let (id, conversation) = self.readable_chat(identity)?;
         let read = self.store.mark_conversation_read(&id)?;
         // Also when read elsewhere than in the app's chat (Threema Web, a notification's action):
         // the UI takes its notification away and recounts.
@@ -976,8 +992,8 @@ impl App {
                 json!({ "event": "conversationRead", "identity": id }),
             ));
         }
-        // Groups have no read receipts (lists have nothing incoming).
-        if matches!(conversation, Conversation::Group(_) | Conversation::List(_)) {
+        // Groups have no read receipts (lists have nothing incoming); no contact, no way to send.
+        if !matches!(conversation, Some(Conversation::Contact(_))) {
             return Ok(json!({ "read": read.len() }));
         }
         let send = match self
@@ -1187,17 +1203,18 @@ impl App {
     }
 
     pub(crate) fn delete_conversation(&mut self, identity: &str) -> Result<Value, ApiError> {
-        let (id, conversation) = self.readable_conversation(identity)?;
+        let (id, conversation) = self.readable_chat(identity)?;
         match conversation {
             // A group's conversation goes with the group, which must have been left.
-            Conversation::Group(group) if group.left => {
+            Some(Conversation::Group(group)) if group.left => {
                 self.store.delete_group(&id)?;
                 self.media.remove_picture(&id);
             }
-            Conversation::Group(_) => self.store.delete_conversation(&id)?,
-            Conversation::Contact(_) => self.store.delete_conversation(&id)?,
             // A list's chat goes with the list.
-            Conversation::List(_) => self.store.delete_distribution_list(&id)?,
+            Some(Conversation::List(_)) => self.store.delete_distribution_list(&id)?,
+            Some(Conversation::Group(_) | Conversation::Contact(_)) | None => {
+                self.store.delete_conversation(&id)?;
+            }
         }
         self.chat_removed(&id);
         Ok(json!({}))

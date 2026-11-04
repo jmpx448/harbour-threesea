@@ -146,13 +146,6 @@ impl Store {
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
-
-    /// Delete all FS sessions with `peer` (contact deleted).
-    pub fn delete_fs_sessions(&self, peer: &str) -> Result<(), StoreError> {
-        self.conn
-            .execute("DELETE FROM fs_sessions WHERE peer = ?1", [peer])?;
-        Ok(())
-    }
 }
 
 fn storage(error: impl std::fmt::Display) -> ProviderError {

@@ -96,7 +96,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `contact` | `identity` | contact |
 | `addContact` | `identity` | contact (directory lookup, unverified) |
 | `updateContact` | `identity`, `firstName`, `lastName` | contact |
-| `deleteContact` | `identity` | `{}` |
+| `deleteContact` | `identity` | `{}`; out of the contact list, its chat, what was chosen for it and what was queued for it gone, and on the exclusion list of the address book sync (ADR 0022); a hidden private chat stays as it is. Also `contactsChanged`, and the events of `deleteConversation` |
 | `declineNickname` | – | profile; the question for a nickname isn't asked again, messages keep leaving contacts' stored name alone |
 | `profile` | – | `{identity, nickname, askNickname (a new or ID-backup-restored ID: ask once), publicKey, linkedEmail, linkedMobile, pictureVersion, pictureShare (everyone\|nobody\|selected), pictureRecipients: [ID]}` |
 | `linkEmail` | `email` ("" unlinks) | profile (`linkedEmail`, `linkedEmailPending` until the link in the e-mail is opened; checked again on `profile` and in maintenance) |
@@ -214,7 +214,7 @@ body, createdAt (ms; of an incoming message the sender's clock), arrivedAt (ms; 
 4 failed; incoming 0 unread, 1 read.
 
 Contact JSON: `{identity, displayName, firstName, lastName, nickname, verification (0–2), work,
-workVerified, inactive, invalid, hidden, canEdit, canDelete (contact supports edits / deletions for everyone), reactions (contact has REACTION_SUPPORT: any emoji;
+workVerified, inactive, invalid, hidden (out of the contact list: known from a group, or deleted), neededByGroup (hidden, and a member of a group we are in: nothing to delete), canEdit, canDelete (contact supports edits / deletions for everyone), reactions (contact has REACTION_SUPPORT: any emoji;
 else only 👍/👎, which can't be withdrawn), canCall (O2O_AUDIO_CALL_SUPPORT), publicKey (hex)}`.
 
 Error kinds (mapped to translated text in `qml/components/Errors.js`): `noLicense`,

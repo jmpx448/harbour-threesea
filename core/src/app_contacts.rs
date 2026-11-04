@@ -343,6 +343,15 @@ impl App {
                 .blocked_contacts
                 .contains(&contact.identity.to_string())
         }));
+        // Out of the contact list, and a group we are in needs it: nothing to delete. (Asked only
+        // for those: every row of the contact list is a direct contact.)
+        value["neededByGroup"] = json!(
+            contact.acquaintance_level == pc::AcquaintanceLevel::GroupOrDeleted
+                && self
+                    .store
+                    .is_group_member(&contact.identity.to_string())
+                    .unwrap_or(false)
+        );
         value
     }
 
@@ -526,29 +535,60 @@ impl App {
         Ok(json!({ "cleared": cleared }))
     }
 
+    /// The user deletes a contact (ADR 0022; Android's `MarkContactAsDeletedBackgroundTask`): out
+    /// of the contact list, its row stays as an acquaintance, and its chat goes, as does what was
+    /// chosen for them.
     pub(crate) fn delete_contact(&mut self, identity: &str) -> Result<Value, ApiError> {
         let id = contacts::parse_identity(identity).ok_or(ApiError::IdentityFormat)?;
         let key = id.to_string();
-        // Someone a group names stays as a group acquaintance, like Android's
-        // AcquaintanceLevel.GROUP: the group needs the name and the public key, and such a
-        // contact is out of the contact list either way. A group we left counts too: it still
-        // goes to the other devices, and Threema Desktop refuses to link for a group naming
-        // someone it has no contact for.
-        let demoted = match self.store.contact(&key)? {
-            Some(mut contact) if self.store.is_named_by_a_group(&key)? => {
-                contact.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
-                self.store.upsert_contact(&contact)?;
-                true
-            }
-            _ => false,
+        // A hidden private chat isn't changed from outside (ADR 0009): it stays as it is, hidden,
+        // and can be opened and deleted once unlocked. Whether there is one isn't given away.
+        let chat_readable = match self.check_readable(&key) {
+            Ok(()) => true,
+            Err(ApiError::Locked) => false,
+            Err(error) => return Err(error),
         };
-        if !demoted {
-            self.store.delete_contact(&key)?;
+        if chat_readable {
+            self.store.delete_conversation(&key)?;
+            self.store.forget_chat_choices(&key)?;
+            // What was queued for them (a reaction, an edit, a picture request) stays here too.
+            self.store.outbox_clear(&key)?;
+            self.chat_removed(&key);
         }
-        // Forward security sessions belong to the contact. Like Android, without a Terminate: it
-        // would show them a reset line the moment they are deleted. Their next message is rejected.
-        self.store.delete_fs_sessions(&key)?;
+        if let Some(mut contact) = self.store.contact(&key)? {
+            contact.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
+            self.store.upsert_contact(&contact)?;
+        }
+        // The group pages still show it for someone a group names, also one we left. A pause in
+        // asking for it stays: the reason for that doesn't change with this.
+        if !self.store.is_named_by_a_group(&key)? {
+            self.store.cancel_picture_download(&key)?;
+            self.store.set_contact_picture(&key, None)?;
+            self.media
+                .remove_picture(&crate::profile_pictures::contact_picture_name(&key));
+        }
+        // Like Android, the forward security sessions stay: the row does too, and their next
+        // message would only be rejected. Android's exclusion is a question, for contacts from
+        // the address book: asked or not, the next match would otherwise bring them back.
+        self.set_sync_excluded(&key, true)?;
+        let _ = self
+            .media_events
+            .send(crate::providers::CoreEvent::ContactsChanged);
         Ok(json!({}))
+    }
+
+    /// Adding someone by hand undoes what deleting them put on the exclusion list. `true` if it
+    /// did, for the other devices.
+    pub(crate) fn sync_included_again(&mut self, identity: &str) -> Result<bool, ApiError> {
+        let excluded = self
+            .app_settings()?
+            .sync_excluded_ids
+            .iter()
+            .any(|id| id == identity);
+        if excluded {
+            self.set_sync_excluded(identity, false)?;
+        }
+        Ok(excluded)
     }
 
     /// The directory says that `contact` has dropped forward secrecy: end what is left of the
@@ -1114,8 +1154,8 @@ impl App {
             else {
                 continue;
             };
-            let mut contact = match self.store.contact(&hit.identity)? {
-                Some(contact) => contact,
+            let (mut contact, fresh) = match self.store.contact(&hit.identity)? {
+                Some(contact) => (contact, false),
                 None => {
                     match self.add_contact(&hit.identity).await {
                         Ok(_) => {}
@@ -1123,9 +1163,11 @@ impl App {
                         Err(_) => continue,
                     }
                     added += 1;
-                    self.store
+                    let contact = self
+                        .store
                         .contact(&hit.identity)?
-                        .ok_or(ApiError::ContactNotFound)?
+                        .ok_or(ApiError::ContactNotFound)?;
+                    (contact, true)
                 }
             };
             if contacts::hex_bytes(&contact.public_key.to_string()).as_slice() != hit.public_key {
@@ -1136,21 +1178,56 @@ impl App {
                 continue;
             }
             matched += 1;
-            let unnamed = contact.first_name.as_deref().unwrap_or("").is_empty()
-                && contact.last_name.as_deref().unwrap_or("").is_empty();
-            if unnamed {
-                contact.first_name = Some(entry.first_name.clone()).filter(|n| !n.is_empty());
-                contact.last_name = Some(entry.last_name.clone()).filter(|n| !n.is_empty());
+            let change = self.take_from_address_book(contact, entry)?;
+            if change == AddressBookChange::Raised {
+                added += 1;
             }
-            if contact.verification_level == pc::VerificationLevel::Unverified {
-                contact.verification_level = pc::VerificationLevel::ServerVerified;
+            // `handle` tells the other devices, as for someone made direct by writing to them.
+            if fresh || change != AddressBookChange::None {
+                self.made_direct.borrow_mut().push(hit.identity.clone());
             }
-            contact.acquaintance_level = pc::AcquaintanceLevel::Direct;
-            self.store.upsert_contact(&contact)?;
         }
         tracing::info!(matched, added, "address book matched");
         Ok(json!({ "matched": matched, "added": added }))
     }
+
+    /// A contact the address book matched: named from it unless the user named them, server
+    /// verified, in the contact list.
+    fn take_from_address_book(
+        &self,
+        mut contact: libthreema::model::contact::Contact,
+        entry: &crate::address_book::Entry,
+    ) -> Result<AddressBookChange, ApiError> {
+        let mut change = AddressBookChange::None;
+        let unnamed = contact.first_name.as_deref().unwrap_or("").is_empty()
+            && contact.last_name.as_deref().unwrap_or("").is_empty();
+        if unnamed && !(entry.first_name.is_empty() && entry.last_name.is_empty()) {
+            contact.first_name = Some(entry.first_name.clone()).filter(|n| !n.is_empty());
+            contact.last_name = Some(entry.last_name.clone()).filter(|n| !n.is_empty());
+            change = AddressBookChange::Updated;
+        }
+        if contact.verification_level == pc::VerificationLevel::Unverified {
+            contact.verification_level = pc::VerificationLevel::ServerVerified;
+            change = AddressBookChange::Updated;
+        }
+        if contact.acquaintance_level != pc::AcquaintanceLevel::Direct {
+            contact.acquaintance_level = pc::AcquaintanceLevel::Direct;
+            change = AddressBookChange::Raised;
+        }
+        if change != AddressBookChange::None {
+            self.store.upsert_contact(&contact)?;
+        }
+        Ok(change)
+    }
+}
+
+/// What an address book match did to a contact we had.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddressBookChange {
+    None,
+    Updated,
+    /// New in the contact list.
+    Raised,
 }
 
 #[cfg(test)]
@@ -1382,13 +1459,347 @@ mod contact_policy_tests {
             kept.acquaintance_level,
             libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::GroupOrDeleted
         );
-        // Not in a group: deleted for good.
-        call(
+        // Its page has nothing to delete while the group needs it.
+        let shown = call(&mut app, json!({"cmd": "contact", "identity": "BBBBBBBB"})).await;
+        assert_eq!(shown["result"]["hidden"], true);
+        assert_eq!(shown["result"]["neededByGroup"], true);
+    }
+
+    fn with_a_chat(app: &App, identity: &str) {
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(identity))
+            .unwrap();
+        app.store
+            .insert_incoming(identity, 7, "text", "hello", 1000)
+            .unwrap();
+    }
+
+    fn unread_total(app: &App) -> i64 {
+        app.conversations_json(false, false).unwrap()["unreadTotal"]
+            .as_i64()
+            .unwrap()
+    }
+
+    fn listed_chats(app: &App) -> Vec<String> {
+        app.conversations_json(false, false).unwrap()["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| chat["identity"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// What is left of someone with a chat, a picture and choices of their own when deleted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleting_a_contact_keeps_the_row_and_takes_the_chat_along() {
+        use crate::profile_pictures::{REQUEST_PAUSE_DELETED_MS, contact_picture_name};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        let picture = contact_picture_name("BBBBBBBB");
+        app.media.write_picture(&picture, b"picture").unwrap();
+        app.store.set_contact_picture("BBBBBBBB", Some(5)).unwrap();
+        app.store
+            .pause_picture_requests("BBBBBBBB", REQUEST_PAUSE_DELETED_MS)
+            .unwrap();
+        app.store.set_pinned("BBBBBBBB", true).unwrap();
+        app.store
+            .set_chat_notifications(
+                "BBBBBBBB",
+                Some((crate::chat_notifications::Policy::Never, None)),
+            )
+            .unwrap();
+        app.store.set_chat_tone("BBBBBBBB", Some("a.ogg")).unwrap();
+        app.store.set_setting("draft:BBBBBBBB", "unsent").unwrap();
+        assert_eq!(unread_total(&app), 1);
+
+        let reply = call(
             &mut app,
-            json!({"cmd": "deleteContact", "identity": "CCCCCCCC"}),
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
         )
         .await;
-        assert!(app.store.contact("CCCCCCCC").unwrap().is_none());
+        assert_eq!(reply["ok"], true, "{reply}");
+
+        let kept = app.store.contact("BBBBBBBB").unwrap().expect("kept");
+        assert_eq!(
+            kept.acquaintance_level,
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::GroupOrDeleted
+        );
+        assert!(listed_chats(&app).is_empty());
+        assert_eq!(unread_total(&app), 0);
+        assert_eq!(app.store.setting("draft:BBBBBBBB").unwrap(), None);
+        assert!(app.store.pinned_chats().unwrap().is_empty());
+        assert_eq!(app.store.chat_notifications("BBBBBBBB").unwrap(), None);
+        assert!(app.store.chat_tones().unwrap().is_empty());
+        assert_eq!(app.store.contact_picture_version("BBBBBBBB").unwrap(), 0);
+        assert!(app.media.read_picture(&picture).unwrap().is_none());
+        // Nobody is asked for a picture sooner for having been deleted.
+        assert!(!app.store.request_picture("BBBBBBBB").unwrap());
+        let shown = call(&mut app, json!({"cmd": "contact", "identity": "BBBBBBBB"})).await;
+        assert_eq!(shown["result"]["hidden"], true);
+        assert_eq!(shown["result"]["neededByGroup"], false);
+
+        // And back, with what it was known by.
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let added = call(
+            &mut app,
+            json!({"cmd": "addContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        assert_eq!(added["result"]["hidden"], false);
+        assert_eq!(
+            app.contacts_json().unwrap()["contacts"][0]["identity"],
+            "BBBBBBBB"
+        );
+    }
+
+    /// What was queued for them doesn't go out after they are deleted; a group's own does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleting_a_contact_takes_what_was_queued_for_them_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        app.store
+            .outbox_add("BBBBBBBB", 1, crate::reactions::OUTBOX_EDIT, &json!({}))
+            .unwrap();
+        app.store
+            .outbox_add("CCCCCCCC", 2, crate::reactions::OUTBOX_EDIT, &json!({}))
+            .unwrap();
+        call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        let left: Vec<String> = app
+            .store
+            .outbox()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.conversation)
+            .collect();
+        assert_eq!(left, ["CCCCCCCC"]);
+    }
+
+    /// As on Android: the row stays, so their next message has a session to come in on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleting_a_contact_keeps_the_forward_security_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        app.store
+            .conn
+            .execute(
+                "INSERT INTO fs_sessions (peer, session_id, my_ephemeral_public, last_outgoing_at)
+                 VALUES ('BBBBBBBB', x'00', x'00', 0)",
+                [],
+            )
+            .unwrap();
+        call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        let sessions: i64 = app
+            .store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM fs_sessions WHERE peer = 'BBBBBBBB'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sessions, 1);
+    }
+
+    /// The next match doesn't bring someone deleted back, and adding them by hand ends that.
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_deleted_stays_out_of_the_address_book_match_until_added_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let excluded = |app: &App| app.app_settings().unwrap().sync_excluded_ids;
+        call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        assert_eq!(excluded(&app), ["BBBBBBBB"]);
+        call(
+            &mut app,
+            json!({"cmd": "addContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        assert!(excluded(&app).is_empty());
+    }
+
+    /// Someone out of the contact list who isn't excluded (a group member): back in it, and it
+    /// says so, for the count and the other devices (`match_address_book`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_address_book_match_says_when_it_raises_someone() {
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        app.store.upsert_contact(&contact).unwrap();
+        let entry = crate::address_book::Entry {
+            first_name: "Anna".into(),
+            last_name: String::new(),
+            emails: Vec::new(),
+            phones: Vec::new(),
+        };
+        let change = app.take_from_address_book(contact, &entry).unwrap();
+        assert!(change == super::AddressBookChange::Raised);
+        let stored = app.store.contact("BBBBBBBB").unwrap().unwrap();
+        assert_eq!(stored.acquaintance_level, AcquaintanceLevel::Direct);
+        assert_eq!(stored.first_name.as_deref(), Some("Anna"));
+        // Nothing left to do the second time.
+        let change = app.take_from_address_book(stored, &entry).unwrap();
+        assert!(change == super::AddressBookChange::None);
+    }
+
+    /// The group pages go on showing someone's picture, whoever else they are to us.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_group_member_deleted_as_a_contact_loses_the_chat_and_keeps_the_picture() {
+        use crate::profile_pictures::contact_picture_name;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "BBBBBBBB".parse().unwrap(),
+            group_id: 0x1234,
+        };
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: "Crew".into(),
+                members: vec!["BBBBBBBB".into()],
+                left: true,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let picture = contact_picture_name("BBBBBBBB");
+        app.media.write_picture(&picture, b"picture").unwrap();
+        app.store.set_contact_picture("BBBBBBBB", Some(5)).unwrap();
+
+        call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+
+        assert!(!listed_chats(&app).contains(&"BBBBBBBB".to_owned()));
+        assert!(app.store.contact_picture_version("BBBBBBBB").unwrap() > 0);
+        assert!(app.media.read_picture(&picture).unwrap().is_some());
+        // A group we left needs nothing of them: this contact can go on being deleted.
+        let shown = call(&mut app, json!({"cmd": "contact", "identity": "BBBBBBBB"})).await;
+        assert_eq!(shown["result"]["neededByGroup"], false);
+    }
+
+    /// A hidden private chat isn't changed from outside, and no error says there is one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleting_a_contact_leaves_a_hidden_private_chat_to_be_opened_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        app.store.set_private("BBBBBBBB", true).unwrap();
+        app.unlocked = false;
+
+        let reply = call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(listed_chats(&app).is_empty(), "stays hidden");
+        let read = json!({"cmd": "messages", "identity": "BBBBBBBB"});
+        let hidden = call(&mut app, read.clone()).await;
+        assert_eq!(hidden["error"]["kind"], "locked");
+
+        app.unlocked = true;
+        let opened = call(&mut app, read).await;
+        assert_eq!(opened["result"]["messages"][0]["text"], "hello");
+        let deleted = call(
+            &mut app,
+            json!({"cmd": "deleteConversation", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        assert_eq!(deleted["ok"], true, "{deleted}");
+        assert!(listed_chats(&app).is_empty());
+    }
+
+    /// Older versions removed the row and left the chat: it can be read, marked read, emptied and
+    /// deleted, and stays hidden if it is private.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_chat_whose_contact_row_is_gone_stays_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        app.store.delete_contact("BBBBBBBB").unwrap();
+        let read = json!({"cmd": "messages", "identity": "BBBBBBBB"});
+        let mark = json!({"cmd": "markRead", "identity": "BBBBBBBB"});
+        let empty = json!({"cmd": "emptyConversation", "identity": "BBBBBBBB"});
+        let delete = json!({"cmd": "deleteConversation", "identity": "BBBBBBBB"});
+
+        app.store.set_private("BBBBBBBB", true).unwrap();
+        app.unlocked = false;
+        for request in [&read, &mark, &empty, &delete] {
+            let reply = call(&mut app, request.clone()).await;
+            assert_eq!(reply["error"]["kind"], "locked", "{request}");
+        }
+        app.store.set_private("BBBBBBBB", false).unwrap();
+        app.unlocked = true;
+        assert_eq!(unread_total(&app), 1);
+
+        let shown = call(&mut app, read).await;
+        assert_eq!(shown["result"]["messages"][0]["text"], "hello");
+        let marked = call(&mut app, mark).await;
+        assert_eq!(marked["result"]["read"], 1);
+        assert_eq!(unread_total(&app), 0);
+        assert_eq!(call(&mut app, empty).await["ok"], true);
+        assert_eq!(listed_chats(&app), ["BBBBBBBB"]);
+        assert_eq!(call(&mut app, delete).await["ok"], true);
+        assert!(listed_chats(&app).is_empty());
+        // Writing takes a contact, which can be added back.
+        let refused = call(
+            &mut app,
+            json!({"cmd": "sendText", "identity": "BBBBBBBB", "text": "hello"}),
+        )
+        .await;
+        assert_eq!(refused["error"]["kind"], "contactNotFound");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_deleted_is_found_by_a_list_they_are_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        with_a_chat(&app, "BBBBBBBB");
+        let list = app
+            .store
+            .create_distribution_list("Crew", vec!["BBBBBBBB".into()])
+            .unwrap();
+        call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        assert_eq!(app.list_receivers(&list).unwrap(), ["BBBBBBBB"]);
     }
 
     #[tokio::test(flavor = "current_thread")]

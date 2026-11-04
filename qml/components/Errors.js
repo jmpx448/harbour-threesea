@@ -143,6 +143,9 @@ function text(kind, message) {
     case "notGif":
         //% "This picture is not a GIF."
         return qsTrId("threesea-la-error-not-gif")
+    case "contactNotFound":
+        //% "Add this ID to your contacts to write to it."
+        return qsTrId("threesea-la-error-contact-not-found")
     case "notSupportedByContact":
         //% "This contact's app doesn't support this."
         return qsTrId("threesea-la-error-not-supported-by-contact")

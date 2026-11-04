@@ -270,6 +270,14 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Remove everything queued for a contact that is gone. (Not with a group's or a chat's
+    /// deletion: a group's setup, leave and "for everyone" entries still have to go out.)
+    pub fn outbox_clear(&self, conversation: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM outbox WHERE conversation = ?1", [conversation])?;
+        Ok(())
+    }
+
     /// Remove a sent (acknowledged) or unsendable outbox entry.
     pub fn outbox_remove(&self, conversation: &str, message_id: u64) -> Result<(), StoreError> {
         self.conn.execute(

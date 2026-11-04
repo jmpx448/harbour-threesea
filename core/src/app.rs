@@ -1674,13 +1674,27 @@ impl App {
             Command::AndroidBackupExportStatus => self.android_export_status(),
             Command::Contacts => self.contacts_json(),
             Command::Contact { identity } => self.contact_json(&identity),
-            Command::AddContact { identity } => self.add_contact(&identity).await,
+            Command::AddContact { identity } => {
+                let result = self.add_contact(&identity).await?;
+                let added = result["identity"].as_str().unwrap_or_default().to_owned();
+                if self.sync_included_again(&added)? {
+                    let change = crate::app_multidevice::SyncChange::Settings;
+                    self.reflect_change(change, &json!({})).await;
+                }
+                Ok(result)
+            }
             Command::UpdateContact {
                 identity,
                 first_name,
                 last_name,
             } => self.update_contact(&identity, first_name, last_name),
-            Command::DeleteContact { identity } => self.delete_contact(&identity),
+            Command::DeleteContact { identity } => {
+                let result = self.delete_contact(&identity)?;
+                // It is on the address book's exclusion list now, which they keep too.
+                let change = crate::app_multidevice::SyncChange::Settings;
+                self.reflect_change(change, &json!({})).await;
+                Ok(result)
+            }
             Command::SetContactPolicies {
                 identity,
                 read_receipts,
@@ -2195,8 +2209,7 @@ impl App {
             })),
             Command::CleanUp { days, messages } => self.clean_up(days, messages),
             Command::EmptyConversation { identity } => {
-                let key = self.readable_conversation(&identity)?.0;
-                self.check_readable(&key)?;
+                let key = self.readable_chat(&identity)?.0;
                 self.store.empty_conversation(&key)?;
                 let store = std::rc::Rc::clone(&self.store);
                 self.media
@@ -2484,6 +2497,7 @@ fn sync_change(
     use crate::app_multidevice::SyncChange;
     Some(match command {
         Command::AddContact { identity }
+        | Command::DeleteContact { identity }
         | Command::UpdateContact { identity, .. }
         | Command::SetContactPolicies { identity, .. } => {
             SyncChange::Contacts(vec![identity.clone()])

@@ -242,9 +242,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - A row that can't be a session counts as none and is removed; a session in an impossible state is
   ended and replaced when sending (`encapsulate_or_replace`). Should encapsulating still fail, the
   message counts as not sent. None of this ends the connection.
-- Deleting a contact deletes its sessions without a Terminate, like Android
-  (`MarkContactAsDeletedBackgroundTask`): one would show them a reset line the moment they are
-  deleted. Their next message gets a Reject.
+- Deleting a contact leaves its sessions alone, like Android (`MarkContactAsDeletedBackgroundTask`
+  has no part in them; only `DeleteAllContactsBackgroundTask` deletes them, when the whole ID goes).
+  The row stays (ADR 0022), so the person's next message comes in on its session.
 - Simplifications vs Android (TODO): new sessions are stored right away (Android waits for the
   server ack of the Init); no 24 h keep-alive `empty` messages.
 - ECHOECHO does not support FS (mask 0x9). Interop verified with the official Android app

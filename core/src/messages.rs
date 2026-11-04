@@ -1211,8 +1211,8 @@ impl Store {
     }
 
     /// Delete a chat: its messages and what is kept for the chat as such, its pin, archive and
-    /// unread marks and its draft, so that it starts anew if it comes back. What belongs to the
-    /// contact or group (notification choice, tone) and the private mark stay; see
+    /// unread marks and its draft, so that it starts anew if it comes back (ADR 0022). What belongs
+    /// to the contact or group (notification choice, tone) and the private mark stay; see
     /// [`Self::empty_conversation`] to keep the chat.
     pub fn delete_conversation(&self, conversation: &str) -> Result<(), StoreError> {
         let step = self.conn.unchecked_transaction()?;

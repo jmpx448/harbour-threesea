@@ -13,6 +13,7 @@ Upstream paths are relative to `third_party/threema-android`. "lt" = provided by
 | Setup steps after a restore | `app/protocolsteps/ApplicationSetupSteps.kt` | – | `core::app_safe` (`restore_setup_step`), `groups::resync_restored`, `fs_store::start_session` | ✅ |
 | Directory lookup by ID (`identity/fetch_bulk`) | `APIConnector.fetchIdentities` | lt `csp_e2e/contacts/lookup.rs` (crate-private) | `core::contacts::lookup` | ✅ |
 | Contacts (storage, names, verification levels) | `ch.threema.app.services.ContactService` | lt `model/contact.rs` | `core::contacts` (stores lt's `Contact` model), `core::app_contacts` | ✅ add/edit/delete, Safe import/export |
+| Deleting a contact (row stays, chat goes) | `MarkContactAsDeletedBackgroundTask` | — | `App::delete_contact`, ADR 0022 | ✅ |
 | Hashed phone/e-mail lookup, address-book sync | `ch.threema.app.services.SynchronizeContactsService` | — | `core::address_book`, `qml` `AddressBookReader` (opt-in) | ✅ |
 | QR verification (level 2) | `ch.threema.app.qrscanner` | — | `rqrr` in core, `qml/pages/ScanQrPage.qml`, `MyQrCodePage.qml` | ✅ |
 | CSP connection, reconnect, keepalive | `ch.threema.domain.protocol.connection` | lt `csp/` (sans-I/O) ✅ | `core::connection` (socket + loop) | ✅ connect, echo keepalive, backoff reconnect, offline queue |

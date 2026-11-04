@@ -156,8 +156,8 @@ Page {
             }
 
             function remove() {
-                //% "Deleting"
-                remorseAction(qsTrId("threesea-la-deleting"), function() {
+                //% "Deleting contact and chat"
+                remorseAction(qsTrId("threesea-la-deleting-contact"), function() {
                     backend.call("deleteContact", { identity: model.identity }, function() {
                         backend.refreshContacts()
                     })
