@@ -66,6 +66,17 @@ QtObject {
         return backend.sent.filter(function(sent) { return sent === command }).length
     }
 
+    // A message arriving in a chat that isn't open.
+    readonly property string chat: "ABCD1234"
+    property var kept: null
+    function incoming(text, more) {
+        var message = { id: "m" + text, conversation: chat, outgoing: false, kind: "text", text: text,
+                        createdAt: Date.now() }
+        for (var key in more) message[key] = more[key]
+        backend.results["contact"] = { displayName: "A Contact" }
+        backend.coreEvent("messageAdded", { message: message, notify: true })
+    }
+
     // The usual start: ready, with a lock (or without) as the core reports it.
     function ready(appLock, graceSecs) {
         harness.setActive(true)
@@ -896,6 +907,49 @@ QtObject {
                 backend.state = "error"
             }, 800],
             [function() { checkStack("") }, 0],
+        ],
+        // A chat's notification goes when it is closed, either way, with what it held.
+        notificationObjectsGo: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("first") }, 50],
+            [function() {
+                root.kept = window.notifications[chat]
+                check("its object", root.kept.own, true)
+                root.kept.closed(1)
+                check("out of the list", window.notifications[chat], undefined)
+            }, 50],
+            [function() {
+                check("destroyed when dismissed", root.kept, null)
+                incoming("second")
+            }, 50],
+            [function() {
+                root.kept = window.notifications[chat]
+                window.clearNotification(chat)
+                check("out of the list too", window.notifications[chat], undefined)
+            }, 50],
+            [function() { check("destroyed when cleared", root.kept, null) }, 0],
+        ],
+        // One taken over after a restart: replaced once by one of ours, at the same place.
+        notificationTakenOver: [
+            [function() { ready(false) }, 100],
+            [function() {
+                root.kept = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { replacesId: 42; itemCount: 3 }", root)
+                window.notifications[chat] = root.kept
+                incoming("first")
+            }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                check("one of ours", n.own, true)
+                check("the chat", n.identity, chat)
+                check("counted on", n.itemCount, 4)
+                root.kept = n
+                incoming("second")
+            }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                check("still that one", n === root.kept, true)
+                check("counted on", n.itemCount, 5)
+            }, 0],
         ],
         // A failure of a running core with the lock up: no PIN page for a dead core.
         failsWhileLocked: [

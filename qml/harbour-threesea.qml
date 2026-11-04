@@ -83,16 +83,8 @@ ApplicationWindow {
                     : qsTrId("threesea-la-locked-notification-body")
             var n = notifications["locked"]
             if (n && n.body === body) return
-            if (!n) {
-                n = privateNotificationComponent.createObject(window)
-                //% "Threesea is locked"
-                n.summary = qsTrId("threesea-la-locked-notification")
-                n.previewSummary = n.summary
-                notifications["locked"] = n
-            }
-            n.body = body
-            n.previewBody = body
-            n.publish()
+            //% "Threesea is locked"
+            plainNotification("locked", qsTrId("threesea-la-locked-notification"), body)
         }
     }
 
@@ -100,15 +92,10 @@ ApplicationWindow {
     // there is no other way to find out.
     function licenseNotification() {
         if (Qt.application.state === Qt.ApplicationActive || notifications["license"]) return
-        var n = privateNotificationComponent.createObject(window)
         //% "Threesea is offline"
-        n.summary = qsTrId("threesea-la-license-notification")
-        //% "Threema no longer accepts this license key. Open Threesea to check it."
-        n.body = qsTrId("threesea-la-license-notification-body")
-        n.previewSummary = n.summary
-        n.previewBody = n.body
-        n.publish()
-        notifications["license"] = n
+        plainNotification("license", qsTrId("threesea-la-license-notification"),
+                          //% "Threema no longer accepts this license key. Open Threesea to check it."
+                          qsTrId("threesea-la-license-notification-body"))
     }
 
     function lockChanged(status) {
@@ -618,7 +605,7 @@ ApplicationWindow {
             "path": "/",
             "iface": "org.threesea.harbourthreesea",
             "method": method,
-            "arguments": token ? [identity, token] : [identity]
+            "arguments": token ? [identity, token] : identity ? [identity] : []
         }
         if (type) action.type = type
         return action
@@ -628,6 +615,8 @@ ApplicationWindow {
         id: notificationComponent
         Notification {
             id: chatNotification
+            // Made by us, unlike one taken over after a restart.
+            readonly property bool own: true
             property string identity
             // A new token for every new notification; one taken over after a restart keeps its
             // chat's token, which lipstick still holds (bridge/dbusinterface.h).
@@ -635,7 +624,10 @@ ApplicationWindow {
             property string token
             // Once both are set (a binding would run before them and renew too early).
             Component.onCompleted: token = dbus.actionToken(identity, renewToken)
-            onClosed: window.notificationClosed(identity, chatNotification)
+            onClosed: {
+                window.notificationClosed(identity, chatNotification)
+                chatNotification.destroy()
+            }
             appName: "Threesea"
             appIcon: "harbour-threesea"
             // Lipstick delivers actions via D-Bus only (bridge/dbusinterface.cpp).
@@ -649,22 +641,37 @@ ApplicationWindow {
         }
     }
 
-    // Private chats: no Reply or Mark as read (they would need the chat); tap opens the app.
+    // Private chats and what isn't about a chat: no Reply or Mark as read, tap opens the app.
     Component {
-        id: privateNotificationComponent
+        id: plainNotificationComponent
         Notification {
+            id: plain
+            readonly property bool own: true
+            // Under this it is in `notifications`.
+            property string key
+            onClosed: {
+                window.notificationClosed(key, plain)
+                plain.destroy()
+            }
             appName: "Threesea"
             appIcon: "harbour-threesea"
-            remoteActions: [{
-                "name": "default",
-                "displayName": "",
-                "service": "org.threesea.harbour-threesea",
-                "path": "/",
-                "iface": "org.threesea.harbourthreesea",
-                "method": "activate",
-                "arguments": []
-            }]
+            remoteActions: [window.dbusAction("default", "", "activate")]
         }
+    }
+
+    // The plain notification under this key, new or updated, on the screen.
+    function plainNotification(key, summary, body) {
+        var n = notifications[key]
+        if (!n) {
+            n = plainNotificationComponent.createObject(window, { key: key })
+            notifications[key] = n
+        }
+        n.summary = summary
+        n.body = body
+        n.previewSummary = summary
+        n.previewBody = body
+        n.publish()
+        return n
     }
 
     // The chat server saw this Threema ID log in with another device's cookie (Android's
@@ -807,9 +814,12 @@ ApplicationWindow {
             n = notificationComponent.createObject(window, { identity: identity })
             notifications[identity] = n
             n.itemCount = 0
-        } else if (!n.identity) {
-            // Taken over after a restart: it needs our actions again.
-            n.remoteActions = notificationComponent.createObject(window, { identity: identity, renewToken: false }).remoteActions
+        } else if (n.own !== true) {
+            // Taken over after a restart: it needs our actions again, so one of ours takes its
+            // place on the screen.
+            n = notificationComponent.createObject(window, { identity: identity, renewToken: false,
+                                                             replacesId: n.replacesId, itemCount: n.itemCount })
+            notifications[identity] = n
         }
         n.itemCount = n.itemCount + 1
         var text = backend.notificationPreview
@@ -824,7 +834,7 @@ ApplicationWindow {
     function notifyPrivate(message) {
         var n = notifications["private"]
         if (!n) {
-            n = privateNotificationComponent.createObject(window)
+            n = plainNotificationComponent.createObject(window, { key: "private" })
             notifications["private"] = n
             n.itemCount = 0
         }
@@ -875,6 +885,8 @@ ApplicationWindow {
             n.close()
             delete notifications[identity]
             dbus.forgetToken(identity)
+            // A taken-over one belongs to the JavaScript engine, which collects it from here.
+            if (n.own === true) n.destroy()
         }
     }
 
@@ -931,15 +943,10 @@ ApplicationWindow {
             window.clearNotification(action.identity)
         })
         if (backend.state === "error" && NotificationActions.drop()) {
-            var n = privateNotificationComponent.createObject(window)
             //% "Your reply was not sent"
-            n.summary = qsTrId("threesea-la-reply-not-sent")
-            //% "Threesea could not start. Open it to see why."
-            n.body = qsTrId("threesea-la-reply-not-sent-body")
-            n.previewSummary = n.summary
-            n.previewBody = n.body
-            n.publish()
-            notifications["replyNotSent"] = n
+            plainNotification("replyNotSent", qsTrId("threesea-la-reply-not-sent"),
+                              //% "Threesea could not start. Open it to see why."
+                              qsTrId("threesea-la-reply-not-sent-body"))
         }
     }
 
