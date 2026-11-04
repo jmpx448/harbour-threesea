@@ -536,15 +536,20 @@ impl Store {
                 "SELECT key, blob_id, thumbnail_blob_id FROM files WHERE message = ?1",
                 [message],
                 |row| {
-                    let key: Vec<u8> = row.get(0)?;
-                    Ok((key, row.get(1)?, row.get(2)?))
+                    // Read in place, so no copy of the key stays behind in freed memory.
+                    let mut key = Zeroizing::new([0; 32]);
+                    let usable = row.get_ref(0)?.as_blob().ok().and_then(|blob| {
+                        let source = <&[u8; 32]>::try_from(blob).ok()?;
+                        key.copy_from_slice(source);
+                        Some(())
+                    });
+                    Ok((usable.map(|()| key), row.get(1)?, row.get(2)?))
                 },
             )
             .optional()?
             .and_then(|(key, file, thumbnail)| {
-                let key: [u8; 32] = key.try_into().ok()?;
                 Some(FileKeys {
-                    key: Zeroizing::new(key),
+                    key: key?,
                     blob_id: blob_id(file),
                     thumbnail_blob_id: blob_id(thumbnail),
                 })
@@ -638,6 +643,15 @@ mod tests {
         assert_eq!(*back.key, [5; 32]);
         assert_eq!(back.blob_id, Some(BlobId([1; 16])));
         assert_eq!(back.thumbnail_blob_id, None);
+        // A key of the wrong size is no key.
+        store
+            .conn
+            .execute(
+                "UPDATE files SET key = x'0505' WHERE message = ?1",
+                [message.id],
+            )
+            .unwrap();
+        assert!(store.file_keys(message.id).unwrap().is_none());
         store.remove_message(message.id).unwrap();
         assert!(store.file_keys(message.id).unwrap().is_none());
     }

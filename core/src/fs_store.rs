@@ -14,7 +14,6 @@ use libthreema::{
     model::provider::ProviderError,
 };
 use rusqlite::{OptionalExtension as _, Row, params};
-use zeroize::Zeroize as _;
 
 use crate::{
     providers::{CoreEvent, EventSink},
@@ -46,13 +45,18 @@ fn bad(column: usize) -> rusqlite::Error {
     rusqlite::Error::InvalidColumnType(column, "fs session".into(), rusqlite::types::Type::Blob)
 }
 
+/// Read in place: no heap copy of the key to wipe or to forget.
 fn key32(row: &Row<'_>, column: usize) -> rusqlite::Result<Option<[u8; 32]>> {
-    let Some(mut bytes) = row.get::<_, Option<Vec<u8>>>(column)? else {
+    let Some(bytes) = row
+        .get_ref(column)?
+        .as_blob_or_null()
+        .map_err(|_| bad(column))?
+    else {
         return Ok(None);
     };
-    let key = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| bad(column));
-    bytes.zeroize();
-    key.map(Some)
+    <[u8; 32]>::try_from(bytes)
+        .map(Some)
+        .map_err(|_| bad(column))
 }
 
 fn ratchet(row: &Row<'_>, key_column: usize) -> rusqlite::Result<Option<Ratchet>> {
@@ -61,6 +65,12 @@ fn ratchet(row: &Row<'_>, key_column: usize) -> rusqlite::Result<Option<Ratchet>
     };
     let counter = row.get::<_, i64>(key_column + 1)?.cast_unsigned();
     Ok(Some(Ratchet { counter, chain_key }))
+}
+
+fn ratchet_columns(ratchet: Option<&Ratchet>) -> (Option<&[u8]>, Option<i64>) {
+    ratchet
+        .map(|ratchet| (&ratchet.chain_key[..], ratchet.counter.cast_signed()))
+        .unzip()
 }
 
 fn from_row(row: &Row<'_>, my_identity: ThreemaId) -> rusqlite::Result<Session> {
@@ -151,15 +161,11 @@ impl FsSessionStore for StoreFs {
     }
 
     fn store(&mut self, session: &Session) -> Result<(), ProviderError> {
-        let ratchet = |r: &Option<Ratchet>| {
-            r.as_ref()
-                .map(|r| (r.chain_key.to_vec(), r.counter.cast_signed()))
-                .unzip()
-        };
-        let (my_2dh_key, my_2dh_counter) = ratchet(&session.my_ratchet_2dh);
-        let (my_4dh_key, my_4dh_counter) = ratchet(&session.my_ratchet_4dh);
-        let (peer_2dh_key, peer_2dh_counter) = ratchet(&session.peer_ratchet_2dh);
-        let (peer_4dh_key, peer_4dh_counter) = ratchet(&session.peer_ratchet_4dh);
+        // Keys are bound by reference: a copy would stay in freed memory after they ratcheted on.
+        let (my_2dh_key, my_2dh_counter) = ratchet_columns(session.my_ratchet_2dh.as_ref());
+        let (my_4dh_key, my_4dh_counter) = ratchet_columns(session.my_ratchet_4dh.as_ref());
+        let (peer_2dh_key, peer_2dh_counter) = ratchet_columns(session.peer_ratchet_2dh.as_ref());
+        let (peer_4dh_key, peer_4dh_counter) = ratchet_columns(session.peer_ratchet_4dh.as_ref());
         let result = self.store.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO fs_sessions ({COLUMNS})
@@ -168,7 +174,10 @@ impl FsSessionStore for StoreFs {
             params![
                 session.peer_identity.to_string(),
                 &session.id.0[..],
-                session.my_ephemeral_private_key.map(|key| key.to_vec()),
+                session
+                    .my_ephemeral_private_key
+                    .as_ref()
+                    .map(|key| &key[..]),
                 &session.my_ephemeral_public_key[..],
                 session.versions.map(|v| v.local),
                 session.versions.map(|v| v.remote),
@@ -461,6 +470,53 @@ mod tests {
             }
             (texts, replies)
         }
+    }
+
+    #[test]
+    fn session_keys_survive_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let me: ThreemaId = "ABCD1234".parse().unwrap();
+        let peer: ThreemaId = "EFGH5678".parse().unwrap();
+        let mut fs = StoreFs {
+            store: Rc::clone(&store),
+            my_identity: me,
+            events: EventSink::default(),
+        };
+        let id = SessionId([7; 16]);
+        let session = Session {
+            id,
+            my_identity: me,
+            peer_identity: peer,
+            my_ephemeral_private_key: Some([1; 32]),
+            my_ephemeral_public_key: [2; 32],
+            versions: None,
+            last_outgoing_message_at: 5,
+            my_ratchet_2dh: Some(Ratchet {
+                counter: 3,
+                chain_key: [4; 32],
+            }),
+            my_ratchet_4dh: None,
+            peer_ratchet_2dh: None,
+            peer_ratchet_4dh: Some(Ratchet {
+                counter: 6,
+                chain_key: [8; 32],
+            }),
+        };
+        fs.store(&session).unwrap();
+        let back = fs.get(peer, id).unwrap().unwrap();
+        assert_eq!(back.my_ephemeral_private_key, Some([1; 32]));
+        assert_eq!(back.my_ephemeral_public_key, [2; 32]);
+        assert_eq!(back.my_ratchet_2dh.as_ref().unwrap().chain_key, [4; 32]);
+        assert_eq!(back.my_ratchet_2dh.as_ref().unwrap().counter, 3);
+        assert!(back.my_ratchet_4dh.is_none());
+        assert_eq!(back.peer_ratchet_4dh.as_ref().unwrap().chain_key, [8; 32]);
+        // A key of the wrong size is an error, not a short key.
+        store
+            .conn
+            .execute("UPDATE fs_sessions SET my_2dh_key = x'0404'", [])
+            .unwrap();
+        assert!(fs.get(peer, id).is_err());
     }
 
     #[test]
