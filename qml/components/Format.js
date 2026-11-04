@@ -113,11 +113,18 @@ function status(code) {
         //% "Forward secrecy is active for this chat."
         return qsTrId("threesea-la-status-fs-established")
     case "fsReset":
+        //% "Forward secrecy was reset. This can happen when the contact changes devices or reinstalls the app."
+        return qsTrId("threesea-la-status-fs-session-reset")
+    case "fsMessageRejected":
         //% "Forward secrecy was reset. Affected messages are sent again."
-        return qsTrId("threesea-la-status-fs-reset")
+        return qsTrId("threesea-la-status-fs-message-rejected")
+    case "fsUnavailable":
+        //% "Forward secrecy is off in this chat because this contact's app is not using it at the moment."
+        return qsTrId("threesea-la-status-fs-unavailable")
     case "fsTerminated":
-        //% "Forward secrecy for this chat was ended by the contact."
-        return qsTrId("threesea-la-status-fs-terminated")
+        // Only in older chats: new ones say why (fsReset, fsUnavailable).
+        //% "The forward secrecy session with this contact ended."
+        return qsTrId("threesea-la-status-fs-session-ended")
     default:
         return code
     }

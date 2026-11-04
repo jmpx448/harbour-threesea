@@ -487,6 +487,7 @@ impl App {
             server_group: ChatServerGroup::try_from(identity.server_group.as_str()).ok()?,
             device_cookie: self.device_cookie().ok()?,
             client_info: self.version.client_info(),
+            fs_mask_checks: connection::FsMaskChecks::default(),
         };
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         let (from_tx, from_rx) = mpsc::unbounded_channel();

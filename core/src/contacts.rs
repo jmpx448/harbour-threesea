@@ -177,6 +177,52 @@ pub enum Lookup {
     Refused,
 }
 
+/// What a directory lookup says about a stored contact: its feature mask and activity state. A
+/// stored key is never replaced here. Returns whether something changed, and so has to be stored.
+pub fn apply_lookup(config: &Config, contact: &mut Contact, result: Lookup) -> bool {
+    let state = |c: &Contact| {
+        (
+            c.feature_mask.0,
+            c.activity_state,
+            c.verification_level,
+            c.nickname.clone(),
+        )
+    };
+    let before = state(contact);
+    match result {
+        Lookup::Found(fresh) => {
+            contact.feature_mask = fresh.feature_mask;
+            contact.activity_state = fresh.activity_state;
+        }
+        Lookup::Invalid => contact.activity_state = pc::ActivityState::Invalid,
+        // A wrong answer changes nothing.
+        Lookup::Refused => return false,
+    }
+    // Added before predefined contacts were pinned.
+    let _ = pin_predefined(config, contact);
+    before != state(contact)
+}
+
+impl Store {
+    /// What a directory lookup found for `identity`, on a fresh read of the contact: a lookup takes
+    /// a while, and a rename or a deletion meanwhile stands. Returns whether something changed.
+    pub fn store_lookup(
+        &self,
+        config: &Config,
+        identity: &str,
+        result: Lookup,
+    ) -> Result<bool, StoreError> {
+        let Some(mut contact) = self.contact(identity)? else {
+            return Ok(false);
+        };
+        let changed = apply_lookup(config, &mut contact, result);
+        if changed {
+            self.upsert_contact(&contact)?;
+        }
+        Ok(changed)
+    }
+}
+
 /// Threema's own contacts have a known key ([`Config::predefined_contacts`]): another one is refused
 /// (`false`), the right one counts as fully verified and brings the known nickname, like
 /// libthreema's lookup and Android's `requireValidContact`. Anyone else stays as they are.
@@ -553,6 +599,54 @@ mod tests {
             state: 0,
             feature_mask: 255,
         }
+    }
+
+    #[test]
+    fn a_lookup_updates_the_mask_and_state_and_nothing_else_of_a_stored_contact() {
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let mut stored = contact_init(&entry("ABCD1234")).unwrap();
+        let key = stored.public_key;
+
+        let mut dropped = entry("ABCD1234");
+        dropped.feature_mask = 0;
+        dropped.public_key = BASE64.encode(&[8; 32]);
+        let fresh = Box::new(contact_init(&dropped).unwrap());
+        assert!(apply_lookup(
+            &config,
+            &mut stored,
+            Lookup::Found(fresh.clone())
+        ));
+        assert_eq!(stored.feature_mask.0, 0);
+        assert!(stored.public_key == key, "a stored key is never replaced");
+        assert!(!apply_lookup(&config, &mut stored, Lookup::Found(fresh)));
+
+        assert!(!apply_lookup(&config, &mut stored, Lookup::Refused));
+        assert_eq!(stored.activity_state, pc::ActivityState::Active);
+        assert!(apply_lookup(&config, &mut stored, Lookup::Invalid));
+        assert_eq!(stored.activity_state, pc::ActivityState::Invalid);
+    }
+
+    #[test]
+    fn a_lookup_stands_only_for_what_it_found_on_the_contact_as_it_is_now() {
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let mut dropped = entry("ABCD1234");
+        dropped.feature_mask = 0;
+        let found = || Lookup::Found(Box::new(contact_init(&dropped).unwrap()));
+
+        // Deleted while the lookup was on the way: it doesn't come back.
+        assert!(!store.store_lookup(&config, "ABCD1234", found()).unwrap());
+        assert!(store.contact("ABCD1234").unwrap().is_none());
+
+        // Renamed meanwhile: the name stands.
+        let mut contact = contact_init(&entry("ABCD1234")).unwrap();
+        contact.first_name = Some("Anna".into());
+        store.upsert_contact(&contact).unwrap();
+        assert!(store.store_lookup(&config, "ABCD1234", found()).unwrap());
+        let stored = store.contact("ABCD1234").unwrap().unwrap();
+        assert_eq!(stored.first_name.as_deref(), Some("Anna"));
+        assert_eq!(stored.feature_mask.0, 0);
     }
 
     #[test]

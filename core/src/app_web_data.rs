@@ -141,8 +141,20 @@ fn status_text(code: &str) -> String {
         "groupMemberRemoved" => format!("{argument} was removed."),
         "groupMemberLeft" => format!("{argument} left the group."),
         "fsEstablished" => "Forward secrecy is active for this chat.".into(),
-        "fsReset" => "Forward secrecy was reset. Affected messages are sent again.".into(),
-        "fsTerminated" => "Forward secrecy for this chat was ended by the contact.".into(),
+        "fsReset" => {
+            "Forward secrecy was reset. This can happen when the contact changes devices or \
+             reinstalls the app."
+                .into()
+        }
+        "fsMessageRejected" => {
+            "Forward secrecy was reset. Affected messages are sent again.".into()
+        }
+        "fsUnavailable" => {
+            "Forward secrecy is off in this chat because this contact's app is not using it at the \
+             moment."
+                .into()
+        }
+        "fsTerminated" => "The forward secrecy session with this contact ended.".into(),
         "call" => call_text(argument),
         _ => code.to_owned(),
     }

@@ -761,34 +761,11 @@ impl App {
         let found = contacts::lookup(&self.https, &self.config, &ids).await?;
         let mut changed = false;
         for (id, result) in found {
-            let Some(mut contact) = stored
-                .iter()
-                .find(|c| c.identity.to_string() == id)
-                .cloned()
-            else {
+            // Read again: the lookup took a while, and a rename or a deletion meanwhile stands.
+            let Some(mut contact) = self.store.contact(&id)? else {
                 continue;
             };
-            let state = |c: &libthreema::model::contact::ContactInit| {
-                (
-                    c.feature_mask.0,
-                    c.activity_state,
-                    c.verification_level,
-                    c.nickname.clone(),
-                )
-            };
-            let before = state(&contact);
-            match result {
-                Lookup::Found(fresh) => {
-                    contact.feature_mask = fresh.feature_mask;
-                    contact.activity_state = fresh.activity_state;
-                }
-                Lookup::Invalid => contact.activity_state = pc::ActivityState::Invalid,
-                // A wrong answer changes nothing.
-                Lookup::Refused => continue,
-            }
-            // Added before predefined contacts were pinned; a stored key is never replaced here.
-            let _ = contacts::pin_predefined(&self.config, &mut contact);
-            if before != state(&contact) {
+            if contacts::apply_lookup(&self.config, &mut contact, result) {
                 self.store.upsert_contact(&contact)?;
                 changed = true;
             }

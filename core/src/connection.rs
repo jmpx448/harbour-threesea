@@ -89,6 +89,14 @@ const ECHO_LAST_LOOK: Duration = Duration::from_secs(1);
 const NOTIFY_GRACE: Duration = Duration::from_secs(8);
 /// Typing indicators older than this when the connection gets to them are not sent.
 const TYPING_MAX_AGE: Duration = Duration::from_secs(5);
+/// How often one contact's feature mask is looked up because of what it sent: anyone can send
+/// any number of Rejects, and each of a burst would ask the directory the same.
+const FS_MASK_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// The same for an Init against a stored "no". The "no" from a moment ago may be from a linking
+/// on the peer's side that has been rolled back since, which is just when an Init arrives.
+const FS_MASK_INIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// The lookup holds up the incoming messages, like looking up an unknown sender.
+const FS_MASK_LOOKUP_LIMIT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a transaction may take to begin, other devices' transactions included.
 const TRANSACTION_BEGIN_LIMIT: Duration = Duration::from_secs(90);
@@ -284,6 +292,44 @@ pub struct ConnectionSetup {
     pub device_cookie: DeviceCookie,
     /// Who we are to the chat server and the mediator.
     pub client_info: ClientInfo,
+    /// Feature mask lookups for forward secrecy's sake; outlive a connection.
+    pub fs_mask_checks: FsMaskChecks,
+}
+
+/// When a contact's feature mask was last looked up for forward secrecy's sake, and whether we can
+/// go by what that found.
+#[derive(Default)]
+pub struct FsMaskChecks(RefCell<std::collections::HashMap<String, (Instant, bool)>>);
+
+impl FsMaskChecks {
+    /// Whether the last lookup answered, if there was one within `interval`.
+    fn recent(&self, peer: &str, now: Instant, interval: Duration) -> Option<bool> {
+        let checks = self.0.borrow();
+        let (at, answered) = checks.get(peer)?;
+        (now.saturating_duration_since(*at) < interval).then_some(*answered)
+    }
+
+    fn record(&self, peer: &str, now: Instant, answered: bool) {
+        let _ = self.0.borrow_mut().insert(peer.to_owned(), (now, answered));
+    }
+
+    /// The last answer may be out of date: no going by it, and no new lookup before its time.
+    fn distrust(&self, peer: &str) {
+        if let Some((_, answered)) = self.0.borrow_mut().get_mut(peer) {
+            *answered = false;
+        }
+    }
+}
+
+/// What a look at a contact's feature mask came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskCheck {
+    /// The directory has just answered.
+    Fresh,
+    /// It answered a moment ago; asked again, it would too soon.
+    Recent,
+    /// No answer we can go by: the stored mask may be stale.
+    Unknown,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -363,6 +409,62 @@ fn d2m_name(payload: &D2mIncoming) -> &'static str {
 
 fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Protocol(error.to_string())
+}
+
+/// What became of a rejected message.
+#[derive(Default)]
+struct Requeued {
+    /// Something waits in the store: send it.
+    send: bool,
+    /// The rejected message goes out again.
+    resending: bool,
+    /// The messages put back in the queue, for the UI.
+    changed: Vec<Message>,
+}
+
+/// Put a rejected message back in the queue, if it is ours to send again (only the store, no
+/// sending): a group message of ours, or the 1:1 message, which like on Android needs a new session.
+fn requeue_rejected(
+    store: &crate::store::Store,
+    peer: &str,
+    message_id: u64,
+) -> Result<Requeued, crate::store::StoreError> {
+    let in_group = store.requeue_group_receiver(peer, message_id)?;
+    let changed = store.reset_outgoing(peer, message_id)?;
+    let resending = in_group || !changed.is_empty();
+    Ok(Requeued {
+        send: resending,
+        resending,
+        changed,
+    })
+}
+
+/// Whether a contact's feature mask says it supports forward secrecy.
+fn has_fs_support(contact: &libthreema::model::contact::ContactInit) -> bool {
+    contact.feature_mask.0 & FeatureMask::FORWARD_SECURITY_SUPPORT != 0
+}
+
+/// The status line for a forward secrecy event, if it gets one. Lines only appear for sessions
+/// that existed, and say what happened as far as we know it: a contact that ended a session has
+/// not necessarily turned anything off, that is for the feature mask to say, and "sent again"
+/// is only said of messages that really are.
+fn fs_status_line(status: &FsStatus, supports_fs: bool, resending: bool) -> Option<&'static str> {
+    match status {
+        FsStatus::Established => supports_fs.then_some("fsEstablished"),
+        FsStatus::Reset => Some("fsReset"),
+        FsStatus::MessageRejected {
+            session_known: false,
+            ..
+        }
+        | FsStatus::Terminated {
+            session_known: false,
+        } => None,
+        FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } if !supports_fs => {
+            Some("fsUnavailable")
+        }
+        FsStatus::MessageRejected { .. } if resending => Some("fsMessageRejected"),
+        FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } => Some("fsReset"),
+    }
 }
 
 /// The wait before the next attempt, given the wait so far and how long the session lasted. A
@@ -1310,18 +1412,37 @@ impl<'a> Session<'a> {
 
         // Forward security, if the contact supports it.
         let mut envelope = None;
-        // An existing session proves support even if our copy of the feature mask is stale (the
-        // peer may have just enabled FS, e.g. by unlinking a multi-device client).
-        let has_session = self
-            .fs_store()
-            .get_best(receiver_identity)
-            .map_err(protocol_error)?
-            .is_some();
         // Never with multi-device (SE-199): the other devices couldn't follow the ratchet.
         // Nor when the user switched forward security off (Settings → Advanced).
-        let use_fs = !self.transport.is_mediator()
-            && !self.fs_disabled
-            && (has_session || contact.feature_mask.0 & FeatureMask::FORWARD_SECURITY_SUPPORT != 0);
+        let fs_on = !self.transport.is_mediator() && !self.fs_disabled;
+        // A session against a stored "no": the mask is stale, or the session is left over. The
+        // directory decides, and without its answer the session stays.
+        let mut contact = contact;
+        if fs_on && !has_fs_support(&contact) && self.has_fs_session(receiver_identity) {
+            let check = self
+                .check_feature_mask(receiver, FS_MASK_CHECK_INTERVAL)
+                .await?;
+            let Some(fresh) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
+                return Ok(None);
+            };
+            contact = fresh;
+            if check != MaskCheck::Unknown && !has_fs_support(&contact) {
+                // Nothing here may keep this message from going out without forward secrecy.
+                match self.end_fs_sessions(receiver) {
+                    Ok(controls) => {
+                        if !controls.is_empty() {
+                            self.show_fs_unavailable(receiver)?;
+                        }
+                        payloads.extend(controls);
+                    }
+                    Err(error) => tracing::warn!(%error, "cannot end forward secrecy sessions"),
+                }
+            }
+        }
+        // The feature mask alone decides, like Android: a session is no proof, since a peer that
+        // dropped forward security answers everything in it with a Terminate or nothing at all.
+        // That the mask can be stale the other way round is seen to when an Init arrives.
+        let use_fs = fs_on && has_fs_support(&contact);
         // log-ok: the contact's feature mask only
         tracing::debug!(
             feature_mask = contact.feature_mask.0,
@@ -1515,7 +1636,10 @@ impl<'a> Session<'a> {
                 Ok(None)
             }
             CoreEvent::FsStatus { peer, status } => {
-                let store = &self.setup.store;
+                let store = Rc::clone(&self.setup.store);
+                // In the store before anything that can take a while or fail: the Reject has been
+                // acknowledged, and a message left "sent" now would be lost without a trace.
+                let mut requeued = Requeued::default();
                 if let FsStatus::MessageRejected { message_id, .. } = status {
                     // Once per message and connection: a peer that rejects the re-send too
                     // would otherwise bounce the message back and forth without end — the
@@ -1532,43 +1656,26 @@ impl<'a> Session<'a> {
                             self.emit(CoreEvent::MessagesChanged(vec![failed]));
                         }
                     } else {
-                        // A group message: the peer gets it again.
-                        if store
-                            .requeue_group_receiver(&peer, message_id)
-                            .map_err(protocol_error)?
-                        {
-                            self.send_pending().await?;
-                        }
-                        // Like Android: the message needs to be sent again (new session).
-                        let reset = store
-                            .reset_outgoing(&peer, message_id)
-                            .map_err(protocol_error)?;
-                        if !reset.is_empty() {
-                            self.emit(CoreEvent::MessagesChanged(reset));
-                            self.send_pending().await?;
+                        requeued =
+                            requeue_rejected(&store, &peer, message_id).map_err(protocol_error)?;
+                        if !requeued.changed.is_empty() {
+                            self.emit(CoreEvent::MessagesChanged(core::mem::take(
+                                &mut requeued.changed,
+                            )));
                         }
                     }
                 }
-                if !crate::providers::shows_fs_status(store, &self.setup.config, &peer)
+                let supports_fs = self.fs_support_after(&peer, &status).await?;
+                if requeued.send {
+                    self.send_pending().await?;
+                }
+                if !crate::providers::shows_fs_status(&store, &self.setup.config, &peer)
                     .map_err(protocol_error)?
                 {
                     return Ok(None);
                 }
-                // Only for sessions that existed: every message in flight on a session the
-                // peer lost is rejected, and a chat would get a line for each of them.
-                let code = match status {
-                    FsStatus::Established => "fsEstablished",
-                    FsStatus::Reset
-                    | FsStatus::MessageRejected {
-                        session_known: true,
-                        ..
-                    } => "fsReset",
-                    FsStatus::Terminated {
-                        session_known: true,
-                    } => "fsTerminated",
-                    FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } => {
-                        return Ok(None);
-                    }
+                let Some(code) = fs_status_line(&status, supports_fs, requeued.resending) else {
+                    return Ok(None);
                 };
                 Ok(store
                     .insert_status(&peer, code)
@@ -1584,6 +1691,176 @@ impl<'a> Session<'a> {
             }
             other => Ok(Some(other)),
         }
+    }
+
+    /// Look up `peer`'s feature mask, unless that was done within `interval`. Without an answer
+    /// the stored mask stays.
+    async fn check_feature_mask(
+        &self,
+        peer: &str,
+        interval: Duration,
+    ) -> Result<MaskCheck, ConnectionError> {
+        let now = Instant::now();
+        let checks = &self.setup.fs_mask_checks;
+        if let Some(answered) = checks.recent(peer, now, interval) {
+            return Ok(if answered {
+                MaskCheck::Recent
+            } else {
+                MaskCheck::Unknown
+            });
+        }
+        let store = &self.setup.store;
+        if store.contact(peer).map_err(protocol_error)?.is_none() {
+            return Ok(MaskCheck::Unknown);
+        }
+        let identities = [peer.to_owned()];
+        let lookup = crate::contacts::lookup(&self.setup.https, &self.setup.config, &identities);
+        let found = match tokio::time::timeout(FS_MASK_LOOKUP_LIMIT, lookup).await {
+            Ok(Ok(found)) => found,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "feature mask lookup failed");
+                checks.record(peer, now, false);
+                return Ok(MaskCheck::Unknown);
+            }
+            Err(_) => {
+                tracing::warn!("feature mask lookup timed out");
+                checks.record(peer, now, false);
+                return Ok(MaskCheck::Unknown);
+            }
+        };
+        let mut changed = false;
+        for (_, result) in found {
+            changed |= store
+                .store_lookup(&self.setup.config, peer, result)
+                .map_err(protocol_error)?;
+        }
+        if changed {
+            self.emit(CoreEvent::ContactsChanged);
+        }
+        checks.record(peer, now, true);
+        Ok(MaskCheck::Fresh)
+    }
+
+    /// Whether we have a session with `identity`. Not being able to tell isn't worth more than a
+    /// log line here: it only decides whether to look closer at a contact without forward secrecy.
+    fn has_fs_session(&self, identity: libthreema::common::ThreemaId) -> bool {
+        match self.fs_store().get_best(identity) {
+            Ok(session) => session.is_some(),
+            Err(error) => {
+                tracing::warn!(%error, "cannot read forward secrecy sessions");
+                false
+            }
+        }
+    }
+
+    /// What `status` says about the peer's forward secrecy support, like Android's
+    /// `ForwardSecurityMessageProcessor`: a peer that ended a session or rejected a message may
+    /// have dropped it (linked a device), so its mask is looked up at once; and if the directory
+    /// says no, what is left of the sessions ends too. An Init from someone whose stored mask says
+    /// no means the mask is stale, or else the Init is: only a lookup made now can tell.
+    async fn fs_support_after(
+        &mut self,
+        peer: &str,
+        status: &FsStatus,
+    ) -> Result<bool, ConnectionError> {
+        let stored = |session: &Self| -> Result<bool, ConnectionError> {
+            let contact = session.setup.store.contact(peer).map_err(protocol_error)?;
+            // Without a contact there is nothing to go by and nobody to show a line to.
+            Ok(contact.is_none_or(|contact| has_fs_support(&contact)))
+        };
+        let ending = match status {
+            FsStatus::Reset => return stored(self),
+            FsStatus::Established => {
+                if stored(self)? {
+                    return Ok(true);
+                }
+                match self
+                    .check_feature_mask(peer, FS_MASK_INIT_CHECK_INTERVAL)
+                    .await?
+                {
+                    MaskCheck::Fresh => true,
+                    MaskCheck::Recent => {
+                        self.setup.fs_mask_checks.distrust(peer);
+                        false
+                    }
+                    MaskCheck::Unknown => false,
+                }
+            }
+            FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } => {
+                self.check_feature_mask(peer, FS_MASK_CHECK_INTERVAL)
+                    .await?
+                    != MaskCheck::Unknown
+            }
+        };
+        let supports_fs = stored(self)?;
+        if ending && !supports_fs {
+            for payload in self.end_fs_sessions(peer)? {
+                self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
+                    .await?;
+            }
+        }
+        Ok(supports_fs)
+    }
+
+    /// `peer` has no forward secrecy (any more): end the sessions we still have and tell it, so
+    /// that it refreshes what it knows about us too. What to send first, if anything.
+    fn end_fs_sessions(&self, peer: &str) -> Result<Vec<MessageWithMetadataBox>, ConnectionError> {
+        use libthreema::{common::ThreemaId, protobuf::csp_e2e_fs::terminate::Cause};
+        let Ok(identity) = peer.parse::<ThreemaId>() else {
+            return Ok(Vec::new());
+        };
+        if self
+            .fs_store()
+            .get_best(identity)
+            .map_err(protocol_error)?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        tracing::info!("contact has no forward secrecy; sessions ended");
+        fs_protocol::terminate_all_with_cause(
+            &mut self.fs_store(),
+            identity,
+            Cause::DisabledByRemote,
+        )
+        .map_err(protocol_error)?;
+        self.take_fs_controls(peer)
+    }
+
+    /// The line saying that this chat has no forward secrecy any more.
+    fn show_fs_unavailable(&self, peer: &str) -> Result<(), ConnectionError> {
+        let store = &self.setup.store;
+        if crate::providers::shows_fs_status(store, &self.setup.config, peer)
+            .map_err(protocol_error)?
+            && let Some(message) = store
+                .insert_status(peer, "fsUnavailable")
+                .map_err(protocol_error)?
+        {
+            self.emit(CoreEvent::MessageAdded {
+                message,
+                send_delivery_receipt: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// The control messages for `peer` waiting in the event queue, encoded, so that they go out
+    /// ahead of whatever is being sent now.
+    fn take_fs_controls(&self, peer: &str) -> Result<Vec<MessageWithMetadataBox>, ConnectionError> {
+        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
+        let mut payloads = Vec::new();
+        for event in events {
+            match event {
+                CoreEvent::FsControl {
+                    peer: receiver,
+                    envelope,
+                } if receiver == peer => {
+                    payloads.extend(self.encode_control(peer, &envelope)?);
+                }
+                other => self.events.borrow_mut().push(other),
+            }
+        }
+        Ok(payloads)
     }
 
     fn emit(&self, event: CoreEvent) {
@@ -2788,6 +3065,120 @@ fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
 }
 
 #[cfg(test)]
+mod fs_status_tests {
+    use super::*;
+
+    #[test]
+    fn a_mask_check_counts_for_its_interval_and_a_distrusted_one_gives_no_answer() {
+        let checks = FsMaskChecks::default();
+        let start = Instant::now();
+        let minute = Duration::from_secs(60);
+        assert_eq!(checks.recent("ABCD1234", start, minute), None);
+
+        checks.record("ABCD1234", start, true);
+        assert_eq!(checks.recent("ABCD1234", start, minute), Some(true));
+        assert_eq!(checks.recent("EFGH5678", start, minute), None);
+        let later = start + Duration::from_secs(30);
+        assert_eq!(checks.recent("ABCD1234", later, minute), Some(true));
+        // An Init looks sooner than others do.
+        assert_eq!(
+            checks.recent("ABCD1234", later, FS_MASK_INIT_CHECK_INTERVAL),
+            None
+        );
+
+        // An Init within its own interval: no going by that "no", and no extra lookup either.
+        checks.distrust("ABCD1234");
+        assert_eq!(checks.recent("ABCD1234", later, minute), Some(false));
+        // A failed or distrusted lookup is tried again after the interval.
+        let after = start + minute;
+        assert_eq!(checks.recent("ABCD1234", after, minute), None);
+    }
+
+    #[test]
+    fn a_rejected_message_is_back_in_the_queue_with_nothing_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO messages
+                     (conversation, message_id, outgoing, kind, body, created_at, updated_at, state)
+                 VALUES ('ABCD1234', 7, 1, 'text', 'hi', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        let requeued = requeue_rejected(&store, "ABCD1234", 7).unwrap();
+        assert!(requeued.send && requeued.resending);
+        assert_eq!(requeued.changed.len(), 1);
+        assert_eq!(store.pending_outgoing().unwrap().len(), 1);
+
+        // What isn't ours to send: nothing to do, and no claim that it goes out.
+        let requeued = requeue_rejected(&store, "ABCD1234", 8).unwrap();
+        assert!(!requeued.send && !requeued.resending && requeued.changed.is_empty());
+    }
+
+    fn rejected(session_known: bool) -> FsStatus {
+        FsStatus::MessageRejected {
+            message_id: 1,
+            group_identity: None,
+            session_known,
+        }
+    }
+
+    #[test]
+    fn lines_only_for_sessions_that_existed() {
+        assert_eq!(fs_status_line(&rejected(false), true, true), None);
+        assert_eq!(fs_status_line(&rejected(false), false, true), None);
+        let terminated = FsStatus::Terminated {
+            session_known: false,
+        };
+        assert_eq!(fs_status_line(&terminated, false, false), None);
+    }
+
+    #[test]
+    fn a_rejected_message_is_only_said_to_go_out_again_if_it_does() {
+        assert_eq!(
+            fs_status_line(&rejected(true), true, true),
+            Some("fsMessageRejected")
+        );
+        assert_eq!(
+            fs_status_line(&rejected(true), true, false),
+            Some("fsReset")
+        );
+    }
+
+    #[test]
+    fn the_feature_mask_says_why_a_session_ended() {
+        let terminated = FsStatus::Terminated {
+            session_known: true,
+        };
+        assert_eq!(fs_status_line(&terminated, true, false), Some("fsReset"));
+        assert_eq!(
+            fs_status_line(&terminated, false, false),
+            Some("fsUnavailable")
+        );
+        assert_eq!(
+            fs_status_line(&rejected(true), false, true),
+            Some("fsUnavailable")
+        );
+    }
+
+    #[test]
+    fn forward_secrecy_is_only_called_active_if_the_mask_agrees() {
+        assert_eq!(
+            fs_status_line(&FsStatus::Established, true, false),
+            Some("fsEstablished")
+        );
+        assert_eq!(fs_status_line(&FsStatus::Established, false, false), None);
+    }
+}
+
+#[cfg(test)]
 mod backoff_tests {
     use super::*;
 
@@ -3028,6 +3419,115 @@ mod sync_order_tests {
         (dir, app)
     }
 
+    /// A contact whose stored mask says no, with a forward secrecy session left, and what it takes
+    /// to talk to it: no lookup goes out as long as `fs_mask_checks` has an entry.
+    fn contact_without_fs_support(app: &App) -> (ConnectionSetup, libthreema::common::ThreemaId) {
+        let mut contact = crate::contacts::test_contact(CREATOR);
+        contact.feature_mask = libthreema::common::FeatureMask(0);
+        app.store.upsert_contact(&contact).unwrap();
+        let identity = app.store.identity().unwrap().unwrap();
+        let setup = ConnectionSetup {
+            store: Rc::clone(&app.store),
+            media: Arc::clone(&app.media),
+            https: app.https.clone(),
+            config: Arc::clone(&app.config),
+            identity: identity.threema_id.parse().unwrap(),
+            client_key: Zeroizing::new(*identity.client_key),
+            server_group: ChatServerGroup::try_from(identity.server_group.as_str()).unwrap(),
+            device_cookie: DeviceCookie([1; 16]),
+            client_info: app.version.client_info(),
+            fs_mask_checks: FsMaskChecks::default(),
+        };
+        let mut fs = StoreFs {
+            store: Rc::clone(&setup.store),
+            my_identity: setup.identity,
+            events: EventSink::default(),
+        };
+        fs_protocol::encapsulate(
+            &mut fs,
+            setup.identity,
+            &ClientKey::from(*setup.client_key),
+            contact.identity,
+            &contact.public_key,
+            0x01,
+            b"hello",
+            None,
+            1,
+        )
+        .unwrap();
+        (setup, contact.identity)
+    }
+
+    fn text() -> Outgoing {
+        Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_against_a_stored_no_ends_only_on_the_directorys_word() {
+        let (_dir, app) = app();
+        let (setup, peer) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let peers = || setup.store.fs_peers().unwrap().len();
+
+        // The lookup failed: the session stays, the message goes out plain.
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), false);
+        let sent = session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(peers(), 1);
+        assert!(session.fs_store().get_best(peer).unwrap().is_some());
+
+        // It answered, and the mask stands: a Terminate first, and the chat says so.
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), true);
+        let sent = session
+            .encode(CREATOR, 2, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(peers(), 0);
+        let newest: String = setup
+            .store
+            .conn
+            .query_row(
+                "SELECT body FROM messages WHERE conversation = ?1 ORDER BY id DESC LIMIT 1",
+                [CREATOR],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(newest, "fsUnavailable");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_init_does_not_go_by_the_no_from_a_moment_ago() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+
+        // The peer's linking got us a "no", was rolled back, and here is its Init.
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), true);
+        let event = CoreEvent::FsStatus {
+            peer: CREATOR.into(),
+            status: FsStatus::Established,
+        };
+        assert!(session.handle_fs_event(event).await.unwrap().is_none());
+        assert_eq!(setup.store.fs_peers().unwrap().len(), 1);
+
+        // Nor does sending, until a lookup has said.
+        let sent = session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(setup.store.fs_peers().unwrap().len(), 1);
+    }
+
     /// A session after its handshake, on a plain socket: every mediator step fails on it, so a
     /// reflection that is attempted shows as an error.
     async fn session<'a>(
@@ -3121,6 +3621,7 @@ mod sync_order_tests {
             server_group: ChatServerGroup::try_from(identity.server_group.as_str()).unwrap(),
             device_cookie: DeviceCookie([1; 16]),
             client_info: app.version.client_info(),
+            fs_mask_checks: FsMaskChecks::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut session = session(&setup, &tx).await;
