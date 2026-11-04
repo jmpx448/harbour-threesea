@@ -14,9 +14,12 @@ use libthreema::{
         config::{Config, ConfigEnvironment, Flavor},
         keys::ClientKey,
     },
-    csp_e2e::identity::create::{
-        CreateIdentityContext, CreateIdentityLoop, CreateIdentityResponse, CreateIdentityResult,
-        CreateIdentityTask, SerialLicense,
+    csp_e2e::{
+        CspE2eProtocolError,
+        identity::create::{
+            CreateIdentityContext, CreateIdentityLoop, CreateIdentityResponse,
+            CreateIdentityResult, CreateIdentityTask, SerialLicense,
+        },
     },
     id_backup::{IdentityBackupData, decrypt_identity_backup, encrypt_identity_backup},
 };
@@ -1220,6 +1223,22 @@ fn forget_false_refusal(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// What creating an ID says to the user. libthreema flattens the directory's own words into
+/// `ServerError` along with every other server problem, so its prefix is what tells them apart
+/// (a test keeps an eye on it). Only those words are for the user to read.
+fn create_identity_error(error: CspE2eProtocolError) -> ApiError {
+    const DIRECTORYS_WORDS: &str = "Custom (possibly localized) error from server: ";
+    match error {
+        CspE2eProtocolError::NetworkError(message) => ApiError::Network(message),
+        CspE2eProtocolError::RateLimitExceeded => ApiError::RateLimited,
+        CspE2eProtocolError::ServerError(message) => match message.strip_prefix(DIRECTORYS_WORDS) {
+            Some(words) => ApiError::Server(words.to_owned()),
+            None => ApiError::Internal(message),
+        },
+        other => ApiError::Internal(other.to_string()),
+    }
+}
+
 fn random_device_id() -> String {
     // UUID v4 formatting, like Android's `UUID.randomUUID()`.
     let mut b: [u8; 16] = rand::random();
@@ -2282,11 +2301,11 @@ impl App {
             client_key,
             server_group,
         } = loop {
-            match task.poll().map_err(|e| ApiError::Server(e.to_string()))? {
+            match task.poll().map_err(create_identity_error)? {
                 CreateIdentityLoop::Instruction(instruction) => {
                     let result = self.https.send(instruction.request).await;
                     task.response(CreateIdentityResponse { result })
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                        .map_err(create_identity_error)?;
                 }
                 CreateIdentityLoop::Done(result) => break result,
             }
@@ -2918,6 +2937,77 @@ mod tests {
                 assert_eq!(reply["ok"], true);
             })
             .await;
+    }
+
+    /// Runs libthreema's real task against these answers: what comes out of it is what the user
+    /// would read.
+    fn create_identity_answered(answers: Vec<libthreema::https::HttpsResult>) -> ApiError {
+        let (_dir, app) = app();
+        app.store
+            .set_setting(keys::LICENSE_KEY, "ABCDE-12345")
+            .unwrap();
+        let mut task = CreateIdentityTask::new(CreateIdentityContext {
+            client_info: app.version.client_info(),
+            config: Arc::clone(&app.config),
+            flavor: Flavor::Consumer,
+            serial_license: Some(app.license().unwrap()),
+        });
+        let mut answers = answers.into_iter();
+        loop {
+            match task.poll().map_err(create_identity_error) {
+                Ok(CreateIdentityLoop::Instruction(_)) => {
+                    let result = answers.next().expect("asked once too often");
+                    if let Err(error) = task
+                        .response(CreateIdentityResponse { result })
+                        .map_err(create_identity_error)
+                    {
+                        return error;
+                    }
+                }
+                Ok(CreateIdentityLoop::Done(_)) => panic!("an ID was created"),
+                Err(error) => return error,
+            }
+        }
+    }
+
+    fn status(status: u16, body: &str) -> libthreema::https::HttpsResult {
+        Ok(libthreema::https::HttpsResponse {
+            status,
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn creating_an_id_says_what_went_wrong_in_our_words() {
+        assert!(matches!(
+            create_identity_answered(vec![Err(libthreema::https::HttpsError::Unreachable(
+                "details".into()
+            ))]),
+            ApiError::Network(_)
+        ));
+        assert!(matches!(
+            create_identity_answered(vec![status(429, "")]),
+            ApiError::RateLimited
+        ));
+        assert!(matches!(
+            create_identity_answered(vec![status(500, "")]),
+            ApiError::Internal(_)
+        ));
+
+        // The directory's own words come through without libthreema's decoration.
+        let challenge = json!({
+            "token": data_encoding::BASE64.encode(b"challenge"),
+            "tokenRespKeyPub": data_encoding::BASE64.encode(&[2; 32]),
+        })
+        .to_string();
+        let refused = create_identity_answered(vec![
+            status(200, &challenge),
+            status(200, r#"{"success":false,"error":"This key is used up."}"#),
+        ]);
+        assert!(
+            matches!(&refused, ApiError::Server(words) if words == "This key is used up."),
+            "{refused:?}"
+        );
     }
 
     #[test]
