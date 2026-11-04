@@ -4,7 +4,8 @@
 //!
 //! A file message's `body` (UI JSON) carries `fileState` / `thumbnailState`:
 //! 0 on the server, 1 downloading, 2 on the device, 3 failed; outgoing ones also `uploadState`:
-//! 1 uploading, 2 uploaded (the message can be sent), 3 failed.
+//! 1 uploading, 2 uploaded (the message can be sent), 3 failed. `fileOnDemand`: the user cleaned
+//! the file up, so it comes back only when asked for.
 //!
 //! Sending: the file is first stored in the (encrypted) media store, then uploaded from there,
 //! so a failed upload can be retried after a restart without the original file.
@@ -131,14 +132,38 @@ pub fn file_keys(file: &FileMessage) -> FileKeys {
 }
 
 impl Store {
-    /// File messages created before `before` (ms) whose file is on the device, not starred.
+    /// File messages created before `before` (ms) whose file is on the device and can come back:
+    /// not starred, not still on their way out (their upload reads the file), and with a blob. A
+    /// list's own copy or an unsent imported file has none, so its bytes here are the only ones.
     pub fn files_before(&self, before: i64) -> Result<Vec<i64>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT id FROM messages WHERE kind = 'file' AND created_at < ?1 AND starred = 0
-               AND json_extract(body, '$.fileState') = ?2",
+               AND json_extract(body, '$.fileState') = ?2
+               AND NOT (outgoing = 1 AND state = ?3)
+               AND EXISTS (SELECT 1 FROM files
+                           WHERE files.message = messages.id AND files.blob_id IS NOT NULL)",
         )?;
-        let rows = statement.query_map(params![before, STATE_LOCAL], |row| row.get(0))?;
+        let rows = statement.query_map(
+            params![
+                before,
+                STATE_LOCAL,
+                crate::messages::OutgoingState::Pending as i64
+            ],
+            |row| row.get(0),
+        )?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The user removed a message's file to free space: it can be fetched again, on request only.
+    pub fn set_file_cleaned(&self, message: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE messages
+             SET body = json_set(body, '$.fileState', ?2, '$.fileOnDemand', json('true')),
+                 updated_at = ?3
+             WHERE id = ?1 AND kind = 'file'",
+            params![message, STATE_REMOTE, now_ms()],
+        )?;
+        Ok(())
     }
 
     /// Delete messages created before `before` (ms), except starred ones and status lines.
@@ -232,7 +257,8 @@ impl Store {
     /// received ones, and our own from another device (reflected, Android's
     /// `ReflectedOutgoingFileTask`) — what this device sent itself has its parts already.
     /// `limit`: largest file that comes by itself, in bytes (0: any size, our default; Android
-    /// has a fixed 5 MB). Thumbnails are never held back by it.
+    /// has a fixed 5 MB). Thumbnails are never held back by it, and a file cleaned up by the user
+    /// (`fileOnDemand`) comes only when asked for.
     pub fn media_to_download(
         &self,
         auto: &[String],
@@ -257,11 +283,10 @@ impl Store {
             if thumbnail == Some(STATE_REMOTE) {
                 parts.push((id, MediaPart::Thumbnail));
             }
-            let size = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|body| body["size"].as_u64())
-                .unwrap_or(0);
+            let parsed = serde_json::from_str::<Value>(&body).unwrap_or_default();
+            let size = parsed["size"].as_u64().unwrap_or(0);
             if file == Some(STATE_REMOTE)
+                && parsed["fileOnDemand"] != true
                 && auto.iter().any(|k| k == download_kind(&body))
                 && (limit == 0 || size <= limit)
             {
@@ -272,12 +297,11 @@ impl Store {
     }
 }
 
-/// Is a part of this file message still on the blob server (or the mirror)?
+/// Is a part of this file message still on the blob server (or the mirror), and to come by itself?
 fn awaits_download(body: &str) -> bool {
     let body: Value = serde_json::from_str(body).unwrap_or_default();
-    ["thumbnailState", "fileState"]
-        .iter()
-        .any(|field| body[field].as_i64() == Some(STATE_REMOTE))
+    body["thumbnailState"].as_i64() == Some(STATE_REMOTE)
+        || (body["fileState"].as_i64() == Some(STATE_REMOTE) && body["fileOnDemand"] != true)
 }
 
 /// The auto-download category of a file message (Android's choices): `image` (also GIFs),
@@ -1033,8 +1057,7 @@ impl App {
             let ids = self.store.files_before(before)?;
             for id in &ids {
                 self.media.remove_part(*id, MediaPart::File);
-                self.store
-                    .set_media_state(*id, MediaPart::File, STATE_REMOTE)?;
+                self.store.set_file_cleaned(*id)?;
             }
             ids.len()
         };
@@ -1885,6 +1908,115 @@ mod tests {
         assert!(store.size().unwrap() > 0);
     }
 
+    /// Clean up → Media files frees the space for good: the file stays downloadable, by hand.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleaned_files_download_only_when_asked_for() {
+        let (_dir, mut app) = app();
+        let id = received_file(&app.store, 1, 1);
+        app.store
+            .set_media_state(id, MediaPart::File, STATE_LOCAL)
+            .unwrap();
+        app.store
+            .set_media_state(id, MediaPart::Thumbnail, STATE_LOCAL)
+            .unwrap();
+        app.media.write(id, MediaPart::File, b"picture").unwrap();
+        app.media.write(id, MediaPart::Thumbnail, b"thumb").unwrap();
+        let every_kind = ["image".to_owned(), "file".to_owned()];
+
+        let cleaned = app.clean_up(0, false).unwrap();
+        assert_eq!(cleaned["removed"], 1);
+        assert!(!app.media.has(id, MediaPart::File));
+        assert!(app.media.has(id, MediaPart::Thumbnail));
+        assert_eq!(state(&app.store, id, "fileState"), Some(STATE_REMOTE));
+        assert!(
+            app.store
+                .media_to_download(&every_kind, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let body = app.store.message(id).unwrap().unwrap().body;
+        assert!(!awaits_download(&body));
+        assert!(body.contains("a.jpg"), "the rest of the body stays");
+
+        // Asked for: it comes. A restart during that doesn't turn it automatic.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async { app.download_file(id).unwrap() })
+            .await;
+        assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOADING));
+        app.store.reset_loading_media().unwrap();
+        assert_eq!(state(&app.store, id, "fileState"), Some(STATE_REMOTE));
+        assert!(
+            app.store
+                .media_to_download(&every_kind, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Blob keys of a file that went up, or (`blob`: `None`) of one with nothing on the server.
+    fn with_blob(store: &Store, message: i64, blob: Option<u8>) {
+        store
+            .set_file_keys(
+                message,
+                &FileKeys {
+                    key: Zeroizing::new([4; 32]),
+                    blob_id: blob.map(|b| libthreema::common::BlobId([b; 16])),
+                    thumbnail_blob_id: None,
+                },
+            )
+            .unwrap();
+    }
+
+    /// A file still to go out keeps its bytes: its upload reads them.
+    #[test]
+    fn cleaning_up_leaves_unsent_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let body = json!({"mediaType": "video/mp4", "fileState": STATE_LOCAL}).to_string();
+        let unsent = store.insert_outgoing("ABCD1234", 1, "file", &body).unwrap();
+        let sent = store.insert_outgoing("ABCD1234", 2, "file", &body).unwrap();
+        with_blob(&store, unsent.id, Some(1));
+        with_blob(&store, sent.id, Some(2));
+        store
+            .raise_outgoing_state(
+                "ABCD1234",
+                &[sent.message_id],
+                crate::messages::OutgoingState::Sent,
+            )
+            .unwrap();
+        let cleaned = store.files_before(i64::MAX).unwrap();
+        assert_eq!(cleaned, vec![sent.id]);
+        assert!(!cleaned.contains(&unsent.id));
+    }
+
+    /// The clean-up promises that a file can be fetched again: one with no blob stays, a list's
+    /// own copy and a file without keys alike, since a tap could bring nothing back.
+    #[test]
+    fn cleaning_up_leaves_what_could_not_come_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let body = json!({"mediaType": "video/mp4", "fileState": STATE_LOCAL}).to_string();
+        let insert = |id| {
+            store
+                .insert_incoming("ABCD1234", id, "file", &body, 1)
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        let without_keys = insert(1);
+        let without_blob = insert(2);
+        let with_one = insert(3);
+        with_blob(&store, without_blob, None);
+        with_blob(&store, with_one, Some(1));
+        assert_eq!(store.files_before(i64::MAX).unwrap(), vec![with_one]);
+        assert_eq!(
+            state(&store, without_keys, "fileState"),
+            Some(STATE_LOCAL),
+            "stays as it was"
+        );
+    }
+
     #[test]
     fn clean_up_lists() {
         let dir = tempfile::tempdir().unwrap();
@@ -1906,6 +2038,9 @@ mod tests {
             .insert_incoming("ECHOECHO", 4, "file", &body, 9_000)
             .unwrap()
             .unwrap();
+        for message in [old.id, starred.id, recent.id] {
+            with_blob(&store, message, Some(1));
+        }
         assert_eq!(store.files_before(5_000).unwrap(), vec![old.id]);
         assert_eq!(store.delete_messages_before(5_000).unwrap(), 2);
         assert!(store.message(old.id).unwrap().is_none());
