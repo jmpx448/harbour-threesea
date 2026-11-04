@@ -241,7 +241,7 @@ impl App {
         };
         let (by_last_name, hide_inactive) =
             (flag(keys::SORT_BY_LAST_NAME)?, flag(keys::HIDE_INACTIVE)?);
-        let mut list: Vec<Value> = self
+        let mut list: Vec<(bool, String, String, Value)> = self
             .store
             .contacts()?
             .iter()
@@ -251,12 +251,17 @@ impl App {
             .filter(|c| !hide_inactive || c.activity_state == pc::ActivityState::Active)
             .map(|c| {
                 let mut value = self.contact_value(c);
-                // Nicknames ("~nick") sort under their letter; the UI takes the section from it.
-                value["sortKey"] = json!(contacts::sort_key(c, by_last_name));
-                value
+                // Nicknames ("~nick") sort under their letter; the section comes from the same.
+                let key = contacts::sort_key(c, by_last_name);
+                let section = contacts::section(&key);
+                let display = contacts::display_name(c).to_lowercase();
+                value["section"] = json!(section);
+                (section == "#", key, display, value)
             })
             .collect();
-        list.sort_by(|a, b| a["sortKey"].as_str().cmp(&b["sortKey"].as_str()));
+        // Letters, then all the rest in one section; the same letters by their accents.
+        list.sort_by(|a, b| (a.0, &a.1, &a.2).cmp(&(b.0, &b.1, &b.2)));
+        let list: Vec<Value> = list.into_iter().map(|(_, _, _, value)| value).collect();
         Ok(json!({ "contacts": list }))
     }
 
@@ -1384,6 +1389,51 @@ mod contact_policy_tests {
         )
         .await;
         assert!(app.store.contact("CCCCCCCC").unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_contact_list_sorts_accents_with_their_letter_and_the_rest_at_the_end() {
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        for (id, name) in [
+            ("BBBBBBBB", "Zoe"),
+            ("CCCCCCCC", "Özlem"),
+            ("DDDDDDDD", "😀 Party"),
+            ("EEEEEEEE", "42 Crew"),
+            ("FFFFFFFF", "Ärne"),
+            ("GGGGGGGG", "Arne"),
+            ("HHHHHHHH", "Oskar"),
+        ] {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.acquaintance_level = AcquaintanceLevel::Direct;
+            contact.first_name = Some(name.into());
+            app.store.upsert_contact(&contact).unwrap();
+        }
+        let contacts = app.contacts_json().unwrap();
+        let listed: Vec<(&str, &str)> = contacts["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["firstName"].as_str().unwrap(),
+                    c["section"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("Arne", "A"),
+                ("Ärne", "A"),
+                ("Oskar", "O"),
+                ("Özlem", "O"),
+                ("Zoe", "Z"),
+                ("42 Crew", "#"),
+                ("😀 Party", "#"),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

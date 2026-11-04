@@ -402,10 +402,121 @@ pub fn sort_key(c: &Contact, by_last_name: bool) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if name.is_empty() {
-        display_name(c).trim_start_matches('~').to_lowercase()
+        folded(display_name(c).trim_start_matches('~'))
     } else {
-        name.to_lowercase()
+        folded(&name)
     }
+}
+
+/// Letters that sort as other letters, lower case: what a primary-strength collator (Android's
+/// contact list) does for the alphabets names here mostly come in. All Latin letters with a mark,
+/// ligatures and a few more that stand for a base letter, then Greek and Cyrillic where the accent
+/// isn't a letter of its own. By hand: this one list doesn't justify a new dependency and Unicode's
+/// normalization tables in the package.
+const FOLDED: &[(&str, &str)] = &[
+    ("ªàáâãäåāăąǎǟǡǻȁȃȧḁẚạảấầẩẫậắằẳẵặ", "a"),
+    ("æǣǽ", "ae"),
+    ("ƀƃɓḃḅḇ", "b"),
+    ("çćĉċčƈȼɕḉ", "c"),
+    ("ðďđƌȡɖɗḋḍḏḑḓ", "d"),
+    ("ȸ", "db"),
+    ("ǆǳ", "dz"),
+    ("ǝəɛèéêëēĕėęěȅȇȩɇḕḗḙḛḝẹẻẽếềểễệ", "e"),
+    ("ƒḟ", "f"),
+    ("ﬀ", "ff"),
+    ("ﬃ", "ffi"),
+    ("ﬄ", "ffl"),
+    ("ﬁ", "fi"),
+    ("ﬂ", "fl"),
+    ("ĝğġģǥǧǵɠḡ", "g"),
+    ("ĥħȟɦḣḥḧḩḫẖ", "h"),
+    ("ƕ", "hv"),
+    ("ìíîïĩīĭįıǐȉȋɨḭḯỉị", "i"),
+    ("ĳ", "ij"),
+    ("ĵǰȷɉɟʄʝ", "j"),
+    ("ķƙǩḱḳḵ", "k"),
+    ("ĺļľŀłƚȴɫɬɭḷḹḻḽ", "l"),
+    ("ǉ", "lj"),
+    ("ɱḿṁṃ", "m"),
+    ("ñńņňŉŋƞǹȵɲɳṅṇṉṋ", "n"),
+    ("ǌ", "nj"),
+    ("ɔºòóôõöøōŏőơǒǫǭǿȍȏȫȭȯȱṍṏṑṓọỏốồổỗộớờởỡợ", "o"),
+    ("œ", "oe"),
+    ("ƣ", "oi"),
+    ("ȣ", "ou"),
+    ("ƥṕṗ", "p"),
+    ("ĸɋʠ", "q"),
+    ("ȹ", "qp"),
+    ("ŕŗřȑȓɍɼɽɾṙṛṝṟ", "r"),
+    ("śŝşšſșȿʂṡṣṥṧṩẛẜẝ", "s"),
+    ("ß", "ss"),
+    ("ﬅﬆ", "st"),
+    ("ţťŧƫƭțȶʈṫṭṯṱẗ", "t"),
+    ("þ", "th"),
+    ("ùúûüũūŭůűųưǔǖǘǚǜȕȗṳṵṷṹṻụủứừửữự", "u"),
+    ("ʋṽṿ", "v"),
+    ("ŵẁẃẅẇẉẘ", "w"),
+    ("ẋẍ", "x"),
+    ("ýÿŷƴȳɏẏẙỳỵỷỹỿ", "y"),
+    ("źżžƶȥɀʐʑẑẓẕ", "z"),
+    ("ά", "α"),
+    ("έ", "ε"),
+    ("ή", "η"),
+    ("ίϊΐ", "ι"),
+    ("ό", "ο"),
+    ("ς", "σ"),
+    ("ύϋΰ", "υ"),
+    ("ώ", "ω"),
+    ("ёѐ", "е"),
+    ("ѓ", "г"),
+    ("ќ", "к"),
+    ("ѝ", "и"),
+];
+
+/// Cyrillic letters that only look like a base letter with a mark: typed as two characters they
+/// are still the letter they are as one.
+const COMPOSED: &[(char, char, char)] = &[
+    ('и', '\u{306}', 'й'),
+    ('у', '\u{306}', 'ў'),
+    ('і', '\u{308}', 'ї'),
+];
+
+/// `text` in lower case with its letters' accents taken off, also those typed as a mark of their
+/// own after the letter, so that names sort as the alphabet does, whatever their accents.
+fn folded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for letter in text.chars().flat_map(char::to_lowercase) {
+        if letter.is_ascii() {
+            out.push(letter);
+        } else if let Some((_, _, whole)) = COMPOSED
+            .iter()
+            .find(|(base, mark, _)| *mark == letter && out.ends_with(*base))
+        {
+            out.pop();
+            out.push(*whole);
+        } else if !('\u{300}'..='\u{36f}').contains(&letter) {
+            match FOLDED.iter().find(|(from, _)| from.contains(letter)) {
+                Some((_, to)) => out.push_str(to),
+                None => out.push(letter),
+            }
+        }
+    }
+    out
+}
+
+/// The section a [`sort_key`] files under: its first letter, or `#` for all the rest (digits,
+/// signs, emoji), like Jolla People. Only a capital that folds back to the very letter the key
+/// sorts by: a letter whose capital is another letter's would make a second section of that one.
+pub fn section(sort_key: &str) -> String {
+    sort_key
+        .chars()
+        .next()
+        .filter(|first| first.is_alphabetic())
+        .and_then(|first| {
+            let capital = first.to_uppercase().next()?;
+            (folded(&capital.to_string()) == first.to_string()).then_some(capital)
+        })
+        .map_or_else(|| "#".to_owned(), String::from)
 }
 
 /// JSON for the UI.
@@ -667,6 +778,67 @@ mod tests {
         c.last_name = None;
         c.nickname = Some("Echo".into());
         assert_eq!(sort_key(&c, true), "echo");
+    }
+
+    #[test]
+    fn accents_sort_and_file_under_their_letter() {
+        for (name, key, letter) in [
+            ("Ärne", "arne", "A"),
+            ("Émile", "emile", "E"),
+            ("Özlem", "ozlem", "O"),
+            ("Ørjan", "orjan", "O"),
+            ("Łukasz", "lukasz", "L"),
+            ("Straße", "strasse", "S"),
+            // A base letter and its accent as two characters.
+            ("A\u{308}rne", "arne", "A"),
+            ("İpek", "ipek", "I"),
+            ("Ёлка", "елка", "Е"),
+            ("Άννα", "αννα", "Α"),
+            // Latin letters with a mark, wherever Unicode has them, and ligatures.
+            ("Ṣade", "sade", "S"),
+            ("Ḍiya", "diya", "D"),
+            ("Ḿaria", "maria", "M"),
+            ("ǖlo", "ulo", "U"),
+            ("ȧda", "ada", "A"),
+            ("ƒelix", "felix", "F"),
+            ("ĳsbrand", "ijsbrand", "I"),
+            ("ﬁona", "fiona", "F"),
+            ("ſara", "sara", "S"),
+            ("Əli", "eli", "E"),
+            // Letters of their own stay that, however they were typed.
+            ("Йоанн", "йоанн", "Й"),
+            ("И\u{306}оанн", "йоанн", "Й"),
+            ("Їжак", "їжак", "Ї"),
+            ("Анна", "анна", "А"),
+        ] {
+            let mut c = contact_init(&entry("ECHOECHO")).unwrap();
+            c.first_name = Some(name.into());
+            let found = sort_key(&c, false);
+            assert_eq!(found, key, "{name}");
+            assert_eq!(section(&found), letter, "{name}");
+        }
+    }
+
+    /// Every letter the table folds sorts among the base letters, and a capital that isn't what
+    /// the key sorts by never gives a section.
+    #[test]
+    fn the_table_leads_only_to_what_sorts_in_the_alphabet() {
+        for (from, to) in FOLDED {
+            assert!(!to.is_empty());
+            for letter in from.chars() {
+                assert_eq!(folded(&letter.to_string()), *to, "{letter}");
+                let first = to.chars().next().unwrap();
+                assert_ne!(section(to), "#", "{letter}");
+                assert_eq!(section(&first.to_string()), section(to));
+            }
+        }
+    }
+
+    #[test]
+    fn everything_but_letters_files_under_one_section() {
+        for name in ["42", "😀 Party", "(Anna)", ""] {
+            assert_eq!(section(&folded(name)), "#", "{name}");
+        }
     }
 
     #[test]

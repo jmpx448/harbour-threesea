@@ -45,16 +45,6 @@ QVariant ContactListModel::data(const QModelIndex &index, int role) const
         return QVariant();
     }
     const QVariantMap &row = m_rows.at(index.row());
-    if (role == SectionRole) {
-        // Alphabetic sections like Jolla People, from what the core sorts by (first or last name,
-        // Settings → Appearance); nicknames ("~nick") sort under their letter.
-        QString name = row.value(QStringLiteral("sortKey"), row.value(QStringLiteral("displayName"))).toString();
-        if (name.startsWith(QLatin1Char('~'))) {
-            name.remove(0, 1);
-        }
-        const QChar first = name.isEmpty() ? QChar('#') : name.at(0).toUpper();
-        return first.isLetter() ? QString(first) : QStringLiteral("#");
-    }
     const QByteArray name = roleNames().value(role);
     return name.isEmpty() ? QVariant() : row.value(QString::fromLatin1(name));
 }
