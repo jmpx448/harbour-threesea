@@ -1089,8 +1089,8 @@ impl Store {
     }
 
     /// One row per conversation: last message and unread count, newest first. Chats without
-    /// messages get a stand-in row (id 0): emptied chats (kind `empty`, from when they were
-    /// emptied) and groups and distribution lists with no history yet (kind `none`, from their
+    /// messages get a stand-in row (id 0): emptied chats and those a backup brought without their
+    /// messages (kind `empty`, from when they were emptied or last changed) and groups and distribution lists with no history yet (kind `none`, from their
     /// creation) — unlike a contact, they are chats of their own as soon as they exist
     /// (Android lists every group too; a Safe restore brings groups without any messages).
     pub fn conversations(&self) -> Result<Vec<(Message, i64)>, StoreError> {
