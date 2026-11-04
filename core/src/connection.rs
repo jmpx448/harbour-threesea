@@ -1324,12 +1324,18 @@ impl<'a> Session<'a> {
             if distributes_profile(body) {
                 self.distribute_picture(&receiver).await?;
             }
+            let features = self
+                .setup
+                .store
+                .contact(&receiver)
+                .map_err(protocol_error)?
+                .map(|contact| contact.feature_mask);
             match self
                 .encode(
                     &receiver,
                     message_id,
                     created_at,
-                    Outgoing::Group(group, body.clone()),
+                    Outgoing::Group(group, body_for_receiver(body, features)),
                 )
                 .await?
             {
@@ -3104,6 +3110,30 @@ fn distributes_profile(body: &GroupMessageBody) -> bool {
     )
 }
 
+/// What one member gets of a group message: the message itself, except that a member without
+/// `REACTION_SUPPORT` gets a reaction as the thumbs up or down it maps to, if it does (the group
+/// reaction steps in `csp-e2e.proto`). Any other reaction goes to them as it is, which the steps
+/// intend; Android leaves them out instead.
+fn body_for_receiver(
+    body: &GroupMessageBody,
+    features: Option<libthreema::common::FeatureMask>,
+) -> GroupMessageBody {
+    if let GroupMessageBody::Reaction(ReactionMessage {
+        message_id,
+        action: ReactionAction::Apply(emoji),
+    }) = body
+        && features
+            .is_some_and(|mask| mask.0 & libthreema::common::FeatureMask::REACTION_SUPPORT == 0)
+        && let Some(reaction_type) = reactions::legacy_reaction(emoji)
+    {
+        return GroupMessageBody::LegacyReaction(LegacyReactionMessage {
+            reaction_type,
+            message_ids: vec![*message_id],
+        });
+    }
+    body.clone()
+}
+
 /// The group variant of a message body (what can be sent to groups at all).
 fn to_group_body(body: ContactMessageBody) -> Option<GroupMessageBody> {
     Some(match body {
@@ -3716,6 +3746,57 @@ mod sync_order_tests {
 
     fn text() -> Outgoing {
         Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    /// In a mixed group the thumbs reach a member on an old client as what they understand; what
+    /// has no such form, and everything else, goes as it is.
+    #[test]
+    fn a_group_reaction_is_chosen_per_receiver() {
+        use libthreema::{common::FeatureMask, model::message::LegacyReactionType};
+        let reaction = |action| {
+            GroupMessageBody::Reaction(ReactionMessage {
+                message_id: MessageId(5),
+                action,
+            })
+        };
+        let thumb = reaction(ReactionAction::Apply("\u{1F44D}".to_owned()));
+        let (old, new) = (
+            Some(FeatureMask(0)),
+            Some(FeatureMask(FeatureMask::REACTION_SUPPORT)),
+        );
+
+        let GroupMessageBody::LegacyReaction(legacy) = body_for_receiver(&thumb, old) else {
+            panic!("expected the legacy form");
+        };
+        assert!(matches!(
+            legacy.reaction_type,
+            LegacyReactionType::Acknowledge
+        ));
+        assert_eq!(legacy.message_ids[0].0, 5);
+        assert!(matches!(
+            body_for_receiver(&thumb, new),
+            GroupMessageBody::Reaction(_)
+        ));
+        // Nobody to look the mask up for: `encode` keeps it for later anyway.
+        assert!(matches!(
+            body_for_receiver(&thumb, None),
+            GroupMessageBody::Reaction(_)
+        ));
+        // No legacy form: a heart, or taking a thumb back.
+        for action in [
+            ReactionAction::Apply("\u{2764}\u{fe0f}".to_owned()),
+            ReactionAction::Withdraw("\u{1F44D}".to_owned()),
+        ] {
+            assert!(matches!(
+                body_for_receiver(&reaction(action), old),
+                GroupMessageBody::Reaction(_)
+            ));
+        }
+        let text = GroupMessageBody::Text(TextMessage { text: "hi".into() });
+        assert!(matches!(
+            body_for_receiver(&text, old),
+            GroupMessageBody::Text(_)
+        ));
     }
 
     /// The mark that someone may have a message is on record before the first byte goes out, and

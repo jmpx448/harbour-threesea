@@ -259,6 +259,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   0x04 decline (👎), any skin tone mapped to the base emoji. A legacy reaction **replaces** all
   reactions of its sender on the message; there is no legacy withdraw, so the UI offers only
   👍/👎 for such contacts and doesn't withdraw.
+- In a group, reactions work if any member supports them, and each member is chosen for when sending
+  (`body_for_receiver`): without support a thumb goes as the legacy form; anything else goes as the
+  `Reaction` itself, as the spec's footnote says (Android leaves them out).
 - Receive: unknown referred messages and status lines (not reactable) are ignored; emoji > 64
   bytes, empty or non-UTF-8 are rejected by the decoder (libthreema).
 - Outgoing reactions are not messages of their own; they wait in the `outbox` table until the
@@ -378,7 +381,6 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   discards those it has). A picture is reflected from the mirror once it is on this device;
   `group_picture_syncs` notes it until then, in the same step as the picture, and it is retried
   the same way; deleting the picture clears the note and the file, and a version 0 sends nothing.
-- Not yet: group calls, per-receiver legacy reactions.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We
   sync only on the spec's triggers (unknown group, sync requests) and once after a Safe restore,
