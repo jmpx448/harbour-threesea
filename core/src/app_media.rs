@@ -1579,6 +1579,106 @@ mod tests {
         assert!(!app.store.message_keeps_media(id).unwrap());
     }
 
+    /// Every way of writing brings an archived chat back, a list's copies their members' chats too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn writing_brings_a_chat_back_from_the_archive() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in [
+            "BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE", "FFFFFFFF", "GGGGGGGG",
+        ] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let group = crate::groups::Group {
+            key: "g:ABCD1234:0000000000000001".to_owned(),
+            identity: libthreema::common::GroupIdentity {
+                creator_identity: "ABCD1234".parse().unwrap(),
+                group_id: 1,
+            },
+            name: "g".into(),
+            members: vec!["BBBBBBBB".to_owned()],
+            left: false,
+            created_at: 0,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        let list = app
+            .store
+            .create_distribution_list("l", vec!["GGGGGGGG".to_owned()])
+            .unwrap();
+        let archive = |app: &App, key: &str| app.store.set_archived(key, true).unwrap();
+        let back =
+            |app: &App, key: &str| !app.store.archived_chats().unwrap().iter().any(|k| k == key);
+
+        archive(&app, "BBBBBBBB");
+        app.send_text("BBBBBBBB", "hello", None).unwrap();
+        assert!(back(&app, "BBBBBBBB"), "text");
+
+        archive(&app, "CCCCCCCC");
+        let place = json!({"latitude": 1.0, "longitude": 2.0});
+        app.send_location("CCCCCCCC", &place).unwrap();
+        assert!(back(&app, "CCCCCCCC"), "location");
+
+        archive(&app, "DDDDDDDD");
+        let choices = ["a".to_owned(), "b".to_owned()];
+        app.create_poll("DDDDDDDD", "?", &choices, false, false)
+            .unwrap();
+        assert!(back(&app, "DDDDDDDD"), "poll");
+
+        archive(&app, &group.key);
+        app.send_text(&group.key, "hello", None).unwrap();
+        assert!(back(&app, &group.key), "group");
+
+        archive(&app, &list.key);
+        archive(&app, "GGGGGGGG");
+        app.send_text(&list.key, "hello", None).unwrap();
+        assert!(back(&app, &list.key), "list");
+        assert!(back(&app, "GGGGGGGG"), "a list's member");
+
+        let source = app.store.conversation_messages("BBBBBBBB", 1).unwrap()[0].id;
+        archive(&app, "EEEEEEEE");
+        app.forward_message(source, "EEEEEEEE").unwrap();
+        assert!(back(&app, "EEEEEEEE"), "forward");
+
+        // Ends without yielding: the upload's task doesn't run, so nothing goes to the network.
+        archive(&app, "FFFFFFFF");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                app.attachments = vec![Zeroizing::new(b"bytes".to_vec())];
+                app.send_file(OutgoingFile {
+                    identity: "FFFFFFFF".to_owned(),
+                    path: None,
+                    name: Some("a.bin".to_owned()),
+                    media_type: "application/octet-stream".to_owned(),
+                    caption: None,
+                    rendering: "file".to_owned(),
+                    width: None,
+                    height: None,
+                    duration: None,
+                    encode: None,
+                })
+                .unwrap();
+            })
+            .await;
+        assert!(back(&app, "FFFFFFFF"), "file");
+        assert_eq!(app.unarchived.borrow().len(), 8);
+
+        // Others stay: receiving and reflected messages aren't this path, nor is an untouched chat.
+        archive(&app, "CCCCCCCC");
+        app.send_text("BBBBBBBB", "again", None).unwrap();
+        assert!(!back(&app, "CCCCCCCC"));
+    }
+
     /// A photo of a private chat must not land in the Gallery folder, unencrypted, while one of
     /// an ordinary chat does.
     #[test]

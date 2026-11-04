@@ -324,12 +324,14 @@ impl App {
         Ok(json!({ "identity": key, "private": private }))
     }
 
-    /// A new outgoing message in a group goes to every member.
+    /// A new outgoing message in a group goes to every member, and it brings its chat back from
+    /// the archive.
     pub(crate) fn prepare_sending(
         &self,
         conversation: &Conversation,
         message: &Message,
     ) -> Result<(), ApiError> {
+        self.back_from_archive(&message.conversation)?;
         match conversation {
             Conversation::Group(group) => {
                 self.store
@@ -346,6 +348,7 @@ impl App {
                 )?;
                 if message.kind != "file" {
                     for member in self.list_receivers(list)? {
+                        self.back_from_archive(&member)?;
                         self.store.insert_outgoing(
                             &member,
                             MessageId::random().0,
@@ -356,6 +359,19 @@ impl App {
                 }
             }
             Conversation::Contact(contact) => self.make_direct(contact)?,
+        }
+        Ok(())
+    }
+
+    /// Writing in an archived chat brings it back (Android's `ContactMessageReceiver`,
+    /// `GroupMessageReceiver`, `DistributionListMessageReceiver`). The chat list hears of it at once,
+    /// the other devices when the command is done (`handle`).
+    fn back_from_archive(&self, key: &str) -> Result<(), ApiError> {
+        if self.store.unarchive(key)? {
+            self.unarchived.borrow_mut().push(key.to_owned());
+            let _ = self.media_events.send(crate::providers::CoreEvent::Call(
+                json!({ "event": "chatsChanged" }),
+            ));
         }
         Ok(())
     }

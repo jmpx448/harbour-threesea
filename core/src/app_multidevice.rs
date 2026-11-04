@@ -842,6 +842,33 @@ mod tests {
         }
     }
 
+    /// Writing in an archived chat brings it back here, and on the other devices.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_chat_written_in_leaves_the_archive_everywhere() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.store.set_archived("BBBBBBBB", true).unwrap();
+        let mut rx = in_a_group(&mut app);
+        let send = json!({"id": 1, "cmd": "sendText", "identity": "BBBBBBBB", "text": "hello"});
+        let reply: Value = serde_json::from_str(&app.handle(&send.to_string()).await).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(app.store.archived_chats().unwrap().is_empty());
+        let mut reflected = false;
+        while let Ok(message) = rx.try_recv() {
+            reflected |= matches!(message, ToConnection::ReflectSync);
+        }
+        assert!(reflected);
+
+        // Nothing changed: nothing to tell.
+        let send = json!({"id": 2, "cmd": "sendText", "identity": "BBBBBBBB", "text": "again"});
+        app.handle(&send.to_string()).await;
+        while let Ok(message) = rx.try_recv() {
+            assert!(!matches!(message, ToConnection::ReflectSync));
+        }
+    }
+
     fn device(id: u64, current: bool) -> LinkedDevice {
         LinkedDevice {
             id: format!("{id:016x}"),

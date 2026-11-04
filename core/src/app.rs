@@ -1212,6 +1212,8 @@ pub struct App {
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
     /// Contacts the request being handled made direct, for the other devices.
     pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
+    /// Chats a message brought back from the archive during the current command.
+    pub(crate) unarchived: std::cell::RefCell<Vec<String>>,
     /// Calls (ADR 0012): this build has a media engine; the current call, its SDP rules and
     /// cached TURN servers (with their expiry, ms).
     pub(crate) calls_supported: bool,
@@ -1297,6 +1299,7 @@ impl App {
             write_pass: None,
             attachments: Vec::new(),
             made_direct: std::cell::RefCell::default(),
+            unarchived: std::cell::RefCell::default(),
             pending_link: None,
             calls_supported: start.calls,
             update_check_built: start.update_check,
@@ -1462,6 +1465,10 @@ impl App {
         let made_direct = self.made_direct.take();
         if !made_direct.is_empty() {
             let change = crate::app_multidevice::SyncChange::Contacts(made_direct);
+            self.reflect_change(change, &json!({})).await;
+        }
+        for conversation in self.unarchived.take() {
+            let change = crate::app_multidevice::SyncChange::Conversation(conversation);
             self.reflect_change(change, &json!({})).await;
         }
         match outcome {
