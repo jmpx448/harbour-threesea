@@ -235,6 +235,11 @@ ApplicationWindow {
         target: Qt.application
         onStateChanged: {
             window.lockedNotification()
+            // The group may have become private during the call.
+            if (Qt.application.state !== Qt.ApplicationActive && groupCalls.conversation.length > 0
+                    && window.groupCallName.length > 0) {
+                window.refreshGroupCallName()
+            }
             // The license page shows the stored key: behind the lock like the rest.
             if ((backend.state !== "ready" && backend.state !== "needsLicense")
                     || !window.lockInfo || !window.lockInfo.lock) return
@@ -836,6 +841,25 @@ ApplicationWindow {
                 })
             }
             window.settleStack()
+        }
+    }
+
+    // The group of the group call we are in (cover); empty for a private group, as in the
+    // notifications: the cover then shows only the state and the time.
+    property string groupCallName
+    function refreshGroupCallName() {
+        var conversation = groupCalls.conversation
+        backend.call("group", { key: conversation }, function(ok, group) {
+            if (groupCalls.conversation !== conversation) return
+            window.groupCallName = ok && group.private !== true ? group.title : ""
+        })
+    }
+    Connections {
+        target: groupCalls
+        onStateChanged: {
+            if (groupCalls.state !== "joining") return
+            window.groupCallName = ""
+            window.refreshGroupCallName()
         }
     }
 

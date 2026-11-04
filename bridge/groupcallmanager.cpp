@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "groupcallmanager.h"
 
+#include <QDateTime>
 #include <QDebug>
 
 #include "threesebackend.h"
@@ -16,7 +17,10 @@ GroupCallManager::GroupCallManager(ThreeseBackend *backend, QObject *parent)
     m_engine = new GroupCallEngine(this);
     connect(m_engine, &GroupCallEngine::channelMessage, this, &GroupCallManager::onChannelMessage);
     connect(m_engine, &GroupCallEngine::failed, this, &GroupCallManager::onFailed);
-    connect(m_engine, &GroupCallEngine::connected, this, [this] { setState(QStringLiteral("connected")); });
+    connect(m_engine, &GroupCallEngine::connected, this, [this] {
+        m_activeSince = static_cast<double>(QDateTime::currentMSecsSinceEpoch());
+        setState(QStringLiteral("connected"));
+    });
     connect(m_engine, &GroupCallEngine::localFrame, this, &GroupCallManager::localFrame);
     connect(m_engine, &GroupCallEngine::localVideoStopped, this, &GroupCallManager::localVideoStopped);
     connect(m_engine, &GroupCallEngine::participantFrame, this, &GroupCallManager::participantFrame);

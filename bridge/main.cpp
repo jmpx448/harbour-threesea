@@ -199,6 +199,11 @@ int main(int argc, char *argv[])
     // get past those.
     QObject::connect(calls, &CallManager::aboutToTakeMicrophone, groupCalls, &GroupCallManager::leave);
     QObject::connect(groupCalls, &GroupCallManager::aboutToTakeMicrophone, calls, &CallManager::endCallWithMicrophone);
+    // Without a window there is no cover and no call page to show that the microphone is on.
+    view->installEventFilter(new CloseWatcher([calls, groupCalls]() {
+        calls->endCallWithMicrophone();
+        groupCalls->leave();
+    }, view->engine()));
     // An incoming call brings the window up (also when it was closed, the Full flavour's background run).
     QObject::connect(calls, &CallManager::incoming, view.data(), [&view]() {
         view->showFullScreen();

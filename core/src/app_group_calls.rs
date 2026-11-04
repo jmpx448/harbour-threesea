@@ -1133,6 +1133,40 @@ mod app_tests {
         assert_eq!(events[0]["event"], "groupCallMicrophoneOff");
     }
 
+    /// The cover names the group of a running call: a private one has to be told apart, locked
+    /// or not.
+    #[test]
+    fn the_group_lookup_says_when_a_group_is_private() {
+        let (_dir, app) = app(true);
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([7; 32]),
+                server_group: "30".into(),
+            })
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "ABCD1234".parse().unwrap(),
+            group_id: 1,
+        };
+        let key = crate::groups::key(&identity);
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: key.clone(),
+                identity,
+                name: "Secret plans".into(),
+                members: Vec::new(),
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        assert_eq!(app.group_info(&key).unwrap()["private"], false);
+        app.store.set_private(&key, true).unwrap();
+        assert_eq!(app.group_info(&key).unwrap()["private"], true);
+    }
+
     #[test]
     fn group_calls_follow_the_build_and_the_setting() {
         let (_dir, app) = app(true);

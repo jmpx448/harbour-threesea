@@ -99,6 +99,7 @@ impl App {
         let group = self.store.group(key)?.ok_or(ApiError::GroupNotFound)?;
         let mut value = self.group_json(&group)?;
         value["title"] = json!(self.group_title(&group));
+        value["private"] = json!(self.store.is_private(key)?);
         Ok(value)
     }
 

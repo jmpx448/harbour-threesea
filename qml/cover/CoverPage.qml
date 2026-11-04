@@ -6,16 +6,27 @@ CoverBackground {
     id: cover
 
     // A call: who and its state or running time, with answer/decline or hang up (Jolla's phone
-    // app's cover).
-    readonly property bool inCall: calls.state !== "idle"
+    // app's cover). A 1:1 call that rings or runs comes first: it takes the microphone from a
+    // group call when answered.
+    readonly property bool inGroupCall: calls.state === "idle" && groupCalls.state !== "idle"
+                                        && groupCalls.state !== "ended"
+    readonly property bool inCall: calls.state !== "idle" || inGroupCall
     property int seconds: 0
 
+    function callStart() {
+        if (!inGroupCall) return calls.activeSince
+        // Since the SFU started it, else since we joined, like the group call page.
+        var startedAt = groupCalls.call(groupCalls.conversation).startedAt
+        return startedAt > 0 ? Math.min(startedAt, groupCalls.activeSince) : groupCalls.activeSince
+    }
+
     Timer {
-        running: calls.state === "active" && cover.status === Cover.Active
+        running: (calls.state === "active" || (cover.inGroupCall && groupCalls.state === "connected"))
+                 && cover.status === Cover.Active
         interval: 1000
         repeat: true
         triggeredOnStart: true
-        onTriggered: cover.seconds = Math.max(0, Math.floor((Date.now() - calls.activeSince) / 1000))
+        onTriggered: cover.seconds = Math.max(0, Math.floor((Date.now() - cover.callStart()) / 1000))
     }
 
     Column {
@@ -31,7 +42,8 @@ CoverBackground {
             maximumLineCount: 2
             // "Hide content on the cover" (Privacy): only the call's state.
             visible: window.appSettings.disableScreenshots !== true
-            text: window.callName
+                     && !(cover.inGroupCall && window.locked)
+            text: cover.inGroupCall ? window.groupCallName : window.callName
             color: Theme.highlightColor
         }
         Label {
@@ -39,7 +51,11 @@ CoverBackground {
             horizontalAlignment: Text.AlignHCenter
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.secondaryColor
-            text: calls.state === "active"
+            text: cover.inGroupCall && groupCalls.state !== "connected"
+                  ? qsTrId("threesea-la-group-call-joining")
+                  : cover.inGroupCall && groupCalls.participants.length === 0
+                  ? qsTrId("threesea-la-group-call-waiting")
+                  : calls.state === "active" || cover.inGroupCall
                   ? Math.floor(cover.seconds / 60) + ":" + ("0" + (cover.seconds % 60)).slice(-2)
                   : calls.state === "incoming"
                     ? qsTrId("threesea-la-call-incoming")
@@ -69,7 +85,7 @@ CoverBackground {
     }
 
     CoverActionList {
-        enabled: cover.inCall && calls.state !== "incoming" && calls.state !== "ended"
+        enabled: calls.state !== "idle" && calls.state !== "incoming" && calls.state !== "ended"
         CoverAction {
             iconSource: calls.muted ? "image://theme/icon-cover-unmute" : "image://theme/icon-cover-mute"
             onTriggered: calls.muted = !calls.muted
@@ -77,6 +93,18 @@ CoverBackground {
         CoverAction {
             iconSource: "image://theme/icon-cover-hangup"
             onTriggered: calls.hangUp()
+        }
+    }
+
+    CoverActionList {
+        enabled: cover.inGroupCall
+        CoverAction {
+            iconSource: groupCalls.muted ? "image://theme/icon-cover-unmute" : "image://theme/icon-cover-mute"
+            onTriggered: groupCalls.muted = !groupCalls.muted
+        }
+        CoverAction {
+            iconSource: "image://theme/icon-cover-hangup"
+            onTriggered: groupCalls.leave()
         }
     }
 

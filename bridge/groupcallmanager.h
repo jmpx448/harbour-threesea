@@ -23,6 +23,8 @@ class GroupCallManager : public QObject
     // idle | joining | connecting | connected | ended
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     Q_PROPERTY(QString conversation READ conversation NOTIFY stateChanged)
+    // When we got into the call (ms since epoch), for the duration display.
+    Q_PROPERTY(double activeSince READ activeSince NOTIFY stateChanged)
     // The other participants: `[{id, identity, nickname, authenticated}]` (identity and nickname
     // once the handshake with them is done).
     Q_PROPERTY(QVariantList participants READ participants NOTIFY participantsChanged)
@@ -38,6 +40,7 @@ public:
     bool supported() const { return m_engine != nullptr; }
     QString state() const { return m_state; }
     QString conversation() const { return m_conversation; }
+    double activeSince() const { return m_activeSince; }
     QVariantList participants() const { return m_participants; }
     QString error() const { return m_error; }
     bool muted() const { return m_muted; }
@@ -92,6 +95,7 @@ private:
     bool m_muted = false;
     bool m_camera = false;
     bool m_frontCamera = true;
+    double m_activeSince = 0;
     QTimer m_tick;
 };
 
