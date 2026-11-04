@@ -216,7 +216,8 @@ impl App {
         self.group_info(key)
     }
 
-    /// `setGroupMembers` (creator): setup to everyone old and new, the state to new members.
+    /// `setGroupMembers` (creator): the setup to everyone old and new, the name and picture to new
+    /// members.
     pub(crate) fn set_group_members(
         &mut self,
         key: &str,
@@ -238,29 +239,23 @@ impl App {
         if added.is_empty() && removed.is_empty() {
             return self.group_info(key);
         }
-        let receivers: Vec<String> = members.iter().chain(&removed).cloned().collect();
+        // Whoever is removed gets an empty list (csp.struct.yml): it says enough, and who else is
+        // in the group from here on is none of their business.
         self.store.group_outbox_add(
             key,
-            &receivers,
+            &removed,
+            OUTBOX_GROUP_SETUP,
+            &json!({ "members": [] }),
+        )?;
+        self.store.group_outbox_add(
+            key,
+            &members,
             OUTBOX_GROUP_SETUP,
             &json!({ "members": members }),
         )?;
         group.members = members;
         self.store.upsert_group(&group)?;
-        if !added.is_empty() {
-            self.store.group_outbox_add(
-                key,
-                &added,
-                OUTBOX_GROUP_NAME,
-                &json!({ "name": group.name }),
-            )?;
-            self.store.group_outbox_add(
-                key,
-                &added,
-                groups::OUTBOX_GROUP_DELETE_PICTURE,
-                &json!({}),
-            )?;
-        }
+        groups::send_name_and_picture(&self.store, &group, &added)?;
         for member in &added {
             self.store.insert_status(
                 key,
@@ -701,8 +696,128 @@ impl App {
 #[cfg(test)]
 mod tests {
     use libthreema::common::BlobId;
+    use zeroize::Zeroizing;
 
     use super::*;
+    use crate::{app::StartConfig, store::StoredIdentity};
+
+    fn app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "USER0001".into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        (dir, app)
+    }
+
+    /// Our group with these members, all of them contacts; and who gets what is queued.
+    fn own_group(app: &mut App, members: &[&str]) -> String {
+        for member in ["AAAAAAAA", "BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&contacts::test_contact(member))
+                .unwrap();
+        }
+        let members: Vec<String> = members.iter().map(|m| (*m).to_owned()).collect();
+        let group = app.create_group("Crew", &members).unwrap();
+        let key = group["key"].as_str().unwrap().to_owned();
+        for entry in app.store.outbox().unwrap() {
+            app.store.outbox_remove(&key, entry.message_id).unwrap();
+        }
+        key
+    }
+
+    fn queued(app: &App, key: &str) -> Vec<(String, Value, Vec<String>)> {
+        app.store
+            .outbox()
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                let receivers = app.store.pending_receivers(key, entry.message_id).unwrap();
+                (entry.kind, entry.body, receivers)
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_removed_does_not_learn_who_else_is_in_the_group() {
+        let (_dir, mut app) = app();
+        let key = own_group(&mut app, &["AAAAAAAA", "BBBBBBBB"]);
+        app.set_group_members(&key, &["BBBBBBBB".to_owned(), "CCCCCCCC".to_owned()])
+            .unwrap();
+        let queued = queued(&app, &key);
+        assert_eq!(
+            queued[0],
+            (
+                OUTBOX_GROUP_SETUP.to_owned(),
+                json!({ "members": [] }),
+                vec!["AAAAAAAA".to_owned()]
+            )
+        );
+        assert_eq!(
+            queued[1],
+            (
+                OUTBOX_GROUP_SETUP.to_owned(),
+                json!({ "members": ["BBBBBBBB", "CCCCCCCC"] }),
+                vec!["BBBBBBBB".to_owned(), "CCCCCCCC".to_owned()]
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_added_gets_the_groups_picture() {
+        let (_dir, mut app) = app();
+        let key = own_group(&mut app, &["AAAAAAAA"]);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        let picture = GroupPicture {
+            blob_id: BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        };
+        group.picture = Some(picture.clone());
+        app.store.upsert_group(&group).unwrap();
+
+        app.set_group_members(&key, &["AAAAAAAA".to_owned(), "BBBBBBBB".to_owned()])
+            .unwrap();
+
+        let added = vec!["BBBBBBBB".to_owned()];
+        let queued = queued(&app, &key);
+        assert_eq!(
+            queued[1],
+            (
+                OUTBOX_GROUP_NAME.to_owned(),
+                json!({ "name": "Crew" }),
+                added.clone()
+            )
+        );
+        assert_eq!(
+            queued[2],
+            (
+                groups::OUTBOX_GROUP_SET_PICTURE.to_owned(),
+                picture.to_json(),
+                added
+            )
+        );
+        assert_eq!(queued.len(), 3);
+    }
 
     /// A picture that says it is too large isn't even asked for (the test has no network).
     #[tokio::test(flavor = "current_thread")]

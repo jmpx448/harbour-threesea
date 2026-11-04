@@ -367,8 +367,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Deleting a group we left keeps the queued `group-leave` or empty setup until it is acknowledged:
   it is sent by the key alone, and otherwise the members keep writing and the creator's answer to
   the sync request brings the group back. All else queued for the group goes.
-- Creator: create (setup + name + delete-picture to all), rename, change members (setup to all
-  old and new, name/picture to added), dissolve (empty setup). Members: leave (`group-leave` to
+- Creator: create (setup + name + delete-picture to all), rename, change members (setup to those
+  in the group, an empty setup to those removed, name/picture to added; the blob is persisted, so
+  the same descriptor serves), dissolve (empty setup). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.
 - Threema Desktop refuses to link at all over a group naming someone it has no contact for
   (`dom/backend/join.ts`), and asserts the same on `GroupSync`. So no group data names a member

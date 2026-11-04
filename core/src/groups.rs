@@ -1401,6 +1401,25 @@ fn send_setup_and_name(
 /// The creator sends a group's state to `receivers`: setup, name, picture.
 pub fn send_state(store: &Store, group: &Group, receivers: &[String]) -> Result<(), StoreError> {
     send_setup_and_name(store, group, receivers)?;
+    send_picture(store, group, receivers)
+}
+
+/// What comes after the setup for whoever is new to the group: its name and picture.
+pub fn send_name_and_picture(
+    store: &Store,
+    group: &Group,
+    receivers: &[String],
+) -> Result<(), StoreError> {
+    store.group_outbox_add(
+        &group.key,
+        receivers,
+        OUTBOX_GROUP_NAME,
+        &json!({ "name": group.name }),
+    )?;
+    send_picture(store, group, receivers)
+}
+
+fn send_picture(store: &Store, group: &Group, receivers: &[String]) -> Result<(), StoreError> {
     match &group.picture {
         Some(picture) => store.group_outbox_add(
             &group.key,
