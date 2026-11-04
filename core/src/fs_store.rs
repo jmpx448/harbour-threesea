@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use libthreema::{
-    common::ThreemaId,
+    common::{ThreemaId, keys::PublicKey},
     csp_e2e::fs::{
         FsSessionStore, FsStatus,
         ratchet::Ratchet,
@@ -227,9 +227,15 @@ impl FsSessionStore for StoreFs {
         Ok(deleted)
     }
 
-    fn enqueue_control(&mut self, peer: ThreemaId, envelope: Vec<u8>) -> Result<(), ProviderError> {
+    fn enqueue_control(
+        &mut self,
+        peer: ThreemaId,
+        peer_public_key: Option<PublicKey>,
+        envelope: Vec<u8>,
+    ) -> Result<(), ProviderError> {
         self.events.borrow_mut().push(CoreEvent::FsControl {
             peer: peer.to_string(),
+            peer_key: peer_public_key,
             envelope,
         });
         Ok(())

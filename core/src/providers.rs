@@ -45,7 +45,12 @@ pub enum CoreEvent {
     /// Contacts were added or changed (e.g. a new sender, a nickname).
     ContactsChanged,
     /// Internal: a forward security control message to send to `peer`.
-    FsControl { peer: String, envelope: Vec<u8> },
+    FsControl {
+        peer: String,
+        /// Known when this answers a message of `peer`, who may not be a contact yet.
+        peer_key: Option<libthreema::common::keys::PublicKey>,
+        envelope: Vec<u8>,
+    },
     /// Internal: a forward security status (turned into a status message by the connection).
     FsStatus {
         peer: String,
@@ -288,6 +293,27 @@ pub fn may_receive(
         return Ok(false);
     }
     Ok(exempt || !identity_blocked(store, config, receiver)?)
+}
+
+/// Whom a forward secrecy control message for `receiver` goes to: a contact, unless revoked, by
+/// its stored key, else someone who just wrote to us (`peer_key`). Such a stranger's first message
+/// comes after their Init, so their Accept would otherwise be lost: their next message is then
+/// answered in a state they aren't in yet, which they reject, on every first conversation. Not
+/// under _block unknown_, though, where their answer would only show that we are online.
+pub fn control_receiver(
+    store: &Store,
+    config: &Config,
+    receiver: &str,
+    peer_key: Option<libthreema::common::keys::PublicKey>,
+) -> Result<Option<(ThreemaId, libthreema::common::keys::PublicKey)>, StoreError> {
+    if let Some(contact) = store.contact(receiver)? {
+        return Ok((contact.activity_state != pc::ActivityState::Invalid)
+            .then_some((contact.identity, contact.public_key)));
+    }
+    let (Ok(identity), Some(key)) = (ThreemaId::try_from(receiver), peer_key) else {
+        return Ok(None);
+    };
+    Ok((!identity_blocked(store, config, receiver)?).then_some((identity, key)))
 }
 
 /// The group members `message_id` still has to go to. Whoever may not receive it is taken off the
@@ -1050,6 +1076,54 @@ mod tests {
             CoreEvent::UnknownMembers(identities) if identities.as_slice() == [OTHER.to_owned()]
         )));
         assert!(store.next_sync().unwrap().is_some());
+    }
+
+    #[test]
+    fn control_messages_go_to_contacts_and_to_strangers_who_just_wrote() {
+        let (_dir, store) = store();
+        let config = config();
+        let key = |byte| libthreema::common::keys::PublicKey::from([byte; 32]);
+        let to = |id: &str, peer_key| {
+            control_receiver(&store, &config, id, peer_key)
+                .unwrap()
+                .map(|(identity, key)| (identity.to_string(), key))
+        };
+        contact(
+            &store,
+            OTHER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Invalid,
+        );
+        // A contact goes by the stored key, whatever the message came with.
+        let stored = store.contact(OTHER).unwrap().unwrap().public_key;
+        assert!(to(OTHER, Some(key(1))) == Some((OTHER.to_owned(), stored)));
+        assert!(to(OTHER, None) == Some((OTHER.to_owned(), stored)));
+        // Revoked: nothing.
+        assert!(to(MEMBER, Some(key(1))).is_none());
+        // A stranger who wrote, and only one who did.
+        assert!(to(STRANGER, Some(key(1))) == Some((STRANGER.to_owned(), key(1))));
+        assert!(to(STRANGER, None).is_none());
+        // Not on the block list, and not with unknown senders blocked.
+        store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockedContacts": [STRANGER] }).to_string(),
+            )
+            .unwrap();
+        assert!(to(STRANGER, Some(key(1))).is_none());
+        store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockUnknown": true }).to_string(),
+            )
+            .unwrap();
+        assert!(to(STRANGER, Some(key(1))).is_none());
     }
 
     #[test]

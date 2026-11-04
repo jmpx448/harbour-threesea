@@ -130,12 +130,19 @@ pub trait FsSessionStore {
     ) -> Result<usize, ProviderError>;
 
     /// Queue an FS control envelope (encoded [`Envelope`]) to be sent to `peer` as a `0xa0`
-    /// message with a new random message ID, no flags and no nickname.
+    /// message with a new random message ID, no flags and no nickname. `peer_public_key` is known
+    /// when this answers a message of `peer`, who may not be a contact yet: an Init comes before
+    /// the message that creates the contact.
     ///
     /// # Errors
     ///
     /// Storage failures.
-    fn enqueue_control(&mut self, peer: ThreemaId, envelope: Vec<u8>) -> Result<(), ProviderError>;
+    fn enqueue_control(
+        &mut self,
+        peer: ThreemaId,
+        peer_public_key: Option<PublicKey>,
+        envelope: Vec<u8>,
+    ) -> Result<(), ProviderError>;
 
     /// Report a user-visible event.
     ///
@@ -192,6 +199,7 @@ fn envelope_bytes(session_id: SessionId, content: envelope::Content) -> Vec<u8> 
 fn send_reject(
     store: &mut dyn FsSessionStore,
     peer: ThreemaId,
+    peer_public_key: PublicKey,
     session_id: SessionId,
     message_id: u64,
     group_identity: Option<GroupIdentity>,
@@ -199,6 +207,7 @@ fn send_reject(
 ) -> Result<(), ProviderError> {
     store.enqueue_control(
         peer,
+        Some(peer_public_key),
         envelope_bytes(
             session_id,
             envelope::Content::Reject(Reject {
@@ -213,11 +222,13 @@ fn send_reject(
 fn send_terminate(
     store: &mut dyn FsSessionStore,
     peer: ThreemaId,
+    peer_public_key: Option<PublicKey>,
     session_id: SessionId,
     cause: terminate::Cause,
 ) -> Result<(), ProviderError> {
     store.enqueue_control(
         peer,
+        peer_public_key,
         envelope_bytes(
             session_id,
             envelope::Content::Terminate(Terminate { cause: cause as i32 }),
@@ -294,7 +305,14 @@ pub(crate) fn process_incoming(
             Ok(IncomingFsOutcome::Handled)
         },
         Some(envelope::Content::Encapsulated(encapsulated)) => {
-            let outcome = handle_encapsulated(store, peer, session_id, outer_message_id, &encapsulated)?;
+            let outcome = handle_encapsulated(
+                store,
+                peer,
+                *peer_public_key,
+                session_id,
+                outer_message_id,
+                &encapsulated,
+            )?;
             if let IncomingFsOutcome::Inner { .. } = outcome {
                 fs.pending_commit = Some(PeerRatchetCommit {
                     peer,
@@ -338,12 +356,19 @@ fn handle_init(
         Ok(session) => session,
         Err(error) => {
             warn!(%error, "Cannot accept FS init");
-            return send_terminate(store, peer, session_id, terminate::Cause::Reset);
+            return send_terminate(
+                store,
+                peer,
+                Some(*peer_public_key),
+                session_id,
+                terminate::Cause::Reset,
+            );
         },
     };
     store.store(&session)?;
     store.enqueue_control(
         peer,
+        Some(*peer_public_key),
         envelope_bytes(
             session_id,
             envelope::Content::Accept(Accept {
@@ -372,7 +397,13 @@ fn handle_accept(
 ) -> Result<(), ProviderError> {
     let Some(mut session) = store.get(peer, session_id)? else {
         warn!(?session_id, "FS accept for unknown session");
-        return send_terminate(store, peer, session_id, terminate::Cause::UnknownSession);
+        return send_terminate(
+            store,
+            peer,
+            Some(*peer_public_key),
+            session_id,
+            terminate::Cause::UnknownSession,
+        );
     };
     match session.process_accept(
         client_key,
@@ -391,7 +422,13 @@ fn handle_accept(
         Err(error) => {
             warn!(%error, "Cannot process FS accept");
             store.delete(peer, session_id)?;
-            send_terminate(store, peer, session_id, terminate::Cause::Reset)
+            send_terminate(
+                store,
+                peer,
+                Some(*peer_public_key),
+                session_id,
+                terminate::Cause::Reset,
+            )
         },
     }
 }
@@ -407,6 +444,7 @@ fn dh_type_of(encapsulated: &Encapsulated) -> DhType {
 fn handle_encapsulated(
     store: &mut dyn FsSessionStore,
     peer: ThreemaId,
+    peer_public_key: PublicKey,
     session_id: SessionId,
     outer_message_id: u64,
     encapsulated: &Encapsulated,
@@ -416,6 +454,7 @@ fn handle_encapsulated(
         send_reject(
             store,
             peer,
+            peer_public_key,
             session_id,
             outer_message_id,
             encapsulated.group_identity.clone(),
@@ -432,6 +471,7 @@ fn handle_encapsulated(
             send_reject(
                 store,
                 peer,
+                peer_public_key,
                 session_id,
                 outer_message_id,
                 encapsulated.group_identity.clone(),
@@ -676,7 +716,7 @@ pub fn terminate_all_with_cause(
 ) -> Result<(), ProviderError> {
     while let Some(session) = store.get_best(peer)? {
         store.delete(peer, session.id)?;
-        send_terminate(store, peer, session.id, cause)?;
+        send_terminate(store, peer, None, session.id, cause)?;
     }
     Ok(())
 }

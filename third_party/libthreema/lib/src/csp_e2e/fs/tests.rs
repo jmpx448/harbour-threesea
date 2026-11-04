@@ -7,7 +7,7 @@ use super::*;
 #[derive(Default)]
 struct MemoryData {
     sessions: HashMap<(ThreemaId, [u8; 16]), Session>,
-    controls: Vec<(ThreemaId, Vec<u8>)>,
+    controls: Vec<(ThreemaId, Option<PublicKey>, Vec<u8>)>,
     statuses: Vec<(ThreemaId, FsStatus)>,
 }
 
@@ -66,8 +66,16 @@ impl FsSessionStore for MemoryStore {
         Ok(before.saturating_sub(data.sessions.len()))
     }
 
-    fn enqueue_control(&mut self, peer: ThreemaId, envelope: Vec<u8>) -> Result<(), ProviderError> {
-        self.0.borrow_mut().controls.push((peer, envelope));
+    fn enqueue_control(
+        &mut self,
+        peer: ThreemaId,
+        peer_public_key: Option<PublicKey>,
+        envelope: Vec<u8>,
+    ) -> Result<(), ProviderError> {
+        self.0
+            .borrow_mut()
+            .controls
+            .push((peer, peer_public_key, envelope));
         Ok(())
     }
 
@@ -143,7 +151,13 @@ impl Party {
     }
 
     fn take_controls(&self) -> Vec<Vec<u8>> {
-        self.with_store(|store| store.controls.drain(..).map(|(_, envelope)| envelope).collect())
+        self.with_store(|store| {
+            store
+                .controls
+                .drain(..)
+                .map(|(_, _, envelope)| envelope)
+                .collect()
+        })
     }
 }
 
@@ -488,6 +502,37 @@ fn a_message_without_forward_security_is_reported_if_the_session_covers_its_type
     // Never encapsulated, so never missing it.
     check_message_without_fs(&bob.fs, alice.id, 0xfe).unwrap();
     assert_eq!(reports(&bob), 0);
+}
+
+#[test]
+fn answers_come_with_the_key_of_whoever_wrote_who_may_not_be_a_contact_yet() {
+    let mut alice = alice();
+    let mut bob = bob();
+    let alice_key = alice.key.public_key();
+    let first = alice.send(&bob, 0x01, b"hello");
+    let sent_with_key = |party: &Party| {
+        party.with_store(|store| {
+            store
+                .controls
+                .drain(..)
+                .map(|(_, key, _)| key == Some(alice_key))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    // A Reject for a message of an unknown session: Bob hasn't seen the Init.
+    let _ = bob.receive(&alice, first.envelope.as_ref().unwrap(), 1);
+    assert_eq!(sent_with_key(&bob), vec![true]);
+    // The Accept for the Init.
+    let _ = bob.receive(&alice, &first.prelude[0], 2);
+    assert_eq!(sent_with_key(&bob), vec![true]);
+
+    // Ending our own sessions answers nothing: whoever ends them has the contact to go by.
+    {
+        let mut store = bob.fs.store.borrow_mut();
+        terminate_all(&mut *store, alice.id).unwrap();
+    }
+    assert_eq!(sent_with_key(&bob), vec![false]);
 }
 
 #[test]

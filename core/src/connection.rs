@@ -1365,21 +1365,25 @@ impl<'a> Session<'a> {
     fn encode_control(
         &self,
         receiver: &str,
+        peer_key: Option<PublicKey>,
         envelope: &[u8],
     ) -> Result<Option<MessageWithMetadataBox>, ConnectionError> {
-        let Some(contact) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
+        let Some((identity, public_key)) = crate::providers::control_receiver(
+            &self.setup.store,
+            &self.setup.config,
+            receiver,
+            peer_key,
+        )
+        .map_err(protocol_error)?
+        else {
             return Ok(None);
         };
-        if contact.activity_state == libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid
-        {
-            return Ok(None);
-        }
         let nonce = self.fresh_nonce()?;
         match encode_outgoing_fs_control_message(
             self.setup.identity,
             &ClientKey::from(*self.setup.client_key),
-            contact.identity,
-            &contact.public_key,
+            identity,
+            &public_key,
             envelope,
             u64::try_from(crate::messages::now_ms()).unwrap_or(0),
             nonce,
@@ -1502,7 +1506,11 @@ impl<'a> Session<'a> {
             ) {
                 Ok(encapsulation) => {
                     for control in encapsulation.prelude {
-                        payloads.extend(self.encode_control(receiver, &control)?);
+                        payloads.extend(self.encode_control(
+                            receiver,
+                            Some(receiver_key),
+                            &control,
+                        )?);
                     }
                     envelope = encapsulation.envelope;
                 }
@@ -1649,8 +1657,12 @@ impl<'a> Session<'a> {
         event: CoreEvent,
     ) -> Result<Option<CoreEvent>, ConnectionError> {
         match event {
-            CoreEvent::FsControl { peer, envelope } => {
-                if let Some(payload) = self.encode_control(&peer, &envelope)? {
+            CoreEvent::FsControl {
+                peer,
+                peer_key,
+                envelope,
+            } => {
+                if let Some(payload) = self.encode_control(&peer, peer_key, &envelope)? {
                     self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
                         .await?;
                 }
@@ -1887,9 +1899,10 @@ impl<'a> Session<'a> {
             match event {
                 CoreEvent::FsControl {
                     peer: receiver,
+                    peer_key,
                     envelope,
                 } if receiver == peer => {
-                    payloads.extend(self.encode_control(peer, &envelope)?);
+                    payloads.extend(self.encode_control(peer, peer_key, &envelope)?);
                 }
                 other => self.events.borrow_mut().push(other),
             }
