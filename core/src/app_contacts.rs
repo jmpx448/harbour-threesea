@@ -402,12 +402,16 @@ impl App {
             return Err(ApiError::ContactIsSelf);
         }
         if let Some(mut existing) = self.store.contact(&id)? {
+            if !contacts::pin_predefined(&self.config, &mut existing) {
+                return Err(ApiError::ContactInvalid);
+            }
             // Known from a group or deleted before: make it a regular contact again.
             existing.acquaintance_level = pc::AcquaintanceLevel::Direct;
             self.store.upsert_contact(&existing)?;
             return Ok(contacts::to_json(&existing));
         }
-        let mut found = contacts::lookup(&self.https, std::slice::from_ref(&id)).await?;
+        let mut found =
+            contacts::lookup(&self.https, &self.config, std::slice::from_ref(&id)).await?;
         let Some((_, Lookup::Found(contact))) = found.pop() else {
             return Err(ApiError::ContactInvalid);
         };
@@ -719,7 +723,7 @@ impl App {
             return Ok(false);
         }
         let ids: Vec<String> = stored.iter().map(|c| c.identity.to_string()).collect();
-        let found = contacts::lookup(&self.https, &ids).await?;
+        let found = contacts::lookup(&self.https, &self.config, &ids).await?;
         let mut changed = false;
         for (id, result) in found {
             let Some(mut contact) = stored
@@ -729,15 +733,27 @@ impl App {
             else {
                 continue;
             };
-            let before = (contact.feature_mask.0, contact.activity_state);
+            let state = |c: &libthreema::model::contact::ContactInit| {
+                (
+                    c.feature_mask.0,
+                    c.activity_state,
+                    c.verification_level,
+                    c.nickname.clone(),
+                )
+            };
+            let before = state(&contact);
             match result {
                 Lookup::Found(fresh) => {
                     contact.feature_mask = fresh.feature_mask;
                     contact.activity_state = fresh.activity_state;
                 }
                 Lookup::Invalid => contact.activity_state = pc::ActivityState::Invalid,
+                // A wrong answer changes nothing.
+                Lookup::Refused => continue,
             }
-            if before != (contact.feature_mask.0, contact.activity_state) {
+            // Added before predefined contacts were pinned; a stored key is never replaced here.
+            let _ = contacts::pin_predefined(&self.config, &mut contact);
+            if before != state(&contact) {
                 self.store.upsert_contact(&contact)?;
                 changed = true;
             }
@@ -773,14 +789,18 @@ impl App {
             .filter_map(|c| contacts::parse_identity(&c.identity).map(|id| id.to_string()))
             .filter(|id| Some(id) != own.as_ref())
             .collect();
-        let found = contacts::lookup(&self.https, &ids).await?;
+        let found = contacts::lookup(&self.https, &self.config, &ids).await?;
         let mut imported = 0_usize;
         let mut revoked = 0_usize;
         for (id, result) in found {
-            let Lookup::Found(contact) = result else {
+            let contact = match result {
+                Lookup::Found(contact) => contact,
                 // Revoked or never existed: dropped, like on Android (counted for the summary).
-                revoked += 1;
-                continue;
+                Lookup::Invalid => {
+                    revoked += 1;
+                    continue;
+                }
+                Lookup::Refused => continue,
             };
             let Some(entry) = pending
                 .iter()
@@ -789,8 +809,11 @@ impl App {
                 continue;
             };
             if self.store.contact(&id)?.is_none() {
-                self.store
-                    .upsert_contact(&contacts::apply_backup(*contact, entry))?;
+                let mut restored = contacts::apply_backup(*contact, entry);
+                if !contacts::pin_predefined(&self.config, &mut restored) {
+                    continue;
+                }
+                self.store.upsert_contact(&restored)?;
                 if entry.is_private {
                     self.mark_private(&id, true)?;
                 }
@@ -887,7 +910,8 @@ impl App {
                 let id = contacts::parse_identity(&code.identity)
                     .ok_or(ApiError::IdentityFormat)?
                     .to_string();
-                let mut found = contacts::lookup(&self.https, std::slice::from_ref(&id)).await?;
+                let mut found =
+                    contacts::lookup(&self.https, &self.config, std::slice::from_ref(&id)).await?;
                 let Some((_, Lookup::Found(contact))) = found.pop() else {
                     return Err(ApiError::ContactInvalid);
                 };

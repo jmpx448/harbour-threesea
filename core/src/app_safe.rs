@@ -562,7 +562,7 @@ impl App {
         }
         if !unknown.is_empty() {
             let ids: Vec<String> = unknown.iter().map(|(id, _)| id.clone()).collect();
-            for (id, result) in crate::contacts::lookup(&self.https, &ids).await? {
+            for (id, result) in crate::contacts::lookup(&self.https, &self.config, &ids).await? {
                 let crate::contacts::Lookup::Found(contact) = result else {
                     continue;
                 };

@@ -347,7 +347,7 @@ impl App {
                     }
                 }
                 None => {
-                    let contact = Contact {
+                    let mut contact = Contact {
                         identity: c
                             .identity
                             .parse()
@@ -382,6 +382,10 @@ impl App {
                         conversation_category: ConversationCategory::Default,
                         conversation_visibility: ConversationVisibility::Normal,
                     };
+                    if !crate::contacts::pin_predefined(&self.config, &mut contact) {
+                        key_conflicts += 1;
+                        continue;
+                    }
                     self.store.upsert_contact(&contact)?;
                     if c.archived {
                         self.store.set_archived(&c.identity, true)?;

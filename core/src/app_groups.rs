@@ -406,10 +406,11 @@ impl App {
     /// _group_ (not shown as contacts). Pending group messages are sent once they are known.
     pub(crate) fn fetch_members(&self, identities: Vec<String>) {
         let https = self.https.clone();
+        let config = std::sync::Arc::clone(&self.config);
         let store = Rc::clone(&self.store);
         let events = self.media_events.clone();
         tokio::task::spawn_local(async move {
-            match contacts::lookup(&https, &identities).await {
+            match contacts::lookup(&https, &config, &identities).await {
                 Ok(found) => {
                     for (_, result) in found {
                         if let Lookup::Found(contact) = result {

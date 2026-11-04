@@ -8,7 +8,7 @@
 
 use data_encoding::BASE64;
 use libthreema::{
-    common::{FeatureMask, ThreemaId, keys::PublicKey},
+    common::{FeatureMask, ThreemaId, config::Config, keys::PublicKey},
     https::HttpsResult,
     model::contact::{Contact, ContactInit},
     protobuf::d2d_sync::{
@@ -173,6 +173,25 @@ pub enum Lookup {
     Found(Box<ContactInit>),
     /// Revoked or never existed.
     Invalid,
+    /// A predefined contact with a key other than its known one: a wrong answer, not to be used.
+    Refused,
+}
+
+/// Threema's own contacts have a known key ([`Config::predefined_contacts`]): another one is refused
+/// (`false`), the right one counts as fully verified and brings the known nickname, like
+/// libthreema's lookup and Android's `requireValidContact`. Anyone else stays as they are.
+#[must_use]
+pub fn pin_predefined(config: &Config, c: &mut ContactInit) -> bool {
+    let Some(predefined) = config.predefined_contacts.get(&c.identity) else {
+        return true;
+    };
+    if predefined.public_key != c.public_key {
+        tracing::warn!("predefined contact with another key refused");
+        return false;
+    }
+    c.verification_level = pc::VerificationLevel::FullyVerified;
+    c.nickname = Some(predefined.nickname.clone());
+    true
 }
 
 #[derive(Deserialize)]
@@ -248,10 +267,27 @@ fn contact_init(entry: &FetchedIdentity) -> Option<ContactInit> {
     })
 }
 
+/// What the directory's answer says about `id`.
+fn lookup_result(config: &Config, fetched: &[FetchedIdentity], id: &str) -> Lookup {
+    let found = fetched
+        .iter()
+        .find(|f| f.identity == id)
+        .and_then(contact_init);
+    let Some(mut contact) = found else {
+        return Lookup::Invalid;
+    };
+    if pin_predefined(config, &mut contact) {
+        Lookup::Found(Box::new(contact))
+    } else {
+        Lookup::Refused
+    }
+}
+
 /// `POST identity/fetch_bulk` for up to a few hundred IDs. IDs missing from the answer are
 /// invalid (revoked or never existed).
 pub async fn lookup(
     client: &HttpsClient,
+    config: &Config,
     identities: &[String],
 ) -> Result<Vec<(String, Lookup)>, DirectoryError> {
     let mut results = Vec::with_capacity(identities.len());
@@ -265,14 +301,7 @@ pub async fn lookup(
                 .await,
         )?;
         for id in chunk {
-            let found = fetched
-                .iter()
-                .find(|f| &f.identity == id)
-                .and_then(contact_init);
-            results.push((
-                id.clone(),
-                found.map_or(Lookup::Invalid, |c| Lookup::Found(Box::new(c))),
-            ));
+            results.push((id.clone(), lookup_result(config, &fetched, id)));
         }
     }
     Ok(results)
@@ -580,6 +609,52 @@ mod tests {
     }
 
     #[test]
+    fn predefined_contacts_are_pinned() {
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let id = ThreemaId::try_from("*3MATOKN").unwrap();
+        let known = config.predefined_contacts.get(&id).unwrap();
+
+        // What the directory says about it decides nothing but whether it is used.
+        let answer = |key: &[u8]| FetchedIdentity {
+            public_key: BASE64.encode(key),
+            ..entry("*3MATOKN")
+        };
+        let right = hex_bytes(&known.public_key.to_string());
+        let Lookup::Found(contact) = lookup_result(&config, &[answer(&right)], "*3MATOKN") else {
+            panic!("the right key is taken");
+        };
+        assert_eq!(
+            contact.verification_level,
+            pc::VerificationLevel::FullyVerified
+        );
+        assert_eq!(contact.nickname.as_deref(), Some(known.nickname.as_str()));
+        assert!(matches!(
+            lookup_result(&config, &[answer(&[9; 32])], "*3MATOKN"),
+            Lookup::Refused
+        ));
+        assert!(matches!(
+            lookup_result(&config, &[], "*3MATOKN"),
+            Lookup::Invalid
+        ));
+
+        // Restored from a backup, as unverified or with another key: the same.
+        let mut restored = *contact;
+        restored.verification_level = pc::VerificationLevel::Unverified;
+        assert!(pin_predefined(&config, &mut restored));
+        assert_eq!(
+            restored.verification_level,
+            pc::VerificationLevel::FullyVerified
+        );
+        restored.public_key = PublicKey::from([9; 32]);
+        assert!(!pin_predefined(&config, &mut restored));
+
+        // Everyone else stays as they are.
+        let mut other = contact_init(&entry("ABCD1234")).unwrap();
+        assert!(pin_predefined(&config, &mut other));
+        assert_eq!(other.verification_level, pc::VerificationLevel::Unverified);
+    }
+
+    #[test]
     fn display_names() {
         let mut c = contact_init(&entry("ECHOECHO")).unwrap();
         assert_eq!(display_name(&c), "ECHOECHO");
@@ -613,7 +688,8 @@ mod live_tests {
     #[ignore = "contacts the real Threema directory server"]
     async fn echoecho_exists_and_bogus_id_is_invalid() {
         let client = HttpsClient::new().unwrap();
-        let results = lookup(&client, &["ECHOECHO".into(), "ZZZZZZZ9".into()])
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let results = lookup(&client, &config, &["ECHOECHO".into(), "ZZZZZZZ9".into()])
             .await
             .unwrap();
         let Lookup::Found(echo) = &results[0].1 else {
