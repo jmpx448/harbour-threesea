@@ -619,6 +619,23 @@ impl State {
                 acknowledge: AcknowledgeContext::from(&*payload),
             });
         };
+        // Someone the user blocked gets no forward security session and no answer: their control
+        // messages must neither change our state nor show them that we are online. The exception
+        // is someone who shares an active group with us, since the group control messages they send
+        // are exempt from blocking and may arrive encapsulated. Unknown senders with _block unknown_
+        // on keep their session for the same reason: their group-setup is exempt, and without a
+        // session it would be lost.
+        let fs_refused = matches!(
+            sender.communication_permission(
+                &context.config,
+                &*context.settings.borrow(),
+                &*context.contacts.borrow(),
+            )?,
+            CommunicationPermission::BlockExplicit
+        ) && !context
+            .contacts
+            .borrow()
+            .is_member_of_active_group(sender.inner().identity)?;
         let csp_e2e = &mut context.csp_e2e;
         let message = {
             let (user_identity, client_key, sender_identity, sender_public_key) = (
@@ -632,6 +649,10 @@ impl State {
                 // A stale commit from a message that was never acknowledged must not be applied.
                 fs.pending_commit = None;
                 move |envelope: &[u8]| {
+                    if fs_refused {
+                        info!("Discarding FS envelope of a blocked sender");
+                        return Ok(fs::IncomingFsOutcome::Handled);
+                    }
                     fs::process_incoming(
                         fs,
                         user_identity,
