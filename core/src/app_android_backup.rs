@@ -1507,6 +1507,85 @@ mod export_tests {
         assert_eq!(app.store.setting(keys::ANDROID_EXPORT_ERROR).unwrap(), None);
     }
 
+    /// A scheduled backup runs unattended, usually while the private chats are hidden, and holds
+    /// them like any other backup (ADR 0009): its folder and password can only be set with the PIN,
+    /// and a backup that left chats out would lose them for whoever restores it.
+    #[test]
+    fn scheduled_backup_holds_the_hidden_private_chats() {
+        use crate::store::keys;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
+            .unwrap();
+        app.store
+            .insert_incoming(
+                "B0B0B0B0",
+                0xAAAA,
+                "text",
+                "private words",
+                1_800_000_000_000,
+            )
+            .unwrap();
+        app.store.set_private("B0B0B0B0", true).unwrap();
+        assert!(!app.unlocked);
+        for (key, value) in [
+            (keys::ANDROID_EXPORT_DIR, folder.path().to_str().unwrap()),
+            (keys::ANDROID_EXPORT_PASSWORD, "round-trip-pw"),
+            (keys::ANDROID_EXPORT_INTERVAL, "daily"),
+        ] {
+            app.store.set_setting(key, value).unwrap();
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let restored = tokio::task::LocalSet::new().block_on(&runtime, async {
+            app.android_export_scheduled();
+            let done = app.android_export.clone().expect("the backup started");
+            while !done.get() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let path = std::fs::read_dir(folder.path())
+                .unwrap()
+                .next()
+                .expect("a backup file")
+                .unwrap()
+                .path();
+
+            let mut b = app_with_identity(dir_b.path(), [7; 32]);
+            b.android_backup_import(
+                path.to_str().unwrap().to_owned(),
+                Zeroizing::new("round-trip-pw".into()),
+                "metadata",
+            )
+            .await
+            .unwrap();
+            let identity = b.store.identity().unwrap().unwrap();
+            let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+            crate::android_backup::import::HistoryImport {
+                store: std::rc::Rc::clone(&b.store),
+                media: std::sync::Arc::clone(&b.media),
+                events,
+                cancel: std::rc::Rc::new(std::cell::Cell::new(false)),
+                me: identity.threema_id.clone(),
+                own_public_key: libthreema::common::keys::ClientKey::from(*identity.client_key)
+                    .public_key()
+                    .to_string(),
+                path,
+                password: Zeroizing::new("round-trip-pw".into()),
+            }
+            .run()
+            .await;
+            b.store.conversation_messages("B0B0B0B0", 10).unwrap()
+        });
+        assert_eq!(app.store.setting(keys::ANDROID_EXPORT_ERROR).unwrap(), None);
+        assert!(restored.iter().any(|m| m.body == "private words"));
+    }
+
     #[test]
     fn backup_file_names() {
         let name = backup_file_name(1_700_000_000_000);

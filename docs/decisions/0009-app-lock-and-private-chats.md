@@ -92,7 +92,12 @@ backup, data backup and its schedule, turning Threema Safe on or off, the revoca
 linking a device, removing the ID) needs the PIN in the core whenever a lock exists, also within
 the grace time, like Android. The UI asks before opening those pages (`window.pushWithPin`);
 linking asks on `LinkDevicePage`, where every route ends. The app locking closes the page
-holding a PIN, the lock settings included. Scheduled backups run without it. So
+holding a PIN, the lock settings included. Scheduled backups run without it, and they hold the
+private chats like any other data backup, also while those are hidden: their folder and password
+can only be set with the PIN (or before any lock existed), the file is encrypted under that
+password, and a backup that left chats out would lose them for whoever restores it. The format
+has no private mark: on a device that had no such mark before, restored chats aren't private
+until they are marked again. So
 a forgotten PIN can't be reset from inside the app any more: that takes deleting the app's data
 folder, then restarting the phone, then restoring from a backup; Settings → Security → App lock
 says so with the folder's path, and the README, which a locked-out user can still read. The restart
