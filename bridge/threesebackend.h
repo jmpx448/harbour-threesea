@@ -381,6 +381,9 @@ private:
     void sendSquarePicture(const QString &path, QVariantMap request, const QJSValue &callback,
                            bool safeCopy = false);
     void fail(const QString &reason);
+    // A command that can't reach a core still gets its answer: a refusal, or whoever waits for it
+    // (a page holding its text, a reply from a notification) would wait for ever.
+    void answerNoCore(const QJSValue &callback);
     void stopCore();
     void requestDataRemoval(const QString &pin);
     void dataRemovalRefused(const QVariantMap &error, const QString &kind);

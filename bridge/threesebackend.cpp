@@ -500,6 +500,7 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
                               const QJSValue &callback)
 {
     if (!m_core) {
+        answerNoCore(callback);
         return;
     }
     const quint64 id = m_nextId++;
@@ -681,6 +682,7 @@ void ThreeseBackend::importOldChatTones()
 void ThreeseBackend::addGifFavourite(const QString &path, const QJSValue &callback)
 {
     if (!m_core) {
+        answerNoCore(callback);
         return;
     }
     const quint64 id = m_nextId++;
@@ -702,6 +704,7 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
                                double seconds, const QString &caption, const QJSValue &callback)
 {
     if (!m_core) {
+        answerNoCore(callback);
         return;
     }
     const quint64 id = m_nextId++;
@@ -918,6 +921,7 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
         return;
     }
     if (!m_core) {
+        answerNoCore(m_callbacks.take(id));
         removeTempSources(id);
         return;
     }
@@ -951,9 +955,27 @@ void ThreeseBackend::request(const QString &command, const QVariantMap &args, Na
     call(command, args, QJSValue());
 }
 
+void ThreeseBackend::answerNoCore(const QJSValue &callback)
+{
+    if (!callback.isCallable()) {
+        return;
+    }
+    // Later, like any answer of the core: callers go on after the call before they expect one.
+    QJSValue answer = callback;
+    QTimer::singleShot(0, this, [this, answer]() mutable {
+        QJSValueList arguments;
+        arguments << QJSValue(false);
+        arguments << m_engine->toScriptValue(QVariantMap());
+        arguments << QJSValue(QStringLiteral("internal"));
+        arguments << QJSValue(QStringLiteral("the app's core is not running"));
+        answer.call(arguments);
+    });
+}
+
 void ThreeseBackend::call(const QString &command, const QVariantMap &args, const QJSValue &callback)
 {
     if (!m_core) {
+        answerNoCore(callback);
         return;
     }
     const quint64 id = m_nextId++;
