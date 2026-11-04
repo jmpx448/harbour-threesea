@@ -382,7 +382,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - `poll-setup` (0x15 / group 0x52): poll id (u64) + JSON (`d` question, `s` state, `a` multiple,
   `t` announce votes to everyone, `u` display mode, `c` choices `{i, n, o}`; when closing also
   `p` participants and per choice `r` votes per participant or `t` totals). Closing = the same
-  poll id with `s: 1`; closed → open is ignored.
+  poll id with `s: 1`; closed → open is ignored. A close changes the results only, by choice ID (the
+  spec's "ignore any other fields"; Android also takes the names): choice texts stay what people
+  voted for.
 - `poll-vote` (0x16 / 0x53): creator id + poll id + JSON `[[choice id, 0|1], …]` with all
   choices. Sent to everyone if the poll announces votes, else only to its creator.
 - Stored as a message of kind `poll` (its state is the body), `polls` table maps

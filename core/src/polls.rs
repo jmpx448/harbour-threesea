@@ -288,11 +288,7 @@ pub fn receive_setup(
             if current["state"] == 1 || !closing {
                 return Ok((None, None));
             }
-            // Close with the given results; nothing else may change.
-            current["state"] = json!(1);
-            current["votes"] = poll["votes"].clone();
-            current["choices"] = poll["choices"].clone();
-            current["summary"] = poll["summary"].clone();
+            close_with_results(&mut current, &poll);
             let changed = store.set_message_body(existing.id, &current)?;
             // And a message of its own in the chat, like Android's "Poll closed": the results.
             let body = current.to_string();
@@ -353,10 +349,7 @@ pub fn reflect_setup(
             if current["state"] == 1 || !closing {
                 return Ok((None, None));
             }
-            current["state"] = json!(1);
-            current["votes"] = poll["votes"].clone();
-            current["choices"] = poll["choices"].clone();
-            current["summary"] = poll["summary"].clone();
+            close_with_results(&mut current, &poll);
             let changed = store.set_message_body(existing.id, &current)?;
             let added = store.insert_reflected_outgoing(
                 conversation,
@@ -368,6 +361,52 @@ pub fn reflect_setup(
             Ok((added, changed))
         }
     }
+}
+
+/// Close a poll with the results of its closing setup (`closing`, as [`from_setup`] reads it): who
+/// voted for what and the totals, by choice ID. Nothing else may change (the spec's "ignore any
+/// other fields"; Android takes the names too): the creator can't reword the choices under votes
+/// already cast. Votes for choices the poll doesn't have count for nothing.
+fn close_with_results(current: &mut Value, closing: &Value) {
+    let known: Vec<Value> = current["choices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|choice| choice["id"].clone())
+        .collect();
+    let mut votes = serde_json::Map::new();
+    for (voter, chosen) in closing["votes"].as_object().into_iter().flatten() {
+        let chosen: Vec<Value> = chosen
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|choice| known.contains(choice))
+            .cloned()
+            .collect();
+        if !chosen.is_empty() {
+            votes.insert(voter.clone(), Value::Array(chosen));
+        }
+    }
+    for choice in current["choices"].as_array_mut().into_iter().flatten() {
+        let total = closing["choices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|given| given["id"] == choice["id"])
+            .map(|given| given["total"].clone());
+        match (choice.as_object_mut(), total) {
+            (Some(choice), Some(total)) if !total.is_null() => {
+                choice.insert("total".to_owned(), total);
+            }
+            (Some(choice), _) => {
+                choice.remove("total");
+            }
+            (None, _) => {}
+        }
+    }
+    current["state"] = json!(1);
+    current["votes"] = Value::Object(votes);
+    current["summary"] = closing["summary"].clone();
 }
 
 /// _Common Poll Vote Receive Steps_.
@@ -459,6 +498,61 @@ mod tests {
                 ("deleted", "")
             );
         }
+    }
+
+    /// Closing takes the results and nothing else: choice texts stay what people voted for, in a
+    /// poll closed by a member and in one closed on another device of ours, and the results
+    /// message says the same.
+    #[test]
+    fn closing_a_poll_keeps_its_choice_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let setup = json!({"s": 0, "a": 0, "t": 0, "d": "Who pays?",
+                           "c": [{"i": 0, "n": "Alice"}, {"i": 1, "n": "Bob"}]});
+        let closing = json!({"s": 1, "a": 0, "t": 0, "d": "Who is nice?", "p": ["B0B0B0B0", "C0C0C0C0"],
+                             "c": [{"i": 0, "n": "Bob", "r": [1, 0]}, {"i": 1, "n": "Alice", "r": [0, 1]},
+                                   {"i": 7, "n": "Carol", "r": [1, 1]}]});
+        let (setup, closing) = (setup.to_string(), closing.to_string());
+        let check = |poll: &Message, closed: &Message, changed: &Message| {
+            for body in [&closed.body, &changed.body] {
+                let body: Value = serde_json::from_str(body).unwrap();
+                assert_eq!(body["description"], "Who pays?");
+                assert_eq!(body["state"], 1);
+                assert_eq!(
+                    body["choices"],
+                    json!([{"id": 0, "name": "Alice"}, {"id": 1, "name": "Bob"}])
+                );
+                // The results by choice ID, and the choice that isn't one is gone.
+                assert_eq!(body["votes"], json!({"B0B0B0B0": [0], "C0C0C0C0": [1]}));
+            }
+            assert_eq!(changed.id, poll.id);
+        };
+
+        let (poll, _) =
+            receive_setup(&store, "ABCD1234", "ABCD1234", false, 1, 1, 9, &setup).unwrap();
+        let (closed, changed) =
+            receive_setup(&store, "ABCD1234", "ABCD1234", false, 2, 2, 9, &closing).unwrap();
+        check(&poll.unwrap(), &closed.unwrap(), &changed.unwrap());
+
+        let (poll, _) = reflect_setup(&store, "ABCD1234", "ECHOECHO", 3, 1, 10, &setup).unwrap();
+        let (closed, changed) =
+            reflect_setup(&store, "ABCD1234", "ECHOECHO", 4, 2, 10, &closing).unwrap();
+        check(&poll.unwrap(), &closed.unwrap(), &changed.unwrap());
+    }
+
+    /// A summary poll's totals come with the close, by choice ID.
+    #[test]
+    fn closing_a_summary_poll_takes_the_totals_by_id() {
+        let mut current = json!({"state": 0, "summary": false, "votes": {"B0B0B0B0": [0]},
+                                 "choices": [{"id": 0, "name": "a"}, {"id": 1, "name": "b"}]});
+        let closing = json!({"summary": true, "votes": {},
+                             "choices": [{"id": 1, "name": "x", "total": 3}, {"id": 0, "name": "y", "total": 1}]});
+        close_with_results(&mut current, &closing);
+        assert_eq!(
+            current,
+            json!({"state": 1, "summary": true, "votes": {},
+                   "choices": [{"id": 0, "name": "a", "total": 1}, {"id": 1, "name": "b", "total": 3}]})
+        );
     }
 
     #[test]
