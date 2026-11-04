@@ -519,6 +519,7 @@ impl App {
             client_info: self.version.client_info(),
             fs_mask_checks: connection::FsMaskChecks::default(),
             storage_failing: connection::StorageFailing::default(),
+            failing_items: connection::FailingItems::default(),
             carried_events: core::cell::RefCell::default(),
         };
         let (to_tx, to_rx) = mpsc::unbounded_channel();

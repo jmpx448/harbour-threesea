@@ -51,18 +51,16 @@ pub enum ReflectedError {
 }
 
 impl ReflectedError {
-    /// SQLite's code if the store failed and this device still needs the envelope: then the
-    /// mediator is to send it again, as no other route brings it here. A broken rule of ours
-    /// (`SQLITE_CONSTRAINT`) would fail the same way every time, and hold up all that follows.
+    /// SQLite's code if the store failed: the mediator is to send the envelope again, as no other
+    /// route brings it here. (Not for good if it fails the same way every time:
+    /// [`crate::store::fails_every_time`].)
     #[must_use]
     pub fn storage_code(&self) -> Option<i32> {
-        const SQLITE_CONSTRAINT: i32 = 19;
-        let code = match self {
-            Self::Store(error) => error.sqlite_code(),
-            Self::StoreCode(code) => *code,
-            Self::Decrypt(_) | Self::Replay | Self::Decode(_) => return None,
-        };
-        (code & 0xff != SQLITE_CONSTRAINT).then_some(code)
+        match self {
+            Self::Store(error) => Some(error.sqlite_code()),
+            Self::StoreCode(code) => Some(*code),
+            Self::Decrypt(_) | Self::Replay | Self::Decode(_) => None,
+        }
     }
 }
 
@@ -125,6 +123,18 @@ pub fn open(
             Err(ReflectedError::Decode(error.to_string()))
         }
     }
+}
+
+/// An envelope is given up on: from now on it counts as seen.
+pub fn note_dropped(
+    store: &Store,
+    device_group_key: &libthreema::common::keys::DeviceGroupKey,
+    data: &[u8],
+) -> Result<(), ReflectedError> {
+    let (nonce, _) = device_group_key
+        .decrypt_envelope(data)
+        .map_err(|e| ReflectedError::Decrypt(e.to_string()))?;
+    Ok(store.add_d2d_nonce(&nonce)?)
 }
 
 /// Apply an opened envelope and note its nonce, in one store step. An envelope this can't use
@@ -673,15 +683,12 @@ mod tests {
         assert!(error.storage_code().is_some(), "{error}");
     }
 
-    /// What can't be used is acknowledged and counts as seen; a broken rule of ours is that too,
-    /// or it would come back at every login and hold up what follows.
+    /// What can't be used is acknowledged and counts as seen.
     #[test]
     fn an_unusable_envelope_is_dropped_and_leaves_its_nonce() {
         let dir = tempfile::tempdir().unwrap();
         let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
         let key = libthreema::common::keys::DeviceGroupKey::from([7; 32]);
-        let user: ThreemaId = "ABCD1234".parse().unwrap();
-        let events: EventSink = Rc::default();
 
         let (_, garbage) = key.encrypt_envelope(&[0xff; 8]).unwrap();
         let error = open(&store, &key, &garbage).map(|_| ()).unwrap_err();
@@ -689,22 +696,6 @@ mod tests {
         assert!(error.storage_code().is_none());
         assert!(matches!(
             open(&store, &key, &garbage),
-            Err(ReflectedError::Replay)
-        ));
-
-        store
-            .conn
-            .execute_batch(
-                "CREATE TRIGGER refuse BEFORE INSERT ON messages
-                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
-            )
-            .unwrap();
-        let (data, _) = sealed(&key, 5);
-        let opened = open(&store, &key, &data).unwrap();
-        let error = apply_once(&store, user, opened, &events).unwrap_err();
-        assert!(error.storage_code().is_none(), "{error}");
-        assert!(matches!(
-            open(&store, &key, &data),
             Err(ReflectedError::Replay)
         ));
     }

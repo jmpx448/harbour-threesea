@@ -35,6 +35,21 @@ fn is_disk_full(error: &rusqlite::Error) -> bool {
             if failure.extended_code == rusqlite::ffi::SQLITE_IOERR_SHMSIZE)
 }
 
+/// Whether a failure with this SQLite code ([`StoreError::sqlite_code`]) comes from what was being
+/// stored, so that trying again won't help (a broken rule, a bad type, something too big; `0`: what
+/// isn't SQLite's as such). Anything else may be the device's state of the moment (a full disk, an
+/// I/O error, damage someone can repair): that is never a reason to give up on anything.
+#[must_use]
+pub fn fails_every_time(code: i32) -> bool {
+    use rusqlite::ffi::{SQLITE_CONSTRAINT, SQLITE_ERROR, SQLITE_MISMATCH, SQLITE_TOOBIG};
+    let primary = code & 0xff;
+    primary == 0
+        || primary == SQLITE_ERROR
+        || primary == SQLITE_TOOBIG
+        || primary == SQLITE_CONSTRAINT
+        || primary == SQLITE_MISMATCH
+}
+
 impl StoreError {
     /// What went wrong as the UI tells it apart (`Errors.js`); `store` when there is nothing more
     /// to say. SQLCipher reports damage on any page but the first as corruption.
@@ -965,6 +980,35 @@ mod tests {
         store.delete_distribution_list("d:1").unwrap();
         step.commit().unwrap();
         assert!(store.conn.is_autocommit());
+    }
+
+    #[test]
+    fn only_failures_of_the_data_itself_count_as_failing_every_time() {
+        use rusqlite::ffi;
+        for code in [
+            0,
+            ffi::SQLITE_ERROR,
+            ffi::SQLITE_TOOBIG,
+            ffi::SQLITE_CONSTRAINT,
+            ffi::SQLITE_CONSTRAINT_TRIGGER,
+            ffi::SQLITE_MISMATCH,
+        ] {
+            assert!(fails_every_time(code), "{code}");
+        }
+        for code in [
+            ffi::SQLITE_FULL,
+            ffi::SQLITE_IOERR,
+            ffi::SQLITE_IOERR_SHMSIZE,
+            ffi::SQLITE_READONLY,
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_NOMEM,
+            ffi::SQLITE_CANTOPEN,
+            ffi::SQLITE_CORRUPT,
+            ffi::SQLITE_NOTADB,
+        ] {
+            assert!(!fails_every_time(code), "{code}");
+        }
     }
 
     /// A step undoes what it didn't commit, and one inside another only its own part.

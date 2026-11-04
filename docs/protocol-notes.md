@@ -144,8 +144,15 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   (`carried_events`). A store failure ends the connection without an acknowledgement, so the message
   comes again and holds up the queue behind it: the log gets SQLite's code, the user one notice per
   streak (`storageProblem`), since the server keeps messages only for a limited time.
+- What fails the same way every time mustn't hold up everything behind it: after 3 tries in a row
+  (`TRIES_BEFORE_DROPPING`) a message is acknowledged and dropped, with an error in the log, like
+  Android, which acknowledges any failure but the network's at once. That goes for libthreema's own
+  errors and SQLite's 0, ERROR, TOOBIG, CONSTRAINT and MISMATCH (`store::fails_every_time`), never
+  for the state of the device: FULL, IOERR, READONLY, BUSY, LOCKED, NOMEM, CANTOPEN, CORRUPT, NOTADB
+  wait as long as they last, and so do network and server errors.
 - Reflected envelopes: applied and their nonce noted in one store step, then acknowledged; one the
-  store failed on stays unacknowledged, so the mediator hands it out at the next login. Android
+  store failed on stays unacknowledged, so the mediator hands it out at the next login, by the same
+  rule as above (without an end of that queue there is no promotion to leader either). Android
   acknowledges those too (with a TODO), but nothing else brings them to a follower.
 - A leader stores a 1:1 message before reflecting it. Until the task is through it is in
   `awaiting_reflection`, which keeps `message_is_marked_used` from discarding the server's next copy

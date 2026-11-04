@@ -12,7 +12,7 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 use libthreema::{
     common::{
         ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, Delta, DeviceCookie, GroupIdentity,
-        MessageId, Nonce, ThreemaId,
+        MessageFlags, MessageId, Nonce, ThreemaId,
         config::{Config, Flavor},
         keys::{ClientKey, PublicKey},
     },
@@ -313,6 +313,7 @@ pub struct ConnectionSetup {
     pub fs_mask_checks: FsMaskChecks,
     /// Where the store is failing; the UI has been told.
     pub storage_failing: StorageFailing,
+    pub failing_items: FailingItems,
     /// Answers to what has been received that the last connection couldn't send
     /// ([`waits_for_the_next_connection`]).
     pub carried_events: RefCell<Vec<CoreEvent>>,
@@ -351,6 +352,45 @@ impl StorageFailing {
         let was_failing = core::mem::take(&mut failing[step as usize]);
         self.0.set(failing);
         was_failing && !failing.contains(&true)
+    }
+}
+
+/// A message or reflected envelope is given up on when it has failed this many times in a row in
+/// a way that says trying again won't help ([`ConnectionError::fails_every_time`]). It would hold
+/// up all that comes after it, for good: one bug of ours must not stop someone's whole inbox.
+const TRIES_BEFORE_DROPPING: u32 = 3;
+/// More than this many failing at once isn't one bad message; start counting over.
+const FAILING_ITEMS_MAX: usize = 64;
+
+/// What came in and failed.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum FailingItem {
+    Message {
+        sender: String,
+        id: u64,
+    },
+    /// By the nonce the encrypted envelope starts with.
+    Envelope(Vec<u8>),
+}
+
+/// How often each of them has failed in a row; outlives a connection.
+#[derive(Default)]
+pub struct FailingItems(RefCell<std::collections::HashMap<FailingItem, u32>>);
+
+impl FailingItems {
+    /// One more failure: how many that makes.
+    fn failed(&self, item: &FailingItem) -> u32 {
+        let mut items = self.0.borrow_mut();
+        if items.len() >= FAILING_ITEMS_MAX {
+            items.clear();
+        }
+        let failures = items.entry(item.clone()).or_default();
+        *failures += 1;
+        *failures
+    }
+
+    fn forget(&self, item: &FailingItem) {
+        let _ = self.0.borrow_mut().remove(item);
     }
 }
 
@@ -416,6 +456,14 @@ enum ConnectionError {
     /// Our store failed (SQLite's code): nothing the network can help with.
     #[error("storage failed ({code})")]
     Storage { code: i32, step: StorageStep },
+    /// libthreema gave up on a message for a reason of its own, neither storage nor network.
+    #[error("incoming message: {0}")]
+    IncomingMessage(String),
+}
+
+/// What tells a reflected envelope from the others: the random nonce at its start.
+fn envelope_nonce(envelope: &[u8]) -> Vec<u8> {
+    envelope.iter().take(24).copied().collect()
 }
 
 fn storage_error(error: crate::store::StoreError) -> ConnectionError {
@@ -431,6 +479,16 @@ impl ConnectionError {
         match self {
             Self::Storage { code, .. } => Self::Storage { code, step },
             other => other,
+        }
+    }
+
+    /// Trying again won't help: this comes from what is being handled, not from the state of the
+    /// device or the network.
+    fn fails_every_time(&self) -> bool {
+        match self {
+            Self::Storage { code, .. } => crate::store::fails_every_time(*code),
+            Self::IncomingMessage(_) => true,
+            _ => false,
         }
     }
 
@@ -553,11 +611,18 @@ fn nickname_delta(nickname: Option<&str>, unanswered: bool) -> Delta<&str> {
     }
 }
 
-/// Like [`protocol_error`], but a rate limit stays what it is: it has its own wait.
+/// Like [`protocol_error`], but a rate limit stays what it is (it has its own wait), and what isn't
+/// the network's or a server's doing is the message's.
 fn e2e_error(error: CspE2eProtocolError) -> ConnectionError {
     match error {
         CspE2eProtocolError::RateLimitExceeded => ConnectionError::RateLimited,
-        other => protocol_error(other),
+        CspE2eProtocolError::NetworkError(_)
+        | CspE2eProtocolError::ServerError(_)
+        | CspE2eProtocolError::InvalidCredentials => protocol_error(error),
+        other => match protocol_error(other) {
+            ConnectionError::Protocol(text) => ConnectionError::IncomingMessage(text),
+            storage => storage,
+        },
     }
 }
 
@@ -2609,10 +2674,38 @@ impl<'a> Session<'a> {
             Ok(()) => self.storage_works(StorageStep::Reflected),
             // Unacknowledged, it comes again at the next login: this is its only way here.
             Err(error) if error.storage_code().is_some() => {
-                return Err(ConnectionError::Storage {
-                    code: error.storage_code().unwrap_or_default(),
+                let code = error.storage_code().unwrap_or_default();
+                let failure = ConnectionError::Storage {
+                    code,
                     step: StorageStep::Reflected,
-                });
+                };
+                if !failure.fails_every_time() {
+                    return Err(failure);
+                }
+                // Holding on to it would hold up the mediator's queue, and with it the promotion
+                // to leader and all that comes from the chat server.
+                let failures = self
+                    .setup
+                    .failing_items
+                    .failed(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
+                if failures < TRIES_BEFORE_DROPPING {
+                    tracing::warn!(
+                        code,
+                        failures,
+                        "a reflected envelope failed, it comes again"
+                    );
+                    return Err(failure);
+                }
+                tracing::error!(
+                    code,
+                    failures,
+                    "a reflected envelope keeps failing and is dropped"
+                );
+                if let Err(error) =
+                    crate::reflected::note_dropped(&store, &device_group_key, &reflected.envelope)
+                {
+                    tracing::warn!(%error, "noting a dropped envelope failed");
+                }
             }
             Err(error) => tracing::warn!(
                 %error,
@@ -2622,6 +2715,9 @@ impl<'a> Session<'a> {
                 "reflected envelope dropped"
             ),
         }
+        self.setup
+            .failing_items
+            .forget(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
         // A message another device received first: its notification waits a moment.
         for event in self.events.borrow().iter() {
             if let CoreEvent::MessageAdded { message, .. } = event
@@ -3209,16 +3305,44 @@ impl<'a> Session<'a> {
         &mut self,
         message: MessageWithMetadataBox,
     ) -> Result<(), ConnectionError> {
-        let ack = self
-            .run_incoming_task(message)
-            .await
-            .map_err(|error| error.while_doing(StorageStep::Incoming))?;
-        self.storage_works(StorageStep::Incoming);
+        let (sender_identity, id, flags) = (message.sender_identity, message.id, message.flags.0);
+        let item = FailingItem::Message {
+            sender: sender_identity.to_string(),
+            id: id.0,
+        };
+        let ack = match self.run_incoming_task(message).await {
+            Ok(ack) => {
+                self.storage_works(StorageStep::Incoming);
+                ack
+            }
+            Err(error) => {
+                let error = error.while_doing(StorageStep::Incoming);
+                if !error.fails_every_time() {
+                    if matches!(error, ConnectionError::Protocol(_)) {
+                        tracing::warn!("an incoming message failed, it comes again");
+                    }
+                    return Err(error);
+                }
+                // As Android does right away, whatever failed: only the server can hold it, and
+                // it holds up the rest of the queue until it is acknowledged.
+                let failures = self.setup.failing_items.failed(&item);
+                if failures < TRIES_BEFORE_DROPPING {
+                    tracing::warn!(failures, "an incoming message failed, it comes again");
+                    return Err(error);
+                }
+                tracing::error!(failures, "an incoming message keeps failing and is dropped");
+                (flags & MessageFlags::NO_SERVER_ACKNOWLEDGEMENT == 0).then_some(MessageAck {
+                    sender_identity,
+                    id,
+                })
+            }
+        };
         // It's in the store by now: before anything that can fail on the network.
         self.emit_stored_message_events();
         if let Some(ack) = ack {
             self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
         }
+        self.setup.failing_items.forget(&item);
         self.after_incoming().await
     }
 
@@ -4024,6 +4148,7 @@ mod sync_order_tests {
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
             storage_failing: StorageFailing::default(),
+            failing_items: FailingItems::default(),
             carried_events: RefCell::default(),
         };
         let mut fs = StoreFs {
@@ -4486,6 +4611,142 @@ mod sync_order_tests {
         assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
     }
 
+    /// Another device read `CREATOR`'s message 1.
+    fn read_update() -> libthreema::protobuf::d2d::Envelope {
+        use libthreema::protobuf::d2d::{
+            Envelope, IncomingMessageUpdate, envelope::Content, incoming_message_update,
+        };
+        Envelope {
+            content: Some(Content::IncomingMessageUpdate(IncomingMessageUpdate {
+                updates: vec![incoming_message_update::Update {
+                    conversation: d2d_conversation(CREATOR),
+                    message_id: 1,
+                    update: Some(incoming_message_update::update::Update::Read(
+                        incoming_message_update::Read { at: 1 },
+                    )),
+                }],
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// What fails the same way every time mustn't hold up the queue for good: after a few tries the
+    /// message is acknowledged (on this socket without a handshake that attempt is a protocol
+    /// error). The state of the device is no such reason, however long it lasts.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_that_fails_every_time_is_given_up_on() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let store = &setup.store;
+        let is_storage = |error: &ConnectionError| matches!(error, ConnectionError::Storage { .. });
+
+        // A full disk, a read-only file: never.
+        let copies: Vec<_> = (0..2 * TRIES_BEFORE_DROPPING)
+            .map(|_| from_creator(&setup, 1, "hi"))
+            .collect();
+        store.conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        for copy in copies {
+            let error = session.handle_incoming(copy).await.unwrap_err();
+            assert!(is_storage(&error), "{error}");
+        }
+        store.conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+
+        // A rule of ours that the message breaks, every time.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON messages
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        for _ in 1..TRIES_BEFORE_DROPPING {
+            let copy = from_creator(&setup, 1, "hi");
+            let error = session.handle_incoming(copy).await.unwrap_err();
+            assert!(is_storage(&error), "{error}");
+        }
+        let copy = from_creator(&setup, 1, "hi");
+        let error = session.handle_incoming(copy).await.unwrap_err();
+        assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
+
+        // Another message starts over.
+        let other = from_creator(&setup, 2, "hi");
+        let error = session.handle_incoming(other).await.unwrap_err();
+        assert!(is_storage(&error), "{error}");
+    }
+
+    #[test]
+    fn what_libthreema_reports_says_whose_doing_it_is() {
+        for own in [
+            CspE2eProtocolError::InvalidState("x"),
+            CspE2eProtocolError::DesyncError("x".into()),
+        ] {
+            let error = e2e_error(own);
+            assert!(
+                matches!(error, ConnectionError::IncomingMessage(_)),
+                "{error}"
+            );
+            assert!(error.fails_every_time());
+        }
+        for network in [
+            CspE2eProtocolError::NetworkError("x".into()),
+            CspE2eProtocolError::ServerError("x".into()),
+            CspE2eProtocolError::InvalidCredentials,
+            CspE2eProtocolError::RateLimitExceeded,
+        ] {
+            assert!(!e2e_error(network).fails_every_time());
+        }
+        let full = e2e_error(CspE2eProtocolError::DesyncError("storage[13]: x".into()));
+        assert!(matches!(full, ConnectionError::Storage { code: 13, .. }));
+        assert!(!full.fails_every_time());
+        let rule = e2e_error(CspE2eProtocolError::DesyncError("storage[19]: x".into()));
+        assert!(rule.fails_every_time());
+    }
+
+    /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
+    /// leader and nothing from the chat server. Afterwards it counts as seen.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reflection_that_fails_every_time_is_given_up_on() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        setup
+            .store
+            .insert_incoming(CREATOR, 1, "text", "x", 1)
+            .unwrap();
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON messages
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let (nonce, data) = key
+            .encrypt_envelope(&prost::Message::encode_to_vec(&read_update()))
+            .unwrap();
+        let reflected = || libthreema::d2m::payload::Reflected {
+            reflect_id: 1,
+            flags: D2mReflectFlags(0),
+            timestamp: 1,
+            envelope: data.clone(),
+        };
+        for _ in 1..TRIES_BEFORE_DROPPING {
+            let error = session.handle_reflected(reflected()).await.unwrap_err();
+            assert!(matches!(error, ConnectionError::Storage { .. }), "{error}");
+            assert!(!setup.store.has_d2d_nonce(&nonce).unwrap());
+        }
+        // On this socket the acknowledgement fails, as an error of its own.
+        let error = session.handle_reflected(reflected()).await.unwrap_err();
+        assert!(!matches!(error, ConnectionError::Storage { .. }), "{error}");
+        assert!(setup.store.has_d2d_nonce(&nonce).unwrap());
+    }
+
     /// The mediator hands out again only what wasn't acknowledged. On this socket the attempt to
     /// acknowledge shows as an error of its own.
     #[tokio::test(flavor = "current_thread")]
@@ -4497,24 +4758,7 @@ mod sync_order_tests {
         setup.store.set_multi_device(Some(&properties)).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut session = session(&setup, &tx).await;
-        let envelope = libthreema::protobuf::d2d::Envelope {
-            content: Some(
-                libthreema::protobuf::d2d::envelope::Content::IncomingMessageUpdate(
-                    libthreema::protobuf::d2d::IncomingMessageUpdate {
-                        updates: vec![libthreema::protobuf::d2d::incoming_message_update::Update {
-                            conversation: d2d_conversation(CREATOR),
-                            message_id: 1,
-                            update: Some(
-                                libthreema::protobuf::d2d::incoming_message_update::update::Update::Read(
-                                    libthreema::protobuf::d2d::incoming_message_update::Read { at: 1 },
-                                ),
-                            ),
-                        }],
-                    },
-                ),
-            ),
-            ..Default::default()
-        };
+        let envelope = read_update();
         let (_, data) = key
             .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
             .unwrap();
@@ -4867,6 +5111,7 @@ mod sync_order_tests {
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
             storage_failing: StorageFailing::default(),
+            failing_items: FailingItems::default(),
             carried_events: RefCell::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
