@@ -1216,3 +1216,50 @@ fn web_duplicates_of_a_browser_merge() {
     assert_eq!(left, vec![used, other]);
     assert!(app.store.web_session(never_stored).unwrap().is_none());
 }
+
+/// Whether a session's server is shown depends on the host, not on what the code claimed.
+#[test]
+fn web_session_shows_a_foreign_host_whatever_the_code_said() {
+    let (_dir, app) = fixture();
+    stored_web_session(&app, 1, "web.example.org", false);
+    stored_web_session(&app, 2, WEB_HOST, false);
+    let sessions = app.web_sessions_json().unwrap();
+    let self_hosted = |host: &str| {
+        sessions["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["host"] == host)
+            .unwrap()["selfHosted"]
+            .clone()
+    };
+    assert_eq!(self_hosted("web.example.org"), true);
+    assert_eq!(self_hosted(WEB_HOST), false);
+}
+
+/// Removing an allowed server takes its sessions and pin with it, tells a connected browser to
+/// forget the session, and the next code naming the server asks again.
+#[test]
+fn web_allowed_server_can_be_removed() {
+    let (_dir, mut app) = fixture();
+    let host = "web.example.org";
+    app.store.set_web_host(host, Some("pin")).unwrap();
+    app.store.set_web_host("other.example.org", None).unwrap();
+    let on_host = stored_web_session(&app, 1, host, true);
+    let other = stored_web_session(&app, 2, WEB_HOST, true);
+    let (mut rx, _) = app.web_test_session(on_host);
+    let listed = app.web_sessions_json().unwrap();
+    assert_eq!(listed["servers"], json!(["other.example.org", host]));
+
+    let after = app.web_remove_server(host).unwrap();
+
+    assert_eq!(after["servers"], json!(["other.example.org"]));
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Delete))));
+    assert!(app.store.web_session(on_host).unwrap().is_none());
+    assert!(app.store.web_session(other).unwrap().is_some());
+    assert_eq!(app.store.web_host(host).unwrap(), None);
+    assert_eq!(
+        app.classify_qr(&web_code(3, host)).unwrap()["confirmHost"],
+        true
+    );
+}

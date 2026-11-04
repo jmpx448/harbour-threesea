@@ -11,10 +11,15 @@ Page {
     allowedOrientations: Orientation.All
 
     property var sessions: []
+    // The self-hosted servers the user allowed.
+    property var servers: []
 
     function load(done) {
         backend.call("webSessions", {}, function(ok, result) {
-            if (ok) page.sessions = result.sessions
+            if (ok) {
+                page.sessions = result.sessions
+                page.servers = result.servers
+            }
             if (done) done()
         })
     }
@@ -27,6 +32,17 @@ Page {
                      ? qsTrId("threesea-la-web-disconnected-kept")
                      //% "Threema Web disconnected."
                      : qsTrId("threesea-la-web-disconnected"), Notice.Long, Notice.Center)
+    }
+
+    // Here, not in the context menu: its scope is gone when the remorse runs out.
+    function removeServer(item, host) {
+        //% "Removing"
+        item.remorseAction(qsTrId("threesea-la-web-removing"), function() {
+            backend.call("webRemoveServer", { host: host }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
+            })
+        })
     }
 
     function stateText(session) {
@@ -90,7 +106,7 @@ Page {
         }
 
         ViewPlaceholder {
-            enabled: list.count === 0
+            enabled: list.count === 0 && page.servers.length === 0
             //% "No browsers"
             text: qsTrId("threesea-la-web-none")
             //% "Open web.threema.ch in a browser and pull down to scan its code"
@@ -145,6 +161,46 @@ Page {
                     font.pixelSize: Theme.fontSizeExtraSmall
                     color: item.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
                     text: page.stateText(modelData) + (modelData.selfHosted ? " · " + modelData.host : "")
+                }
+            }
+        }
+
+        footer: Column {
+            width: parent.width
+            visible: page.servers.length > 0
+
+            SectionHeader {
+                //% "Allowed servers"
+                text: qsTrId("threesea-se-web-servers")
+            }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+                //% "Self-hosted Threema Web servers you allowed. Removing one also removes its browsers, and the next code naming it asks again."
+                text: qsTrId("threesea-la-web-servers-description")
+            }
+            Repeater {
+                model: page.servers
+                ListItem {
+                    id: server
+                    contentHeight: Theme.itemSizeSmall
+                    menu: ContextMenu {
+                        MenuItem {
+                            text: qsTrId("threesea-me-web-remove")
+                            onClicked: page.removeServer(server, modelData)
+                        }
+                    }
+                    Label {
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * x
+                        anchors.verticalCenter: parent.verticalCenter
+                        truncationMode: TruncationMode.Fade
+                        color: server.highlighted ? Theme.highlightColor : Theme.primaryColor
+                        text: modelData
+                    }
                 }
             }
         }

@@ -786,6 +786,9 @@ pub enum Command {
     WebAcceptCertificate {
         session: i64,
     },
+    WebRemoveServer {
+        host: String,
+    },
     /// Favourite GIFs: `{favourites: [{id, width, height}]}`, newest first.
     GifFavourites,
     /// The emoji picker's recently used emoji (`{emoji: [text]}`, newest first) / use one.
@@ -2037,6 +2040,7 @@ impl App {
             Command::WebStop { session } => Ok(self.web_stop(session)),
             Command::WebDelete { session } => self.web_delete(session),
             Command::WebAcceptCertificate { session } => self.web_accept_certificate(session),
+            Command::WebRemoveServer { host } => self.web_remove_server(&host),
             Command::GifFavourites => self.gif_favourites_json(),
             Command::RecentEmoji => self.recent_emoji_json(),
             Command::UseEmoji { emoji } => self.use_emoji(&emoji),

@@ -48,6 +48,8 @@ pub struct WebSession {
     pub server_key: Option<[u8; 32]>,
     pub host: String,
     pub port: u16,
+    /// What the code claimed (its options). Not for anything that matters: the host itself says
+    /// whether the server is Threema's.
     pub self_hosted: bool,
     /// The browser stored the session (`keyPersisted`): it can come back without a QR code.
     pub persistent: bool,
@@ -64,7 +66,7 @@ impl WebSession {
         json!({
             "id": self.id,
             "host": self.host,
-            "selfHosted": self.self_hosted,
+            "selfHosted": !qr::is_threema_host(&self.host),
             "persistent": self.persistent,
             "client": self.client,
             "createdAt": self.created_at,
@@ -185,6 +187,22 @@ impl Store {
              ON CONFLICT(host) DO UPDATE SET spki = excluded.spki",
             params![host, spki],
         )?;
+        Ok(())
+    }
+
+    /// The self-hosted servers the user allowed.
+    pub fn web_hosts(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT host FROM web_hosts ORDER BY host")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Take a self-hosted server's permission and its certificate pin back.
+    pub fn remove_web_host(&self, host: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM web_hosts WHERE host = ?1", [host])?;
         Ok(())
     }
 }

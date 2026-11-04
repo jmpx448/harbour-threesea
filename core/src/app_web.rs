@@ -3,7 +3,8 @@
 //! (WebSocket, SaltyRTC responder, ARP connection layer), and the app's answers to the browser.
 //!
 //! Commands: `webSessions`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
-//! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`. Events: `webSession {id, state, error?}`
+//! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`, `webRemoveServer
+//! {host}`. Events: `webSession {id, state, error?}`
 //! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
 //! code), `webCertificateChanged {id, host}`.
 
@@ -247,7 +248,7 @@ impl App {
     }
 
     /// `webSessions`: `{sessions: [{id, host, selfHosted, persistent, client, createdAt,
-    /// lastConnection, state}]}`.
+    /// lastConnection, state}], servers: [host]}` (`servers`: the self-hosted ones allowed).
     pub(crate) fn web_sessions_json(&self) -> Result<serde_json::Value, ApiError> {
         let sessions: Vec<serde_json::Value> = self
             .store
@@ -264,7 +265,7 @@ impl App {
                 value
             })
             .collect();
-        Ok(json!({ "sessions": sessions }))
+        Ok(json!({ "sessions": sessions, "servers": self.store.web_hosts()? }))
     }
 
     /// `webPair {qr, allowHost}`: a new session from Threema Web's code. A server outside
@@ -408,6 +409,19 @@ impl App {
         self.web.pending_blobs.retain(|blob| blob.session != id);
         self.store.remove_web_session(id)?;
         Ok(json!({}))
+    }
+
+    /// `webRemoveServer {host}`: the user takes back a self-hosted server's permission. Its
+    /// sessions go with it, as nothing may connect there any more, and with the permission the
+    /// pin: the next code naming the server asks again (ADR 0013).
+    pub(crate) fn web_remove_server(&mut self, host: &str) -> Result<serde_json::Value, ApiError> {
+        for session in self.store.web_sessions()? {
+            if session.host == host {
+                self.web_delete(session.id)?;
+            }
+        }
+        self.store.remove_web_host(host)?;
+        self.web_sessions_json()
     }
 
     /// `webAcceptCertificate {session}`: the self-hosted server's new certificate is fine; pin it and

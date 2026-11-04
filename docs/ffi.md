@@ -247,10 +247,11 @@ QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, k
 | `groupCallChannel` | `data` (base64, from the SFU's data channel) | `{}`; answers go out as `groupCallSend` events |
 | `groupCallMute` / `groupCallCamera` | `muted` / `on` | `{}` (tells the others; the engine switches the device) |
 | `groupCallTick` / `groupCallLeave` | – | every second while in a call (rekeying, state) / leave |
-| `webSessions` | – | `{sessions: [{id, host, selfHosted, persistent, client, createdAt, lastConnection, state}]}` (ADR 0013) |
+| `webSessions` | – | `{sessions: [{id, host, selfHosted, persistent, client, createdAt, lastConnection, state}], servers: [host]}` (ADR 0013); `selfHosted` goes by the host; `servers`: the self-hosted servers the user allowed |
 | `webPair` | `qr`, `allowHost` | the new session; a host outside threema.ch first answers `{confirmHost}` and needs `allowHost` |
 | `webStart` / `webStop` / `webDelete` | `session` | `{}`: connect a stored session / disconnect / forget it (also ends its task's authority) |
 | `webAcceptCertificate` | `session` | `{}`: pin a self-hosted server's new certificate and connect again |
+| `webRemoveServer` | `host` | like `webSessions`: take back an allowed server's permission and pin, and remove its sessions |
 | `recentEmoji` / `useEmoji` | – / `emoji` | `{emoji: [text]}` newest first / record one as used |
 
 ## D-Bus (notification actions)
