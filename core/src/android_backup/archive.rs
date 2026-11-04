@@ -10,7 +10,7 @@ use std::{io::Read as _, path::Path};
 
 use zeroize::Zeroizing;
 
-use super::EntryKind;
+use super::{EntryKind, csv::Table};
 
 /// Hard bounds for the container (an archive beyond them is rejected as a whole).
 const MAX_ENTRIES: usize = 400_000;
@@ -36,6 +36,12 @@ pub enum ArchiveError {
     /// The backup declares a format newer than this importer knows.
     #[error("unsupported backup version {0}")]
     UnsupportedVersion(i64),
+}
+
+impl From<super::csv::TooLarge> for ArchiveError {
+    fn from(_: super::csv::TooLarge) -> Self {
+        Self::TooLarge
+    }
 }
 
 /// One entry as listed (nothing decrypted yet): `declared_size` comes from the central
@@ -178,5 +184,10 @@ impl Archive {
         let text = std::str::from_utf8(&data)
             .map_err(|_| ArchiveError::Invalid("entry is not UTF-8".into()))?;
         Ok(Zeroizing::new(text.to_owned()))
+    }
+
+    /// A CSV entry as a table.
+    pub fn read_table(&mut self, name: &str, max_bytes: usize) -> Result<Table, ArchiveError> {
+        Ok(Table::parse(&self.read_text(name, max_bytes)?)?)
     }
 }

@@ -130,6 +130,16 @@ pub struct Summary {
     pub cancelled: bool,
 }
 
+/// What the blocking thread brings back from opening the archive.
+struct OpenedArchive {
+    archive: Archive,
+    source: String,
+    contacts: Vec<records::Contact>,
+    groups: Vec<records::Group>,
+    polls: ArchivePolls,
+    invalid_polls: usize,
+}
+
 /// Everything the job owns (nothing borrows the [`crate::app::App`]).
 pub struct HistoryImport {
     pub store: Rc<Store>,
@@ -187,33 +197,57 @@ impl HistoryImport {
         let password = self.password.clone();
         let own_id = self.me.clone();
         let own_key = self.own_public_key.clone();
-        // Open, gate and fingerprint on the blocking thread; the archive moves back and
-        // forth between the threads from here on.
-        let (mut archive, source) =
-            tokio::task::spawn_blocking(move || -> Result<(Archive, String), ApiError> {
-                let mut archive = Archive::open(&path, &password)?;
-                let _version = super::read_version(&mut archive)?;
-                let encrypted = super::read_identity_backup(&mut archive)?;
-                let (_, identity) =
-                    libthreema::id_backup::decrypt_identity_backup(&password, &encrypted)
-                        .map_err(|_| ApiError::BackupDecrypt)?;
-                if identity.threema_id.to_string() != own_id
-                    || identity.client_key.public_key().to_string() != own_key
-                {
-                    return Err(ApiError::BackupOtherIdentity);
-                }
-                let fingerprint = fingerprint_file(&path)?;
-                Ok((archive, fingerprint))
+        // Open, gate, fingerprint and read the small tables on the blocking thread; the archive
+        // moves back and forth between the threads from here on. Tables are read and parsed
+        // there too: the core thread keeps serving commands and the connection.
+        let opened = tokio::task::spawn_blocking(move || -> Result<OpenedArchive, ApiError> {
+            let mut archive = Archive::open(&path, &password)?;
+            let _version = super::read_version(&mut archive)?;
+            let encrypted = super::read_identity_backup(&mut archive)?;
+            let (_, identity) =
+                libthreema::id_backup::decrypt_identity_backup(&password, &encrypted)
+                    .map_err(|_| ApiError::BackupDecrypt)?;
+            if identity.threema_id.to_string() != own_id
+                || identity.client_key.public_key().to_string() != own_key
+            {
+                return Err(ApiError::BackupOtherIdentity);
+            }
+            let source = fingerprint_file(&path)?;
+            let contacts = optional_table(&mut archive, "contacts.csv")?
+                .map(|table| records::contacts(&table).0)
+                .unwrap_or_default();
+            let groups = optional_table(&mut archive, "groups.csv")?
+                .map(|table| records::groups(&table).0)
+                .unwrap_or_default();
+            let (polls, invalid_polls) = read_polls(&mut archive)?;
+            Ok(OpenedArchive {
+                archive,
+                source,
+                contacts,
+                groups,
+                polls,
+                invalid_polls,
             })
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))??;
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))??;
+        let OpenedArchive {
+            mut archive,
+            source,
+            contacts,
+            groups,
+            polls,
+            invalid_polls,
+        } = opened;
 
-        let mut summary = Summary::default();
+        let mut summary = Summary {
+            invalid_rows: invalid_polls,
+            ..Summary::default()
+        };
 
         // Resolve every chat file to a local conversation; media/thumbnail presence by uid.
         let (plans, media_entries, thumbnail_entries) =
-            self.plan_chats(&mut archive, &mut summary)?;
-        let polls = read_polls(&mut archive, &mut summary)?;
+            self.plan_chats(&archive, contacts, &groups, &mut summary);
         let total = plans.len();
 
         for (done, plan) in plans.into_iter().enumerate() {
@@ -229,21 +263,19 @@ impl HistoryImport {
                 "imported": summary.imported,
             }));
             let entry = plan.entry.clone();
-            let (returned, text) = tokio::task::spawn_blocking(
-                move || -> Result<(Archive, Zeroizing<String>), ArchiveError> {
-                    let text = archive.read_text(&entry, MAX_TABLE_BYTES)?;
-                    Ok((archive, text))
+            let (returned, messages, invalid) = tokio::task::spawn_blocking(
+                move || -> Result<(Archive, Vec<records::Message>, usize), ArchiveError> {
+                    let table = archive.read_table(&entry, MAX_TABLE_BYTES)?;
+                    let (mut messages, invalid) = records::messages(&table);
+                    // Oldest first, deterministic ties: placement needs ascending times.
+                    messages.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.uid.cmp(&b.uid)));
+                    Ok((archive, messages, invalid))
                 },
             )
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))??;
             archive = returned;
-            let table = super::csv::Table::parse(&text);
-            let (mut messages, invalid) = records::messages(&table);
-            drop(text);
             summary.invalid_rows += invalid;
-            // Oldest first, deterministic ties: placement needs ascending times.
-            messages.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.uid.cmp(&b.uid)));
 
             archive = self
                 .import_chat(
@@ -275,44 +307,35 @@ impl HistoryImport {
     #[allow(clippy::type_complexity)]
     fn plan_chats(
         &self,
-        archive: &mut Archive,
+        archive: &Archive,
+        contacts: Vec<records::Contact>,
+        groups: &[records::Group],
         summary: &mut Summary,
-    ) -> Result<
-        (
-            Vec<ChatPlan>,
-            std::collections::HashMap<(&'static str, String), String>,
-            std::collections::HashMap<(&'static str, String), String>,
-        ),
-        crate::app::ApiError,
-    > {
+    ) -> (
+        Vec<ChatPlan>,
+        std::collections::HashMap<(&'static str, String), String>,
+        std::collections::HashMap<(&'static str, String), String>,
+    ) {
         // Alias maps from the metadata CSVs (the metadata import must have run: chats whose
         // conversation is missing are counted and skipped, nothing is created here).
         let mut contact_alias = std::collections::HashMap::new();
-        if archive.has_entry("contacts.csv") {
-            let text = archive.read_text("contacts.csv", MAX_TABLE_BYTES)?;
-            let (contacts, _) = records::contacts(&super::csv::Table::parse(&text));
-            for contact in contacts {
-                let alias = contact
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| contact.identity.clone());
-                contact_alias.insert(alias, contact.identity.clone());
-                contact_alias.insert(contact.identity.clone(), contact.identity);
-            }
+        for contact in contacts {
+            let alias = contact
+                .alias
+                .clone()
+                .unwrap_or_else(|| contact.identity.clone());
+            contact_alias.insert(alias, contact.identity.clone());
+            contact_alias.insert(contact.identity.clone(), contact.identity);
         }
         let mut group_alias = std::collections::HashMap::new();
-        if archive.has_entry("groups.csv") {
-            let text = archive.read_text("groups.csv", MAX_TABLE_BYTES)?;
-            let (groups, _) = records::groups(&super::csv::Table::parse(&text));
-            for group in &groups {
-                if let Ok(creator) = group.creator.parse() {
-                    let key = crate::groups::key(&libthreema::common::GroupIdentity {
-                        creator_identity: creator,
-                        group_id: group.group_id,
-                    });
-                    for alias in group.aliases() {
-                        group_alias.insert(alias, key.clone());
-                    }
+        for group in groups {
+            if let Ok(creator) = group.creator.parse() {
+                let key = crate::groups::key(&libthreema::common::GroupIdentity {
+                    creator_identity: creator,
+                    group_id: group.group_id,
+                });
+                for alias in group.aliases() {
+                    group_alias.insert(alias, key.clone());
                 }
             }
         }
@@ -372,7 +395,7 @@ impl HistoryImport {
                 _ => summary.skipped_chats += 1,
             }
         }
-        Ok((plans, media, thumbnails))
+        (plans, media, thumbnails)
     }
 
     /// Insert one chat's rows in bounded transactions, then its media.
@@ -751,16 +774,16 @@ impl HistoryImport {
                 continue;
             }
             let name = entry.to_owned();
-            let (returned, text) = tokio::task::spawn_blocking(
-                move || -> Result<(Archive, Zeroizing<String>), ArchiveError> {
-                    let text = archive.read_text(&name, MAX_TABLE_BYTES)?;
-                    Ok((archive, text))
+            let (returned, reactions, invalid) = tokio::task::spawn_blocking(
+                move || -> Result<(Archive, Vec<records::Reaction>, usize), ArchiveError> {
+                    let table = archive.read_table(&name, MAX_TABLE_BYTES)?;
+                    let (reactions, invalid) = records::reactions(&table, group);
+                    Ok((archive, reactions, invalid))
                 },
             )
             .await
             .map_err(|e| crate::app::ApiError::Internal(e.to_string()))??;
             archive = returned;
-            let (reactions, invalid) = records::reactions(&super::csv::Table::parse(&text), group);
             summary.invalid_rows += invalid;
             for chunk in reactions.chunks(BATCH) {
                 if self.cancel.get() {
@@ -828,27 +851,29 @@ impl HistoryImport {
     }
 }
 
-/// `ballot*.csv`, if present (small: read on the core thread like the metadata tables).
-fn read_polls(
+/// A table the format allows to be absent.
+fn optional_table(
     archive: &mut Archive,
-    summary: &mut Summary,
-) -> Result<ArchivePolls, crate::app::ApiError> {
-    if !archive.has_entry("ballot.csv") {
-        return Ok(ArchivePolls::default());
+    name: &str,
+) -> Result<Option<super::csv::Table>, ArchiveError> {
+    if !archive.has_entry(name) {
+        return Ok(None);
     }
-    let mut table = |name: &str| -> Result<Option<super::csv::Table>, ArchiveError> {
-        if !archive.has_entry(name) {
-            return Ok(None);
-        }
-        let text = archive.read_text(name, MAX_TABLE_BYTES)?;
-        Ok(Some(super::csv::Table::parse(&text)))
+    archive.read_table(name, MAX_TABLE_BYTES).map(Some)
+}
+
+/// `ballot*.csv`, if present, and how many of their rows were unreadable.
+fn read_polls(archive: &mut Archive) -> Result<(ArchivePolls, usize), ArchiveError> {
+    let Some(ballots) = optional_table(archive, "ballot.csv")? else {
+        return Ok((ArchivePolls::default(), 0));
     };
-    let ballots = table("ballot.csv")?.unwrap_or_else(|| super::csv::Table::parse(""));
-    let choices = table("ballot_choice.csv")?;
-    let votes = table("ballot_vote.csv")?;
-    let (polls, invalid) = ArchivePolls::read(&ballots, choices.as_ref(), votes.as_ref());
-    summary.invalid_rows += invalid;
-    Ok(polls)
+    let choices = optional_table(archive, "ballot_choice.csv")?;
+    let votes = optional_table(archive, "ballot_vote.csv")?;
+    Ok(ArchivePolls::read(
+        &ballots,
+        choices.as_ref(),
+        votes.as_ref(),
+    ))
 }
 
 /// SHA-256 of the archive file, streamed: the stable fingerprint synthetic ids are keyed by.

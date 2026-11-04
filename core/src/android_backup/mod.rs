@@ -150,7 +150,7 @@ impl EntryKind {
 pub fn read_version(archive: &mut Archive) -> Result<i64, ArchiveError> {
     let text = archive.read_text("settings", MAX_SETTINGS_BYTES)?;
     let mut version = 1;
-    for row in csv::parse(&text) {
+    for row in csv::parse(&text)?.iter() {
         if row.len() == 2 && row[0] == "version" {
             version = row[1]
                 .parse()

@@ -379,9 +379,9 @@ mod tests {
     fn round_trip(writer: PollWriter) -> ArchivePolls {
         let [(_, polls), (_, choices), (_, votes)] = writer.finish();
         let (read, invalid) = ArchivePolls::read(
-            &Table::parse(&polls),
-            Some(&Table::parse(&choices)),
-            Some(&Table::parse(&votes)),
+            &Table::parse(&polls).unwrap(),
+            Some(&Table::parse(&choices).unwrap()),
+            Some(&Table::parse(&votes).unwrap()),
         );
         assert_eq!(invalid, 0);
         read
@@ -565,9 +565,9 @@ mod tests {
             "",
         ]);
         let (read, invalid) = ArchivePolls::read(
-            &Table::parse(&polls),
-            Some(&Table::parse(&choices)),
-            Some(&Table::parse(&votes)),
+            &Table::parse(&polls).unwrap(),
+            Some(&Table::parse(&choices).unwrap()),
+            Some(&Table::parse(&votes).unwrap()),
         );
         assert_eq!(invalid, 1, "the choice of an unknown poll");
         let (_, first) = read.message("[1,4]").unwrap();

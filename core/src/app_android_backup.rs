@@ -139,8 +139,7 @@ fn load_metadata(
         if !archive.has_entry(name) {
             return Ok(None);
         }
-        let text = archive.read_text(name, MAX_TABLE_BYTES)?;
-        Ok(Some(crate::android_backup::csv::Table::parse(&text)))
+        Ok(Some(archive.read_table(name, MAX_TABLE_BYTES)?))
     };
     let (contacts, bad) = table(&mut archive, "contacts.csv")?
         .map(|t| records::contacts(&t))

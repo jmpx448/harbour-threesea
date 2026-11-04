@@ -9,30 +9,33 @@
 //! mid-field quotes vanish) would differ on malformed rows, and this parser is small and pinned
 //! by tests to the upstream behaviour.
 
+use zeroize::{Zeroize as _, Zeroizing};
+
+/// Hard bounds, far above what a backup holds and below what would hurt: a table is refused as
+/// a whole beyond them. A file is at most 64 MiB (`MAX_TABLE_BYTES`), but small cells cost far
+/// more memory than their bytes, so rows and cells are counted too. For scale: old backups hold
+/// a chunk of nonces in one cell (Android's chunks have at most 10 000, about 650 KiB), a nonce
+/// row takes 67 bytes and a message row some 30 cells in a few hundred bytes.
+const MAX_FIELD_BYTES: usize = 4 << 20;
+const MAX_ROW_BYTES: usize = 8 << 20;
+const MAX_ROW_FIELDS: usize = 256;
+const MAX_ROWS: usize = 2 << 20;
+const MAX_CELLS: usize = 16 << 20;
+
+/// A table beyond the bounds above.
+#[derive(Debug, thiserror::Error)]
+#[error("table beyond the reader's bounds")]
+pub struct TooLarge;
+
 /// One logical row per `Vec<String>`; empty input gives no rows. Equivalent to reading every
-/// row with `CSVReader.readNext()` (multi-line aware).
-pub fn parse(text: &str) -> Vec<Vec<String>> {
-    let mut rows = Vec::new();
-    let mut parser = Parser::default();
-    let mut row: Vec<String> = Vec::new();
+/// row with `CSVReader.readNext()` (multi-line aware), in time linear in the text. Rows are
+/// wiped when dropped: these files hold message text and blob keys.
+pub fn parse(text: &str) -> Result<Zeroizing<Vec<Vec<String>>>, TooLarge> {
+    let mut reader = Reader::new(text.len());
     for line in physical_lines(text) {
-        row.extend(parser.parse_line_multi(line));
-        if !parser.is_pending() {
-            if !row.is_empty() {
-                rows.push(std::mem::take(&mut row));
-            }
-            row = Vec::new();
-        }
+        reader.line(line)?;
     }
-    // An unterminated quote at the end of the file: Java would keep waiting for more lines and
-    // return the pending text as a final field once the stream ends.
-    if let Some(pending) = parser.pending.take() {
-        row.push(pending);
-    }
-    if !row.is_empty() {
-        rows.push(row);
-    }
-    rows
+    reader.finish()
 }
 
 /// Physical lines as `BufferedReader.readLine` sees them: terminated by `\n`, `\r` or `\r\n`
@@ -60,100 +63,178 @@ const QUOTE: char = '"';
 const ESCAPE: char = '\\';
 
 /// `au.com.bytecode.opencsv.CSVParser` (2.3) with its defaults (`strictQuotes` off,
-/// `ignoreLeadingWhiteSpace` on), `parseLineMulti` semantics.
-#[derive(Default)]
-struct Parser {
-    pending: Option<String>,
+/// `ignoreLeadingWhiteSpace` on), `parseLineMulti` semantics, plus the rows read so far.
+struct Reader {
+    rows: Zeroizing<Vec<Vec<String>>>,
+    row: Zeroizing<Vec<String>>,
+    row_bytes: usize,
+    cells: usize,
+    /// The field being read. Sized once so that it never moves: a growing string would leave
+    /// freed copies of what it held. Wiped at the end, finished fields are copied out of it.
+    field: Zeroizing<String>,
+    /// `field` holds nothing but white space.
+    blank: bool,
+    /// A quoted field continues on the next physical line.
+    pending: bool,
 }
 
-impl Parser {
-    fn is_pending(&self) -> bool {
-        self.pending.is_some()
+impl Reader {
+    fn new(text_bytes: usize) -> Self {
+        Self {
+            rows: Zeroizing::new(Vec::new()),
+            row: Zeroizing::new(Vec::new()),
+            row_bytes: 0,
+            cells: 0,
+            // A field is never longer than the text and the break of its last line.
+            field: Zeroizing::new(String::with_capacity(
+                text_bytes.saturating_add(1).min(MAX_FIELD_BYTES),
+            )),
+            blank: true,
+            pending: false,
+        }
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn parse_line_multi(&mut self, line: &str) -> Vec<String> {
-        let chars: Vec<char> = line.chars().collect();
-        let mut tokens: Vec<String> = Vec::new();
-        let mut sb = String::new();
-        let mut in_quotes = false;
-        if let Some(pending) = self.pending.take() {
-            sb = pending;
-            in_quotes = true;
+    fn push(&mut self, c: char) -> Result<(), TooLarge> {
+        if self.field.len() + c.len_utf8() > MAX_FIELD_BYTES {
+            return Err(TooLarge);
         }
+        self.field.push(c);
+        self.blank &= c.is_whitespace();
+        Ok(())
+    }
+
+    fn clear_field(&mut self) {
+        self.field.clear();
+        self.blank = true;
+    }
+
+    fn end_field(&mut self) -> Result<(), TooLarge> {
+        self.row_bytes += self.field.len();
+        self.cells += 1;
+        if self.row.len() >= MAX_ROW_FIELDS
+            || self.row_bytes > MAX_ROW_BYTES
+            || self.cells > MAX_CELLS
+        {
+            return Err(TooLarge);
+        }
+        self.row.push(self.field.as_str().to_owned());
+        self.clear_field();
+        Ok(())
+    }
+
+    fn end_row(&mut self) -> Result<(), TooLarge> {
+        if !self.row.is_empty() {
+            if self.rows.len() >= MAX_ROWS {
+                return Err(TooLarge);
+            }
+            self.rows.push(std::mem::take(&mut *self.row));
+            self.row_bytes = 0;
+        }
+        Ok(())
+    }
+
+    fn line(&mut self, line: &str) -> Result<(), TooLarge> {
+        let mut in_quotes = std::mem::take(&mut self.pending);
         let mut in_field = false;
-        let next_is =
-            |i: usize, wanted: &[char]| chars.get(i + 1).is_some_and(|next| wanted.contains(next));
-        let mut i = 0;
-        while i < chars.len() {
-            let c = chars[i];
+        let mut chars = line.chars().peekable();
+        let mut previous = None;
+        let mut index = 0_usize;
+        while let Some(c) = chars.next() {
+            let next = chars.peek().copied();
+            let mut last = c;
             if c == ESCAPE {
                 // Escapable (a quote or another backslash follows, inside a field): take the
                 // next character literally. Otherwise the backslash is swallowed, like OpenCSV.
-                if (in_quotes || in_field) && next_is(i, &[QUOTE, ESCAPE]) {
-                    sb.push(chars[i + 1]);
-                    i += 1;
+                if let Some(escaped @ (QUOTE | ESCAPE)) = next
+                    && (in_quotes || in_field)
+                {
+                    self.push(escaped)?;
+                    chars.next();
+                    index += 1;
+                    last = escaped;
                 }
             } else if c == QUOTE {
-                if (in_quotes || in_field) && next_is(i, &[QUOTE]) {
+                if (in_quotes || in_field) && next == Some(QUOTE) {
                     // A doubled quote inside a field: one literal quote.
-                    sb.push(chars[i + 1]);
-                    i += 1;
+                    self.push(QUOTE)?;
+                    chars.next();
+                    index += 1;
                 } else {
                     // OpenCSV keeps a quote that sits in the middle of a field (not next to a
                     // separator); leading white space before it is discarded.
-                    if i > 2
-                        && chars[i - 1] != SEPARATOR
-                        && chars.len() > i + 1
-                        && chars[i + 1] != SEPARATOR
+                    if index > 2
+                        && previous != Some(SEPARATOR)
+                        && next.is_some_and(|next| next != SEPARATOR)
                     {
-                        if !sb.is_empty() && sb.chars().all(char::is_whitespace) {
-                            sb.clear();
+                        if !self.field.is_empty() && self.blank {
+                            self.clear_field();
                         } else {
-                            sb.push(c);
+                            self.push(QUOTE)?;
                         }
                     }
                     in_quotes = !in_quotes;
                 }
                 in_field = !in_field;
             } else if c == SEPARATOR && !in_quotes {
-                tokens.push(std::mem::take(&mut sb));
+                self.end_field()?;
                 in_field = false;
             } else {
-                sb.push(c);
+                self.push(c)?;
                 in_field = true;
             }
-            i += 1;
+            previous = Some(last);
+            index += 1;
         }
         if in_quotes {
-            // The quoted field continues on the next physical line.
-            sb.push('\n');
-            self.pending = Some(sb);
+            self.push('\n')?;
+            self.pending = true;
+            Ok(())
         } else {
-            tokens.push(sb);
+            self.end_field()?;
+            self.end_row()
         }
-        tokens
+    }
+
+    fn finish(mut self) -> Result<Zeroizing<Vec<Vec<String>>>, TooLarge> {
+        // An unterminated quote at the end of the file: Java would keep waiting for more lines
+        // and return the pending text as a final field once the stream ends.
+        if self.pending {
+            self.end_field()?;
+        }
+        self.end_row()?;
+        Ok(self.rows)
     }
 }
 
 /// A header-keyed CSV file (every data file but `settings`): fields are found by column name,
 /// never by position (`CSVRow.getValuePosition`); missing columns are `None`, so version gates
 /// decide what must exist.
+#[derive(Default)]
 pub struct Table {
     header: Vec<String>,
     pub rows: Vec<Vec<String>>,
 }
 
+impl Drop for Table {
+    fn drop(&mut self) {
+        self.header.zeroize();
+        self.rows.zeroize();
+    }
+}
+
 impl Table {
     /// The first row is the header; files without rows are valid and empty.
-    pub fn parse(text: &str) -> Self {
-        let mut rows = parse(text);
+    pub fn parse(text: &str) -> Result<Self, TooLarge> {
+        let mut rows = parse(text)?;
         let header = if rows.is_empty() {
             Vec::new()
         } else {
             rows.remove(0)
         };
-        Self { header, rows }
+        Ok(Self {
+            header,
+            rows: std::mem::take(&mut *rows),
+        })
     }
 
     pub fn has_column(&self, name: &str) -> bool {
@@ -214,14 +295,19 @@ pub fn write_row(fields: &[&str]) -> String {
 mod tests {
     use super::*;
 
+    /// The rows of a text within the bounds.
+    fn rows(text: &str) -> Vec<Vec<String>> {
+        std::mem::take(&mut *parse(text).unwrap())
+    }
+
     #[test]
     fn plain_rows() {
-        let rows = parse("\"a\",\"b\"\n\"c\",\"d\"\n");
-        assert_eq!(rows, vec![vec!["a", "b"], vec!["c", "d"]]);
+        let parsed = rows("\"a\",\"b\"\n\"c\",\"d\"\n");
+        assert_eq!(parsed, vec![vec!["a", "b"], vec!["c", "d"]]);
         // Unquoted values and empty cells work too (settings uses plain two-column rows).
-        assert_eq!(parse("version,27\n"), vec![vec!["version", "27"]]);
-        assert_eq!(parse("\"a\",,\"c\"\n"), vec![vec!["a", "", "c"]]);
-        assert!(parse("").is_empty());
+        assert_eq!(rows("version,27\n"), vec![vec!["version", "27"]]);
+        assert_eq!(rows("\"a\",,\"c\"\n"), vec![vec!["a", "", "c"]]);
+        assert!(rows("").is_empty());
     }
 
     #[test]
@@ -237,30 +323,30 @@ mod tests {
         ];
         let mut file = String::new();
         file.push_str(&write_row(&original));
-        let rows = parse(&file);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], original);
+        let parsed = rows(&file);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], original);
     }
 
     #[test]
     fn crlf_and_multiline() {
         // CRLF line ends; an embedded break always comes back as plain \n (Java readLine).
         let file = "\"a\r\nb\",\"c\"\r\n\"next\"\r\n";
-        let rows = parse(file);
-        assert_eq!(rows, vec![vec!["a\nb", "c"], vec!["next"]]);
+        let parsed = rows(file);
+        assert_eq!(parsed, vec![vec!["a\nb", "c"], vec!["next"]]);
         // Unterminated quote at the end of the file: the pending text (with the continuation
         // break OpenCSV already appended) is the last field.
-        assert_eq!(parse("\"open"), vec![vec!["open\n"]]);
+        assert_eq!(rows("\"open"), vec![vec!["open\n"]]);
     }
 
     #[test]
     fn opencsv_quirks() {
         // A lone backslash inside quotes is swallowed (OpenCSV's escape handling); the writer
         // never produces one, but a parser difference here would corrupt text silently.
-        assert_eq!(parse("\"a\\b\""), vec![vec!["ab"]]);
+        assert_eq!(rows("\"a\\b\""), vec![vec!["ab"]]);
         // A quote in the middle of a field stays.
-        assert_eq!(parse("\"midd\"\"le\""), vec![vec!["midd\"le"]]);
-        assert_eq!(parse("abc\"de\"f"), vec![vec!["abc\"de\"f"]]);
+        assert_eq!(rows("\"midd\"\"le\""), vec![vec!["midd\"le"]]);
+        assert_eq!(rows("abc\"de\"f"), vec![vec!["abc\"de\"f"]]);
     }
 
     #[test]
@@ -274,7 +360,7 @@ mod tests {
         ]));
         file.push_str(&write_row(&["00000BOB", "A;B;C", "1", "1700000000000"]));
         file.push_str(&write_row(&["00000ANN", "", "0", ""]));
-        let table = Table::parse(&file);
+        let table = Table::parse(&file).unwrap();
         assert!(table.has_column("members"));
         assert!(!table.has_column("nope"));
         let rows = &table.rows;
@@ -290,7 +376,92 @@ mod tests {
         assert_eq!(table.get_ms(&rows[1], "created_at"), None);
         assert_eq!(table.get(&rows[1], "nope"), None);
         // An empty file is an empty table.
-        let empty = Table::parse("");
+        let empty = Table::parse("").unwrap();
         assert!(empty.rows.is_empty());
+    }
+
+    #[test]
+    fn a_crafted_line_stays_linear() {
+        // White space, then a quote per few characters: rescanning the field for each quote
+        // took hours at this size.
+        let mut line = " ".repeat(3 << 20);
+        line.push('x');
+        for _ in 0..300_000 {
+            line.push_str("\"a");
+        }
+        let start = std::time::Instant::now();
+        let parsed = rows(&line);
+        assert_eq!(parsed.len(), 1);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn white_space_before_a_quote_is_dropped_once_and_across_lines() {
+        // The blank state survives a line break inside a quoted field, like the rescan did.
+        assert_eq!(rows("abc   \"d\"e"), vec![vec!["abc   \"d\"e"]]);
+        assert_eq!(rows("\"    \"x\"y"), vec![vec!["x\"y\n"]]);
+        assert_eq!(rows("\"  \n   \"x\"y"), vec![vec!["x\"y\n"]]);
+    }
+
+    #[test]
+    fn fields_are_bounded() {
+        let at_the_bound = "x".repeat(MAX_FIELD_BYTES);
+        assert_eq!(rows(&at_the_bound)[0][0].len(), MAX_FIELD_BYTES);
+        assert!(parse(&format!("{at_the_bound}x")).is_err());
+        // Also when the field runs over several lines, and with escapes on the way.
+        let lines = "\"".to_owned() + &"xxxxxxx\n".repeat(MAX_FIELD_BYTES / 8 + 1);
+        assert!(parse(&lines).is_err());
+        let doubled = "\"\"".repeat(MAX_FIELD_BYTES + 1);
+        assert!(parse(&format!("\"{doubled}\"")).is_err());
+    }
+
+    #[test]
+    fn rows_are_bounded() {
+        let at_the_bound = ",".repeat(MAX_ROW_FIELDS - 1);
+        assert_eq!(rows(&at_the_bound)[0].len(), MAX_ROW_FIELDS);
+        assert!(parse(&format!("{at_the_bound},")).is_err());
+        // Three fields within the field bound, over the row's.
+        let field = "x".repeat(MAX_FIELD_BYTES);
+        assert!(parse(&format!("{field},{field},{field}")).is_err());
+        // Across lines as well, and the next row starts afresh.
+        let field = "x".repeat(MAX_ROW_BYTES / 2);
+        assert!(parse(&format!("{field}\n{field}\n{field}")).is_ok());
+        assert!(parse(&format!("{field},\"{field}\n\",{field}")).is_err());
+    }
+
+    #[test]
+    fn small_cells_are_bounded() {
+        // Empty lines: rows cost far more memory than the one byte each takes here.
+        assert_eq!(rows(&"\n".repeat(MAX_ROWS)).len(), MAX_ROWS);
+        assert!(parse(&"\n".repeat(MAX_ROWS + 1)).is_err());
+        // Empty cells, in rows of allowed width.
+        let row = ",".repeat(MAX_ROW_FIELDS - 1) + "\n";
+        assert!(parse(&row.repeat(MAX_CELLS / MAX_ROW_FIELDS)).is_ok());
+        assert!(parse(&row.repeat(MAX_CELLS / MAX_ROW_FIELDS + 1)).is_err());
+    }
+
+    #[test]
+    fn the_field_buffer_never_moves() {
+        // Sized for the longest field the text can hold, whatever that field is.
+        for text in [
+            "",
+            "a",
+            "\"open",
+            "\"\n\n\n",
+            "\"a\nb\nc",
+            "abc\ndef",
+            "\u{1f389}",
+        ] {
+            let mut reader = Reader::new(text.len());
+            let capacity = reader.field.capacity();
+            for line in physical_lines(text) {
+                reader.line(line).unwrap();
+            }
+            assert_eq!(reader.field.capacity(), capacity, "{text:?}");
+        }
     }
 }

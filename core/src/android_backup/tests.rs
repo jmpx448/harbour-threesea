@@ -58,7 +58,7 @@ fn reads_a_winzip_aes_archive() {
     assert_eq!(identity.threema_id.to_string(), "ABCD1234");
 
     // The CSV dialect round-trips OpenCSV's escaping, by header name, not position.
-    let contacts = Table::parse(&archive.read_text("contacts.csv", 1 << 20).unwrap());
+    let contacts = Table::parse(&archive.read_text("contacts.csv", 1 << 20).unwrap()).unwrap();
     assert_eq!(contacts.rows.len(), 3);
     assert_eq!(
         contacts.get(&contacts.rows[0], "identity"),
@@ -83,7 +83,7 @@ fn reads_a_winzip_aes_archive() {
     assert!(parsed[2].hidden);
     assert_eq!(parsed[2].alias.as_deref(), Some("99"));
 
-    let groups = Table::parse(&archive.read_text("groups.csv", 1 << 20).unwrap());
+    let groups = Table::parse(&archive.read_text("groups.csv", 1 << 20).unwrap()).unwrap();
     assert_eq!(
         groups.get_list(&groups.rows[0], "members"),
         vec!["ABCD1234", "B0B0B0B0", "ANNANNAN", "CCCCCCCC"]
@@ -98,13 +98,14 @@ fn reads_a_winzip_aes_archive() {
     assert_eq!(parsed[1].user_state, Some(2));
     assert!(parsed[1].archived);
 
-    let lists = Table::parse(&archive.read_text("distribution_list.csv", 1 << 20).unwrap());
+    let lists =
+        Table::parse(&archive.read_text("distribution_list.csv", 1 << 20).unwrap()).unwrap();
     let (parsed, invalid) = records::distribution_lists(&lists);
     assert_eq!((parsed.len(), invalid), (1, 0));
     assert_eq!(parsed[0].id, 7);
     assert_eq!(parsed[0].members, vec!["B0B0B0B0", "ANNANNAN"]);
 
-    let messages = Table::parse(&archive.read_text("message_17.csv", 1 << 20).unwrap());
+    let messages = Table::parse(&archive.read_text("message_17.csv", 1 << 20).unwrap()).unwrap();
     assert_eq!(messages.get(&messages.rows[0], "body"), Some(TRICKY));
     assert_eq!(messages.get(&messages.rows[0], "type"), Some("TEXT"));
     assert_eq!(

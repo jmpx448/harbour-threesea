@@ -74,7 +74,7 @@ mod tests {
             + &write_row(&[&format!("{};{}", "11".repeat(24), "22".repeat(32))])
             + &write_row(&["abcd"])
             + &write_row(&["not hex"]);
-        let (hashed, skipped) = read(&Table::parse(&text), "01234567");
+        let (hashed, skipped) = read(&Table::parse(&text).unwrap(), "01234567");
         assert_eq!(skipped, 2);
         assert_eq!(hashed.len(), 4);
         // The raw zero nonce hashes to the same value Android wrote.
@@ -86,7 +86,7 @@ mod tests {
     fn writes_what_it_reads() {
         let nonces = vec![vec![0; 24], vec![0x33; 32]];
         let text = write("01234567", &nonces);
-        let (hashed, skipped) = read(&Table::parse(&text), "01234567");
+        let (hashed, skipped) = read(&Table::parse(&text).unwrap(), "01234567");
         assert_eq!(skipped, 0);
         assert_eq!(
             data_encoding::HEXLOWER.encode(&hashed[0]),
@@ -108,7 +108,7 @@ mod tests {
             })
             .unwrap();
         let (hashed, _) = read(
-            &Table::parse(&(write_row(&["nonces"]) + &write_row(&[ANDROID_HASH_OF_ZERO]))),
+            &Table::parse(&(write_row(&["nonces"]) + &write_row(&[ANDROID_HASH_OF_ZERO]))).unwrap(),
             "01234567",
         );
         assert_eq!(store.add_hashed_nonces(false, &hashed).unwrap(), 1);
