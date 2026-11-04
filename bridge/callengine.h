@@ -85,6 +85,8 @@ private slots:
     void onRemoteFrame(const QImage &image);
 
 private:
+    friend class CallEngineTest;
+
     // `vp8PayloadType` < 0: no video sending.
     bool build(const QVariantMap &turn, bool relayOnly, int opusPayloadType, int vp8PayloadType);
     void removeCamera();
