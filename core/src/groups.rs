@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 use libthreema::{
     common::{GroupIdentity, ThreemaId},
     model::message::{GroupMessageBody, IncomingGroupMessageBody},
+    protobuf::d2d_sync::contact::ActivityState,
 };
 use rusqlite::{OptionalExtension as _, params};
 use serde_json::{Value, json};
@@ -365,6 +366,74 @@ impl Store {
             params![key, kicked],
         )?;
         Ok(())
+    }
+
+    /// Whom something waits for and has no contact to be sent or shown with: the members of the
+    /// groups we are in, and the receivers of whatever is queued (a sync request to a creator we
+    /// don't know). What a failed lookup left behind is found here for the next try.
+    pub(crate) fn unresolved_members(&self) -> Result<Vec<String>, StoreError> {
+        let mut wanted = BTreeSet::new();
+        for group in self.groups()?.into_iter().filter(|group| !group.left) {
+            wanted.extend(group.members);
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT DISTINCT receiver FROM pending_receivers")?;
+        let receivers = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for receiver in receivers {
+            wanted.insert(receiver?);
+        }
+        if let Some(user) = self.identity()? {
+            wanted.remove(&user.threema_id);
+        }
+        let mut unresolved = Vec::new();
+        for identity in wanted {
+            if self.contact(&identity)?.is_none() {
+                unresolved.push(identity);
+            }
+        }
+        Ok(unresolved)
+    }
+
+    /// The directory doesn't know these IDs (revoked or never existed): they are in no group from
+    /// here on and nothing waits for them. Android doesn't keep them in a group either. An outbox
+    /// entry nobody is left for goes now; a message is raised by the next send, which sees it has
+    /// nobody left. Returns whether a group changed.
+    pub(crate) fn drop_invalid_members(&self, identities: &[String]) -> Result<bool, StoreError> {
+        let mut invalid = Vec::new();
+        for identity in identities {
+            if self.contact(identity)?.is_none() {
+                invalid.push(identity.as_str());
+            }
+        }
+        if invalid.is_empty() {
+            return Ok(false);
+        }
+        let step = self.conn.unchecked_transaction()?;
+        let mut changed = false;
+        for mut group in self.groups()? {
+            let before = group.members.len();
+            group.members.retain(|m| !invalid.contains(&m.as_str()));
+            if group.members.len() != before {
+                self.upsert_group(&group)?;
+                changed = true;
+            }
+        }
+        for identity in invalid {
+            let mut statement = self
+                .conn
+                .prepare("SELECT DISTINCT message_id FROM pending_receivers WHERE receiver = ?1")?;
+            let waiting: Vec<i64> = statement
+                .query_map([identity], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            for message_id in waiting {
+                for conversation in self.receiver_done(identity, message_id.cast_unsigned())? {
+                    self.outbox_remove(&conversation, message_id.cast_unsigned())?;
+                }
+            }
+        }
+        step.commit()?;
+        Ok(changed)
     }
 
     /// The other devices have to hear of `identity` in this group once its contact is here.
@@ -1196,6 +1265,10 @@ fn sync_request(
         &json!({}),
     )?;
     outcome.send = true;
+    // It goes out once they have a contact; if the directory doesn't know them, it goes altogether.
+    if store.contact(creator)?.is_none() {
+        outcome.unknown_members.push(creator.to_owned());
+    }
     Ok(())
 }
 
@@ -1291,10 +1364,26 @@ fn receive_setup(
         tracing::info!("group-setup for a group we aren't in from a blocked creator, discarded");
         return Ok(());
     }
-    let members: BTreeSet<String> = members
-        .into_iter()
-        .map(|m| m.to_string())
-        .filter(|m| *m != creator)
+    // Someone revoked isn't made a member, as nothing we send could ever reach them (Android).
+    let mut listed = BTreeSet::new();
+    for member in members {
+        let member = member.to_string();
+        if member != creator
+            && store
+                .contact(&member)?
+                .is_none_or(|c| c.activity_state != ActivityState::Invalid)
+        {
+            listed.insert(member);
+        }
+    }
+    let members = listed;
+    // Asked for even if nothing else changes: an earlier lookup may have failed.
+    let unknown_members: Vec<String> = members
+        .iter()
+        .filter(|m| *m != user)
+        .chain(std::iter::once(&creator))
+        .filter(|m| !contact_exists(m))
+        .cloned()
         .collect();
     if let Some(group) = &group {
         if group.left && members.is_empty() {
@@ -1311,6 +1400,7 @@ fn receive_setup(
             // A list without the creator is a change, whatever else it says: an older version's
             // group sync could have taken them out, and this setup is what brings them back.
             if current == members && group.members.contains(&creator) {
+                outcome.unknown_members = unknown_members;
                 return Ok(());
             }
         }
@@ -1338,11 +1428,7 @@ fn receive_setup(
     // Everyone but us, the creator included.
     let mut new_members: Vec<String> = members.into_iter().filter(|m| m != user).collect();
     new_members.insert(0, creator.clone());
-    outcome.unknown_members = new_members
-        .iter()
-        .filter(|m| !contact_exists(m))
-        .cloned()
-        .collect();
+    outcome.unknown_members = unknown_members;
     match group {
         None => {
             store.upsert_group(&Group {
@@ -1431,6 +1517,7 @@ mod tests {
     const USER: &str = "USER0001";
     const CREATOR: &str = "CREATOR1";
     const BOB: &str = "00000BOB";
+    const EVE: &str = "00000EVE";
     const BLOCKED: &str = "BLOCKED1";
 
     fn id(s: &str) -> ThreemaId {
@@ -2083,6 +2170,150 @@ mod tests {
             store.take_member_lookups("UNKNOWN1").unwrap(),
             vec![(theirs.key, true)]
         );
+    }
+
+    #[test]
+    fn a_member_nobody_has_looked_up_yet_is_asked_for_by_an_identical_setup_too() {
+        let (_dir, store) = store();
+        run(&store, CREATOR, CREATOR, setup(&[USER, "UNKNOWN1"]));
+        let again = run(&store, CREATOR, CREATOR, setup(&[USER, "UNKNOWN1"]));
+        assert!(!again.groups_changed);
+        assert_eq!(again.unknown_members, vec!["UNKNOWN1"]);
+    }
+
+    #[test]
+    fn someone_revoked_is_not_made_a_member() {
+        let (_dir, store) = store();
+        let mut revoked = crate::contacts::test_contact(BOB);
+        revoked.activity_state = ActivityState::Invalid;
+        store.upsert_contact(&revoked).unwrap();
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB, EVE]));
+        let group = store.group(&key(&gid(CREATOR))).unwrap().unwrap();
+        assert_eq!(group.members, vec![CREATOR, EVE]);
+        // And the same list again is no change, so nobody gets a line about it.
+        assert!(!run(&store, CREATOR, CREATOR, setup(&[USER, BOB, EVE])).groups_changed);
+    }
+
+    #[test]
+    fn who_is_missing_a_contact_is_found_for_the_next_try() {
+        let (_dir, store) = store();
+        store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        // In a group we are in, or waited for by something queued; not in a group we left.
+        stored_group(&store, CREATOR, &[BOB], false);
+        let left = GroupIdentity {
+            creator_identity: id(CREATOR),
+            group_id: 99,
+        };
+        store
+            .upsert_group(&Group {
+                key: key(&left),
+                identity: left,
+                name: String::new(),
+                members: vec![EVE.to_owned()],
+                left: true,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        store
+            .group_outbox_add(
+                "g:ABCD1234:1",
+                &["ABCD1234".to_owned()],
+                OUTBOX_GROUP_SYNC_REQUEST,
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(store.unresolved_members().unwrap(), vec![BOB, "ABCD1234"]);
+    }
+
+    #[test]
+    fn a_member_the_directory_does_not_know_stops_holding_up_the_group() {
+        let (_dir, store) = store();
+        store
+            .upsert_contact(&crate::contacts::test_contact(BOB))
+            .unwrap();
+        let group_key = stored_group(&store, CREATOR, &[BOB, "UNKNOWN1"], false);
+        // Bob has this one already; only the unknown member was left.
+        store
+            .set_pending_receivers(&group_key, 7, &["UNKNOWN1".to_owned()])
+            .unwrap();
+        store
+            .outbox_add(&group_key, 7, OUTBOX_GROUP_NAME, &json!({"name": "x"}))
+            .unwrap();
+        // Bob still has to get this one.
+        store
+            .set_pending_receivers(&group_key, 8, &[BOB.to_owned(), "UNKNOWN1".to_owned()])
+            .unwrap();
+        store
+            .outbox_add(&group_key, 8, OUTBOX_GROUP_NAME, &json!({"name": "y"}))
+            .unwrap();
+        // A message: nobody left, so the next send raises it (send_to_group).
+        store
+            .set_pending_receivers(&group_key, 9, &["UNKNOWN1".to_owned()])
+            .unwrap();
+
+        assert!(
+            store
+                .drop_invalid_members(&["UNKNOWN1".to_owned()])
+                .unwrap()
+        );
+
+        let group = store.group(&group_key).unwrap().unwrap();
+        assert_eq!(group.members, vec![BOB]);
+        let entries: Vec<u64> = store
+            .outbox()
+            .unwrap()
+            .iter()
+            .map(|e| e.message_id)
+            .collect();
+        assert_eq!(entries, vec![8]);
+        assert_eq!(store.pending_receivers(&group_key, 8).unwrap(), vec![BOB]);
+        assert!(store.pending_receivers(&group_key, 9).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_contact_that_came_meanwhile_is_not_dropped() {
+        let (_dir, store) = store();
+        store
+            .upsert_contact(&crate::contacts::test_contact(BOB))
+            .unwrap();
+        let group_key = stored_group(&store, CREATOR, &[BOB], false);
+        assert!(!store.drop_invalid_members(&[BOB.to_owned()]).unwrap());
+        assert_eq!(store.group(&group_key).unwrap().unwrap().members, vec![BOB]);
+    }
+
+    #[test]
+    fn a_sync_request_to_a_creator_without_a_contact_asks_for_their_lookup() {
+        let (_dir, store) = store();
+        let unknown = run(
+            &store,
+            BOB,
+            CREATOR,
+            GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+        );
+        assert!(unknown.send);
+        assert_eq!(unknown.unknown_members, vec![CREATOR]);
+
+        // The directory doesn't know them: nothing stays behind.
+        assert!(!store.drop_invalid_members(&[CREATOR.to_owned()]).unwrap());
+        assert!(store.outbox().unwrap().is_empty());
+        assert!(store.unresolved_members().unwrap().is_empty());
+
+        // With a contact there is nothing to look up.
+        store
+            .upsert_contact(&crate::contacts::test_contact(EVE))
+            .unwrap();
+        let known = run(
+            &store,
+            BOB,
+            EVE,
+            GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+        );
+        assert!(known.send);
+        assert!(known.unknown_members.is_empty());
     }
 
     #[test]

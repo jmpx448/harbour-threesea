@@ -411,10 +411,8 @@ impl App {
         self.group_info(key)
     }
 
-    /// Group members we have no contact for: look them up and store them with acquaintance level
-    /// _group_ (not shown as contacts). Pending group messages are sent once they are known. What
-    /// the other devices are owed of them goes out in the same store step (`sync::members_looked_up`)
-    /// and, if the lookup fails, stays noted for the next try (`resume_picture_downloads`).
+    /// [`resolve_members`] off the connection's path, for what the connection didn't ask itself:
+    /// the retry on reconnect and in maintenance, and what a group sync named.
     pub(crate) fn fetch_members(&self, identities: Vec<String>) {
         if let Err(error) = self.store.owe_member_lookups(&identities) {
             tracing::warn!(%error, "noting group members to look up failed");
@@ -428,28 +426,77 @@ impl App {
         let events = self.media_events.clone();
         let connection = self.connection.clone();
         tokio::task::spawn_local(async move {
-            match contacts::lookup(&https, &config, &identities).await {
-                Ok(found) => {
-                    match crate::sync::members_looked_up(&store, found) {
-                        Ok(true) => {
-                            if let Some(connection) = &connection {
-                                let _ = connection.send(ToConnection::ReflectSync);
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(error) => tracing::warn!(%error, "storing group members failed"),
-                    }
-                    // Reload contact names; the media/progress channel also triggers sending.
-                    let _ = events.send(CoreEvent::ContactsChanged);
-                }
-                Err(error) => {
-                    if matches!(error, crate::directory::DirectoryError::RateLimited) {
-                        store.rest_directory_calls();
-                    }
-                    tracing::warn!(%error, "looking up group members failed");
-                }
+            let Some(resolved) = resolve_members(&https, &config, &store, &identities).await else {
+                return;
+            };
+            if resolved.synced
+                && let Some(connection) = &connection
+            {
+                let _ = connection.send(ToConnection::ReflectSync);
             }
+            if resolved.groups_changed {
+                let _ = events.send(CoreEvent::GroupsChanged);
+            }
+            // Reload contact names; the media/progress channel also triggers sending.
+            let _ = events.send(CoreEvent::ContactsChanged);
         });
+    }
+}
+
+/// What [`resolve_members`] changed.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ResolvedMembers {
+    /// Something went into the sync queue for the other devices.
+    pub synced: bool,
+    /// A group lost a member.
+    pub groups_changed: bool,
+}
+
+/// Group members (and creators someone waits for) we have no contact for: look them up and store
+/// them with acquaintance level _group_, not shown as contacts; what waited for them can then be
+/// sent. Those the directory doesn't know leave their groups, so that nothing waits for them.
+/// What the other devices are owed of them goes out in the same store step
+/// (`sync::members_looked_up`). `None` if it failed: whoever is left without a contact is found
+/// again by [`crate::store::Store::unresolved_members`] on reconnect and in maintenance.
+pub(crate) async fn resolve_members(
+    https: &crate::https::HttpsClient,
+    config: &libthreema::common::config::Config,
+    store: &crate::store::Store,
+    identities: &[String],
+) -> Option<ResolvedMembers> {
+    let results = match contacts::lookup(https, config, identities).await {
+        Ok(results) => results,
+        Err(error) => {
+            if matches!(error, crate::directory::DirectoryError::RateLimited) {
+                store.rest_directory_calls();
+            }
+            tracing::warn!(%error, "looking up group members failed");
+            return None;
+        }
+    };
+    let invalid: Vec<String> = results
+        .iter()
+        .filter(|(_, result)| matches!(result, contacts::Lookup::Invalid))
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    let stored = crate::sync::members_looked_up(store, results)
+        .and_then(|synced| Ok((synced, store.drop_invalid_members(&invalid)?)));
+    match stored {
+        Ok((synced, groups_changed)) => {
+            tracing::info!(
+                looked_up = identities.len(),
+                invalid = invalid.len(),
+                "group members looked up"
+            );
+            Some(ResolvedMembers {
+                synced,
+                groups_changed,
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, "storing group members failed");
+            None
+        }
     }
 }
 
@@ -564,6 +611,8 @@ impl App {
     pub(crate) fn member_lookups_due(&self) -> Vec<String> {
         let mut due = self.store.outstanding_member_lookups().unwrap_or_default();
         due.extend(self.store.owed_member_lookups().unwrap_or_default());
+        // Whoever a group or something queued still waits for, however that came about.
+        due.extend(self.store.unresolved_members().unwrap_or_default());
         due.sort();
         due.dedup();
         due

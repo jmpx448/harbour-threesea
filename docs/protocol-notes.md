@@ -350,7 +350,12 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   at most once an hour; left → empty setup (creator) or `group-leave` in reply; sender not a
   member → empty setup or sync request) and each control message's own steps, in
   `core/src/groups.rs` (unit-tested). Members we don't know are looked up and stored with
-  acquaintance level _group_ (not shown as contacts).
+  acquaintance level _group_ (not shown as contacts): by the connection, right after the setup and
+  before the next message, and for whatever that left open on reconnect and in maintenance
+  (`Store::unresolved_members`: members of groups we are in, receivers of what is queued). The
+  setup's nonce is used by then, so a failed lookup can't count on redelivery. Someone the directory
+  doesn't know, or a contact that is revoked when the setup comes, is not kept as a member (Android
+  neither) and nothing waits for them. A sync request's creator is looked up the same way.
 - A group-setup creates its sender as a _direct_ contact (csp.struct.yml, Android), a stranger's
   too, also under _block unknown_ (ADR 0019). Its dedicated blocking steps run in libthreema before
   anything is created: a creator on the block list, for a group the user isn't in, is discarded.

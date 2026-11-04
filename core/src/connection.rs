@@ -3061,6 +3061,35 @@ impl<'a> Session<'a> {
         self.after_incoming().await
     }
 
+    /// Look up group members we have no contact for (`app_groups::resolve_members`) and send
+    /// whatever waited for them.
+    async fn resolve_members(&mut self, identities: &[String]) -> Result<(), ConnectionError> {
+        if let Err(error) = self.setup.store.owe_member_lookups(identities) {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
+        if self.setup.store.directory_resting() {
+            return Ok(());
+        }
+        let Some(resolved) = crate::app_groups::resolve_members(
+            &self.setup.https,
+            &self.setup.config,
+            &self.setup.store,
+            identities,
+        )
+        .await
+        else {
+            return Ok(());
+        };
+        if resolved.synced {
+            self.reflect_queued_syncs().await?;
+        }
+        if resolved.groups_changed {
+            self.emit(CoreEvent::GroupsChanged);
+        }
+        self.emit(CoreEvent::ContactsChanged);
+        self.send_pending().await
+    }
+
     /// What handling an incoming message left to do.
     async fn after_incoming(&mut self) -> Result<(), ConnectionError> {
         let events = status_after_messages(self.events.borrow_mut().drain(..).collect());
@@ -3069,6 +3098,13 @@ impl<'a> Session<'a> {
             // the other devices get a message for a group they don't have yet, and drop it.
             if matches!(event, CoreEvent::SyncQueued) {
                 self.reflect_queued_syncs().await?;
+                continue;
+            }
+            // Before the next message too, which may be from one of them, and so that what we
+            // send to the group reaches them. A failed lookup is tried again later (`on_connected`,
+            // `maintenance`); the setup is acknowledged by now and won't come again.
+            if let CoreEvent::UnknownMembers(identities) = &event {
+                self.resolve_members(identities).await?;
                 continue;
             }
             let Some(event) = Box::pin(self.handle_fs_event(event)).await? else {
