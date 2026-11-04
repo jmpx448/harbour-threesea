@@ -783,7 +783,8 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "DROP TABLE chat_tones;
+                    "ALTER TABLE groups DROP COLUMN kicked;
+                     DROP TABLE chat_tones;
                      DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;
                      DROP TRIGGER messages_search_delete; DROP INDEX messages_mentions;
                      DROP TABLE messages_search; DROP TABLE marked_unread_chats;

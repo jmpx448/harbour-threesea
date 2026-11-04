@@ -54,11 +54,14 @@ pub(crate) const MIGRATION_PICTURES: &str = "
     ALTER TABLE groups ADD COLUMN picture TEXT;
     ALTER TABLE groups ADD COLUMN picture_version INTEGER NOT NULL DEFAULT 0;";
 
-/// Store migration 35. The creator back into the groups an older version's group sync took them
-/// out of: without them, everything they wrote was dropped as coming from a stranger, and nothing
-/// we wrote reached them. An empty list is how such a sync left a group it made by mistake; it is
-/// someone else's group, so it isn't the notes group it looked like.
+/// Store migration 35. `kicked`: of the groups we are out of (`left_group`), the ones the creator
+/// removed us from; those from before it can't be told apart and stay "left". And the creator back
+/// into the groups an older version's group sync took them out of: without them, everything they
+/// wrote was dropped as coming from a stranger, and nothing we wrote reached them. Empty lists
+/// are how those syncs left a group they created by mistake; it is someone else's group, so it
+/// isn't the notes group it looked like.
 pub(crate) const MIGRATION_SYNC: &str = r#"
+    ALTER TABLE groups ADD COLUMN kicked INTEGER NOT NULL DEFAULT 0;
     UPDATE groups
        SET members = CASE WHEN members = '[]' THEN '["' || creator || '"]'
                           ELSE '["' || creator || '",' || substr(members, 2) END
@@ -137,7 +140,7 @@ pub struct Group {
     pub name: String,
     /// Everyone but the user (see the module docs).
     pub members: Vec<String>,
-    /// Left, removed (kicked) or disbanded.
+    /// Left, removed (kicked) or disbanded; [`Store::group_kicked`] tells whether we were removed.
     pub left: bool,
     pub created_at: i64,
     pub picture: Option<GroupPicture>,
@@ -305,7 +308,8 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT (key) DO UPDATE SET name = excluded.name, members = excluded.members,
                  left_group = excluded.left_group, picture = excluded.picture,
-                 picture_version = excluded.picture_version",
+                 picture_version = excluded.picture_version,
+                 kicked = CASE WHEN excluded.left_group = 0 THEN 0 ELSE kicked END",
             params![
                 group.key,
                 group.identity.creator_identity.to_string(),
@@ -317,6 +321,26 @@ impl Store {
                 group.picture.as_ref().map(|p| p.to_json().to_string()),
                 group.picture_version
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the creator removed us from this group (as opposed to our leaving it).
+    pub fn group_kicked(&self, key: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT kicked FROM groups WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// See [`Self::group_kicked`]. Being back in the group clears it (`upsert_group`).
+    pub fn set_group_kicked(&self, key: &str, kicked: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE groups SET kicked = ?2 WHERE key = ?1",
+            params![key, kicked],
         )?;
         Ok(())
     }
@@ -878,8 +902,12 @@ fn receive_setup(
         let Some(mut group) = group else {
             return Ok(());
         };
+        let was_in = !group.left;
         group.left = true;
         store.upsert_group(&group)?;
+        if was_in {
+            store.set_group_kicked(key, true)?;
+        }
         let code = if members.is_empty() {
             "groupDisbanded"
         } else {
@@ -1286,6 +1314,25 @@ mod tests {
     }
 
     #[test]
+    fn being_removed_is_told_apart_from_leaving() {
+        let (_dir, store) = store();
+        let group_key = stored_group(&store, CREATOR, &[CREATOR, BOB], false);
+        run(&store, CREATOR, CREATOR, setup(&[BOB]));
+        assert!(store.group(&group_key).unwrap().unwrap().left);
+        assert!(store.group_kicked(&group_key).unwrap());
+        // Back in: no longer removed; every later write of the group keeps that.
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        let mut group = store.group(&group_key).unwrap().unwrap();
+        assert!(!group.left);
+        assert!(!store.group_kicked(&group_key).unwrap());
+        // Having left ourselves is not being removed, even when a setup without us follows.
+        group.left = true;
+        store.upsert_group(&group).unwrap();
+        run(&store, CREATOR, CREATOR, setup(&[BOB]));
+        assert!(!store.group_kicked(&group_key).unwrap());
+    }
+
+    #[test]
     fn the_migration_repairs_groups_a_sync_took_the_creator_out_of() {
         let (_dir, store) = store();
         store
@@ -1323,6 +1370,10 @@ mod tests {
         let (notes_before, fine_before, left_before) =
             (before(&notes), before(&fine), before(&left));
 
+        store
+            .conn
+            .execute_batch("ALTER TABLE groups DROP COLUMN kicked;")
+            .unwrap();
         store.conn.execute_batch(MIGRATION_SYNC).unwrap();
 
         assert_eq!(before(&damaged), vec![CREATOR, BOB, "00000EVE"]);
@@ -1330,6 +1381,7 @@ mod tests {
         assert_eq!(before(&notes), notes_before);
         assert_eq!(before(&fine), fine_before);
         assert_eq!(before(&left), left_before);
+        assert!(!store.group_kicked(&left).unwrap());
     }
 
     #[test]

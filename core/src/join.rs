@@ -269,6 +269,13 @@ pub fn contact_sync(
 pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group, StoreError> {
     let pinned = store.pinned_chats()?;
     let archived = store.archived_chats()?;
+    let user_state = if !stored.left {
+        group::UserState::Member
+    } else if store.group_kicked(&stored.key)? {
+        group::UserState::Kicked
+    } else {
+        group::UserState::Left
+    };
     let notification = match store.chat_notifications(&stored.key)? {
         Some((policy, until)) => group::notification_trigger_policy_override::Override::Policy(
             group::notification_trigger_policy_override::Policy {
@@ -289,11 +296,7 @@ pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group,
         }),
         name: Some(stored.name.clone()),
         created_at: Some(u64::try_from(stored.created_at).unwrap_or_default()),
-        user_state: Some(if stored.left {
-            group::UserState::Left as i32
-        } else {
-            group::UserState::Member as i32
-        }),
+        user_state: Some(user_state as i32),
         profile_picture: Some(DeltaImage {
             image: Some(delta_image::Image::Removed(Unit {})),
         }),
@@ -514,6 +517,15 @@ mod tests {
             vec!["ABCD1234"]
         );
         assert_eq!(synced.user_state, Some(group::UserState::Member as i32));
+    }
+
+    #[test]
+    fn being_removed_goes_out_as_removed() {
+        let (_dir, store, group) = with_group(true);
+        let state = |store: &Store| group_sync(store, &group).unwrap().user_state;
+        assert_eq!(state(&store), Some(group::UserState::Left as i32));
+        store.set_group_kicked(&group.key, true).unwrap();
+        assert_eq!(state(&store), Some(group::UserState::Kicked as i32));
     }
 
     #[test]

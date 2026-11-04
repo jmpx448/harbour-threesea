@@ -280,13 +280,18 @@ fn apply_group(
     if let Some(members) = synced.member_identities {
         stored.members = crate::groups::normalized_members(members.identities, &creator, user);
     }
-    if let Some(state) = synced
+    let user_state = synced
         .user_state
-        .and_then(|s| group::UserState::try_from(s).ok())
-    {
+        .and_then(|s| group::UserState::try_from(s).ok());
+    if let Some(state) = user_state {
         stored.left = state != group::UserState::Member;
     }
     store.upsert_group(&stored)?;
+    match user_state {
+        Some(group::UserState::Kicked) => store.set_group_kicked(&key, true)?,
+        Some(group::UserState::Left) => store.set_group_kicked(&key, false)?,
+        _ => {}
+    }
     // Their contacts come first by the protocol; if one doesn't, messages to them would go nowhere.
     let unknown: Vec<String> = stored
         .members
@@ -611,6 +616,33 @@ mod tests {
         assert!(store.group(&key(CREATOR)).unwrap().is_none());
         assert!(events.is_empty());
         assert!(store.pinned_chats().unwrap().is_empty());
+    }
+
+    fn state(state: group::UserState) -> d2d_sync::Group {
+        d2d_sync::Group {
+            user_state: Some(state as i32),
+            ..synced(CREATOR)
+        }
+    }
+
+    #[test]
+    fn how_we_went_is_kept_and_cleared_on_coming_back() {
+        let (_dir, store) = store();
+        let group_key = key(CREATOR);
+        create(&store, listing(CREATOR, &[BOB]));
+        assert!(!store.group_kicked(&group_key).unwrap());
+
+        update(&store, state(group::UserState::Kicked));
+        assert!(store.group(&group_key).unwrap().unwrap().left);
+        assert!(store.group_kicked(&group_key).unwrap());
+
+        update(&store, state(group::UserState::Member));
+        assert!(!store.group(&group_key).unwrap().unwrap().left);
+        assert!(!store.group_kicked(&group_key).unwrap());
+
+        update(&store, state(group::UserState::Left));
+        assert!(store.group(&group_key).unwrap().unwrap().left);
+        assert!(!store.group_kicked(&group_key).unwrap());
     }
 
     #[test]
