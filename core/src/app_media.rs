@@ -5,9 +5,9 @@
 //! A file message's `body` (UI JSON) carries `fileState` / `thumbnailState`:
 //! 0 on the server, 1 downloading, 2 on the device, 3 failed; outgoing ones also `uploadState`:
 //! 1 uploading, 2 uploaded (the message can be sent), 3 failed. `fileOnDemand`: the user cleaned
-//! the file up, so it comes back only when asked for. `uploadRetry`: how often the upload failed
-//! and when it may try again by itself; `uploadedFile`: when the file part went up, if the rest
-//! of the upload didn't.
+//! the file up, so it comes back only when asked for. `uploadRetry`, `fileRetry` and
+//! `thumbnailRetry`: how often that transfer failed and when it may try again by itself;
+//! `uploadedFile`: when the file part went up, if the rest of the upload didn't.
 //!
 //! Sending: the file is first stored in the (encrypted) media store, then uploaded from there,
 //! so a failed upload can be retried after a restart without the original file.
@@ -70,6 +70,8 @@ fn retry_due(at: i64, now: i64) -> bool {
 pub struct TransferRetries {
     /// Outgoing file messages whose upload may try again now.
     pub uploads: Vec<i64>,
+    /// Parts whose download may try again now.
+    pub downloads: Vec<(i64, MediaPart)>,
     /// When the next one comes due.
     pub next_at: Option<i64>,
 }
@@ -112,6 +114,13 @@ fn state_field(part: MediaPart) -> &'static str {
     match part {
         MediaPart::File => "$.fileState",
         MediaPart::Thumbnail => "$.thumbnailState",
+    }
+}
+
+fn retry_field(part: MediaPart) -> &'static str {
+    match part {
+        MediaPart::File => "$.fileRetry",
+        MediaPart::Thumbnail => "$.thumbnailRetry",
     }
 }
 
@@ -332,7 +341,8 @@ impl Store {
         Ok(removed)
     }
 
-    /// Set `fileState`/`thumbnailState` of a file message; returns the changed message.
+    /// Set `fileState`/`thumbnailState` of a file message; returns the changed message. A download
+    /// under way keeps count of its tries; anything else ends them.
     pub fn set_media_state(
         &self,
         message: i64,
@@ -343,6 +353,34 @@ impl Store {
             "UPDATE messages SET body = json_set(body, ?2, ?3), updated_at = ?4
              WHERE id = ?1 AND kind = 'file'",
             params![message, state_field(part), state, now_ms()],
+        )?;
+        if state != STATE_LOADING {
+            self.forget_transfer_tries(message, retry_field(part))?;
+        }
+        self.message(message)
+    }
+
+    /// A part's download failed. `transient`: it may try again by itself after a pause, as long as
+    /// it has tries left.
+    pub fn set_media_failed(
+        &self,
+        message: i64,
+        part: MediaPart,
+        transient: bool,
+        now: i64,
+    ) -> Result<Option<Message>, StoreError> {
+        let tries = self.transfer_tries(message, retry_field(part))? + 1;
+        self.conn.execute(
+            "UPDATE messages SET body = json_set(body, ?2, ?3, ?4, json(?5)), updated_at = ?6
+             WHERE id = ?1 AND kind = 'file'",
+            params![
+                message,
+                state_field(part),
+                STATE_FAILED,
+                retry_field(part),
+                retry_after_failure(tries, transient, now).to_string(),
+                now
+            ],
         )?;
         self.message(message)
     }
@@ -419,7 +457,8 @@ impl Store {
     /// The user asked for this transfer: its tries start over.
     fn forget_transfer_tries(&self, message: i64, retry_field: &str) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE messages SET body = json_remove(body, ?2) WHERE id = ?1 AND kind = 'file'",
+            "UPDATE messages SET body = json_remove(body, ?2)
+             WHERE id = ?1 AND kind = 'file' AND json_type(body, ?2) IS NOT NULL",
             params![message, retry_field],
         )?;
         Ok(())
@@ -465,7 +504,16 @@ impl Store {
     /// What may try again by itself: an upload that failed for a message that never went out, if
     /// it hasn't failed for good, and whose pause is over. One that failed before tries were
     /// counted has no note on it and counts as due.
-    pub fn transfers_to_retry(&self, now: i64) -> Result<TransferRetries, StoreError> {
+    ///
+    /// Downloads likewise, but only with a note: what failed earlier, and what a restored backup
+    /// has no blob left for, waits for a tap as ever. A file part goes by what comes by itself on
+    /// this network (`auto`, `limit`: see [`Self::media_to_download`]), a thumbnail always does.
+    pub fn transfers_to_retry(
+        &self,
+        now: i64,
+        auto: &[String],
+        limit: u64,
+    ) -> Result<TransferRetries, StoreError> {
         let mut retries = TransferRetries::default();
         let mut statement = self.conn.prepare(
             "SELECT id, json_extract(body, '$.uploadRetry.tries'),
@@ -489,6 +537,35 @@ impl Store {
             };
             if due {
                 retries.uploads.push(id);
+            }
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT id, body FROM messages WHERE kind = 'file'
+                 AND ((json_extract(body, '$.thumbnailState') = ?1
+                       AND json_extract(body, '$.thumbnailRetry.at') IS NOT NULL)
+                      OR (json_extract(body, '$.fileState') = ?1
+                          AND json_extract(body, '$.fileRetry.at') IS NOT NULL))",
+        )?;
+        let rows = statement.query_map([STATE_FAILED], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, text) = row?;
+            let body: Value = serde_json::from_str(&text).unwrap_or_default();
+            for (part, state, retry) in [
+                (MediaPart::Thumbnail, "thumbnailState", "thumbnailRetry"),
+                (MediaPart::File, "fileState", "fileRetry"),
+            ] {
+                let Some(at) = body[retry]["at"].as_i64() else {
+                    continue;
+                };
+                if body[state].as_i64() == Some(STATE_FAILED)
+                    && (part == MediaPart::Thumbnail
+                        || file_comes_by_itself(&body, &text, auto, limit))
+                    && retries.sort_in(at, now)
+                {
+                    retries.downloads.push((id, part));
+                }
             }
         }
         Ok(retries)
@@ -537,17 +614,20 @@ impl Store {
                 parts.push((id, MediaPart::Thumbnail));
             }
             let parsed = serde_json::from_str::<Value>(&body).unwrap_or_default();
-            let size = parsed["size"].as_u64().unwrap_or(0);
-            if file == Some(STATE_REMOTE)
-                && parsed["fileOnDemand"] != true
-                && auto.iter().any(|k| k == download_kind(&body))
-                && (limit == 0 || size <= limit)
-            {
+            if file == Some(STATE_REMOTE) && file_comes_by_itself(&parsed, &body, auto, limit) {
                 parts.push((id, MediaPart::File));
             }
         }
         Ok(parts)
     }
+}
+
+/// Does this message's file part come without being asked for, on the current network?
+fn file_comes_by_itself(parsed: &Value, body: &str, auto: &[String], limit: u64) -> bool {
+    let size = parsed["size"].as_u64().unwrap_or(0);
+    parsed["fileOnDemand"] != true
+        && auto.iter().any(|k| k == download_kind(body))
+        && (limit == 0 || size <= limit)
 }
 
 /// Is a part of this file message still on the blob server (or the mirror), and to come by itself?
@@ -686,19 +766,19 @@ impl Download {
             }
             Ok(())
         });
-        let state = match &stored {
-            Ok(()) => STATE_LOCAL,
+        let changed = match &stored {
+            Ok(()) => store.set_media_state(self.message, self.part, STATE_LOCAL),
             Err(error) => {
                 tracing::warn!(%error, part = ?self.part, "media download failed");
                 // What is here already stays good, whatever became of the blob.
                 if media.has(self.message, self.part) {
-                    STATE_LOCAL
+                    store.set_media_state(self.message, self.part, STATE_LOCAL)
                 } else {
-                    STATE_FAILED
+                    store.set_media_failed(self.message, self.part, error.is_transient(), now_ms())
                 }
             }
         };
-        if let Ok(Some(message)) = store.set_media_state(self.message, self.part, state) {
+        if let Ok(Some(message)) = changed {
             let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
         }
         stored.is_ok()
@@ -1138,10 +1218,15 @@ impl App {
             return;
         }
         let now = now_ms();
-        match self.store.transfers_to_retry(now) {
+        let auto = self.auto_download_kinds();
+        let limit = self.auto_download_limit();
+        match self.store.transfers_to_retry(now, &auto, limit) {
             Ok(retries) => {
                 for message in retries.uploads {
                     self.spawn_upload(message);
+                }
+                for (message, part) in retries.downloads {
+                    self.spawn_download(message, part);
                 }
                 if let Some(at) = retries.next_at {
                     self.look_at_retries_by(at, now);
@@ -1192,10 +1277,16 @@ impl App {
             let now = now_ms();
             for message in messages.iter().filter(|m| m.body.contains("Retry")) {
                 let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
-                if body["uploadState"].as_i64() == Some(STATE_FAILED)
-                    && let Some(at) = body["uploadRetry"]["at"].as_i64()
-                {
-                    self.look_at_retries_by(at, now);
+                for (state, retry) in [
+                    ("uploadState", "uploadRetry"),
+                    ("fileState", "fileRetry"),
+                    ("thumbnailState", "thumbnailRetry"),
+                ] {
+                    if body[state].as_i64() == Some(STATE_FAILED)
+                        && let Some(at) = body[retry]["at"].as_i64()
+                    {
+                        self.look_at_retries_by(at, now);
+                    }
                 }
             }
         }
@@ -1398,6 +1489,8 @@ impl App {
             if matches!(state, Some(STATE_REMOTE | STATE_FAILED))
                 && (part == MediaPart::File || body["thumbnail"] == true)
             {
+                self.store
+                    .forget_transfer_tries(message.id, retry_field(part))?;
                 self.spawn_download(message.id, part);
             }
         }
@@ -2100,7 +2193,7 @@ mod tests {
         let network = Err(media::MediaError::Network("timeout".into()));
         finish_upload(&app.store, &events, id, &keys, network);
         assert_eq!(
-            app.store.transfers_to_retry(later).unwrap().uploads,
+            app.store.transfers_to_retry(later, &[], 0).unwrap().uploads,
             vec![id]
         );
         assert_eq!(state_of(), crate::messages::OutgoingState::Pending as i64);
@@ -2111,7 +2204,7 @@ mod tests {
         assert_eq!(state_of(), crate::messages::OutgoingState::Failed as i64);
         assert!(
             app.store
-                .transfers_to_retry(later)
+                .transfers_to_retry(later, &[], 0)
                 .unwrap()
                 .uploads
                 .is_empty()
@@ -2127,16 +2220,19 @@ mod tests {
         let mut now = 1_000_000;
         for minutes in RETRY_PAUSES_MINUTES {
             app.store.set_upload_failed(id, true, now).unwrap();
-            let retries = app.store.transfers_to_retry(now).unwrap();
+            let retries = app.store.transfers_to_retry(now, &[], 0).unwrap();
             assert!(retries.uploads.is_empty(), "not before the pause is over");
             assert_eq!(retries.next_at, Some(now + minutes * MINUTE_MS));
             now += minutes * MINUTE_MS;
-            assert_eq!(app.store.transfers_to_retry(now).unwrap().uploads, vec![id]);
+            assert_eq!(
+                app.store.transfers_to_retry(now, &[], 0).unwrap().uploads,
+                vec![id]
+            );
         }
         app.store.set_upload_failed(id, true, now).unwrap();
         assert_eq!(
             app.store
-                .transfers_to_retry(now + 365 * RETRY_PAUSE_MAX_MS)
+                .transfers_to_retry(now + 365 * RETRY_PAUSE_MAX_MS, &[], 0)
                 .unwrap(),
             TransferRetries::default(),
             "out of tries"
@@ -2146,7 +2242,7 @@ mod tests {
         app.store.forget_transfer_tries(id, UPLOAD_RETRY).unwrap();
         app.store.set_upload_failed(id, true, now).unwrap();
         assert_eq!(
-            app.store.transfers_to_retry(now).unwrap().next_at,
+            app.store.transfers_to_retry(now, &[], 0).unwrap().next_at,
             Some(now + MINUTE_MS)
         );
 
@@ -2182,7 +2278,7 @@ mod tests {
         finish_upload(&app.store, &events, busy, &keys(busy), not_now);
 
         assert_eq!(
-            app.store.transfers_to_retry(later).unwrap().uploads,
+            app.store.transfers_to_retry(later, &[], 0).unwrap().uploads,
             vec![busy]
         );
     }
@@ -2193,7 +2289,10 @@ mod tests {
         let (_dir, app) = app();
         let id = outgoing_file(&app.store, 1, 1);
         app.store.set_upload_state(id, STATE_FAILED).unwrap();
-        assert_eq!(app.store.transfers_to_retry(0).unwrap().uploads, vec![id]);
+        assert_eq!(
+            app.store.transfers_to_retry(0, &[], 0).unwrap().uploads,
+            vec![id]
+        );
     }
 
     /// A clock that went back doesn't hold a try up until it has caught up.
@@ -2203,7 +2302,10 @@ mod tests {
         let id = outgoing_file(&app.store, 1, 1);
         let ahead = 1_000 * 24 * 60 * MINUTE_MS;
         app.store.set_upload_failed(id, true, ahead).unwrap();
-        assert_eq!(app.store.transfers_to_retry(0).unwrap().uploads, vec![id]);
+        assert_eq!(
+            app.store.transfers_to_retry(0, &[], 0).unwrap().uploads,
+            vec![id]
+        );
     }
 
     /// Starting one marks it at once: a second look before its task ran doesn't name it again.
@@ -2219,11 +2321,26 @@ mod tests {
                 assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOADING));
                 assert!(
                     app.store
-                        .transfers_to_retry(now_ms())
+                        .transfers_to_retry(now_ms(), &[], 0)
                         .unwrap()
                         .uploads
                         .is_empty()
                 );
+            })
+            .await;
+    }
+
+    /// A wake-up looks too: the loop's timer stands still while the phone sleeps, the clock doesn't.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_up_starts_what_came_due_during_sleep() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                app.connection_state = "connected";
+                let id = outgoing_file(&app.store, 1, 1);
+                app.store.set_upload_failed(id, true, 0).unwrap();
+                app.wake_connection();
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOADING));
             })
             .await;
     }
@@ -2283,7 +2400,7 @@ mod tests {
                     app.store.set_upload_state(id, STATE_LOADING).unwrap();
                     app.resume_media();
                     assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
-                    let retries = app.store.transfers_to_retry(now_ms()).unwrap();
+                    let retries = app.store.transfers_to_retry(now_ms(), &[], 0).unwrap();
                     assert!(retries.uploads.is_empty(), "not at the start itself");
                     let waits = RETRY_PAUSES_MINUTES[tries - 1] * MINUTE_MS;
                     assert!(retries.next_at.unwrap() <= now_ms() + waits);
@@ -2292,7 +2409,7 @@ mod tests {
                 app.resume_media();
                 assert_eq!(
                     app.store
-                        .transfers_to_retry(now_ms() + 365 * RETRY_PAUSE_MAX_MS)
+                        .transfers_to_retry(now_ms() + 365 * RETRY_PAUSE_MAX_MS, &[], 0)
                         .unwrap(),
                     TransferRetries::default(),
                     "out of tries"
@@ -2425,6 +2542,181 @@ mod tests {
             "kept for others now"
         );
         assert!(!uploaded_file_good(&json!({}), 1000, TO_CONTACT));
+    }
+
+    /// What is due for a picture's download, on a network where pictures come by themselves.
+    fn due_downloads(store: &Store, now: i64) -> Vec<(i64, MediaPart)> {
+        store
+            .transfers_to_retry(now, &["image".to_owned()], 0)
+            .unwrap()
+            .downloads
+    }
+
+    fn failed_download(
+        app: &App,
+        job: &Download,
+        error: media::MediaError,
+    ) -> mpsc::UnboundedReceiver<CoreEvent> {
+        let (events, rx) = mpsc::unbounded_channel();
+        assert!(!job.finish(&app.store, &app.media, &events, Err(error)));
+        rx
+    }
+
+    /// A download the network broke off comes again by itself, after a pause, a limited number of
+    /// times; a thumbnail as well as a file.
+    #[test]
+    fn a_failed_download_tries_again_a_limited_number_of_times() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        for part in [MediaPart::File, MediaPart::Thumbnail] {
+            let job = job(&app.store, id, part);
+            let field = state_field(part).trim_start_matches("$.");
+            let mut now = now_ms();
+            failed_download(&app, &job, media::MediaError::Network("timeout".into()));
+            assert_eq!(state(&app.store, id, field), Some(STATE_FAILED));
+            assert_eq!(due_downloads(&app.store, now), vec![]);
+            for minutes in RETRY_PAUSES_MINUTES.iter().skip(1) {
+                now += RETRY_PAUSE_MAX_MS;
+                assert!(due_downloads(&app.store, now).contains(&(id, part)));
+                app.store.set_media_failed(id, part, true, now).unwrap();
+                assert_eq!(
+                    app.store
+                        .transfers_to_retry(now, &["image".to_owned()], 0)
+                        .unwrap()
+                        .next_at,
+                    Some(now + minutes * MINUTE_MS)
+                );
+            }
+            now += RETRY_PAUSE_MAX_MS;
+            assert!(due_downloads(&app.store, now).contains(&(id, part)));
+            app.store.set_media_failed(id, part, true, now).unwrap();
+            assert!(!due_downloads(&app.store, now + RETRY_PAUSE_MAX_MS).contains(&(id, part)));
+        }
+    }
+
+    /// What can't work later stays failed until it is tapped: a blob that is gone, one that opens
+    /// with no key, one too large, a disk that is full.
+    #[test]
+    fn a_download_that_cannot_work_later_waits_for_a_tap() {
+        let (_dir, app) = app();
+        for (message_id, error) in [
+            (1, media::MediaError::Status(404)),
+            (2, media::MediaError::Decrypt),
+            (3, media::MediaError::TooLarge),
+            (
+                4,
+                media::MediaError::Io(std::io::ErrorKind::StorageFull.into()),
+            ),
+        ] {
+            let id = received_file(&app.store, message_id, 1);
+            failed_download(&app, &job(&app.store, id, MediaPart::File), error);
+            assert_eq!(state(&app.store, id, "fileState"), Some(STATE_FAILED));
+        }
+        assert_eq!(due_downloads(&app.store, i64::MAX / 2), vec![]);
+        assert_eq!(
+            app.store
+                .transfers_to_retry(now_ms() + RETRY_PAUSE_MAX_MS, &["image".to_owned()], 0)
+                .unwrap(),
+            TransferRetries::default()
+        );
+    }
+
+    /// The settings for what comes by itself count for a try again as well: not a kind left out,
+    /// not over the limit, not a file the user cleaned up. Its thumbnail still comes.
+    #[test]
+    fn a_failed_file_comes_again_only_as_it_would_by_itself() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        let now = now_ms();
+        app.store
+            .set_media_failed(id, MediaPart::File, true, now)
+            .unwrap();
+        app.store
+            .set_media_failed(id, MediaPart::Thumbnail, true, now)
+            .unwrap();
+        let later = now + RETRY_PAUSE_MAX_MS;
+        let downloads = |auto: &[String], limit| {
+            app.store
+                .transfers_to_retry(later, auto, limit)
+                .unwrap()
+                .downloads
+        };
+        let images = ["image".to_owned()];
+        let both = vec![(id, MediaPart::Thumbnail), (id, MediaPart::File)];
+        let thumbnail = vec![(id, MediaPart::Thumbnail)];
+        assert_eq!(downloads(&images, 0), both);
+        assert_eq!(downloads(&images, 1000), both);
+        assert_eq!(downloads(&images, 999), thumbnail);
+        assert_eq!(downloads(&["video".to_owned()], 0), thumbnail);
+        app.store.set_file_cleaned(id).unwrap();
+        assert_eq!(downloads(&images, 0), thumbnail);
+    }
+
+    /// Nothing changes for what failed before tries were counted, or what a restored backup marks
+    /// as failed: there may be thousands, and they wait for a tap.
+    #[test]
+    fn a_download_without_a_note_waits_for_a_tap() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        app.store
+            .set_media_state(id, MediaPart::File, STATE_FAILED)
+            .unwrap();
+        assert_eq!(due_downloads(&app.store, i64::MAX / 2), vec![]);
+    }
+
+    /// Fetched after all: the note goes. A tap starts the tries over.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_tap_on_a_download_starts_its_tries_over() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let id = received_file(&app.store, 1, 1);
+                let now = now_ms();
+                for _ in 0..=RETRY_PAUSES_MINUTES.len() {
+                    app.store
+                        .set_media_failed(id, MediaPart::File, true, now)
+                        .unwrap();
+                }
+                assert_eq!(due_downloads(&app.store, now + RETRY_PAUSE_MAX_MS), vec![]);
+                app.download_file(id).unwrap();
+                assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOADING));
+
+                let failed = app.store.set_media_failed(id, MediaPart::File, true, now);
+                let body = failed.unwrap().unwrap().body;
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["fileRetry"]["tries"], 1);
+
+                app.store
+                    .set_media_state(id, MediaPart::File, STATE_LOCAL)
+                    .unwrap();
+                let body = app.store.message(id).unwrap().unwrap().body;
+                assert!(!body.contains("fileRetry"), "{body}");
+            })
+            .await;
+    }
+
+    /// Once it runs again it isn't due again, however often the list is looked at; and it stays
+    /// under way as far as a new look at the list is concerned.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retried_download_starts_once() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                app.connection_state = "connected";
+                let id = received_file(&app.store, 1, 1);
+                app.store
+                    .set_media_state(id, MediaPart::File, STATE_LOCAL)
+                    .unwrap();
+                app.store
+                    .set_media_failed(id, MediaPart::Thumbnail, true, 0)
+                    .unwrap();
+                app.retry_failed_transfers();
+                assert_eq!(state(&app.store, id, "thumbnailState"), Some(STATE_LOADING));
+                assert_eq!(due_downloads(&app.store, now_ms()), vec![]);
+                app.retry_failed_transfers();
+                assert_eq!(due_downloads(&app.store, now_ms()), vec![]);
+            })
+            .await;
     }
 
     /// A file left by a download that outlived its message's deletion goes at the next start.

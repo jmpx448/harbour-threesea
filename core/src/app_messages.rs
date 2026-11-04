@@ -537,8 +537,10 @@ impl App {
     }
 
     /// Ask the connection to reconnect now (network changed, app woke up).
-    pub(crate) fn wake_connection(&self) -> Value {
+    pub(crate) fn wake_connection(&mut self) -> Value {
         self.tell_connection(ToConnection::Wake);
+        // The loop's timer stands still while the phone sleeps, a pause goes by the clock.
+        self.retry_failed_transfers();
         json!({})
     }
 

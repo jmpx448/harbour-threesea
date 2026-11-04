@@ -610,3 +610,24 @@ the system's app. Send these from another phone as files.
 5. A BMP or HEIC photo sent as media, the way Android sends photos.
    - Expect: a file row, or its preview if it came with one; a tap opens it like any other file,
      no empty picture and no black page.
+
+## Large transfers on the real servers
+
+The time limits and retries were only tried against a local server, without TLS. Lower the phone's
+network to 3G if it can, or find a weak signal, and use a video that takes more than two minutes.
+
+1. Send it to a contact, then to a group.
+   - Expect: it arrives, and the message's clock ends without a warning sign in between.
+2. Have the same video sent to you.
+   - Expect: it arrives by itself if Settings → Media lets videos come on this network.
+3. With a linked device (Threema for Desktop), send a small photo and a large video.
+   - Expect: both arrive on the other phone and on the desktop. This goes through the mirror.
+4. During an upload, switch on flight mode for one minute, then off.
+   - Expect: the upload carries on, and the file arrives once.
+5. During another, switch on flight mode for three minutes, then off.
+   - Expect: the warning sign, then a new try by itself within a few minutes of the connection coming
+     back; a tap on the message tries at once.
+6. Close the app during an upload and start it again.
+   - Expect: the warning sign for up to a minute, then it goes out by itself.
+7. Do the same as in 5 while pictures come in.
+   - Expect: they arrive by themselves a little after the connection is back, no tap needed.
