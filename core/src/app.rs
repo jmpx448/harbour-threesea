@@ -1494,6 +1494,11 @@ impl App {
                 self.set_lock(lock)
             }
             Command::Unlock { pin, private_chats } => {
+                // Nothing to check a PIN against: no PIN opens anything. Private marks can exist
+                // without a lock (Safe restore, a linked device); a PIN set now opens them.
+                if self.store.lock()?.is_none() {
+                    return Err(ApiError::LockNeeded);
+                }
                 self.check_lock(Some(&pin))?;
                 if private_chats {
                     self.unlocked = true;

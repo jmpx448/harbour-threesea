@@ -199,6 +199,9 @@ impl App {
                 return Err(ApiError::PrivateChatsExist);
             }
             self.store.set_lock(None)?;
+            // No lock, nothing open: marks arriving later wait for a new PIN.
+            self.unlocked = false;
+            self.update_media_gate();
             return self.lock_status();
         };
         let current = self.store.lock()?;
@@ -221,7 +224,8 @@ impl App {
         self.lock_status()
     }
 
-    /// The PIN opens the lock; without a lock anything does. Like Android (PinLockViewModel):
+    /// The PIN opens the lock; without a lock there is nothing to open (for `unlock` that is an
+    /// error, `lockNeeded`). Like Android (PinLockViewModel):
     /// after more than three wrong PINs in a row no PIN is checked for a while, 30 s at first and
     /// longer each time up to an hour, until the right one comes. Kept in the store, so
     /// restarting doesn't help (security audit 2026-10-27).

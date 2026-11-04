@@ -31,7 +31,13 @@ Page {
     readonly property bool keyboard: database || passphraseCheck ? backend.passphraseKeyboard
                                               : !!(window.lockInfo && window.lockInfo.lock && window.lockInfo.lock.keyboard)
 
-    onStatusChanged: if (status === PageStatus.Active) entry.focusField()
+    onStatusChanged: {
+        if (status !== PageStatus.Active) return
+        entry.focusField()
+        // A private chat reached from a notification, with no lock set up yet: say so at once.
+        if (privateChats && !(window.lockInfo && window.lockInfo.lock))
+            entry.errorText = Errors.text("lockNeeded", "")
+    }
 
     // Too many wrong PINs: the core checks none until then (like Android, counting down).
     property double pausedUntil: 0

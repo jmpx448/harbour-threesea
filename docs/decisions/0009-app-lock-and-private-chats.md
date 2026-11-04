@@ -80,3 +80,9 @@ sleep with the device. A voice message playing at that moment plays to its end w
 and nothing follows it (with the phone in a pocket it would otherwise end after the grace time);
 coming back past the grace time stops it, and "Immediately" stops it on leaving. A running call's
 page is the one page allowed above the lock: it shows only who calls.
+
+## Update 2026-11-04: one gate in the core
+
+Private marks can arrive without a lock (Threema Safe restore, a linked device). Those chats stay
+hidden, and `unlock` answers `lockNeeded` until a PIN is set, so no PIN opens them; the new PIN
+then does, and the marks can be taken off. Removing the lock or the ID ends what was unlocked.

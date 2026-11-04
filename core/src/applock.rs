@@ -352,6 +352,64 @@ mod app_tests {
         reply["error"]["kind"].as_str().unwrap_or("")
     }
 
+    /// Private marks arrive without a lock (Safe restore, a linked device): no PIN opens them
+    /// until one is set, then that one does and the marks can be taken off.
+    #[tokio::test(flavor = "current_thread")]
+    async fn any_pin_opens_nothing_without_a_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "test".into(),
+                language: "en".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "test".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[1; 32],
+        )
+        .unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.store
+            .insert_incoming("BBBBBBBB", 1, "text", "private text", 1)
+            .unwrap();
+        app.store.set_private("BBBBBBBB", true).unwrap();
+
+        for command in [
+            json!({"cmd": "unlock", "pin": "0000", "privateChats": true}),
+            json!({"cmd": "unlock", "pin": "0000"}),
+        ] {
+            assert_eq!(error(&call(&mut app, command).await), "lockNeeded");
+        }
+        let private = json!({"cmd": "conversations", "private": true});
+        assert_eq!(error(&call(&mut app, private.clone()).await), "locked");
+        assert!(
+            !call(&mut app, json!({"cmd": "lockStatus"})).await["result"]["unlocked"]
+                .as_bool()
+                .unwrap()
+        );
+
+        let set = json!({"cmd": "setLock", "enabled": true, "pin": "2468",
+                         "keyboard": false, "appLock": false, "graceSecs": 0});
+        assert_eq!(error(&call(&mut app, set).await), "");
+        let open = json!({"cmd": "unlock", "pin": "0000", "privateChats": true});
+        assert_eq!(error(&call(&mut app, open).await), "wrongPin");
+        let open = json!({"cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, open).await["result"]["unlocked"], true);
+        let unmark = json!({"cmd": "setPrivate", "identity": "BBBBBBBB", "private": false});
+        assert_eq!(error(&call(&mut app, unmark).await), "");
+
+        // Removing the lock ends what it opened: a later mark is hidden again.
+        let remove = json!({"cmd": "setLock", "enabled": false, "currentPin": "2468"});
+        assert_eq!(call(&mut app, remove).await["result"]["unlocked"], false);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn private_chats_are_hidden_while_locked() {
         let dir = tempfile::tempdir().unwrap();

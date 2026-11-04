@@ -184,6 +184,9 @@ impl App {
         self.stop_connection();
         self.store.wipe()?;
         self.media.remove_all();
+        // The next identity starts locked; its private marks wait for its own PIN.
+        self.unlocked = false;
+        self.update_media_gate();
         // TURN credentials belong to the deleted identity.
         self.turn_servers = None;
         tracing::info!("all local data deleted");

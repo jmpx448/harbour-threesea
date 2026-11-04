@@ -129,7 +129,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `draft` | `identity` | `{text}` |
 | `lockStatus` | – | `{lock: {keyboard, appLock, graceSecs} \| null, unlocked, graceTimes}` (ADR 0009) |
 | `setLock` | `enabled`; a new `pin` (≥ 4 chars) with `keyboard`, or none to keep it; `appLock`, `graceSecs`; if a lock exists `currentPin` | lock status; errors `wrongPin`, `pinTooShort`, `privateChatsExist` (removing) |
-| `unlock` | `pin`; `privateChats: true` makes private chats readable (until `lock`), otherwise it only checks (app lock) | lock status; errors `wrongPin`, `pinLockout` (message: seconds until a PIN is checked again; after more than 3 wrong PINs in a row, 30 s up to an hour, like Android; also for `setLock`'s `currentPin`) |
+| `unlock` | `pin`; `privateChats: true` makes private chats readable (until `lock`), otherwise it only checks (app lock) | lock status; errors `lockNeeded` (no lock stored: no PIN opens anything, marks from a restore or a linked device wait for one), `wrongPin`, `pinLockout` (message: seconds until a PIN is checked again; after more than 3 wrong PINs in a row, 30 s up to an hour, like Android; also for `setLock`'s `currentPin`) |
 | `lock` | – | lock status (private chats hidden again) |
 | `setPrivate` | `identity`, `private` | `{identity, private}`; errors `lockNeeded`, `locked` (unmarking while locked). Private chats leave the chat list, archive, search, starred and media while locked; reading them returns `locked`; `messageAdded` carries `private` |
 | `emptyConversation` | `identity` | `{}`; deletes the messages, the chat stays in `conversations` with a `lastMessage` of kind `empty` (Android's "Empty chat"; migration 20) |

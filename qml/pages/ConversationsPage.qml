@@ -33,6 +33,11 @@ Page {
     }
 
     function openPrivate() {
+        // Marked by a restore or a linked device with no lock here yet: a PIN comes first.
+        if (!(window.lockInfo && window.lockInfo.lock)) {
+            Notices.show(qsTrId("threesea-la-private-needs-lock"), Notice.Long, Notice.Center)
+            return
+        }
         var unlock = pageStack.push(Qt.resolvedUrl("UnlockPage.qml"), {
             privateChats: true,
             //% "Private chats"
