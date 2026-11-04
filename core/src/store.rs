@@ -254,6 +254,19 @@ pub struct Store {
     pub(crate) held_notifications: std::cell::RefCell<std::collections::HashSet<i64>>,
 }
 
+/// Below this share of free pages (in percent) a rewrite gives back too little to wait for.
+const SHRINK_MIN_FREE_PERCENT: i64 = 25;
+/// VACUUM's copy of the live pages lies in memory: SQLCipher builds keep temporary data out of
+/// plain files (`SQLITE_TEMP_STORE=2`). More than this could run a phone out of memory, 32-bit ones
+/// above all.
+const SHRINK_LIVE_BYTES_MAX: i64 = 128 * 1024 * 1024;
+
+fn worth_shrinking(total_pages: i64, free_pages: i64, page_size: i64) -> bool {
+    free_pages * 100 >= total_pages * SHRINK_MIN_FREE_PERCENT
+        && free_pages > 0
+        && (total_pages - free_pages).saturating_mul(page_size) <= SHRINK_LIVE_BYTES_MAX
+}
+
 impl Store {
     /// Open (or create) the database at `path` with the given raw 32-byte key.
     ///
@@ -392,16 +405,48 @@ impl Store {
         transaction.execute_batch(&sql)?;
         transaction.commit()?;
         self.held_notifications.borrow_mut().clear();
-        // The old rows still lie in the free pages and the write-ahead log until these two ran.
+        self.shrink();
+        Ok(())
+    }
+
+    /// [`Self::shrink`] if enough of the file is free for it to matter and the copy fits in memory
+    /// (`worth_shrinking`). Otherwise later writes reuse the free pages.
+    pub fn shrink_if_worthwhile(&self) {
+        let pages = self.conn.query_row(
+            "SELECT c.page_count, f.freelist_count, CAST(s.page_size AS INTEGER)
+             FROM pragma_page_count() c, pragma_freelist_count() f, pragma_page_size() s",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        );
+        match pages {
+            Ok((total, free, page_size)) if worth_shrinking(total, free, page_size) => {
+                self.shrink();
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "reading the free pages failed"),
+        }
+    }
+
+    /// Give the space of deleted rows back to the system: they still lie in the free pages and the
+    /// write-ahead log until these two ran. Rewrites the whole file, and the core waits for it, so
+    /// for what the user just asked to be gone, not for routine deletions. Needs free space for
+    /// the copy, which can run out just when someone clears up a full phone: then the file stays
+    /// as big as it was and later writes reuse its free pages, so this is only logged.
+    fn shrink(&self) {
         for (step, sql) in [
             ("vacuum", "VACUUM;"),
             ("checkpoint", "PRAGMA wal_checkpoint(TRUNCATE);"),
         ] {
             if let Err(error) = self.conn.execute_batch(sql) {
-                tracing::warn!(step, %error, "the emptied database could not be shrunk");
+                tracing::warn!(step, %error, "the database could not be shrunk");
             }
         }
-        Ok(())
     }
 
     /// Remove a setting.
@@ -653,6 +698,21 @@ mod tests {
         assert_eq!(
             store.setting(keys::LICENSE_KEY).unwrap().as_deref(),
             Some("ABCDE-FGHIJ")
+        );
+    }
+
+    #[test]
+    fn shrinking_is_for_a_large_share_of_a_database_that_fits_in_memory() {
+        let page = 4096;
+        let megabyte = 1024 * 1024 / page;
+        assert!(!worth_shrinking(1000, 0, page), "nothing free");
+        assert!(!worth_shrinking(1000, 249, page), "too little free");
+        assert!(worth_shrinking(1000, 250, page));
+        assert!(worth_shrinking(1000, 1000, page), "everything free");
+        assert!(worth_shrinking(128 * megabyte * 2, 128 * megabyte, page));
+        assert!(
+            !worth_shrinking(129 * megabyte * 2, 129 * megabyte, page),
+            "the copy would be too large for memory"
         );
     }
 

@@ -12,6 +12,8 @@ Page {
 
     property var media: ({})
     property var storage: ({})
+    // A clean-up that removed many messages rewrites the database, and the core waits for it.
+    property bool cleaning: false
 
     readonly property var kinds: ["image", "audio", "video", "file"]
     readonly property var kindNames: [
@@ -106,8 +108,15 @@ Page {
 
     Component.onCompleted: load()
 
+    BusyLabel {
+        running: page.cleaning
+        //% "Cleaning up"
+        text: qsTrId("threesea-la-cleaning-up")
+    }
+
     SilicaFlickable {
         anchors.fill: parent
+        visible: !page.cleaning
         contentHeight: column.height + Theme.paddingLarge
 
         Column {
@@ -219,7 +228,9 @@ Page {
                         var args = { days: dialog.days, messages: dialog.messages }
                         //% "Deleting"
                         Remorse.popupAction(page, qsTrId("threesea-la-deleting-message"), function() {
+                            page.cleaning = true
                             backend.call("cleanUp", args, function(ok, result, kind, message) {
+                                page.cleaning = false
                                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                                 page.load()
                             })

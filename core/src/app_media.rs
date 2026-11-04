@@ -1084,7 +1084,13 @@ impl App {
             crate::messages::now_ms() - days_ms(days)
         };
         let removed = if messages {
-            self.delete_messages_with_media(before, false)?
+            let removed = self.delete_messages_with_media(before, false)?;
+            // Someone asking for this wants the space, and sees the figure in Settings. Keep
+            // messages doesn't do this: its free pages are soon reused, and nobody asked to wait.
+            if removed > 0 {
+                self.store.shrink_if_worthwhile();
+            }
+            removed
         } else {
             let ids = self.store.files_before(before)?;
             for id in &ids {
@@ -1942,6 +1948,53 @@ mod tests {
             vec!["keep this", "new", r#"{"state":0}"#, "unsent"],
             "starred, open poll and unsent stay"
         );
+    }
+
+    /// Clean up gives the space back, and what stays is still all there: the figure in Settings
+    /// counts free pages too, so without this it wouldn't move.
+    #[test]
+    fn cleaning_up_messages_shrinks_the_database() {
+        let (_dir, mut app) = app();
+        let text = "old news ".repeat(200);
+        for id in 1..=500 {
+            app.store
+                .insert_incoming("ABCD1234", id, "text", &text, 1_000)
+                .unwrap();
+        }
+        let kept = app
+            .store
+            .insert_incoming("ABCD1234", 501, "text", "starred harbour", 1_000)
+            .unwrap()
+            .unwrap();
+        app.store.set_starred(kept.id, true).unwrap();
+        arrived_when_written(&app.store);
+
+        // Media only: no messages go, nothing to give back.
+        let before = app.store.size().unwrap();
+        app.clean_up(7, false).unwrap();
+        assert_eq!(app.store.size().unwrap(), before);
+
+        // A few messages out of many: not worth rewriting the file.
+        app.store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = ?1 WHERE message_id > 1",
+                [crate::messages::now_ms()],
+            )
+            .unwrap();
+        assert_eq!(app.clean_up(7, true).unwrap()["removed"], 1);
+        assert_eq!(app.store.size().unwrap(), before);
+        arrived_when_written(&app.store);
+
+        app.clean_up(7, true).unwrap();
+        let after = app.store.size().unwrap();
+        assert!(after < before / 4, "{before} went to {after}");
+        assert!(app.store.message(kept.id).unwrap().is_some());
+        let found = app
+            .store
+            .search_messages("harbour", None, 10, |_| None)
+            .unwrap();
+        assert_eq!(found.len(), 1, "the search index survived");
     }
 
     /// Keep messages leaves notes groups alone, as Android's auto-delete does: nobody else has a
