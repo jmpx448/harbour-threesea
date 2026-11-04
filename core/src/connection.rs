@@ -311,6 +311,9 @@ pub struct ConnectionSetup {
     pub fs_mask_checks: FsMaskChecks,
     /// The store failed on the last connection, and the UI has been told.
     pub storage_failing: core::cell::Cell<bool>,
+    /// Answers to what has been received that the last connection couldn't send
+    /// ([`waits_for_the_next_connection`]).
+    pub carried_events: RefCell<Vec<CoreEvent>>,
 }
 
 /// When a contact's feature mask was last looked up for forward secrecy's sake, and whether we can
@@ -381,6 +384,50 @@ fn storage_error(error: crate::store::StoreError) -> ConnectionError {
     ConnectionError::Storage {
         code: error.sqlite_code(),
     }
+}
+
+impl ConnectionError {
+    /// What failed was the connection, not what it was doing: that can be done on the next one.
+    /// (Anything else could fail the same way every time, and end every connection.)
+    fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_)
+                | Self::Timeout
+                | Self::Closed { .. }
+                | Self::Stopped
+                | Self::Reconnect
+                | Self::MediatorClosed { .. }
+        )
+    }
+}
+
+/// Handling this event takes the connection. Nothing else may wait for that: whatever the store
+/// holds, the UI hears of even if the connection is gone.
+fn needs_the_connection(event: &CoreEvent) -> bool {
+    matches!(
+        event,
+        CoreEvent::FsControl { .. }
+            | CoreEvent::FsStatus { .. }
+            | CoreEvent::OutboxChanged
+            | CoreEvent::ReceiptQueued { .. }
+    )
+}
+
+/// Handled by the message's own connection, before the next message of a burst; if that connection
+/// ends, the app sees to it (`UnknownMembers`), or the next one does (`SyncQueued`).
+fn runs_before_the_next_message(event: &CoreEvent) -> bool {
+    matches!(event, CoreEvent::SyncQueued | CoreEvent::UnknownMembers(_))
+}
+
+/// An event only memory holds: the message that caused it is acknowledged and won't come again.
+/// What the others are for waits in the store. An answer lost here would be a forward secrecy
+/// session the peer never gets to use, or a rejected message that stays "sent" with it.
+fn waits_for_the_next_connection(event: &CoreEvent) -> bool {
+    matches!(
+        event,
+        CoreEvent::FsControl { .. } | CoreEvent::FsStatus { .. }
+    )
 }
 
 impl From<TransportError> for ConnectionError {
@@ -803,9 +850,17 @@ struct Session<'a> {
 
 impl Drop for Session<'_> {
     /// The connection ends with notifications still held: they are not lost, whatever is
-    /// unread notifies now.
+    /// unread notifies now. So do the events of what has been received, whichever step failed:
+    /// the store has it, and the server won't send it again.
     fn drop(&mut self) {
+        self.emit_events_unless(needs_the_connection);
         self.release_held_notifications(true);
+        self.setup.carried_events.borrow_mut().extend(
+            self.events
+                .borrow_mut()
+                .drain(..)
+                .filter(waits_for_the_next_connection),
+        );
     }
 }
 
@@ -821,6 +876,7 @@ impl<'a> Session<'a> {
         while let Some(payload) = session.d2m_queue.pop_front() {
             session.handle_d2m(payload).await?;
         }
+        session.resume_carried_events().await?;
         session.terminate_fs_if_pending().await?;
         session.reflect_queued_syncs().await?;
         session.send_pending().await?;
@@ -2117,6 +2173,23 @@ impl<'a> Session<'a> {
         let _ = self.tx.send(FromConnection::Event(Box::new(event)));
     }
 
+    /// Hand on the events that don't need the connection (`later`), so that it can't lose them.
+    fn emit_events_unless(&self, later: fn(&CoreEvent) -> bool) {
+        let events = core::mem::take(&mut *self.events.borrow_mut());
+        let (kept, now): (Vec<_>, Vec<_>) = events.into_iter().partition(later);
+        *self.events.borrow_mut() = kept;
+        for event in now {
+            self.emit(event);
+        }
+    }
+
+    /// What the last connection couldn't send.
+    async fn resume_carried_events(&mut self) -> Result<(), ConnectionError> {
+        let carried = core::mem::take(&mut *self.setup.carried_events.borrow_mut());
+        self.events.borrow_mut().extend(carried);
+        self.after_incoming().await
+    }
+
     /// What came in could be stored: if the store was failing, that is over.
     fn storage_works(&self) {
         if self.setup.storage_failing.replace(false) {
@@ -2161,12 +2234,7 @@ impl<'a> Session<'a> {
             )
             .map_err(protocol_error)?;
         }
-        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
-        for event in events {
-            if let Some(event) = Box::pin(self.handle_fs_event(event)).await? {
-                self.emit(event);
-            }
-        }
+        self.after_incoming().await?;
         store
             .delete_setting(crate::multidevice::SETTING_FS_TERMINATE)
             .map_err(storage_error)?;
@@ -2494,6 +2562,21 @@ impl<'a> Session<'a> {
                 "reflected envelope dropped"
             ),
         }
+        // A message another device received first: its notification waits a moment.
+        for event in self.events.borrow().iter() {
+            if let CoreEvent::MessageAdded { message, .. } = event
+                && !message.outgoing
+            {
+                self.setup
+                    .store
+                    .held_notifications
+                    .borrow_mut()
+                    .insert(message.id);
+                self.held.push((message.id, Instant::now() + NOTIFY_GRACE));
+            }
+        }
+        // Applied, so the UI hears of it even if the acknowledgement is what fails.
+        self.emit_events_unless(needs_the_connection);
         // Every one, ephemeral ones (typing) too, like Android (IncomingReflectedMessageTask):
         // md-d2m.struct.yml says not to acknowledge those, but the mediator keeps them queued
         // until acknowledged and hands them out again at every login.
@@ -2504,24 +2587,7 @@ impl<'a> Session<'a> {
                 },
             ))
             .await?;
-        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
-        for event in events {
-            // A message another device received first: its notification waits a moment.
-            if let CoreEvent::MessageAdded { message, .. } = &event
-                && !message.outgoing
-            {
-                self.setup
-                    .store
-                    .held_notifications
-                    .borrow_mut()
-                    .insert(message.id);
-                self.held.push((message.id, Instant::now() + NOTIFY_GRACE));
-            }
-            if let Some(event) = Box::pin(self.handle_fs_event(event)).await? {
-                self.emit(event);
-            }
-        }
-        Ok(())
+        self.after_incoming().await
     }
 
     /// Notify the held messages that are due (all of them when `all`) and still unread.
@@ -3147,6 +3213,10 @@ impl<'a> Session<'a> {
             }
         };
         self.storage_works();
+        // It's in the store by now: before anything that can fail on the network.
+        self.emit_events_unless(|event| {
+            needs_the_connection(event) || runs_before_the_next_message(event)
+        });
         if let Some(ack) = result.outgoing_message_ack {
             self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
         }
@@ -3185,29 +3255,43 @@ impl<'a> Session<'a> {
         self.send_pending().await
     }
 
-    /// What handling an incoming message left to do.
+    /// What handling an incoming message left to do. If that fails, what is still to come stays
+    /// in the event queue (and what was just tried, if only the connection failed it) for
+    /// [`Self::drop`] to see to.
     async fn after_incoming(&mut self) -> Result<(), ConnectionError> {
         let events = status_after_messages(self.events.borrow_mut().drain(..).collect());
-        for event in events {
+        let mut events = std::collections::VecDeque::from(events);
+        while let Some(event) = events.pop_front() {
+            if let Err(error) = self.after_incoming_event(event.clone()).await {
+                if error.is_connection_lost() {
+                    events.push_front(event);
+                }
+                let mut queue = self.events.borrow_mut();
+                let newer = core::mem::take(&mut *queue);
+                queue.extend(events);
+                queue.extend(newer);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn after_incoming_event(&mut self, event: CoreEvent) -> Result<(), ConnectionError> {
+        match event {
             // A group change goes out before the next message of a burst is even looked at, or
             // the other devices get a message for a group they don't have yet, and drop it.
-            if matches!(event, CoreEvent::SyncQueued) {
-                self.reflect_queued_syncs().await?;
-                continue;
-            }
+            CoreEvent::SyncQueued => self.reflect_queued_syncs().await,
             // Before the next message too, which may be from one of them, and so that what we
             // send to the group reaches them. A failed lookup is tried again later (`on_connected`,
             // `maintenance`); the setup is acknowledged by now and won't come again.
-            if let CoreEvent::UnknownMembers(identities) = &event {
-                self.resolve_members(identities).await?;
-                continue;
+            CoreEvent::UnknownMembers(identities) => self.resolve_members(&identities).await,
+            event => {
+                if let Some(event) = Box::pin(self.handle_fs_event(event)).await? {
+                    self.emit(event);
+                }
+                Ok(())
             }
-            let Some(event) = Box::pin(self.handle_fs_event(event)).await? else {
-                continue;
-            };
-            self.emit(event);
         }
-        Ok(())
     }
 }
 
@@ -3860,6 +3944,7 @@ mod sync_order_tests {
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
             storage_failing: core::cell::Cell::default(),
+            carried_events: RefCell::default(),
         };
         let mut fs = StoreFs {
             store: Rc::clone(&setup.store),
@@ -4317,6 +4402,110 @@ mod sync_order_tests {
         assert!(!matches!(error, ConnectionError::Storage { .. }), "{error}");
     }
 
+    /// The connection dies right after a message was stored, on the acknowledgement here: the UI
+    /// still hears of it and the receipt waits for the next connection. The server's next copy
+    /// is known by then, and is only acknowledged.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stored_message_reaches_the_ui_whatever_the_connection_does() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = from_creator(&setup, 1, "hi");
+        let mut session = session(&setup, &tx).await;
+
+        assert!(session.handle_incoming(message).await.is_err());
+        let added = |events: &[CoreEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+                .count()
+        };
+        assert_eq!(added(&sent_to_ui(&mut rx)), 1);
+        let queued = |store: &crate::store::Store| {
+            store
+                .outbox()
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.kind == reactions::OUTBOX_DELIVERY_RECEIPT)
+                .count()
+        };
+        assert_eq!(queued(&setup.store), 1);
+
+        let again = from_creator(&setup, 1, "hi");
+        assert!(session.handle_incoming(again).await.is_err());
+        assert_eq!(added(&sent_to_ui(&mut rx)), 0);
+        assert_eq!(queued(&setup.store), 1);
+    }
+
+    /// The task itself can end the connection after the store write too: its events are out when
+    /// the session is.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_that_ends_hands_on_its_events() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let status = || CoreEvent::FsStatus {
+            peer: CREATOR.into(),
+            status: FsStatus::Reset,
+        };
+        {
+            let session = session(&setup, &tx).await;
+            let mut queue = session.events.borrow_mut();
+            queue.push(CoreEvent::ContactsChanged);
+            queue.push(status());
+            queue.push(CoreEvent::OutboxChanged);
+            queue.push(CoreEvent::UnknownMembers(vec!["B0B0B0B0".into()]));
+        }
+        let events = sent_to_ui(&mut rx);
+        assert!(matches!(
+            events.as_slice(),
+            [CoreEvent::ContactsChanged, CoreEvent::UnknownMembers(_)]
+        ));
+        // The store holds what the outbox event is for.
+        assert_eq!(setup.carried_events.borrow().len(), 1);
+
+        // The next connection does what the last one couldn't: here, a line in the chat.
+        let mut session = session(&setup, &tx).await;
+        session.resume_carried_events().await.unwrap();
+        assert!(setup.carried_events.borrow().is_empty());
+        assert!(matches!(
+            sent_to_ui(&mut rx).as_slice(),
+            [CoreEvent::MessageAdded { message }] if message.body == "fsReset"
+        ));
+    }
+
+    /// What is still to come when a step fails isn't lost with it. A step that fails for another
+    /// reason than the connection isn't tried again: it would end every connection.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failing_step_leaves_the_rest_for_the_next_connection() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let control = || CoreEvent::FsControl {
+            peer: CREATOR.into(),
+            peer_key: None,
+            envelope: vec![1, 2, 3],
+        };
+        {
+            let mut session = session(&setup, &tx).await;
+            session.events.borrow_mut().push(control());
+            session.events.borrow_mut().push(CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Reset,
+            });
+            // On this socket without a handshake, that is a protocol error.
+            let error = session.after_incoming().await.unwrap_err();
+            assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
+        }
+        assert!(matches!(
+            setup.carried_events.borrow().as_slice(),
+            [CoreEvent::FsStatus { .. }]
+        ));
+        let lost = ConnectionError::Io(std::io::ErrorKind::ConnectionReset.into());
+        assert!(lost.is_connection_lost());
+        assert!(!ConnectionError::Storage { code: 13 }.is_connection_lost());
+    }
+
     #[test]
     fn only_farewells_and_sync_requests_go_to_non_members() {
         use libthreema::model::message::{GroupLeaveMessage, GroupSyncRequestMessage};
@@ -4468,6 +4657,7 @@ mod sync_order_tests {
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
             storage_failing: core::cell::Cell::default(),
+            carried_events: RefCell::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut session = session(&setup, &tx).await;

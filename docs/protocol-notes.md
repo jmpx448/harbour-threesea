@@ -136,6 +136,17 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   nothing until its user is asked once
   (`NICKNAME_UNANSWERED`, `NicknameDialog.qml`) and picks a name, or later takes one away. Android's
   wizard defaults the nickname to the ID, which also replaces the name friends knew.
+- Receiving, in this order: everything a message says goes into the store in one step, the delivery
+  receipt included (an outbox entry; sent after the next login if not now); the UI hears of it; then
+  the acknowledgement; then what takes the network. So the connection can die at any point: what is
+  stored is announced (`Session::drop`), and what the server sends again is known and only
+  acknowledged. Forward secrecy answers only memory holds wait for the next connection
+  (`carried_events`). A store failure ends the connection without an acknowledgement, so the message
+  comes again and holds up the queue behind it: the log gets SQLite's code, the user one notice per
+  streak (`storageProblem`), since the server keeps messages only for a limited time.
+- Reflected envelopes: applied and their nonce noted in one store step, then acknowledged; one the
+  store failed on stays unacknowledged, so the mediator hands it out at the next login. Android
+  acknowledges those too (its ANDR-2706 is open), but nothing else brings them to a follower.
 - Forward secrecy: see below. Not yet: groups (LIB-53), typing-indicator sending, outgoing retries
   after server-side failures.
 - Live-tested 2026-10-21 with the test ID: ECHOECHO echoes text; server ack → "sent",

@@ -2,7 +2,8 @@
 //! libthreema storage interfaces (`model::provider`) backed by our SQLCipher [`Store`].
 //!
 //! Everything runs on the core thread; the store is shared via `Rc`. Changes the UI must hear
-//! about are collected in an [`EventSink`] and emitted after each processed message.
+//! about are collected in an [`EventSink`] and emitted once a message is stored, before anything
+//! that can fail on the network.
 
 use core::cell::RefCell;
 use std::rc::Rc;
@@ -703,6 +704,10 @@ impl StoreConversations {
                     });
                 }
                 if !outcome.unknown_members.is_empty() {
+                    // In this step: the setup won't come again, whatever becomes of the lookup.
+                    self.store
+                        .owe_member_lookups(&outcome.unknown_members)
+                        .map_err(foreign)?;
                     events.push(CoreEvent::UnknownMembers(outcome.unknown_members));
                 }
                 if outcome.sync_queued {
