@@ -36,7 +36,9 @@ ListItem {
     property bool selectionMode: false
     property bool selected: false
     signal selectToggled()
-    highlighted: down || menuOpen || selected
+    // A jump (a quote, a search hit) landed here just now.
+    property bool landed: false
+    highlighted: down || menuOpen || selected || landed
 
     // Apply or withdraw one of our reactions.
     signal react(string emoji, bool apply)

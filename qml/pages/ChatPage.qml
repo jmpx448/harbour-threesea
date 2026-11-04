@@ -230,6 +230,7 @@ Page {
             messages.update(result.messages.reverse())
             if (focusMessage >= 0) {
                 if (!page.showLoadedMessage(focusMessage, page.focusMode)) listView.positionViewAtBeginning()
+                else if (page.focusMode === ListView.Center) page.flashMessage(focusMessage)
                 focusMessage = -1
                 page.focusMode = ListView.Center
             } else if (firstLoad && page.unreadMarkerId >= 0) {
@@ -276,10 +277,16 @@ Page {
         // The load on its way brings everything so far. No id: a private chat's message while
         // they are hidden, its content left out by the core.
         if (!shown || message.id === undefined) return
-        if (messages.indexOfKey(message.id) >= 0) {
+        var at = messages.indexOfKey(message.id)
+        if (at >= 0) {
+            var changed = shownInQuote(messages.get(at), message)
             messages.upsert(message, 0)
+            if (changed) quoteCacheRevision++
+            updateCachedQuote(message)
             return
         }
+        // Out of the window, but a quote may be showing it.
+        updateCachedQuote(message)
         if (messages.count > 0 && !isNewer(message, messages.get(0))) return
         if (!newerExhausted) {
             // Not next to what is loaded: it comes with the pages when the reader gets there.
@@ -328,6 +335,24 @@ Page {
         unseenFrom = -1
         lineOnReturn = false
         markRead()
+    }
+
+    // The cache is by the id the quote names, which for a legacy quote isn't the message's own
+    // (byte-reversed): found by the row.
+    function updateCachedQuote(message) {
+        for (var key in quoteCache) {
+            var cached = quoteCache[key]
+            if (cached && cached.id === message.id && shownInQuote(cached, message)) {
+                quoteCache[key] = message
+                quoteCacheRevision++
+            }
+        }
+    }
+
+    // Whether a quote of this message would read differently now (an edit, a deletion for
+    // everyone). Not for receipts and reactions: every visible quote looks its message up again.
+    function shownInQuote(before, now) {
+        return before.kind !== now.kind || before.text !== now.text || before.editedAt !== now.editedAt
     }
 
     // History order, as the core keeps it.
@@ -571,6 +596,11 @@ Page {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             } else if (result.removed) {
                 messages.remove(rowId)
+                for (var key in page.quoteCache) {
+                    var cached = page.quoteCache[key]
+                    if (cached && cached.id === rowId) delete page.quoteCache[key]
+                }
+                page.quoteCacheRevision++
             } else {
                 page.addMessage(result)
             }
@@ -702,7 +732,37 @@ Page {
 
     function showQuoted(quoteId) {
         var index = indexOfMessageId(quoteId)
-        if (index >= 0) listView.positionViewAtIndex(index, ListView.Center)
+        if (index >= 0) {
+            listView.positionViewAtIndex(index, ListView.Center)
+            flashMessage(messages.get(index).id)
+            return
+        }
+        // Outside the window: a window around it, as for a search hit.
+        var cached = quoteCache[quoteId]
+        if (cached) {
+            showMessage(cached.id)
+            return
+        }
+        backend.call("quotedMessage", { identity: identity, messageId: quoteId }, function(ok, result) {
+            if (ok && result) {
+                page.showMessage(result.id)
+            } else {
+                //% "Message not available"
+                Notices.show(qsTrId("threesea-la-quote-missing"), Notice.Short, Notice.Center)
+            }
+        })
+    }
+
+    // Where a jump landed (a quote, a search hit) lights up for a moment.
+    property int landedOn: -1
+    function flashMessage(id) {
+        landedOn = id
+        landedTimer.restart()
+    }
+    Timer {
+        id: landedTimer
+        interval: 1500
+        onTriggered: page.landedOn = -1
     }
 
     // Mentions (groups): the input shows "@Name", sending turns it back into "@[ID]".
@@ -2478,6 +2538,7 @@ Page {
                 onMenuOpenChanged: page.bubbleMenuOpen = menuOpen
                 // A row can go with its menu open (a remote deletion, the window moving on).
                 Component.onDestruction: if (menuOpen) page.bubbleMenuOpen = false
+                landed: model.id === page.landedOn
                 onSelectToggled: page.toggleSelected(model.id)
                 canDelete: page.contact.canDelete === true
                 onReact: page.react(model.messageId, emoji, apply)
