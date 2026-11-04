@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use self::session::{DhType, Session, SessionError, SessionId, SessionState, supported_version_range};
 use crate::{
     common::{
-        ThreemaId,
+        self, ThreemaId,
         keys::{ClientKey, PublicKey},
     },
     model::provider::ProviderError,
@@ -68,9 +68,18 @@ pub enum FsStatus {
     MessageRejected {
         /// ID of the rejected (outer) message.
         message_id: u64,
+        /// The group the peer says the message was for, if it named a valid one.
+        group_identity: Option<common::GroupIdentity>,
+        /// Whether the reject ended a session we had. Every message sent in a session the peer
+        /// lost is rejected on its own; only the first of them finds the session still there.
+        session_known: bool,
     },
-    /// The peer terminated the session.
-    Terminated,
+    /// The peer ended a session, or said it has forward security disabled for one we don't have
+    /// (the only unknown session this is reported for: the sender's feature mask is out of date).
+    Terminated {
+        /// Whether it ended a session we had.
+        session_known: bool,
+    },
 }
 
 /// Storage of FS sessions (implemented by the app, persisted encrypted, never backed up) plus the
@@ -253,20 +262,31 @@ pub(crate) fn process_incoming(
         },
         Some(envelope::Content::Reject(reject)) => {
             info!(?session_id, cause = reject.cause, "FS reject received");
-            store.delete(peer, session_id)?;
+            let session_known = store.get(peer, session_id)?.is_some();
+            if session_known {
+                store.delete(peer, session_id)?;
+            }
             store.status(
                 peer,
                 FsStatus::MessageRejected {
                     message_id: reject.message_id,
+                    group_identity: reject
+                        .group_identity
+                        .as_ref()
+                        .and_then(|group_identity| common::GroupIdentity::try_from(group_identity).ok()),
+                    session_known,
                 },
             )?;
             Ok(IncomingFsOutcome::Handled)
         },
         Some(envelope::Content::Terminate(terminate)) => {
             info!(?session_id, cause = terminate.cause, "FS terminate received");
-            if store.get(peer, session_id)?.is_some() {
+            let session_known = store.get(peer, session_id)?.is_some();
+            if session_known {
                 store.delete(peer, session_id)?;
-                store.status(peer, FsStatus::Terminated)?;
+            }
+            if session_known || terminate.cause == terminate::Cause::DisabledByLocal as i32 {
+                store.status(peer, FsStatus::Terminated { session_known })?;
             }
             Ok(IncomingFsOutcome::Handled)
         },

@@ -1516,7 +1516,7 @@ impl<'a> Session<'a> {
             }
             CoreEvent::FsStatus { peer, status } => {
                 let store = &self.setup.store;
-                if let FsStatus::MessageRejected { message_id } = status {
+                if let FsStatus::MessageRejected { message_id, .. } = status {
                     // Once per message and connection: a peer that rejects the re-send too
                     // would otherwise bounce the message back and forth without end — the
                     // second rejection leaves it failed for the user to resend by hand.
@@ -1554,10 +1554,21 @@ impl<'a> Session<'a> {
                 {
                     return Ok(None);
                 }
+                // Only for sessions that existed: every message in flight on a session the
+                // peer lost is rejected, and a chat would get a line for each of them.
                 let code = match status {
                     FsStatus::Established => "fsEstablished",
-                    FsStatus::Reset | FsStatus::MessageRejected { .. } => "fsReset",
-                    FsStatus::Terminated => "fsTerminated",
+                    FsStatus::Reset
+                    | FsStatus::MessageRejected {
+                        session_known: true,
+                        ..
+                    } => "fsReset",
+                    FsStatus::Terminated {
+                        session_known: true,
+                    } => "fsTerminated",
+                    FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } => {
+                        return Ok(None);
+                    }
                 };
                 Ok(store
                     .insert_status(&peer, code)

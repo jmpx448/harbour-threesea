@@ -266,9 +266,14 @@ fn unknown_session_is_rejected() {
     ));
     assert!(alice.with_store(|store| store.sessions.is_empty()));
     assert!(alice.with_store(|store| {
-        store
-            .statuses
-            .contains(&(bob.id, FsStatus::MessageRejected { message_id: 42 }))
+        store.statuses.contains(&(
+            bob.id,
+            FsStatus::MessageRejected {
+                message_id: 42,
+                group_identity: None,
+                session_known: true,
+            },
+        ))
     }));
 }
 
@@ -334,6 +339,113 @@ fn a_rejected_group_message_names_its_group_in_the_reject() {
     let reject = reject_of(&controls[0]);
     assert_eq!(reject.cause, reject::Cause::StateMismatch as i32);
     assert_eq!(reject.group_identity, Some(group_identity()));
+}
+
+fn envelope_of(session_id: [u8; 16], content: envelope::Content) -> Vec<u8> {
+    envelope_bytes(SessionId(session_id), content)
+}
+
+#[test]
+fn a_reject_says_whether_it_ended_a_session_and_which_group_it_is_about() {
+    let mut alice = alice();
+    let bob = bob();
+    let first = alice.send(&bob, 0x01, b"one");
+    let session_id = Envelope::decode(first.prelude[0].as_slice()).unwrap().session_id;
+    let session_id: [u8; 16] = session_id.try_into().unwrap();
+    let rejected = |message_id, group_identity| {
+        envelope_of(
+            session_id,
+            envelope::Content::Reject(Reject {
+                message_id,
+                group_identity,
+                cause: reject::Cause::UnknownSession as i32,
+            }),
+        )
+    };
+
+    // Several messages in flight on a session the peer lost: only the first finds it still there.
+    let _ = alice.receive(&bob, &rejected(1, None), 10);
+    let _ = alice.receive(&bob, &rejected(2, Some(group_identity())), 11);
+    // A group that isn't one doesn't count as named.
+    let _ = alice.receive(
+        &bob,
+        &rejected(
+            3,
+            Some(GroupIdentity {
+                group_id: 0,
+                creator_identity: String::new(),
+            }),
+        ),
+        12,
+    );
+    let statuses = alice.with_store(|store| {
+        store
+            .statuses
+            .drain(..)
+            .map(|(_, status)| status)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        statuses,
+        vec![
+            FsStatus::MessageRejected {
+                message_id: 1,
+                group_identity: None,
+                session_known: true,
+            },
+            FsStatus::MessageRejected {
+                message_id: 2,
+                group_identity: Some(common::GroupIdentity {
+                    group_id: 7,
+                    creator_identity: ThreemaId::try_from("00000BOB").unwrap(),
+                }),
+                session_known: false,
+            },
+            FsStatus::MessageRejected {
+                message_id: 3,
+                group_identity: None,
+                session_known: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_terminate_is_reported_for_a_known_session_or_when_the_peer_disabled_forward_security() {
+    let mut alice = alice();
+    let mut bob = bob();
+    let first = alice.send(&bob, 0x01, b"one");
+    let session_id: [u8; 16] = Envelope::decode(first.prelude[0].as_slice())
+        .unwrap()
+        .session_id
+        .try_into()
+        .unwrap();
+    let terminated = |cause: terminate::Cause| {
+        envelope_of(
+            session_id,
+            envelope::Content::Terminate(Terminate { cause: cause as i32 }),
+        )
+    };
+
+    let _ = alice.receive(&bob, &terminated(terminate::Cause::Reset), 10);
+    // The session is gone now: a repeat is nothing to report ...
+    let _ = alice.receive(&bob, &terminated(terminate::Cause::Reset), 11);
+    // ... unless it says that the peer has no forward security any more.
+    let _ = alice.receive(&bob, &terminated(terminate::Cause::DisabledByLocal), 12);
+    let statuses = alice.with_store(|store| {
+        store
+            .statuses
+            .drain(..)
+            .map(|(_, status)| status)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        statuses,
+        vec![
+            FsStatus::Terminated { session_known: true },
+            FsStatus::Terminated { session_known: false },
+        ]
+    );
 }
 
 #[test]
