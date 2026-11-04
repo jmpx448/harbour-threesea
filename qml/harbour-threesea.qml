@@ -783,6 +783,30 @@ ApplicationWindow {
         }]
     }
 
+    // The store fails while receiving: from outside that looks like a bad network. The chat list's
+    // header says so too, for as long as it lasts.
+    property bool storageProblem: false
+    Notification {
+        id: storageNotification
+        appName: "Threesea"
+        appIcon: "harbour-threesea"
+        //% "Saving messages failed"
+        summary: qsTrId("threesea-la-storage-problem-title")
+        //% "Threesea can't write to its data, so new messages wait on the server, for a limited time. Check that this device has free storage. The log in Settings, Advanced has the error code."
+        body: qsTrId("threesea-la-storage-problem-body")
+        previewSummary: summary
+        previewBody: body
+        remoteActions: [{
+            "name": "default",
+            "displayName": "",
+            "service": "org.threesea.harbour-threesea",
+            "path": "/",
+            "iface": "org.threesea.harbourthreesea",
+            "method": "activate",
+            "arguments": []
+        }]
+    }
+
     // A newer release on GitHub (ADR 0014): tapping it opens Settings → Advanced, which links
     // to its page.
     Notification {
@@ -1616,6 +1640,10 @@ ApplicationWindow {
                 if (Qt.application.state !== Qt.ApplicationActive || !page || page.objectName !== "webSessions") {
                     webCertificateNotification.publish()
                 }
+            } else if (name === "storageProblem") {
+                window.storageProblem = data.active
+                if (data.active) storageNotification.publish()
+                else storageNotification.close()
             } else if (name === "updateAvailable") {
                 //% "Threesea %1 is available"
                 updateNotification.summary = qsTrId("threesea-la-update-notification").arg(data.version)

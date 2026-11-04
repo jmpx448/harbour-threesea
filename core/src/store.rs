@@ -63,6 +63,16 @@ impl StoreError {
         }
     }
 
+    /// SQLite's extended result code; `0` for what didn't come from SQLite as such.
+    #[must_use]
+    pub fn sqlite_code(&self) -> i32 {
+        match self {
+            Self::UpgradeNoRoom(rusqlite::Error::SqliteFailure(error, _))
+            | Self::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => error.extended_code,
+            Self::WrongKey | Self::TooNew(_) | Self::UpgradeNoRoom(_) | Self::Sqlite(_) => 0,
+        }
+    }
+
     /// For the log and for support: numbers only, SQLite's own texts can name columns.
     #[must_use]
     pub fn code(&self) -> String {

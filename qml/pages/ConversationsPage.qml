@@ -270,7 +270,8 @@ Page {
                    ? qsTrId("threesea-he-archived-chats")
                    //% "Chats"
                    : qsTrId("threesea-he-chats")
-            description: backend.connectionState === "connected" ? ""
+            description: window.storageProblem ? qsTrId("threesea-la-storage-problem-title")
+                         : backend.connectionState === "connected" ? ""
                          : backend.connectionState === "connecting"
                            //% "Connecting…"
                            ? qsTrId("threesea-la-connecting")

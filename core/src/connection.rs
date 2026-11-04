@@ -120,6 +120,9 @@ pub(crate) const JOIN_REPLY_LIMIT: Duration = Duration::from_secs(
         + 60,
 );
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// The least wait while the store fails: a new connection brings the message it failed on again,
+/// and a wake-up or "Connect now" tries at once anyway.
+const STORAGE_BACKOFF: Duration = Duration::from_secs(30);
 /// How long we stay away when a server told us not to come back by ourselves.
 const HOLD_OFF: Duration = Duration::from_secs(600);
 /// A session this long was a working connection: the next attempts start over.
@@ -306,6 +309,8 @@ pub struct ConnectionSetup {
     pub client_info: ClientInfo,
     /// Feature mask lookups for forward secrecy's sake; outlive a connection.
     pub fs_mask_checks: FsMaskChecks,
+    /// The store failed on the last connection, and the UI has been told.
+    pub storage_failing: core::cell::Cell<bool>,
 }
 
 /// When a contact's feature mask was last looked up for forward secrecy's sake, and whether we can
@@ -367,6 +372,15 @@ enum ConnectionError {
     /// The mediator closed the connection (its close codes: md-d2m.struct.yml).
     #[error("closed by the mediator ({code}): {reason}")]
     MediatorClosed { code: u16, reason: String },
+    /// Our store failed (SQLite's code): nothing the network can help with.
+    #[error("storage failed ({code})")]
+    Storage { code: i32 },
+}
+
+fn storage_error(error: crate::store::StoreError) -> ConnectionError {
+    ConnectionError::Storage {
+        code: error.sqlite_code(),
+    }
 }
 
 impl From<TransportError> for ConnectionError {
@@ -422,8 +436,13 @@ fn d2m_name(payload: &D2mIncoming) -> &'static str {
     }
 }
 
+/// What libthreema reports, in which a provider's storage failure is only text.
 fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
-    ConnectionError::Protocol(error.to_string())
+    let error = error.to_string();
+    match crate::providers::storage_code(&error) {
+        Some(code) => ConnectionError::Storage { code },
+        None => ConnectionError::Protocol(error),
+    }
 }
 
 /// What our messages say about our nickname. Without one, they tell contacts to drop the name
@@ -563,6 +582,22 @@ fn next_backoff(backoff: Duration, rate_limited: bool) -> Duration {
     (backoff * 2).min(most)
 }
 
+/// To the user nothing else tells a failing store from a bad network: one word per streak, however
+/// many connections it takes.
+fn note_storage_failure(
+    setup: &ConnectionSetup,
+    tx: &mpsc::UnboundedSender<FromConnection>,
+    code: i32,
+) {
+    if setup.storage_failing.replace(true) {
+        tracing::info!(code, "storage still failing");
+    } else {
+        tracing::error!(code, "storage failed while connected");
+        let event = CoreEvent::StorageProblem { active: true };
+        let _ = tx.send(FromConnection::Event(Box::new(event)));
+    }
+}
+
 /// Run the connection until the app goes away (`rx` closed). Reconnects with backoff.
 pub async fn run(
     setup: ConnectionSetup,
@@ -621,6 +656,11 @@ pub async fn run(
                 // log-ok: Threema's mediator's own text
                 tracing::warn!(code, %reason, "mediator closed the connection");
                 backoff = HOLD_OFF;
+            }
+            // No use trying harder.
+            Err(ConnectionError::Storage { code }) => {
+                note_storage_failure(&setup, &tx, code);
+                backoff = backoff.max(STORAGE_BACKOFF);
             }
             Err(error) => tracing::info!(%error, "chat server connection lost"),
             Ok(()) => {}
@@ -823,11 +863,11 @@ impl<'a> Session<'a> {
         tx: &'a mpsc::UnboundedSender<FromConnection>,
     ) -> Result<Session<'a>, ConnectionError> {
         // Multi-device (ADR 0011): through the mediator, without forward security (SE-199).
-        let multi_device = setup.store.multi_device().map_err(protocol_error)?;
+        let multi_device = setup.store.multi_device().map_err(storage_error)?;
         let fs_disabled = setup
             .store
             .forward_security_disabled()
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         let device_group_key = multi_device
             .as_ref()
             .map(|properties| {
@@ -850,7 +890,7 @@ impl<'a> Session<'a> {
                             device_label: setup
                                 .store
                                 .setting(crate::multidevice::SETTING_DEVICE_LABEL)
-                                .map_err(protocol_error)?
+                                .map_err(storage_error)?
                                 .filter(|label| !label.is_empty())
                                 .unwrap_or_else(|| crate::multidevice::DEVICE_LABEL.to_owned()),
                             client_info: setup.client_info.clone(),
@@ -868,13 +908,13 @@ impl<'a> Session<'a> {
                 );
                 if !properties.registered {
                     // The slot exists now; from here on the mediator must know us.
-                    let mut registered = setup.store.multi_device().map_err(protocol_error)?;
+                    let mut registered = setup.store.multi_device().map_err(storage_error)?;
                     if let Some(registered) = registered.as_mut() {
                         registered.registered = true;
                         setup
                             .store
                             .set_multi_device(Some(registered))
-                            .map_err(protocol_error)?;
+                            .map_err(storage_error)?;
                     }
                 }
                 Transport::Mediator(Box::new(mediator))
@@ -1012,19 +1052,14 @@ impl<'a> Session<'a> {
     /// order holds across the two: members discard a text for a group whose setup is still to
     /// come, and a text after our leave. So what was queued before a group message goes first.
     async fn send_pending(&mut self) -> Result<(), ConnectionError> {
-        for message in self
-            .setup
-            .store
-            .pending_outgoing()
-            .map_err(protocol_error)?
-        {
+        for message in self.setup.store.pending_outgoing().map_err(storage_error)? {
             let group = crate::groups::parse_key(&message.conversation);
             if group.is_some() {
                 for entry in self
                     .setup
                     .store
                     .outbox_until(&message.conversation, message.created_at)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                 {
                     self.send_outbox_entry(entry).await?;
                 }
@@ -1042,7 +1077,7 @@ impl<'a> Session<'a> {
                 .setup
                 .store
                 .message(message.id)
-                .map_err(protocol_error)?
+                .map_err(storage_error)?
                 .filter(|now| now.state == OutgoingState::Pending as i64 && now.kind != "deleted")
             else {
                 continue;
@@ -1095,7 +1130,7 @@ impl<'a> Session<'a> {
                         .setup
                         .store
                         .file_keys(message.id)
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                     match keys
                         .and_then(|keys| crate::app_media::outgoing_file_message(&body, &keys))
                     {
@@ -1132,7 +1167,7 @@ impl<'a> Session<'a> {
                             &[message.message_id],
                             OutgoingState::Sent,
                         )
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                     if !changed.is_empty() {
                         self.emit(CoreEvent::MessagesChanged(changed));
                     }
@@ -1147,7 +1182,7 @@ impl<'a> Session<'a> {
                     .setup
                     .store
                     .set_outgoing_failed(message.id)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                 {
                     self.emit(CoreEvent::MessagesChanged(vec![failed]));
                 }
@@ -1195,7 +1230,7 @@ impl<'a> Session<'a> {
                         .setup
                         .store
                         .set_outgoing_failed(message.id)
-                        .map_err(protocol_error)?
+                        .map_err(storage_error)?
                     {
                         self.emit(CoreEvent::MessagesChanged(vec![failed]));
                     }
@@ -1213,7 +1248,7 @@ impl<'a> Session<'a> {
             .setup
             .store
             .set_written_out(id)
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
         {
             self.emit(CoreEvent::MessagesChanged(vec![changed]));
         }
@@ -1226,7 +1261,7 @@ impl<'a> Session<'a> {
         use crate::profile_pictures::{Distribution, OWN_PICTURE, Upload};
         // Not even recorded as sent: they get it if they are unblocked.
         if !crate::providers::may_receive(&self.setup.store, &self.setup.config, receiver, false)
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
         {
             return Ok(());
         }
@@ -1234,11 +1269,11 @@ impl<'a> Session<'a> {
         let own = self.setup.media.read_picture(OWN_PICTURE).ok().flatten();
         let body = match store
             .picture_distribution(receiver, own.is_some())
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
         {
             Distribution::None => return Ok(()),
             Distribution::Delete => {
-                store.picture_sent(receiver, None).map_err(protocol_error)?;
+                store.picture_sent(receiver, None).map_err(storage_error)?;
                 ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage)
             }
             Distribution::Set(upload) => {
@@ -1268,14 +1303,14 @@ impl<'a> Session<'a> {
                         };
                         store
                             .set_picture_upload(Some(&upload))
-                            .map_err(protocol_error)?;
+                            .map_err(storage_error)?;
                         upload
                     }
                     (None, None) => return Ok(()),
                 };
                 store
                     .picture_sent(receiver, Some(&upload.blob_id))
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
                 ContactMessageBody::SetProfilePicture(SetProfilePictureMessage {
                     blob_id: upload.blob_id,
                     size: upload.size,
@@ -1319,7 +1354,7 @@ impl<'a> Session<'a> {
             body.is_exempt_from_blocking(),
             !goes_to_non_members(body),
         )
-        .map_err(protocol_error)?;
+        .map_err(storage_error)?;
         // Before the members: our own other devices want it even when there are none — a notes
         // group (Threema's group of one) would otherwise never reach Threema Desktop.
         self.reflect_outgoing(
@@ -1347,7 +1382,7 @@ impl<'a> Session<'a> {
                 .setup
                 .store
                 .contact(&receiver)
-                .map_err(protocol_error)?
+                .map_err(storage_error)?
                 .map(|contact| contact.feature_mask);
             match self
                 .encode(
@@ -1374,7 +1409,7 @@ impl<'a> Session<'a> {
     /// Send the outbox (reactions, edits, deletions, group control): removed once the server
     /// acknowledged it (for every receiver of a group), or if unsendable.
     async fn send_outbox(&mut self) -> Result<(), ConnectionError> {
-        for entry in self.setup.store.outbox().map_err(protocol_error)? {
+        for entry in self.setup.store.outbox().map_err(storage_error)? {
             self.send_outbox_entry(entry).await?;
         }
         Ok(())
@@ -1390,7 +1425,7 @@ impl<'a> Session<'a> {
                 self.setup
                     .store
                     .outbox_remove(&entry.conversation, entry.message_id)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
                 return Ok(());
             };
             if self
@@ -1406,7 +1441,7 @@ impl<'a> Session<'a> {
                 self.setup
                     .store
                     .outbox_remove(&entry.conversation, entry.message_id)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
             }
             return Ok(());
         }
@@ -1450,7 +1485,7 @@ impl<'a> Session<'a> {
             self.setup
                 .store
                 .outbox_remove(&entry.conversation, entry.message_id)
-                .map_err(protocol_error)?;
+                .map_err(storage_error)?;
         }
         Ok(())
     }
@@ -1463,7 +1498,7 @@ impl<'a> Session<'a> {
                 .setup
                 .store
                 .has_nonce(&nonce.0)
-                .map_err(protocol_error)?
+                .map_err(storage_error)?
             {
                 break nonce;
             }
@@ -1471,7 +1506,7 @@ impl<'a> Session<'a> {
         self.setup
             .store
             .add_nonces(&[&nonce.0])
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         Ok(nonce)
     }
 
@@ -1496,7 +1531,7 @@ impl<'a> Session<'a> {
             receiver,
             peer_key,
         )
-        .map_err(protocol_error)?
+        .map_err(storage_error)?
         else {
             return Ok(None);
         };
@@ -1526,7 +1561,7 @@ impl<'a> Session<'a> {
             receiver,
             body.is_exempt_from_blocking(),
         )
-        .map_err(protocol_error)
+        .map_err(storage_error)
     }
 
     /// Encode a message to a contact: forward-security encapsulated if the contact supports it
@@ -1541,7 +1576,7 @@ impl<'a> Session<'a> {
         created_at: i64,
         body: Outgoing,
     ) -> Result<Option<Vec<MessageWithMetadataBox>>, ConnectionError> {
-        let Some(contact) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
+        let Some(contact) = self.setup.store.contact(receiver).map_err(storage_error)? else {
             return Ok(None);
         };
         if !self.may_receive(receiver, &body)? {
@@ -1553,12 +1588,12 @@ impl<'a> Session<'a> {
             .setup
             .store
             .setting(crate::store::keys::NICKNAME)
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         let nickname_unanswered = self
             .setup
             .store
             .setting(crate::store::keys::NICKNAME_UNANSWERED)
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
             .is_some();
         let client_key = ClientKey::from(*self.setup.client_key);
         let mut payloads = Vec::new();
@@ -1578,7 +1613,7 @@ impl<'a> Session<'a> {
             let check = self
                 .check_feature_mask(receiver, FS_MASK_CHECK_INTERVAL)
                 .await?;
-            let Some(fresh) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
+            let Some(fresh) = self.setup.store.contact(receiver).map_err(storage_error)? else {
                 return Ok(None);
             };
             contact = fresh;
@@ -1821,10 +1856,10 @@ impl<'a> Session<'a> {
                         tracing::warn!("message rejected again; left failed");
                         if let Some(message) = store
                             .message_by_id(&peer, true, message_id)
-                            .map_err(protocol_error)?
+                            .map_err(storage_error)?
                             && let Some(failed) = store
                                 .set_outgoing_failed(message.id)
-                                .map_err(protocol_error)?
+                                .map_err(storage_error)?
                         {
                             self.emit(CoreEvent::MessagesChanged(vec![failed]));
                         }
@@ -1836,7 +1871,7 @@ impl<'a> Session<'a> {
                             message_id,
                             group_identity,
                         )
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                         if !requeued.changed.is_empty() {
                             self.emit(CoreEvent::MessagesChanged(core::mem::take(
                                 &mut requeued.changed,
@@ -1855,7 +1890,7 @@ impl<'a> Session<'a> {
                     self.send_pending().await?;
                 }
                 if !crate::providers::shows_fs_status(&store, &self.setup.config, &peer)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                 {
                     return Ok(None);
                 }
@@ -1865,22 +1900,20 @@ impl<'a> Session<'a> {
                 // A session is no news where there is nothing else: after a restore, every
                 // contact's Accept would start a chat, or move a restored one to the top.
                 if code == "fsEstablished"
-                    && store.message_count(&peer).map_err(protocol_error)? == 0
+                    && store.message_count(&peer).map_err(storage_error)? == 0
                 {
                     return Ok(None);
                 }
                 // A visible message adds a row and so gets its line, as on Android; a run of
                 // receipts or typing adds none and gets one.
                 if code == FS_MESSAGE_WITHOUT
-                    && store
-                        .newest_is_status(&peer, code)
-                        .map_err(protocol_error)?
+                    && store.newest_is_status(&peer, code).map_err(storage_error)?
                 {
                     return Ok(None);
                 }
                 Ok(store
                     .insert_status(&peer, code)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                     .map(|message| CoreEvent::MessageAdded {
                         message,
                         send_delivery_receipt: false,
@@ -1911,7 +1944,7 @@ impl<'a> Session<'a> {
             });
         }
         let store = &self.setup.store;
-        if store.contact(peer).map_err(protocol_error)?.is_none() || store.directory_resting() {
+        if store.contact(peer).map_err(storage_error)?.is_none() || store.directory_resting() {
             return Ok(MaskCheck::Unknown);
         }
         let identities = [peer.to_owned()];
@@ -1936,7 +1969,7 @@ impl<'a> Session<'a> {
         for (_, result) in found {
             changed |= store
                 .store_lookup(&self.setup.config, peer, result)
-                .map_err(protocol_error)?;
+                .map_err(storage_error)?;
         }
         if changed {
             self.emit(CoreEvent::ContactsChanged);
@@ -1968,7 +2001,7 @@ impl<'a> Session<'a> {
         status: &FsStatus,
     ) -> Result<bool, ConnectionError> {
         let stored = |session: &Self| -> Result<bool, ConnectionError> {
-            let contact = session.setup.store.contact(peer).map_err(protocol_error)?;
+            let contact = session.setup.store.contact(peer).map_err(storage_error)?;
             // Without a contact there is nothing to go by and nobody to show a line to.
             Ok(contact.is_none_or(|contact| crate::contacts::has_fs_support(&contact)))
         };
@@ -2039,8 +2072,8 @@ impl<'a> Session<'a> {
     fn show_fs_line(&self, peer: &str, code: &str) -> Result<(), ConnectionError> {
         let store = &self.setup.store;
         if crate::providers::shows_fs_status(store, &self.setup.config, peer)
-            .map_err(protocol_error)?
-            && let Some(message) = store.insert_status(peer, code).map_err(protocol_error)?
+            .map_err(storage_error)?
+            && let Some(message) = store.insert_status(peer, code).map_err(storage_error)?
         {
             self.emit(CoreEvent::MessageAdded {
                 message,
@@ -2074,6 +2107,14 @@ impl<'a> Session<'a> {
         let _ = self.tx.send(FromConnection::Event(Box::new(event)));
     }
 
+    /// What came in could be stored: if the store was failing, that is over.
+    fn storage_works(&self) {
+        if self.setup.storage_failing.replace(false) {
+            tracing::info!("storage works again");
+            self.emit(CoreEvent::StorageProblem { active: false });
+        }
+    }
+
     /// After multi-device was turned on: end every forward security session and tell the peers
     /// (Android's `disableForwardSecurity`: Terminate with cause DISABLED_BY_LOCAL), so they stop
     /// sending what we could no longer read.
@@ -2082,7 +2123,7 @@ impl<'a> Session<'a> {
         let store = Rc::clone(&self.setup.store);
         if store
             .setting(crate::multidevice::SETTING_FS_TERMINATE)
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
             .is_none()
         {
             return Ok(());
@@ -2095,10 +2136,10 @@ impl<'a> Session<'a> {
             tracing::info!("forward security is on again; pending termination dropped");
             store
                 .delete_setting(crate::multidevice::SETTING_FS_TERMINATE)
-                .map_err(protocol_error)?;
+                .map_err(storage_error)?;
             return Ok(());
         }
-        let peers = store.fs_peers().map_err(protocol_error)?;
+        let peers = store.fs_peers().map_err(storage_error)?;
         for peer in &peers {
             let Ok(peer) = peer.parse::<ThreemaId>() else {
                 continue;
@@ -2118,7 +2159,7 @@ impl<'a> Session<'a> {
         }
         store
             .delete_setting(crate::multidevice::SETTING_FS_TERMINATE)
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         tracing::info!(peers = peers.len(), "forward security sessions terminated");
         Ok(())
     }
@@ -2288,7 +2329,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         let store = Rc::clone(&self.setup.store);
-        while let Some((id, scope, content)) = store.next_sync().map_err(protocol_error)? {
+        while let Some((id, scope, content)) = store.next_sync().map_err(storage_error)? {
             let decoded = Envelope::decode(content.as_slice())
                 .ok()
                 .and_then(|envelope| envelope.content)
@@ -2299,7 +2340,7 @@ impl<'a> Session<'a> {
                 self.commit_transaction().await?;
                 reflected?;
             }
-            store.sync_done(id).map_err(protocol_error)?;
+            store.sync_done(id).map_err(storage_error)?;
         }
         Ok(())
     }
@@ -2782,6 +2823,7 @@ impl<'a> Session<'a> {
                 // The backlog is in, read updates included: what is still unread notifies.
                 self.reflection_backlog = false;
                 self.release_held_notifications(true);
+                self.storage_works();
             }
             // Only the leader receives from the chat server (Android's MonitoringLayer).
             D2mIncoming::RolePromotedToLeader => {
@@ -2882,7 +2924,7 @@ impl<'a> Session<'a> {
                                 // Like Android's removeMultiDeviceLocally: forget the group, then
                                 // connect directly again (forward security comes back with it:
                                 // the core publishes the feature mask on this event).
-                                self.setup.store.set_multi_device(None).map_err(protocol_error)?;
+                                self.setup.store.set_multi_device(None).map_err(storage_error)?;
                                 self.emit(CoreEvent::MultiDeviceChanged);
                             }
                             let _ = reply.send(Ok(outcome));
@@ -2947,22 +2989,22 @@ impl<'a> Session<'a> {
                 let store = &self.setup.store;
                 store
                     .outbox_remove(&receiver, ack.id.0)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
                 let mut changed = store
                     .raise_outgoing_state(&receiver, &[ack.id.0], OutgoingState::Sent)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
                 // Group messages: sent once every member has it.
                 for conversation in store
                     .receiver_done(&receiver, ack.id.0)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                 {
                     store
                         .outbox_remove(&conversation, ack.id.0)
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                     changed.extend(
                         store
                             .raise_outgoing_state(&conversation, &[ack.id.0], OutgoingState::Sent)
-                            .map_err(protocol_error)?,
+                            .map_err(storage_error)?,
                     );
                 }
                 // Multi-device: tell the other devices (once per message: a group message once
@@ -2992,7 +3034,10 @@ impl<'a> Session<'a> {
                     can_reconnect: true,
                 });
             }
-            IncomingPayload::QueueSendComplete => tracing::debug!("message queue drained"),
+            IncomingPayload::QueueSendComplete => {
+                tracing::debug!("message queue drained");
+                self.storage_works();
+            }
             // Like Android's TaskManager: warn (unless our own cookie is new) and clear the
             // server's flag. Left set, every login of every device in the group gets it again
             // (Threema Desktop: "Connection from another device detected", on every start).
@@ -3000,13 +3045,13 @@ impl<'a> Session<'a> {
                 let store = &self.setup.store;
                 let fresh = store
                     .setting(crate::store::keys::DEVICE_COOKIE_FRESH)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                     .is_some();
                 if fresh {
                     tracing::info!("device cookie change indication for our new cookie");
                     store
                         .delete_setting(crate::store::keys::DEVICE_COOKIE_FRESH)
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                 } else {
                     tracing::warn!("device cookie change indication: another device used this ID");
                     self.emit(CoreEvent::DeviceCookieChanged);
@@ -3087,6 +3132,7 @@ impl<'a> Session<'a> {
                 IncomingMessageLoop::Done(result) => break result,
             }
         };
+        self.storage_works();
         if let Some(ack) = result.outgoing_message_ack {
             self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
         }
@@ -3814,6 +3860,7 @@ mod sync_order_tests {
             device_cookie: DeviceCookie([1; 16]),
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
+            storage_failing: core::cell::Cell::default(),
         };
         let mut fs = StoreFs {
             store: Rc::clone(&setup.store),
@@ -4121,6 +4168,94 @@ mod sync_order_tests {
         }
     }
 
+    /// A message `CREATOR` sends us, as the chat server hands it over (the same each time, for the
+    /// same id); `CREATOR` is a contact.
+    fn from_creator(setup: &ConnectionSetup, id: u64, text: &str) -> MessageWithMetadataBox {
+        let key = ClientKey::from([5; 32]);
+        let mut contact = crate::contacts::test_contact(CREATOR);
+        contact.public_key = key.public_key();
+        setup.store.upsert_contact(&contact).unwrap();
+        encode_outgoing_contact_message(
+            CREATOR.parse().unwrap(),
+            &key,
+            Delta::Unchanged,
+            setup.identity,
+            &ClientKey::from(*setup.client_key).public_key(),
+            &OutgoingMessage {
+                id: MessageId(id),
+                overrides: MessageOverrides::default(),
+                created_at: 1,
+                body: OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                    receiver_identity: setup.identity,
+                    body: ContactMessageBody::Text(TextMessage { text: text.into() }),
+                }),
+            },
+            Nonce([u8::try_from(id).unwrap(); 24]),
+        )
+        .unwrap()
+    }
+
+    /// The events the UI has got so far.
+    fn sent_to_ui(rx: &mut mpsc::UnboundedReceiver<FromConnection>) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let FromConnection::Event(event) = message {
+                events.push(*event);
+            }
+        }
+        events
+    }
+
+    fn storage_notices(events: &[CoreEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::StorageProblem { active } => Some(*active),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A store that fails on a message ends the connection as what it is, not as a network
+    /// problem, without acknowledging: the message comes again. The user hears of it once, and
+    /// once more when a message could be stored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failing_store_is_named_and_told_once_per_streak() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = from_creator(&setup, 1, "hi");
+        let mut session = session(&setup, &tx).await;
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON messages
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+
+        let Err(ConnectionError::Storage { code }) = session.handle_incoming(message).await else {
+            panic!("expected a storage failure");
+        };
+        assert_ne!(code, 0, "SQLite's code");
+        note_storage_failure(&setup, &tx, code);
+        note_storage_failure(&setup, &tx, code);
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
+
+        setup
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        // It's stored this time: what fails now, on this socket without a handshake, is the ack.
+        let again = from_creator(&setup, 1, "hi");
+        let error = session.handle_incoming(again).await.unwrap_err();
+        assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
+        assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+    }
+
     #[test]
     fn only_farewells_and_sync_requests_go_to_non_members() {
         use libthreema::model::message::{GroupLeaveMessage, GroupSyncRequestMessage};
@@ -4251,6 +4386,7 @@ mod sync_order_tests {
             device_cookie: DeviceCookie([1; 16]),
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
+            storage_failing: core::cell::Cell::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut session = session(&setup, &tx).await;

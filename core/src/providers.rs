@@ -87,6 +87,8 @@ pub enum CoreEvent {
     /// The chat server saw this ID log in with another device cookie (another device used
     /// it, or a restore): the UI warns, like Android's rogue-device warning.
     DeviceCookieChanged,
+    /// The store fails while receiving (or works again): once each way.
+    StorageProblem { active: bool },
     /// A call event for the UI (its JSON as it is, app_calls.rs).
     Call(Value),
     /// Internal: a group call was announced in a group (app_group_calls.rs).
@@ -201,6 +203,7 @@ impl CoreEvent {
                 })
             }
             Self::DeviceCookieChanged => json!({"event": "deviceCookieChanged"}),
+            Self::StorageProblem { active } => json!({"event": "storageProblem", "active": active}),
             Self::Call(event) => event.clone(),
             // Handled inside the core.
             Self::FsControl { .. }
@@ -223,9 +226,21 @@ impl CoreEvent {
 
 pub type EventSink = Rc<RefCell<Vec<CoreEvent>>>;
 
+/// How a storage failure shows in what libthreema makes of a [`ProviderError`]: all it passes on
+/// is text.
+const STORAGE_MARK: &str = "storage[";
+
 /// Storage failures (`Foreign` only exists in libthreema's binding builds).
-pub(crate) fn foreign(error: impl std::fmt::Display) -> ProviderError {
-    ProviderError::InvalidState(format!("storage: {error}"))
+pub(crate) fn foreign(error: StoreError) -> ProviderError {
+    ProviderError::InvalidState(format!("{STORAGE_MARK}{}]: {error}", error.sqlite_code()))
+}
+
+/// The SQLite code if this error text says that the store failed ([`foreign`]), wherever libthreema
+/// has put it on the way.
+pub(crate) fn storage_code(error: &str) -> Option<i32> {
+    let (_, rest) = error.split_once(STORAGE_MARK)?;
+    let (code, _) = rest.split_once("]: ")?;
+    code.parse().ok()
 }
 
 /// Nonce storage (incoming and outgoing nonces share one table, like Android).
@@ -1016,6 +1031,20 @@ mod tests {
             })
             .unwrap();
         key
+    }
+
+    #[test]
+    fn a_storage_failure_keeps_its_code_through_libthreema() {
+        let error = foreign(StoreError::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(13),
+            None,
+        )));
+        let text = libthreema::csp_e2e::CspE2eProtocolError::from(error).to_string();
+        assert_eq!(storage_code(&text), Some(13), "{text}");
+
+        for other in ["Desync error: no storage", "storage[]: x", "storage[1", ""] {
+            assert_eq!(storage_code(other), None, "{other}");
+        }
     }
 
     /// A message of this kind fails at the store write `trigger` refuses, comes again once that

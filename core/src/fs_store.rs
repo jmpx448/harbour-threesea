@@ -21,7 +21,7 @@ use libthreema::{
 use rusqlite::{OptionalExtension as _, Row, params};
 
 use crate::{
-    providers::{CoreEvent, EventSink},
+    providers::{CoreEvent, EventSink, foreign},
     store::{Store, StoreError},
 };
 
@@ -148,8 +148,8 @@ impl Store {
     }
 }
 
-fn storage(error: impl std::fmt::Display) -> ProviderError {
-    ProviderError::InvalidState(format!("storage: {error}"))
+fn storage(error: impl Into<StoreError>) -> ProviderError {
+    foreign(error.into())
 }
 
 fn is_4dh(session: &Session) -> bool {
@@ -637,6 +637,30 @@ mod tests {
             }
             (texts, replies)
         }
+    }
+
+    /// The session is the first thing an encapsulated message writes, so with the disk full this
+    /// is what the connection sees of it: it has to know that as a store failure.
+    #[test]
+    fn a_session_write_that_fails_is_reported_as_a_store_failure() {
+        let (alice, mut bob) = established();
+        let payloads = alice.send_text(&bob, "hi");
+        bob.store
+            .conn
+            .execute_batch("PRAGMA query_only = ON")
+            .unwrap();
+        let mut task = bob
+            .e2e
+            .handle_incoming_message(payloads.into_iter().next_back().unwrap());
+        let Err(error) = task.poll(bob.e2e.context()) else {
+            panic!("expected a failure");
+        };
+        let error = error.to_string();
+        assert_eq!(
+            crate::providers::storage_code(&error).map(|code| code & 0xff),
+            Some(8),
+            "SQLITE_READONLY: {error}"
+        );
     }
 
     /// Alice starts a session with Bob: what she sends, ready for Bob's `receive`.

@@ -518,6 +518,7 @@ impl App {
             device_cookie: self.device_cookie().ok()?,
             client_info: self.version.client_info(),
             fs_mask_checks: connection::FsMaskChecks::default(),
+            storage_failing: core::cell::Cell::default(),
         };
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         let (from_tx, from_rx) = mpsc::unbounded_channel();
