@@ -1,2 +1,3 @@
 module harbour.threesea
 CallVideo 1.0 CallVideo.qml
+JsonListModel 1.0 JsonListModel.qml

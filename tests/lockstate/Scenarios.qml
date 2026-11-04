@@ -40,6 +40,28 @@ QtObject {
     function unlock() {
         window.lockPage.unlocked("1234")
     }
+    function findItem(item, test) {
+        if (test(item)) return item
+        var children = item.children || []
+        for (var i = 0; i < children.length; ++i) {
+            var found = findItem(children[i], test)
+            if (found) return found
+        }
+        return null
+    }
+    // The code entry on one of the real pages.
+    function entryOf(page) {
+        return findItem(page, function(item) { return item.errorText !== undefined && item.title !== undefined })
+    }
+    // Its way out, wherever that is right now.
+    function cancelButton(page) {
+        return findItem(page, function(item) {
+            return item.visible && item.icon !== undefined && String(item.icon.source).indexOf("icon-m-cancel") >= 0
+        })
+    }
+    function countSent(command) {
+        return backend.sent.filter(function(sent) { return sent === command }).length
+    }
 
     // The usual start: ready, with a lock (or without) as the core reports it.
     function ready(appLock, graceSecs) {
@@ -180,6 +202,41 @@ QtObject {
             [function() {
                 checkStack("conversations share")
                 check("text", page("share").text, "hello")
+            }, 0],
+        ],
+        // On the keyboard the keypad is hidden, and its X with it: there is another one.
+        passphrasePromptCanBeLeft: [
+            [function() { ready(false) }, 800],
+            [function() {
+                var keyboard = push("pages/RealUnlockPage.qml", { passphraseCheck: true })
+                check("keyboard", entryOf(keyboard).keyboard, true)
+                cancelButton(keyboard).clicked(null)
+            }, 800],
+            [function() {
+                checkStack("conversations")
+                var keypad = push("pages/RealUnlockPage.qml")
+                check("keypad", entryOf(keypad).keyboard, false)
+                check("the keypad's X", !!cancelButton(keypad), true)
+                cancelButton(keypad).clicked(null)
+            }, 800],
+            [function() {
+                checkStack("conversations")
+                var repeat = push("pages/PinSetupPage.qml", { minimumLength: 8, startKeyboard: true })
+                entryOf(repeat).entered("12345678", true)
+                check("repeat step", repeat.first, "12345678")
+                check("no keyboard button", entryOf(repeat).allowKeyboard, false)
+                cancelButton(repeat).clicked(null)
+            }, 800],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // The app lock stays up, on the keypad and on the keyboard.
+        appLockCannotBeLeft: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var keypad = push("pages/RealUnlockPage.qml", { cancellable: false })
+                check("no X on the keypad", !!cancelButton(keypad), false)
+                entryOf(keypad).keyboard = true
+                check("no X on the keyboard", !!cancelButton(keypad), false)
             }, 0],
         ],
         // The license refused under the lock: the lock stays over the license page, and a new key

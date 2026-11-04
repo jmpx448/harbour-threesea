@@ -5,7 +5,8 @@ import Sailfish.Silica 1.0
 // Code entry like Sailfish's device lock: the title in the upper part, Silica's keypad (with
 // letters) at the bottom, the dots right-aligned above it with backspace next to them, cancel
 // bottom left and accept bottom right once the code is long enough. The keyboard button top left
-// switches to a passphrase field (`allowKeyboard`), like the device lock's.
+// switches to a passphrase field (`allowKeyboard`), like the device lock's; the keypad and its
+// cancel are hidden then, so cancel moves to the top right, above the keyboard.
 // `entered(pin, keyboard)` on accept; `clear()` after a wrong code. Fills its parent.
 Item {
     id: root
@@ -66,6 +67,16 @@ Item {
         y: cutout.inset + Theme.paddingLarge
         icon.source: root.keyboard ? "image://theme/icon-m-dialpad" : "image://theme/icon-m-keyboard"
         onClicked: root.keyboard = !root.keyboard
+    }
+    IconButton {
+        visible: root.cancellable && root.keyboard && !root.busy
+        anchors {
+            right: parent.right
+            rightMargin: Theme.horizontalPageMargin
+        }
+        y: cutout.inset + Theme.paddingLarge
+        icon.source: "image://theme/icon-m-cancel"
+        onClicked: root.canceled()
     }
 
     Label {

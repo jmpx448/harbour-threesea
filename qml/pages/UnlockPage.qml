@@ -5,7 +5,8 @@ import "../components"
 import "../components/Errors.js" as Errors
 
 // Asks for the app lock PIN or passphrase (ADR 0009). The app lock can't be dismissed
-// (`cancellable: false`); before the private chats or the lock settings, the X leaves.
+// (`cancellable: false`); before the private chats or the lock settings, the X leaves (PinEntry
+// has it on the keypad and, for a passphrase, above the keyboard).
 // `unlocked(pin)` once the core accepted it; with `privateChats` the core then shows the private
 // chats, without it this only checks (the PIN then goes to a command that needs it). With `database` it opens the encrypted database key instead (state
 // "locked", before the core runs).

@@ -3,7 +3,7 @@ import QtQuick 2.6
 
 // What the app's QML sees of the C++ side, as far as the window needs it. backend.call replies
 // after a moment; `hold(cmd)` keeps a command's replies back until `release(cmd)`, for the
-// moments in between.
+// moments in between; `refused[cmd] = kind` makes it answer with that error.
 QtObject {
     property QtObject backend: QtObject {
         property string state: "starting"
@@ -20,6 +20,10 @@ QtObject {
         property var sent: []
         // Answers by command; anything else gets an empty result.
         property var results: ({})
+        property var refused: ({})
+        // The arguments of each command's last call.
+        property var lastArgs: ({})
+        property var contacts: null
         property var held: ({})
         property var waiting: []
         property var replyTimer: Timer {
@@ -31,12 +35,15 @@ QtObject {
                 backend.waiting = []
                 for (var i = 0; i < now.length; ++i) {
                     if (backend.held[now[i].cmd]) backend.waiting.push(now[i])
-                    else if (now[i].callback) now[i].callback(true, backend.results[now[i].cmd] || {})
+                    else if (!now[i].callback) continue
+                    else if (backend.refused[now[i].cmd]) now[i].callback(false, {}, backend.refused[now[i].cmd], "")
+                    else now[i].callback(true, backend.results[now[i].cmd] || {})
                 }
             }
         }
         function call(cmd, args, callback) {
             sent.push(cmd)
+            lastArgs[cmd] = args
             waiting.push({ cmd: cmd, callback: callback })
         }
         function hold(cmd) { held[cmd] = true }

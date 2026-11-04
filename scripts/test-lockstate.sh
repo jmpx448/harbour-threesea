@@ -13,7 +13,10 @@ docker run --rm -i -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS" sh -euc '
     cp /src/qml/harbour-threesea.qml $B/app/
     cp -r /src/qml/components /src/qml/cover $B/app/
     cp /src/tests/lockstate/pages/*.qml $B/app/pages/
-    for page in CallPage GroupCallPage DataBackupImportPage StartupPage; do cp /src/qml/pages/$page.qml $B/app/pages/; done
+    for page in CallPage GroupCallPage DataBackupImportPage StartupPage PinSetupPage; do cp /src/qml/pages/$page.qml $B/app/pages/; done
+    # Under their own names, beside the plain ones the window and these two open.
+    cp /src/qml/pages/UnlockPage.qml $B/app/pages/RealUnlockPage.qml
+    cp /src/qml/pages/SharePage.qml $B/app/pages/RealSharePage.qml
     cp -r /src/tests/lockstate/harbour $B/app/imports/
     cp /src/tests/lockstate/Fakes.qml /src/tests/lockstate/Scenarios.qml $B/app/
     cp /src/tests/lockstate/main.cpp /src/tests/lockstate/lockstate-test.pro $B/
