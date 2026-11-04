@@ -140,6 +140,23 @@ impl Store {
         Ok(())
     }
 
+    /// Queue something for the other devices. Part of the caller's store step, if it is in one.
+    pub(crate) fn queue_sync_content(
+        &self,
+        scope: libthreema::protobuf::d2d::transaction_scope::Scope,
+        content: libthreema::protobuf::d2d::envelope::Content,
+    ) -> Result<(), StoreError> {
+        use prost::Message as _;
+        #[expect(deprecated, reason = "Padding is still part of the envelope")]
+        let envelope = libthreema::protobuf::d2d::Envelope {
+            padding: Vec::new(),
+            device_id: 0,
+            protocol_version: 0,
+            content: Some(content),
+        };
+        self.queue_sync(scope as i32, &envelope.encode_to_vec())
+    }
+
     /// The oldest queued sync: (id, scope, content).
     pub fn next_sync(&self) -> Result<Option<(i64, i32, Vec<u8>)>, StoreError> {
         Ok(self

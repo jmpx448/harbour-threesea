@@ -12,7 +12,10 @@ use libthreema::protobuf::{
     },
 };
 use serde_json::{Value, json};
-use tokio::{sync::oneshot, time::timeout};
+use tokio::{
+    sync::{mpsc::UnboundedSender, oneshot},
+    time::timeout,
+};
 
 use crate::{
     app::{ApiError, App},
@@ -21,7 +24,7 @@ use crate::{
     },
     groups::Group,
     multidevice::{Properties, SETTING_FS_TERMINATE},
-    store::Store,
+    store::{Store, StoreError},
 };
 
 /// A question to the mediator (30 s) and the wait for a connection coming up (15 s).
@@ -638,7 +641,7 @@ impl App {
                     let Some(group) = self.store.group(&key)? else {
                         return Ok(Vec::new());
                     };
-                    let mut synced = group_delta(&group);
+                    let mut synced = crate::sync::group_only(&group);
                     synced.profile_picture = Some(DeltaImage {
                         image: Some(delta_image::Image::Removed(Unit {})),
                     });
@@ -714,7 +717,7 @@ impl App {
                 if slot.is_none() {
                     continue;
                 }
-                match self.upload_sync_picture(&target).await {
+                match upload_sync_picture(&self.https, &self.media, &target).await {
                     Ok(Some(image)) => *slot = Some(image),
                     Ok(None) => {}
                     Err(error) => {
@@ -736,29 +739,10 @@ impl App {
 
 /// Queue encoded sync envelopes; the connection reflects them in order, each in its transaction.
 fn queue_syncs(store: &Store, items: Vec<(Scope, Content)>) {
-    use prost::Message as _;
     for (scope, content) in items {
-        #[expect(deprecated, reason = "Padding is still part of the envelope")]
-        let envelope = libthreema::protobuf::d2d::Envelope {
-            padding: Vec::new(),
-            device_id: 0,
-            protocol_version: 0,
-            content: Some(content),
-        };
-        if let Err(error) = store.queue_sync(scope as i32, &envelope.encode_to_vec()) {
+        if let Err(error) = store.queue_sync_content(scope, content) {
             tracing::warn!(%error, "sync not queued");
         }
-    }
-}
-
-/// A group sync that only names the group: what changed goes on top.
-fn group_delta(group: &Group) -> libthreema::protobuf::d2d_sync::Group {
-    libthreema::protobuf::d2d_sync::Group {
-        group_identity: Some(libthreema::protobuf::common::GroupIdentity {
-            group_id: group.identity.group_id,
-            creator_identity: group.identity.creator_identity.as_str().to_owned(),
-        }),
-        ..Default::default()
     }
 }
 
@@ -776,39 +760,115 @@ fn member_changes_by_command(previous: &[String], group: &Group) -> HashMap<Stri
     added.chain(removed).collect()
 }
 
-impl App {
-    /// The picture stored as `target`, encrypted and uploaded to the mirror (local scope) as a
-    /// sync `DeltaImage`; `None` if there is none (the "removed" placeholder stays).
-    async fn upload_sync_picture(
-        &self,
-        target: &str,
-    ) -> Result<Option<libthreema::protobuf::common::DeltaImage>, crate::media::MediaError> {
-        use libthreema::protobuf::common::{Blob, DeltaImage, Image, delta_image, image};
-        let Some(data) = self.media.read_picture(target)? else {
-            return Ok(None);
-        };
-        let key: [u8; 32] = rand::random();
-        let nonce = *crate::media::MediaPart::File.nonce();
-        let encrypted = crate::media::encrypt_blob(&key, crate::media::MediaPart::File, &data);
-        let blob_id = crate::media::upload_scoped(
-            &self.https,
-            &encrypted,
-            false,
-            crate::media::BlobScope::Local,
-        )
-        .await?;
-        Ok(Some(DeltaImage {
-            image: Some(delta_image::Image::Updated(Image {
-                r#type: image::Type::Jpeg as i32,
-                blob: Some(Blob {
-                    id: blob_id.0.to_vec(),
-                    nonce: nonce.to_vec(),
-                    key: key.to_vec(),
-                    uploaded_at: u64::try_from(crate::messages::now_ms()).unwrap_or_default(),
-                }),
-            })),
-        }))
+/// A group's picture from its creator reached this device: the others get it from the mirror.
+/// Noted as owed until the entry is queued (`Store::store_received_group_picture`), so a failed
+/// upload or a crash is made up for by the next `resume_picture_downloads`.
+pub(crate) async fn reflect_group_picture(
+    store: &Store,
+    https: &crate::https::HttpsClient,
+    media: &crate::media::MediaStore,
+    key: &str,
+    connection: Option<&UnboundedSender<ToConnection>>,
+) {
+    let done = |store: &Store| {
+        if let Err(error) = store.group_picture_synced(key) {
+            tracing::warn!(%error, "owed group picture not cleared");
+        }
+    };
+    let group = match store.group(key) {
+        // Version 0: deleted meanwhile, which has been queued by itself. Its file may still
+        // be there.
+        Ok(Some(group))
+            if group.picture_version != 0 && matches!(store.multi_device(), Ok(Some(_))) =>
+        {
+            group
+        }
+        // Nobody left to tell, or nothing to tell them.
+        Ok(_) => return done(store),
+        Err(error) => {
+            tracing::warn!(%error, "owed group picture not read");
+            return;
+        }
+    };
+    let image = match upload_sync_picture(https, media, key).await {
+        Ok(Some(image)) => image,
+        // Removed meanwhile; that has been queued by itself.
+        Ok(None) => return done(store),
+        Err(error) => {
+            tracing::warn!(%error, "picture not uploaded to the mirror");
+            return;
+        }
+    };
+    let mut synced = crate::sync::group_only(&group);
+    synced.profile_picture = Some(image);
+    match queue_owed_picture(store, key, group.picture_version, synced) {
+        Ok(true) => {
+            if let Some(connection) = connection {
+                let _ = connection.send(ToConnection::ReflectSync);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "group picture sync not queued"),
     }
+}
+
+/// One store step: only if it is still owed and still the picture that was uploaded (`version`).
+/// Two tries for one picture send it once; a newer picture's try sends that, and the note stays
+/// for it meanwhile.
+fn queue_owed_picture(
+    store: &Store,
+    key: &str,
+    version: i64,
+    synced: libthreema::protobuf::d2d_sync::Group,
+) -> Result<bool, StoreError> {
+    let step = store.conn.unchecked_transaction()?;
+    let same = store
+        .group(key)?
+        .is_some_and(|now| now.picture_version == version);
+    if !same || !store.group_picture_synced(key)? {
+        return Ok(false);
+    }
+    store.queue_sync_content(
+        Scope::GroupSync,
+        Content::GroupSync(GroupSync {
+            action: Some(group_sync::Action::Update(group_sync::Update {
+                group: Some(synced),
+                member_state_changes: HashMap::new(),
+            })),
+        }),
+    )?;
+    step.commit()?;
+    Ok(true)
+}
+
+/// The picture stored as `target`, encrypted and uploaded to the mirror (local scope) as a sync
+/// `DeltaImage`; `None` if there is none (the "removed" placeholder stays).
+async fn upload_sync_picture(
+    https: &crate::https::HttpsClient,
+    media: &crate::media::MediaStore,
+    target: &str,
+) -> Result<Option<libthreema::protobuf::common::DeltaImage>, crate::media::MediaError> {
+    use libthreema::protobuf::common::{Blob, DeltaImage, Image, delta_image, image};
+    let Some(data) = media.read_picture(target)? else {
+        return Ok(None);
+    };
+    let key: [u8; 32] = rand::random();
+    let nonce = *crate::media::MediaPart::File.nonce();
+    let encrypted = crate::media::encrypt_blob(&key, crate::media::MediaPart::File, &data);
+    let blob_id =
+        crate::media::upload_scoped(https, &encrypted, false, crate::media::BlobScope::Local)
+            .await?;
+    Ok(Some(DeltaImage {
+        image: Some(delta_image::Image::Updated(Image {
+            r#type: image::Type::Jpeg as i32,
+            blob: Some(Blob {
+                id: blob_id.0.to_vec(),
+                nonce: nonce.to_vec(),
+                key: key.to_vec(),
+                uploaded_at: u64::try_from(crate::messages::now_ms()).unwrap_or_default(),
+            }),
+        })),
+    }))
 }
 
 /// What a command changed that other devices keep too (multi-device).
@@ -837,7 +897,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::app::StartConfig;
+    use crate::{
+        app::StartConfig,
+        groups::{GroupChange, MemberChange},
+        sync::queue_received_group_change,
+    };
 
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
@@ -950,6 +1014,290 @@ mod tests {
                 .is_none()
         );
         assert!(app.store.groups_with_pending_picture().unwrap().is_empty());
+    }
+
+    fn group_change(name: bool) -> GroupChange {
+        GroupChange {
+            name,
+            ..GroupChange::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_received_group_change_goes_out_as_only_what_changed() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        let queue = |change: &GroupChange| {
+            assert!(queue_received_group_change(&app.store, &group.key, change, &[]).unwrap());
+        };
+
+        // A member left.
+        let mut change = GroupChange {
+            members: true,
+            ..GroupChange::default()
+        };
+        change
+            .member_changes
+            .insert("CCCCCCCC".into(), MemberChange::Left);
+        let mut left = group.clone();
+        left.members.retain(|member| member != "CCCCCCCC");
+        app.store.upsert_group(&left).unwrap();
+        queue(&change);
+        let update = update_of(next_group_sync(&app));
+        assert_eq!(
+            update.member_state_changes.get("CCCCCCCC"),
+            Some(&(MemberStateChange::Left as i32))
+        );
+        let synced = update.group.unwrap();
+        assert_eq!(
+            synced.member_identities.unwrap().identities,
+            vec!["BBBBBBBB"]
+        );
+        assert_eq!(
+            (synced.name, synced.user_state, synced.created_at),
+            (None, None, None)
+        );
+        assert!(synced.profile_picture.is_none());
+
+        // Renamed.
+        queue(&group_change(true));
+        let synced = update_of(next_group_sync(&app)).group.unwrap();
+        assert_eq!(synced.name.as_deref(), Some("Crew"));
+        assert!(synced.member_identities.is_none());
+
+        // The picture was removed.
+        queue(&GroupChange {
+            picture_removed: true,
+            ..GroupChange::default()
+        });
+        let synced = update_of(next_group_sync(&app)).group.unwrap();
+        assert!(matches!(
+            synced.profile_picture.and_then(|picture| picture.image),
+            Some(delta_image::Image::Removed(_))
+        ));
+
+        // We were removed.
+        group.left = true;
+        app.store.upsert_group(&group).unwrap();
+        app.store.set_group_kicked(&group.key, true).unwrap();
+        queue(&GroupChange {
+            user_state: true,
+            ..GroupChange::default()
+        });
+        let synced = update_of(next_group_sync(&app)).group.unwrap();
+        assert_eq!(
+            synced.user_state,
+            Some(libthreema::protobuf::d2d_sync::group::UserState::Kicked as i32)
+        );
+        assert!(synced.member_identities.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_group_sync_names_someone_before_their_contact_has_gone_out() {
+        use prost::Message as _;
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        group.members.push("DDDDDDDD".into());
+        group.members.push("EEEEEEEE".into());
+        app.store.upsert_group(&group).unwrap();
+
+        // The new group goes out now, without the two who have no contact yet.
+        let change = GroupChange {
+            created: true,
+            ..GroupChange::default()
+        };
+        let unknown = ["DDDDDDDD".to_owned(), "EEEEEEEE".to_owned()];
+        assert!(queue_received_group_change(&app.store, &group.key, &change, &unknown).unwrap());
+        let group_sync::Action::Create(create) = next_group_sync(&app) else {
+            panic!("not a create");
+        };
+        let synced = create.group.unwrap();
+        assert_eq!(synced.name.as_deref(), Some("Crew"));
+        assert_eq!(
+            synced.member_identities.unwrap().identities,
+            vec!["BBBBBBBB", "CCCCCCCC"]
+        );
+        assert!(synced.profile_picture.is_none());
+        assert!(app.store.next_sync().unwrap().is_none());
+        assert_eq!(app.store.outstanding_member_lookups().unwrap(), unknown);
+
+        // The lookup finds one of them and doesn't know the other: first the contact, then the
+        // list with them in it, and nothing is left waiting.
+        let found = crate::contacts::test_contact("DDDDDDDD");
+        assert!(
+            crate::sync::members_looked_up(
+                &app.store,
+                vec![
+                    (
+                        "DDDDDDDD".to_owned(),
+                        crate::contacts::Lookup::Found(Box::new(found))
+                    ),
+                    ("EEEEEEEE".to_owned(), crate::contacts::Lookup::Invalid),
+                ],
+            )
+            .unwrap()
+        );
+        let (id, scope, content) = app.store.next_sync().unwrap().unwrap();
+        assert_eq!(scope, Scope::ContactSync as i32);
+        let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+        assert!(matches!(
+            envelope.content,
+            Some(Content::ContactSync(ContactSync {
+                action: Some(contact_sync::Action::Create(_))
+            }))
+        ));
+        app.store.sync_done(id).unwrap();
+        let update = update_of(next_group_sync(&app));
+        // A new group's members didn't "come": the map says nothing about them.
+        assert!(update.member_state_changes.is_empty());
+        assert_eq!(
+            update.group.unwrap().member_identities.unwrap().identities,
+            vec!["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"]
+        );
+        assert!(app.store.next_sync().unwrap().is_none());
+        assert!(app.store.outstanding_member_lookups().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_added_gets_their_line_once_their_contact_is_there() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        group.members.push("DDDDDDDD".into());
+        app.store.upsert_group(&group).unwrap();
+        let mut change = GroupChange {
+            members: true,
+            ..GroupChange::default()
+        };
+        change
+            .member_changes
+            .insert("DDDDDDDD".into(), MemberChange::Added);
+        change
+            .member_changes
+            .insert("CCCCCCCC".into(), MemberChange::Kicked);
+        let unknown = ["DDDDDDDD".to_owned()];
+        queue_received_group_change(&app.store, &group.key, &change, &unknown).unwrap();
+        // Who went goes out now, who came doesn't yet.
+        let update = update_of(next_group_sync(&app));
+        assert_eq!(
+            update.member_state_changes,
+            [("CCCCCCCC".to_owned(), MemberStateChange::Kicked as i32)]
+                .into_iter()
+                .collect()
+        );
+        let found = crate::contacts::test_contact("DDDDDDDD");
+        crate::sync::members_looked_up(
+            &app.store,
+            vec![(
+                "DDDDDDDD".to_owned(),
+                crate::contacts::Lookup::Found(Box::new(found)),
+            )],
+        )
+        .unwrap();
+        let (id, ..) = app.store.next_sync().unwrap().unwrap();
+        app.store.sync_done(id).unwrap();
+        assert_eq!(
+            update_of(next_group_sync(&app)).member_state_changes,
+            [("DDDDDDDD".to_owned(), MemberStateChange::Added as i32)]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lookup_another_device_asked_for_tells_nobody() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let found = crate::contacts::test_contact("DDDDDDDD");
+        assert!(
+            !crate::sync::members_looked_up(
+                &app.store,
+                vec![(
+                    "DDDDDDDD".to_owned(),
+                    crate::contacts::Lookup::Found(Box::new(found)),
+                )],
+            )
+            .unwrap()
+        );
+        assert!(app.store.contact("DDDDDDDD").unwrap().is_some());
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_owed_picture_that_is_gone_is_no_longer_owed() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        group.picture_version = 2;
+        app.store.store_received_group_picture(&group).unwrap();
+        assert_eq!(
+            app.store.group_picture_syncs().unwrap(),
+            vec![group.key.clone()]
+        );
+        // Removed before the upload: nothing to upload, no network, nothing queued.
+        reflect_group_picture(&app.store, &app.https, &app.media, &group.key, None).await;
+        assert!(app.store.group_picture_syncs().unwrap().is_empty());
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn two_tries_for_a_picture_send_it_once_and_a_newer_one_keeps_its_note() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        group.picture_version = 2;
+        app.store.store_received_group_picture(&group).unwrap();
+        let synced = crate::sync::group_only(&group);
+
+        // An upload of an older picture finishes: not sent, and the newer one is still owed.
+        assert!(!queue_owed_picture(&app.store, &group.key, 1, synced.clone()).unwrap());
+        assert!(app.store.next_sync().unwrap().is_none());
+        assert_eq!(
+            app.store.group_picture_syncs().unwrap(),
+            vec![group.key.clone()]
+        );
+
+        assert!(queue_owed_picture(&app.store, &group.key, 2, synced.clone()).unwrap());
+        assert!(app.store.group_picture_syncs().unwrap().is_empty());
+        let (id, ..) = app.store.next_sync().unwrap().unwrap();
+        app.store.sync_done(id).unwrap();
+        // The second try of the same picture: already sent.
+        assert!(!queue_owed_picture(&app.store, &group.key, 2, synced).unwrap());
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deleted_pictures_file_is_not_sent_to_the_others() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let group = foreign_group(&app);
+        assert_eq!(group.picture_version, 0);
+        // A try still under way or a removal that didn't finish: the file is still there.
+        app.media.write_picture(&group.key, b"old").unwrap();
+        app.store.store_received_group_picture(&group).unwrap();
+        reflect_group_picture(&app.store, &app.https, &app.media, &group.key, None).await;
+        assert!(app.store.group_picture_syncs().unwrap().is_empty());
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nothing_is_reflected_without_a_device_group() {
+        let (_dir, app) = app();
+        with_identity(&app);
+        let group = foreign_group(&app);
+        assert!(
+            !queue_received_group_change(&app.store, &group.key, &group_change(true), &[]).unwrap()
+        );
+        assert!(app.store.next_sync().unwrap().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -60,6 +60,11 @@ pub enum CoreEvent {
     OutboxChanged,
     /// Internal: group members without a contact; fetch them from the directory.
     UnknownMembers(Vec<String>),
+    /// Internal: something went into the sync queue while handling a message. The connection
+    /// reflects it before going on to the next message.
+    SyncQueued,
+    /// Internal: a group's picture was deleted; its file goes too (group key).
+    RemoveGroupPicture(String),
     /// Internal: a group's picture changed; download it (group key).
     DownloadGroupPicture(String),
     /// Internal: a contact's picture changed (descriptor persisted in `picture_downloads`);
@@ -190,6 +195,8 @@ impl CoreEvent {
             | Self::FsStatus { .. }
             | Self::OutboxChanged
             | Self::UnknownMembers(_)
+            | Self::SyncQueued
+            | Self::RemoveGroupPicture(_)
             | Self::DownloadGroupPicture(_)
             | Self::DownloadContactPicture(_)
             | Self::SyncPicture { .. }
@@ -610,11 +617,17 @@ impl ConversationProvider for StoreConversations {
                 if !outcome.unknown_members.is_empty() {
                     events.push(CoreEvent::UnknownMembers(outcome.unknown_members));
                 }
+                if outcome.sync_queued {
+                    events.push(CoreEvent::SyncQueued);
+                }
                 if outcome.send {
                     events.push(CoreEvent::OutboxChanged);
                 }
                 if let Some(key) = outcome.download_picture {
                     events.push(CoreEvent::DownloadGroupPicture(key));
+                }
+                if let Some(key) = outcome.remove_picture {
+                    events.push(CoreEvent::RemoveGroupPicture(key));
                 }
                 if let Some(start) = outcome.call_start {
                     events.push(CoreEvent::GroupCallStart {
@@ -931,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reflected_group_message_asks_nobody() {
+    fn a_reflected_group_message_asks_nobody_and_reports_no_change() {
         use libthreema::model::message::{GroupMessageBody, IncomingGroupMessageBody, TextMessage};
         let (_dir, store) = store();
         contact(
@@ -973,6 +986,70 @@ mod tests {
         assert!(store.outbox().unwrap().is_empty());
         receive(false, 2);
         assert!(!store.outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_group_change_received_as_leader_is_reflected_and_its_new_members_looked_up() {
+        use libthreema::model::message::{
+            GroupMessageBody, GroupSetupMessage, IncomingGroupMessageBody,
+        };
+        let (_dir, store) = store();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "USER0001".into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        contact(
+            &store,
+            "ABCD1234",
+            pc::AcquaintanceLevel::GroupOrDeleted,
+            pc::ActivityState::Active,
+        );
+        let store = Rc::new(store);
+        let events: EventSink = Rc::default();
+        let mut conversations = StoreConversations {
+            store: Rc::clone(&store),
+            events: Rc::clone(&events),
+            user: ThreemaId::try_from("USER0001").unwrap(),
+            from_sync: false,
+        };
+        let identity = GroupIdentity {
+            creator_identity: ThreemaId::try_from("ABCD1234").unwrap(),
+            group_id: 7,
+        };
+        conversations
+            .add_or_update_incoming_message(IncomingMessage {
+                sender_identity: identity.creator_identity,
+                id: MessageId(1),
+                overrides: libthreema::model::message::MessageOverrides::default(),
+                created_at: 1,
+                body: IncomingMessageBody::Group(IncomingGroupMessageBody {
+                    group_identity: identity,
+                    body: GroupMessageBody::Setup(GroupSetupMessage {
+                        members: vec![
+                            ThreemaId::try_from("USER0001").unwrap(),
+                            ThreemaId::try_from(OTHER).unwrap(),
+                        ],
+                    }),
+                }),
+            })
+            .unwrap();
+        let events = events.borrow();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CoreEvent::SyncQueued))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            CoreEvent::UnknownMembers(identities) if identities.as_slice() == [OTHER.to_owned()]
+        )));
+        assert!(store.next_sync().unwrap().is_some());
     }
 
     #[test]

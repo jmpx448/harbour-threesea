@@ -59,7 +59,12 @@ pub(crate) const MIGRATION_PICTURES: &str = "
 /// into the groups an older version's group sync took them out of: without them, everything they
 /// wrote was dropped as coming from a stranger, and nothing we wrote reached them. Empty lists
 /// are how those syncs left a group they created by mistake; it is someone else's group, so it
-/// isn't the notes group it looked like.
+/// isn't the notes group it looked like. And what the other devices
+/// are still owed of a group change that needs the network first, kept so that a crash or a failed
+/// lookup or upload can't lose it: `group_member_lookups`, members who have no contact yet
+/// (`added`: they came with this change, the others get to see that), and `group_picture_syncs`,
+/// groups whose new picture isn't on the mirror yet. The setting: contacts looked up for groups
+/// used to reach no other device, see `sync::reflect_group_contacts_once`.
 pub(crate) const MIGRATION_SYNC: &str = r#"
     ALTER TABLE groups ADD COLUMN kicked INTEGER NOT NULL DEFAULT 0;
     UPDATE groups
@@ -67,7 +72,17 @@ pub(crate) const MIGRATION_SYNC: &str = r#"
                           ELSE '["' || creator || '",' || substr(members, 2) END
      WHERE left_group = 0
        AND creator != (SELECT threema_id FROM identity WHERE id = 1)
-       AND NOT EXISTS (SELECT 1 FROM json_each(groups.members) AS m WHERE m.value = groups.creator);"#;
+       AND NOT EXISTS (SELECT 1 FROM json_each(groups.members) AS m WHERE m.value = groups.creator);
+    CREATE TABLE group_member_lookups (
+        key       TEXT NOT NULL,
+        identity  TEXT NOT NULL,
+        added     INTEGER NOT NULL,
+        PRIMARY KEY (key, identity)
+    ) WITHOUT ROWID;
+    CREATE TABLE group_picture_syncs (
+        key  TEXT PRIMARY KEY NOT NULL
+    ) WITHOUT ROWID;
+    INSERT OR REPLACE INTO settings (key, value) VALUES ('group_contacts_to_reflect', '1');"#;
 
 /// _Recently resynced_ lasts an hour (both directions).
 const RESYNC_INTERVAL_MS: i64 = 60 * 60 * 1000;
@@ -345,6 +360,78 @@ impl Store {
         Ok(())
     }
 
+    /// The other devices have to hear of `identity` in this group once its contact is here.
+    pub(crate) fn add_member_lookup(
+        &self,
+        key: &str,
+        identity: &str,
+        added: bool,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO group_member_lookups (key, identity, added) VALUES (?1, ?2, ?3)
+             ON CONFLICT (key, identity) DO UPDATE SET added = added OR excluded.added",
+            params![key, identity, added],
+        )?;
+        Ok(())
+    }
+
+    /// Whoever such a lookup is still outstanding for.
+    pub(crate) fn outstanding_member_lookups(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT DISTINCT identity FROM group_member_lookups ORDER BY identity")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The groups waiting for `identity`, each with whether it came with the change there; they
+    /// stop waiting.
+    pub(crate) fn take_member_lookups(
+        &self,
+        identity: &str,
+    ) -> Result<Vec<(String, bool)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT key, added FROM group_member_lookups WHERE identity = ?1")?;
+        let rows = statement
+            .query_map([identity], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        self.conn.execute(
+            "DELETE FROM group_member_lookups WHERE identity = ?1",
+            [identity],
+        )?;
+        Ok(rows)
+    }
+
+    /// A picture from the group's creator is on the device. One store step with the note that the
+    /// other devices are owed it, so a crash before the upload can't lose that.
+    pub(crate) fn store_received_group_picture(&self, group: &Group) -> Result<(), StoreError> {
+        let step = self.conn.unchecked_transaction()?;
+        self.upsert_group(group)?;
+        if self.multi_device()?.is_some() {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO group_picture_syncs (key) VALUES (?1)",
+                [&group.key],
+            )?;
+        }
+        step.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn group_picture_syncs(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT key FROM group_picture_syncs")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// No longer owed; `false` if it already wasn't.
+    pub(crate) fn group_picture_synced(&self, key: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM group_picture_syncs WHERE key = ?1", [key])?
+            > 0)
+    }
+
     /// Remove a group and its conversation (only once it has been left).
     pub fn delete_group(&self, key: &str) -> Result<(), StoreError> {
         self.conn
@@ -353,6 +440,10 @@ impl Store {
             "DELETE FROM pending_receivers WHERE conversation = ?1",
             [key],
         )?;
+        self.conn
+            .execute("DELETE FROM group_member_lookups WHERE key = ?1", [key])?;
+        self.conn
+            .execute("DELETE FROM group_picture_syncs WHERE key = ?1", [key])?;
         self.delete_conversation(key)
     }
 
@@ -502,6 +593,35 @@ impl Store {
     }
 }
 
+/// What happened to a member (`GroupSync.Update.member_state_changes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberChange {
+    Added,
+    Kicked,
+    Left,
+}
+
+/// What an incoming group message changed, for the user's other devices. A picture isn't here: it
+/// is reflected when it is on this device (`download_group_picture`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupChange {
+    /// A new group.
+    pub created: bool,
+    pub name: bool,
+    pub members: bool,
+    /// Who came and went; empty when we came back ourselves.
+    pub member_changes: std::collections::BTreeMap<String, MemberChange>,
+    /// We were removed, or are (still) a member after a setup.
+    pub user_state: bool,
+    pub picture_removed: bool,
+}
+
+impl GroupChange {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// What processing an incoming group message did.
 #[derive(Debug, Default)]
 pub struct GroupOutcome {
@@ -516,8 +636,14 @@ pub struct GroupOutcome {
     pub groups_changed: bool,
     /// The group's picture changed: download it (group key).
     pub download_picture: Option<String>,
+    /// The group's picture was deleted: its file goes too (group key).
+    pub remove_picture: Option<String>,
     /// A group call was announced (checked and stored by the app).
     pub call_start: Option<libthreema::model::message::GroupCallStartMessage>,
+    /// What the other devices of the group have to be told.
+    pub change: GroupChange,
+    /// That went into the sync queue, in the same store step as the change.
+    pub sync_queued: bool,
 }
 
 /// Group receive steps; `user` is our identity, `contact_exists` whether we have a contact (any
@@ -528,8 +654,72 @@ pub struct GroupOutcome {
 /// itself and answering whatever needed an answer. Group control is discarded then, like Android's
 /// `executeMessageStepsFromSync`: the leader reflects a `GroupSync` for it (csp.struct.yml), and
 /// that makes the status lines. Content is simply stored, and nothing goes out from here.
+///
+/// While this device leads, group control runs as one store step together with the entry that tells
+/// the other devices (csp.struct.yml's _MD_ steps): a crash can't keep the change and lose the
+/// entry, or the other way round.
 #[expect(clippy::too_many_arguments, reason = "the receive context")]
 pub fn receive(
+    store: &Store,
+    user: &str,
+    sender: &str,
+    message_id: u64,
+    created_at: i64,
+    message: IncomingGroupMessageBody,
+    from_sync: bool,
+    contact_exists: &dyn Fn(&str) -> bool,
+    blocked: &dyn Fn(&str) -> Result<bool, StoreError>,
+    name_of: &dyn Fn(&str) -> String,
+) -> Result<GroupOutcome, StoreError> {
+    let group_key = key(&message.group_identity);
+    let control = matches!(
+        message.body,
+        GroupMessageBody::Setup(_)
+            | GroupMessageBody::Name(_)
+            | GroupMessageBody::Leave(_)
+            | GroupMessageBody::DeleteProfilePicture(_)
+    );
+    if from_sync || !control {
+        return receive_steps(
+            store,
+            user,
+            sender,
+            message_id,
+            created_at,
+            message,
+            from_sync,
+            contact_exists,
+            blocked,
+            name_of,
+        );
+    }
+    let step = store.conn.unchecked_transaction()?;
+    let mut outcome = receive_steps(
+        store,
+        user,
+        sender,
+        message_id,
+        created_at,
+        message,
+        from_sync,
+        contact_exists,
+        blocked,
+        name_of,
+    )?;
+    if !outcome.change.is_empty() {
+        outcome.sync_queued = crate::sync::queue_received_group_change(
+            store,
+            &group_key,
+            &outcome.change,
+            &outcome.unknown_members,
+        )?;
+    }
+    step.commit()?;
+    Ok(outcome)
+}
+
+#[expect(clippy::too_many_arguments, reason = "the receive context")]
+fn receive_steps(
     store: &Store,
     user: &str,
     sender: &str,
@@ -605,6 +795,11 @@ pub fn receive(
                 &mut outcome,
             )?;
             outcome.groups_changed = true;
+            outcome.change.members = true;
+            outcome
+                .change
+                .member_changes
+                .insert(sender.to_owned(), MemberChange::Left);
             return Ok(outcome);
         }
         GroupMessageBody::SyncRequest(_) => {
@@ -684,6 +879,7 @@ pub fn receive(
                     &mut outcome,
                 )?;
                 outcome.groups_changed = true;
+                outcome.change.name = true;
             }
         }
         // Group calls (ADR 0012): the app checks the SFU URL and peeks the call.
@@ -795,6 +991,10 @@ pub fn receive(
                 group.picture_version = 0;
                 store.upsert_group(&group)?;
                 outcome.groups_changed = true;
+                outcome.change.picture_removed = true;
+                // A picture still owed to the other devices isn't any more.
+                store.group_picture_synced(&key)?;
+                outcome.remove_picture = Some(key.clone());
             }
         }
         GroupMessageBody::Setup(_)
@@ -931,6 +1131,7 @@ fn receive_setup(
         store.upsert_group(&group)?;
         if was_in {
             store.set_group_kicked(key, true)?;
+            outcome.change.user_state = true;
         }
         let code = if members.is_empty() {
             "groupDisbanded"
@@ -962,6 +1163,7 @@ fn receive_setup(
                 picture_version: 0,
             })?;
             status(store, key, "groupJoined", outcome)?;
+            outcome.change.created = true;
         }
         Some(mut group) => {
             let rejoined = group.left;
@@ -984,6 +1186,20 @@ fn receive_setup(
             group.members = new_members;
             group.left = false;
             store.upsert_group(&group)?;
+            outcome.change.members = true;
+            outcome.change.user_state = true;
+            for member in &added {
+                outcome
+                    .change
+                    .member_changes
+                    .insert(member.clone(), MemberChange::Added);
+            }
+            for member in &removed {
+                outcome
+                    .change
+                    .member_changes
+                    .insert(member.clone(), MemberChange::Kicked);
+            }
             if rejoined {
                 status(store, key, "groupJoined", outcome)?;
             } else {
@@ -1377,6 +1593,7 @@ mod tests {
             };
             let outcome = run_reflected(&store, sender, CREATOR, body);
             assert!(outcome.added.is_empty() && !outcome.groups_changed);
+            assert!(outcome.change.is_empty());
         }
         assert_eq!(store.group(&own).unwrap(), before);
         let group = store.group(&theirs).unwrap().unwrap();
@@ -1472,7 +1689,10 @@ mod tests {
 
         store
             .conn
-            .execute_batch("ALTER TABLE groups DROP COLUMN kicked;")
+            .execute_batch(
+                "ALTER TABLE groups DROP COLUMN kicked;
+                 DROP TABLE group_member_lookups; DROP TABLE group_picture_syncs;",
+            )
             .unwrap();
         store.conn.execute_batch(MIGRATION_SYNC).unwrap();
 
@@ -1482,6 +1702,360 @@ mod tests {
         assert_eq!(before(&fine), fine_before);
         assert_eq!(before(&left), left_before);
         assert!(!store.group_kicked(&left).unwrap());
+    }
+
+    fn queued(store: &Store) -> usize {
+        let mut count = 0;
+        while let Some((id, _, _)) = store.next_sync().unwrap() {
+            store.sync_done(id).unwrap();
+            count += 1;
+        }
+        count
+    }
+
+    /// The whole life of a group as a leader sees it: `queued` after each message, and every step
+    /// says so in its outcome.
+    fn control_messages(store: &Store) -> Vec<(bool, usize)> {
+        let group_key = key(&gid(CREATOR));
+        let mut seen = Vec::new();
+        let mut note = |outcome: GroupOutcome| {
+            seen.push((outcome.sync_queued, queued(store)));
+        };
+        note(run(store, CREATOR, CREATOR, setup(&[USER, BOB])));
+        note(run(
+            store,
+            CREATOR,
+            CREATOR,
+            setup(&[USER, BOB, "00000EVE"]),
+        ));
+        note(run(
+            store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::Name(GroupNameMessage {
+                name: "Crew".into(),
+            }),
+        ));
+        note(run(
+            store,
+            "00000EVE",
+            CREATOR,
+            GroupMessageBody::Leave(GroupLeaveMessage),
+        ));
+        let mut group = store.group(&group_key).unwrap().unwrap();
+        group.picture_version = 3;
+        store.upsert_group(&group).unwrap();
+        note(run(
+            store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::DeleteProfilePicture(
+                libthreema::model::message::DeleteProfilePictureMessage,
+            ),
+        ));
+        note(run(store, CREATOR, CREATOR, setup(&[BOB])));
+        // Not a change: nothing to tell.
+        note(run(store, CREATOR, CREATOR, setup(&[BOB])));
+        note(run(
+            store,
+            BOB,
+            USER,
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+        ));
+        seen
+    }
+
+    #[test]
+    fn every_group_change_is_queued_for_the_other_devices_while_in_a_device_group() {
+        let (_dir, store) = store();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: USER.into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        assert_eq!(
+            control_messages(&store),
+            vec![
+                (true, 1),
+                (true, 1),
+                (true, 1),
+                (true, 1),
+                (true, 1),
+                (true, 1),
+                (false, 0),
+                (false, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_is_queued_without_a_device_group() {
+        let (_dir, store) = store();
+        assert!(
+            control_messages(&store)
+                .iter()
+                .all(|step| *step == (false, 0))
+        );
+    }
+
+    #[test]
+    fn a_change_that_fails_to_queue_is_not_kept() {
+        let (_dir, store) = store();
+        // In a device group without an identity: the entry can't be built.
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let attempt = receive(
+            &store,
+            USER,
+            CREATOR,
+            1,
+            1,
+            IncomingGroupMessageBody {
+                group_identity: gid(CREATOR),
+                body: setup(&[USER, BOB]),
+            },
+            false,
+            &|_| true,
+            &|_| Ok(false),
+            &|m| m.to_owned(),
+        );
+        assert!(attempt.is_err());
+        assert!(store.group(&key(&gid(CREATOR))).unwrap().is_none());
+        assert!(store.next_sync().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_member_without_a_contact_waits_for_the_lookup() {
+        let (_dir, store) = store();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: USER.into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        // New group: nobody came "with the change".
+        run(&store, CREATOR, CREATOR, setup(&[USER, "UNKNOWN1"]));
+        assert_eq!(
+            store.outstanding_member_lookups().unwrap(),
+            vec!["UNKNOWN1"]
+        );
+        assert_eq!(
+            store.take_member_lookups("UNKNOWN1").unwrap(),
+            vec![(key(&gid(CREATOR)), false)]
+        );
+        assert!(store.outstanding_member_lookups().unwrap().is_empty());
+        // Added to a group we have: they did.
+        let identity = GroupIdentity {
+            creator_identity: id(BLOCKED),
+            group_id: 9,
+        };
+        let theirs = Group {
+            key: key(&identity),
+            identity,
+            name: String::new(),
+            members: vec![BLOCKED.into()],
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        store.upsert_group(&theirs).unwrap();
+        receive(
+            &store,
+            USER,
+            BLOCKED,
+            2,
+            1,
+            IncomingGroupMessageBody {
+                group_identity: identity,
+                body: setup(&[USER, "UNKNOWN1"]),
+            },
+            false,
+            &|m| m != "UNKNOWN1",
+            &|_| Ok(false),
+            &|m| m.to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.take_member_lookups("UNKNOWN1").unwrap(),
+            vec![(theirs.key, true)]
+        );
+    }
+
+    #[test]
+    fn a_new_picture_is_owed_to_the_other_devices_only_in_a_device_group() {
+        let (_dir, store) = store();
+        let group_key = stored_group(&store, CREATOR, &[CREATOR], false);
+        let group = store.group(&group_key).unwrap().unwrap();
+        store.store_received_group_picture(&group).unwrap();
+        assert!(store.group_picture_syncs().unwrap().is_empty());
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        store.store_received_group_picture(&group).unwrap();
+        assert_eq!(
+            store.group_picture_syncs().unwrap(),
+            vec![group_key.clone()]
+        );
+        assert!(store.group_picture_synced(&group_key).unwrap());
+        assert!(!store.group_picture_synced(&group_key).unwrap());
+        assert!(store.group_picture_syncs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_deleted_picture_is_no_longer_owed_and_its_file_goes() {
+        let (_dir, store) = store();
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: USER.into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        let group_key = stored_group(&store, CREATOR, &[CREATOR], false);
+        let mut group = store.group(&group_key).unwrap().unwrap();
+        group.picture_version = 2;
+        store.store_received_group_picture(&group).unwrap();
+        let outcome = run(
+            &store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::DeleteProfilePicture(
+                libthreema::model::message::DeleteProfilePictureMessage,
+            ),
+        );
+        assert_eq!(outcome.remove_picture, Some(group_key));
+        assert!(store.group_picture_syncs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nothing_owed_stays_behind_a_deleted_group_or_a_wipe() {
+        let (_dir, store) = store();
+        let owed = |store: &Store| {
+            (
+                store.outstanding_member_lookups().unwrap().len(),
+                store.group_picture_syncs().unwrap().len(),
+            )
+        };
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let group_key = stored_group(&store, CREATOR, &[CREATOR], true);
+        let note = |store: &Store| {
+            let group = store.group(&group_key).unwrap();
+            store
+                .store_received_group_picture(group.as_ref().unwrap())
+                .unwrap();
+            store.add_member_lookup(&group_key, BOB, true).unwrap();
+        };
+        note(&store);
+        assert_eq!(owed(&store), (1, 1));
+        store.delete_group(&group_key).unwrap();
+        assert_eq!(owed(&store), (0, 0));
+
+        stored_group(&store, CREATOR, &[CREATOR], true);
+        note(&store);
+        store.wipe().unwrap();
+        assert_eq!(owed(&store), (0, 0));
+    }
+
+    #[test]
+    fn a_later_setup_does_not_take_back_that_someone_came() {
+        let (_dir, store) = store();
+        stored_group(&store, CREATOR, &[CREATOR], false);
+        let group_key = key(&gid(CREATOR));
+        store.add_member_lookup(&group_key, BOB, true).unwrap();
+        store.add_member_lookup(&group_key, BOB, false).unwrap();
+        assert_eq!(
+            store.take_member_lookups(BOB).unwrap(),
+            vec![(group_key.clone(), true)]
+        );
+        store.add_member_lookup(&group_key, BOB, false).unwrap();
+        store.add_member_lookup(&group_key, BOB, true).unwrap();
+        assert_eq!(
+            store.take_member_lookups(BOB).unwrap(),
+            vec![(group_key, true)]
+        );
+    }
+
+    #[test]
+    fn what_a_message_changed_is_said_for_the_other_devices() {
+        let (_dir, store) = store();
+        let outcome = run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        assert!(outcome.change.created);
+
+        let outcome = run(
+            &store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::Name(GroupNameMessage {
+                name: "Crew".into(),
+            }),
+        );
+        assert!(outcome.change.name && !outcome.change.created);
+
+        let outcome = run(&store, CREATOR, CREATOR, setup(&[USER, "UNKNOWN1"]));
+        assert!(outcome.change.members && outcome.change.user_state);
+        assert_eq!(
+            outcome.change.member_changes,
+            [
+                (BOB.to_owned(), MemberChange::Kicked),
+                ("UNKNOWN1".to_owned(), MemberChange::Added),
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        let outcome = run(
+            &store,
+            "UNKNOWN1",
+            CREATOR,
+            GroupMessageBody::Leave(GroupLeaveMessage),
+        );
+        assert!(outcome.change.members && !outcome.change.user_state);
+        assert_eq!(
+            outcome.change.member_changes.get("UNKNOWN1"),
+            Some(&MemberChange::Left)
+        );
+
+        let group_key = key(&gid(CREATOR));
+        let mut group = store.group(&group_key).unwrap().unwrap();
+        group.picture_version = 3;
+        store.upsert_group(&group).unwrap();
+        let outcome = run(
+            &store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::DeleteProfilePicture(
+                libthreema::model::message::DeleteProfilePictureMessage,
+            ),
+        );
+        assert!(outcome.change.picture_removed);
+
+        // Plain content changes nothing the others need to hear of from us.
+        let outcome = run(
+            &store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+        );
+        assert!(outcome.change.is_empty());
+
+        let outcome = run(&store, CREATOR, CREATOR, setup(&[]));
+        assert!(outcome.change.user_state && !outcome.change.members);
     }
 
     #[test]

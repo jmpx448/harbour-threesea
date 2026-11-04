@@ -378,6 +378,9 @@ pub(crate) fn settle_command(
 async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, emit: Emit) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    if let Err(error) = crate::sync::reflect_group_contacts_once(&app.store) {
+        tracing::warn!(%error, "group contacts not queued for the other devices");
+    }
     let mut connection: Option<mpsc::UnboundedReceiver<FromConnection>> = app.ensure_connection();
     let mut media_events = app.take_media_events();
     let mut web_events = app.take_web_events();

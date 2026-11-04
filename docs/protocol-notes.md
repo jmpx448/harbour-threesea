@@ -278,6 +278,26 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   lists (md-d2d.proto), and the name and `user_state` when they differ. Content is stored as it
   comes, whatever our lists say, as the leader ran the receive steps. Member changes made here
   fill `member_state_changes` for the others.
+- While we lead, a group message that changes a group is reflected as `GroupSync`, since the
+  reflected message itself tells the others nothing (`GroupOutcome.change`, csp.struct.yml's _MD_
+  steps): a new group as `Create`, else only what changed. Unlike the spec it isn't reflected in a
+  transaction before the change is stored, as the message handling can't wait for the mediator; it
+  goes into `d2d_sync_queue` in the same store transaction as the change, so a crash keeps both or
+  neither. The spec looks new members up first; here that takes the network, so the entry lists
+  only people with a contact, and `group_member_lookups` notes the rest. Once looked up, one
+  store transaction stores their contacts and queues `ContactSync.Create` and then a
+  `GroupSync.Update` with them in the list (`ADDED` for those who came with a change, not for a new
+  group's). No group sync names anyone before their contact has gone out. A failed lookup is tried
+  again on reconnect and hourly. Threema Desktop diffs the lists and uses only the map's `LEFT`
+  (`model/group.ts`), so it shows such a late member of a new group as "added"; accepted, as
+  the alternative is holding back the new group. `SyncQueued` makes the connection reflect the
+  entry before it looks at the next message: Desktop drops a reflected message for a
+  group it doesn't have. Migration 35 also marks a one-off: contacts looked up for groups
+  before this reached no other device and Desktop drops a member list naming one, so the first
+  start while in a device group queues every group-level contact as `ContactSync.Create` (Desktop
+  discards those it has). A picture is reflected from the mirror once it is on this device;
+  `group_picture_syncs` notes it until then, in the same step as the picture, and it is retried
+  the same way; deleting the picture clears the note and the file, and a version 0 sends nothing.
 - Not yet: group calls, per-receiver legacy reactions.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We

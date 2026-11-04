@@ -6,16 +6,17 @@
 //! (`optional` in md-d2d-sync.proto). Pictures come as blob mirror references
 //! (`CoreEvent::SyncPicture`, fetched by `App::apply_synced_picture`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use libthreema::{
     common::{FeatureMask, ThreemaId, keys::PublicKey},
     model::contact::Contact,
     protobuf::{
-        common::GroupIdentity as ProtoGroupIdentity,
+        common::{GroupIdentity as ProtoGroupIdentity, Identities, Unit},
         d2d::{
-            ContactSync, GroupSync, SettingsSync, UserProfileSync, contact_sync, group_sync,
-            group_sync::update::MemberStateChange, settings_sync, user_profile_sync,
+            ContactSync, GroupSync, SettingsSync, UserProfileSync, contact_sync, envelope::Content,
+            group_sync, group_sync::update::MemberStateChange, settings_sync,
+            transaction_scope::Scope, user_profile_sync,
         },
         d2d_sync::{
             self, ConversationCategory, ConversationVisibility, ReadReceiptPolicy,
@@ -28,6 +29,8 @@ use libthreema::protobuf::common::{DeltaImage, delta_image};
 
 use crate::{
     chat_notifications::Policy,
+    contacts::Lookup,
+    groups::{GroupChange, MemberChange},
     providers::CoreEvent,
     store::{Store, StoreError, keys},
 };
@@ -440,6 +443,212 @@ fn apply_group(
     Ok(true)
 }
 
+/// The group sync for a change a group message made while this device leads: a new group whole,
+/// else only what changed (csp.struct.yml, the _MD_ steps of the group control messages).
+fn received_change_sync(
+    store: &Store,
+    group: &crate::groups::Group,
+    change: &GroupChange,
+) -> Result<Content, StoreError> {
+    let action = if change.created {
+        let mut synced = crate::join::group_sync(store, group)?;
+        // Not here yet; a picture comes once it has been downloaded.
+        synced.profile_picture = None;
+        group_sync::Action::Create(group_sync::Create {
+            group: Some(synced),
+        })
+    } else {
+        let mut synced = group_only(group);
+        if change.name {
+            synced.name = Some(group.name.clone());
+        }
+        let mut member_state_changes = HashMap::new();
+        if change.members {
+            let identities = crate::join::group_sync_members(store, group)?;
+            for (member, state) in &change.member_changes {
+                // Someone who has no contact yet comes later (`members_looked_up`).
+                if *state != MemberChange::Added || identities.contains(member) {
+                    member_state_changes.insert(
+                        member.clone(),
+                        match state {
+                            MemberChange::Added => MemberStateChange::Added,
+                            MemberChange::Kicked => MemberStateChange::Kicked,
+                            MemberChange::Left => MemberStateChange::Left,
+                        } as i32,
+                    );
+                }
+            }
+            synced.member_identities = Some(Identities { identities });
+        }
+        if change.user_state {
+            synced.user_state = Some(if !group.left {
+                group::UserState::Member
+            } else if store.group_kicked(&group.key)? {
+                group::UserState::Kicked
+            } else {
+                group::UserState::Left
+            } as i32);
+        }
+        if change.picture_removed {
+            synced.profile_picture = Some(DeltaImage {
+                image: Some(delta_image::Image::Removed(Unit {})),
+            });
+        }
+        group_sync::Action::Update(group_sync::Update {
+            group: Some(synced),
+            member_state_changes,
+        })
+    };
+    Ok(Content::GroupSync(GroupSync {
+        action: Some(action),
+    }))
+}
+
+/// A group sync that only names the group: what changed goes on top.
+pub(crate) fn group_only(group: &crate::groups::Group) -> d2d_sync::Group {
+    d2d_sync::Group {
+        group_identity: Some(ProtoGroupIdentity {
+            group_id: group.identity.group_id,
+            creator_identity: group.identity.creator_identity.as_str().to_owned(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Tell the other devices of a change a group message made, in the caller's store step. Nothing
+/// without a device group (`false`). The other devices only get to see people they have a contact
+/// for, so the members still `unknown` here aren't in this entry: they are noted, and the lookup
+/// sends their contact and then the list with them in it (`members_looked_up`). So however long
+/// the lookup takes, no group sync names anyone before their contact has gone out.
+pub(crate) fn queue_received_group_change(
+    store: &Store,
+    key: &str,
+    change: &GroupChange,
+    unknown: &[String],
+) -> Result<bool, StoreError> {
+    if store.multi_device()?.is_none() {
+        return Ok(false);
+    }
+    let Some(group) = store.group(key)? else {
+        return Ok(false);
+    };
+    let content = received_change_sync(store, &group, change)?;
+    store.queue_sync_content(Scope::GroupSync, content)?;
+    for identity in unknown {
+        let added = change.member_changes.get(identity) == Some(&MemberChange::Added);
+        store.add_member_lookup(key, identity, added)?;
+    }
+    Ok(true)
+}
+
+/// What the directory said about group members, as one store step: their contacts, and for the
+/// lookups the other devices are owed, each contact as a `ContactSync.Create` and then, for each
+/// group waiting for it, the list with them in it. Someone the directory doesn't know stops being
+/// waited for. Returns whether something was queued. A failed lookup never gets here: what it owed
+/// stays noted and is tried again.
+pub(crate) fn members_looked_up(
+    store: &Store,
+    results: Vec<(String, Lookup)>,
+) -> Result<bool, StoreError> {
+    use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+
+    let step = store.conn.unchecked_transaction()?;
+    let device_group = store.multi_device()?.is_some();
+    let mut queued = false;
+    let mut groups: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    for (identity, result) in results {
+        let waiting = store.take_member_lookups(&identity)?;
+        if let Lookup::Found(contact) = result
+            && store.contact(&identity)?.is_none()
+        {
+            let mut contact = *contact;
+            contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+            store.upsert_contact(&contact)?;
+            if device_group && !waiting.is_empty() {
+                store.queue_sync_content(
+                    Scope::ContactSync,
+                    Content::ContactSync(ContactSync {
+                        action: Some(contact_sync::Action::Create(contact_sync::Create {
+                            contact: Some(crate::join::contact_sync(store, &contact)?),
+                        })),
+                    }),
+                )?;
+                queued = true;
+            }
+        }
+        for (key, added) in waiting {
+            groups
+                .entry(key)
+                .or_default()
+                .push((identity.clone(), added));
+        }
+    }
+    if device_group {
+        for (key, members) in groups {
+            let Some(group) = store.group(&key)? else {
+                continue;
+            };
+            let identities = crate::join::group_sync_members(store, &group)?;
+            // Nobody new in the list (the directory didn't know them): nothing to say.
+            if !members
+                .iter()
+                .any(|(member, _)| identities.contains(member))
+            {
+                continue;
+            }
+            let member_state_changes = members
+                .into_iter()
+                .filter(|(member, added)| *added && identities.contains(member))
+                .map(|(member, _)| (member, MemberStateChange::Added as i32))
+                .collect();
+            let mut synced = group_only(&group);
+            synced.member_identities = Some(Identities { identities });
+            store.queue_sync_content(
+                Scope::GroupSync,
+                Content::GroupSync(GroupSync {
+                    action: Some(group_sync::Action::Update(group_sync::Update {
+                        group: Some(synced),
+                        member_state_changes,
+                    })),
+                }),
+            )?;
+            queued = true;
+        }
+    }
+    step.commit()?;
+    Ok(queued)
+}
+
+/// Once, after the update that brought this: contacts looked up for a group used to stay on this
+/// device, so a linked Desktop doesn't have them, and throws away every member list naming one.
+/// All group-level contacts go out; it discards those it has. One store step, and only for a
+/// device group: one linked later gets all contacts with the join anyway.
+pub(crate) fn reflect_group_contacts_once(store: &Store) -> Result<(), StoreError> {
+    use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+
+    if store.setting(keys::GROUP_CONTACTS_TO_REFLECT)?.is_none() {
+        return Ok(());
+    }
+    let step = store.conn.unchecked_transaction()?;
+    if store.multi_device()?.is_some() {
+        for contact in store.contacts()? {
+            if contact.acquaintance_level == AcquaintanceLevel::GroupOrDeleted {
+                store.queue_sync_content(
+                    Scope::ContactSync,
+                    Content::ContactSync(ContactSync {
+                        action: Some(contact_sync::Action::Create(contact_sync::Create {
+                            contact: Some(crate::join::contact_sync(store, &contact)?),
+                        })),
+                    }),
+                )?;
+            }
+        }
+    }
+    store.delete_setting(keys::GROUP_CONTACTS_TO_REFLECT)?;
+    step.commit()?;
+    Ok(())
+}
+
 pub fn contact_sync(
     store: &Store,
     sync: ContactSync,
@@ -588,8 +797,6 @@ pub fn user_profile_sync(
 
 #[cfg(test)]
 mod tests {
-    use libthreema::protobuf::common::Identities;
-
     use super::*;
 
     const USER: &str = "USER0001";
@@ -668,6 +875,43 @@ mod tests {
             .into_iter()
             .map(|message| message.body)
             .collect()
+    }
+
+    #[test]
+    fn group_contacts_go_out_once_after_the_update_and_only_to_a_device_group() {
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        let (_dir, store) = store();
+        let mut hidden = crate::contacts::test_contact(BOB);
+        hidden.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&hidden).unwrap();
+        let mut direct = crate::contacts::test_contact(EVE);
+        direct.acquaintance_level = AcquaintanceLevel::Direct;
+        store.upsert_contact(&direct).unwrap();
+
+        // A new store has the mark from the migration, and no device group: it just goes.
+        reflect_group_contacts_once(&store).unwrap();
+        assert!(store.next_sync().unwrap().is_none());
+        assert!(
+            store
+                .setting(keys::GROUP_CONTACTS_TO_REFLECT)
+                .unwrap()
+                .is_none()
+        );
+
+        // As after updating with Desktop linked.
+        store
+            .set_setting(keys::GROUP_CONTACTS_TO_REFLECT, "1")
+            .unwrap();
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        reflect_group_contacts_once(&store).unwrap();
+        let (id, scope, _) = store.next_sync().unwrap().unwrap();
+        assert_eq!(scope, Scope::ContactSync as i32);
+        store.sync_done(id).unwrap();
+        assert!(store.next_sync().unwrap().is_none());
+        reflect_group_contacts_once(&store).unwrap();
+        assert!(store.next_sync().unwrap().is_none());
     }
 
     #[test]
@@ -841,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn members_we_have_no_contact_for_are_looked_up() {
+    fn members_we_have_no_contact_for_are_looked_up_without_owing_anyone() {
         let (_dir, store) = store();
         store
             .upsert_contact(&crate::contacts::test_contact(BOB))
@@ -852,5 +1096,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(asked, Some(vec![CREATOR.to_owned(), EVE.to_owned()]));
+        // Another device named them: it tells the others itself, nothing is owed from here.
+        assert!(store.outstanding_member_lookups().unwrap().is_empty());
     }
 }

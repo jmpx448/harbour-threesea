@@ -2583,8 +2583,19 @@ impl<'a> Session<'a> {
         if let Some(ack) = result.outgoing_message_ack {
             self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
         }
+        self.after_incoming().await
+    }
+
+    /// What handling an incoming message left to do.
+    async fn after_incoming(&mut self) -> Result<(), ConnectionError> {
         let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
         for event in events {
+            // A group change goes out before the next message of a burst is even looked at, or
+            // the other devices get a message for a group they don't have yet, and drop it.
+            if matches!(event, CoreEvent::SyncQueued) {
+                self.reflect_queued_syncs().await?;
+                continue;
+            }
             let Some(event) = Box::pin(self.handle_fs_event(event)).await? else {
                 continue;
             };
@@ -2949,6 +2960,206 @@ mod drop_plan_tests {
     #[test]
     fn this_device_alone_may_leave_while_others_stay() {
         assert_eq!(plan_drop(Some(&[OWN]), &[DESKTOP], OWN), (Vec::new(), true));
+    }
+}
+
+#[cfg(test)]
+mod sync_order_tests {
+    use libthreema::model::{
+        message::{
+            GroupMessageBody, GroupSetupMessage, IncomingGroupMessageBody, IncomingMessage,
+            IncomingMessageBody, TextMessage,
+        },
+        provider::ConversationProvider as _,
+    };
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+    use crate::{
+        app::{App, StartConfig},
+        store::StoredIdentity,
+    };
+
+    const USER: &str = "USER0001";
+    const CREATOR: &str = "ABCD1234";
+
+    fn app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: USER.into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        (dir, app)
+    }
+
+    /// A session after its handshake, on a plain socket: every mediator step fails on it, so a
+    /// reflection that is attempted shows as an error.
+    async fn session<'a>(
+        setup: &'a ConnectionSetup,
+        tx: &'a mpsc::UnboundedSender<FromConnection>,
+    ) -> Session<'a> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let events: EventSink = Rc::new(RefCell::new(Vec::new()));
+        let store = &setup.store;
+        let (csp, _) = CspProtocol::new(
+            CspProtocolContextInit {
+                permanent_server_keys: setup.config.chat_server_public_keys.clone(),
+                identity: setup.identity,
+                client_key: ClientKey::from(*setup.client_key),
+                client_info: setup.client_info.clone(),
+                device_cookie: Some(setup.device_cookie),
+                csp_device_id: None,
+            }
+            .try_into()
+            .unwrap(),
+        );
+        let e2e = CspE2eProtocol::new(CspE2eProtocolContextInit {
+            client_info: setup.client_info.clone(),
+            config: Arc::clone(&setup.config),
+            csp_e2e: CspE2eContextInit {
+                user_identity: setup.identity,
+                client_key: ClientKey::from(*setup.client_key),
+                flavor: Flavor::Consumer,
+                nonce_storage: Box::new(RefCell::new(StoreNonces(Rc::clone(store)))),
+                fs_sessions: None,
+            },
+            d2x: None,
+            shortcut: Box::new(WebShortcuts {
+                events: Rc::clone(&events),
+            }),
+            settings: Box::new(RefCell::new(StoreSettings(Rc::clone(store)))),
+            contacts: Box::new(RefCell::new(StoreContacts {
+                store: Rc::clone(store),
+                user_identity: setup.identity,
+                events: Rc::clone(&events),
+            })),
+            conversations: Box::new(RefCell::new(StoreConversations {
+                store: Rc::clone(store),
+                events: Rc::clone(&events),
+                user: setup.identity,
+                from_sync: false,
+            })),
+        });
+        Session {
+            setup,
+            transport: Transport::Direct(stream),
+            liveness: Liveness::new(Instant::now()),
+            d2m_queue: std::collections::VecDeque::new(),
+            multi_device: store.multi_device().unwrap(),
+            fs_disabled: false,
+            fs_resent: std::collections::HashSet::new(),
+            held: Vec::new(),
+            reflection_backlog: false,
+            next_reflect_id: 0x8000_0000,
+            reflected: std::collections::HashSet::new(),
+            csp,
+            e2e,
+            events,
+            tx,
+            awaiting_ack: Vec::new(),
+        }
+    }
+
+    /// There is no mediator here: this shows the reflection is tried within the setup's own step,
+    /// not the order a real mediator would see on the wire.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_group_change_is_reflected_before_the_next_message_of_a_burst() {
+        let (_dir, app) = app();
+        app.store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        let identity = app.store.identity().unwrap().unwrap();
+        let setup = ConnectionSetup {
+            store: Rc::clone(&app.store),
+            media: Arc::clone(&app.media),
+            https: app.https.clone(),
+            config: Arc::clone(&app.config),
+            identity: identity.threema_id.parse().unwrap(),
+            client_key: Zeroizing::new(*identity.client_key),
+            server_group: ChatServerGroup::try_from(identity.server_group.as_str()).unwrap(),
+            device_cookie: DeviceCookie([1; 16]),
+            client_info: app.version.client_info(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let mut conversations = StoreConversations {
+            store: Rc::clone(&setup.store),
+            events: Rc::clone(&session.events),
+            user: setup.identity,
+            from_sync: false,
+        };
+        let group = libthreema::common::GroupIdentity {
+            creator_identity: CREATOR.parse().unwrap(),
+            group_id: 7,
+        };
+        let message = |id: u64, body: GroupMessageBody| IncomingMessage {
+            sender_identity: group.creator_identity,
+            id: MessageId(id),
+            overrides: MessageOverrides::default(),
+            created_at: 1,
+            body: IncomingMessageBody::Group(IncomingGroupMessageBody {
+                group_identity: group,
+                body,
+            }),
+        };
+
+        // The setup's step doesn't end without trying, and keeps the entry for the next try.
+        conversations
+            .add_or_update_incoming_message(message(
+                1,
+                GroupMessageBody::Setup(GroupSetupMessage {
+                    members: vec![setup.identity],
+                }),
+            ))
+            .unwrap();
+        assert!(setup.store.next_sync().unwrap().is_some());
+        assert!(session.after_incoming().await.is_err());
+        assert!(setup.store.next_sync().unwrap().is_some());
+
+        // The text that follows wants nothing of the mediator: the queue was the setup's to send.
+        while let Some((id, ..)) = setup.store.next_sync().unwrap() {
+            setup.store.sync_done(id).unwrap();
+        }
+        conversations
+            .add_or_update_incoming_message(message(
+                2,
+                GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+            ))
+            .unwrap();
+        assert!(session.after_incoming().await.is_ok());
+        let mut added = false;
+        while let Ok(event) = rx.try_recv() {
+            added |= matches!(
+                event,
+                FromConnection::Event(event) if matches!(*event, CoreEvent::MessageAdded { .. })
+            );
+        }
+        assert!(added);
     }
 }
 

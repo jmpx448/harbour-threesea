@@ -5,16 +5,13 @@
 
 use std::rc::Rc;
 
-use libthreema::{
-    common::{GroupIdentity, ThreemaId},
-    protobuf::d2d_sync::contact as pc,
-};
+use libthreema::common::{GroupIdentity, ThreemaId};
 use serde_json::{Value, json};
 
 use crate::{
     app::{ApiError, App},
     connection::ToConnection,
-    contacts::{self, Lookup},
+    contacts,
     groups::{
         self, Group, GroupPicture, OUTBOX_GROUP_LEAVE, OUTBOX_GROUP_NAME, OUTBOX_GROUP_SETUP,
     },
@@ -311,6 +308,7 @@ impl App {
         let store = Rc::clone(&self.store);
         let media = std::sync::Arc::clone(&self.media);
         let events = self.media_events.clone();
+        let connection = self.connection.clone();
         tokio::task::spawn_local(async move {
             let Ok(Some(group)) = store.group(&key) else {
                 return;
@@ -336,8 +334,17 @@ impl App {
                     {
                         group.picture_version =
                             crate::profile_pictures::next_version(group.picture_version);
-                        if store.upsert_group(&group).is_ok() {
+                        if store.store_received_group_picture(&group).is_ok() {
                             let _ = events.send(CoreEvent::GroupsChanged);
+                            // Now that it is here, for the other devices too.
+                            crate::app_multidevice::reflect_group_picture(
+                                &store,
+                                &https,
+                                &media,
+                                &key,
+                                connection.as_ref(),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -403,31 +410,26 @@ impl App {
     }
 
     /// Group members we have no contact for: look them up and store them with acquaintance level
-    /// _group_ (not shown as contacts). Pending group messages are sent once they are known.
+    /// _group_ (not shown as contacts). Pending group messages are sent once they are known. What
+    /// the other devices are owed of them goes out in the same store step (`sync::members_looked_up`)
+    /// and, if the lookup fails, stays noted for the next try (`resume_picture_downloads`).
     pub(crate) fn fetch_members(&self, identities: Vec<String>) {
         let https = self.https.clone();
         let config = std::sync::Arc::clone(&self.config);
         let store = Rc::clone(&self.store);
         let events = self.media_events.clone();
+        let connection = self.connection.clone();
         tokio::task::spawn_local(async move {
             match contacts::lookup(&https, &config, &identities).await {
                 Ok(found) => {
-                    for (_, result) in found {
-                        if let Lookup::Found(contact) = result {
-                            let mut contact = *contact;
-                            if store
-                                .contact(&contact.identity.to_string())
-                                .ok()
-                                .flatten()
-                                .is_some()
-                            {
-                                continue;
-                            }
-                            contact.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
-                            if let Err(error) = store.upsert_contact(&contact) {
-                                tracing::warn!(%error, "storing a group member failed");
+                    match crate::sync::members_looked_up(&store, found) {
+                        Ok(true) => {
+                            if let Some(connection) = &connection {
+                                let _ = connection.send(ToConnection::ReflectSync);
                             }
                         }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(%error, "storing group members failed"),
                     }
                     // Reload contact names; the media/progress channel also triggers sending.
                     let _ = events.send(CoreEvent::ContactsChanged);
@@ -518,6 +520,31 @@ impl App {
             for key in pending {
                 self.download_group_picture(key);
             }
+        }
+        // What the other devices are still owed: a picture not on the mirror yet, a member whose
+        // lookup failed or never got to run.
+        if let Ok(owed) = self.store.group_picture_syncs() {
+            for key in owed {
+                let store = Rc::clone(&self.store);
+                let https = self.https.clone();
+                let media = std::sync::Arc::clone(&self.media);
+                let connection = self.connection.clone();
+                tokio::task::spawn_local(async move {
+                    crate::app_multidevice::reflect_group_picture(
+                        &store,
+                        &https,
+                        &media,
+                        &key,
+                        connection.as_ref(),
+                    )
+                    .await;
+                });
+            }
+        }
+        if let Ok(owed) = self.store.outstanding_member_lookups()
+            && !owed.is_empty()
+        {
+            self.fetch_members(owed);
         }
     }
 

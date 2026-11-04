@@ -401,7 +401,10 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
     let mut groups = Vec::new();
     for stored in store.groups()? {
         let mut group = group_sync(store, &stored)?;
-        if let Some(data) = media.read_picture(&stored.key).ok().flatten() {
+        // Version 0: no picture, whatever a file may say (a removal that didn't finish).
+        if stored.picture_version != 0
+            && let Some(data) = media.read_picture(&stored.key).ok().flatten()
+        {
             group.profile_picture = Some(blobs.add(data, None));
         }
         groups.push(AugmentedGroup {

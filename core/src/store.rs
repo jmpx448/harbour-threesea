@@ -239,6 +239,8 @@ pub mod keys {
     /// What the pending Safe import did (JSON counts: imported, skipped and why), for the
     /// status page.
     pub const SAFE_IMPORT_SUMMARY: &str = "safe_import_summary";
+    /// Set by store migration 35: see `sync::reflect_group_contacts_once`.
+    pub const GROUP_CONTACTS_TO_REFLECT: &str = "group_contacts_to_reflect";
 }
 
 /// The encrypted store.

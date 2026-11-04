@@ -850,6 +850,7 @@ impl App {
                 }
             }
             CoreEvent::UnknownMembers(identities) => self.fetch_members(identities.clone()),
+            CoreEvent::RemoveGroupPicture(key) => self.media.remove_picture(key),
             CoreEvent::WebSessionResume(hash) => self.web_resume(hash),
             CoreEvent::DownloadGroupPicture(key) => self.download_group_picture(key.clone()),
             CoreEvent::DownloadContactPicture(identity) => {
