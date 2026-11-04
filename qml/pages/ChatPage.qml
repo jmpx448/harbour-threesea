@@ -1170,7 +1170,10 @@ Page {
         }
         saveDraft()
         stopTyping()
-        if (window.openChat === identity) window.openChat = ""
+        // Going back to this same chat further down, that one is the open one already.
+        var below = pageStack.currentPage
+        var sameChat = below && below !== page && below.identity === identity && below.inputField
+        if (window.openChat === identity && !sameChat) window.openChat = ""
         // The window of messages goes with the page; clearing it here gives those rows back
         // at once (user question 2026-10-30). No collection run: that would cost a moment
         // exactly while the chat is closing, and the app has an idle one anyway.
@@ -1191,6 +1194,9 @@ Page {
             recordingWentUnasked()
         }
         if (status === PageStatus.Active) {
+            // Also when coming back from a chat opened on top of this one (from a group's
+            // member list): that one's closing left no chat open, and messages here would ring.
+            window.openChat = identity
             markRead()
             // Back from the contact page: blocked or not may have changed.
             if (!isGroup) loadContact()
