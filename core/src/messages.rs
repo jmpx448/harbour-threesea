@@ -1210,14 +1210,33 @@ impl Store {
         Ok(list)
     }
 
-    /// Delete a chat's messages and forget it (see [`Self::empty_conversation`] to keep it).
+    /// Delete a chat: its messages and what is kept for the chat as such, its pin, archive and
+    /// unread marks and its draft, so that it starts anew if it comes back. What belongs to the
+    /// contact or group (notification choice, tone) and the private mark stay; see
+    /// [`Self::empty_conversation`] to keep the chat.
     pub fn delete_conversation(&self, conversation: &str) -> Result<(), StoreError> {
+        let step = self.conn.unchecked_transaction()?;
+        self.delete_chat_rows(conversation)?;
+        step.commit()?;
+        Ok(())
+    }
+
+    /// [`Self::delete_conversation`]'s rows, in the caller's transaction.
+    pub(crate) fn delete_chat_rows(&self, conversation: &str) -> Result<(), StoreError> {
+        for table in [
+            "messages",
+            "emptied_chats",
+            "pinned_chats",
+            "archived_chats",
+            "marked_unread_chats",
+        ] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE conversation = ?1"),
+                [conversation],
+            )?;
+        }
         self.conn.execute(
-            "DELETE FROM messages WHERE conversation = ?1",
-            [conversation],
-        )?;
-        self.conn.execute(
-            "DELETE FROM emptied_chats WHERE conversation = ?1",
+            "DELETE FROM settings WHERE key IN ('draft:' || ?1, 'draftQuote:' || ?1)",
             [conversation],
         )?;
         Ok(())
@@ -2044,6 +2063,43 @@ mod tests {
         // Deleting forgets it.
         store.delete_conversation("BBBBBBBB").unwrap();
         assert_eq!(store.conversations().unwrap().len(), 1);
+    }
+
+    /// When the person writes again, the chat starts anew; emptying it keeps it as it is.
+    #[test]
+    fn a_deleted_chat_takes_its_marks_along_and_an_emptied_one_keeps_them() {
+        use crate::chat_notifications::Policy;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        store.set_archived("BBBBBBBB", true).unwrap();
+        store.set_marked_unread("BBBBBBBB", true).unwrap();
+        store.set_setting("draft:BBBBBBBB", "unsent").unwrap();
+        store.set_setting("draftQuote:BBBBBBBB", "ff").unwrap();
+        store
+            .set_chat_notifications("BBBBBBBB", Some((Policy::Never, None)))
+            .unwrap();
+        store.set_chat_tone("BBBBBBBB", Some("a.ogg")).unwrap();
+        store.empty_conversation("BBBBBBBB").unwrap();
+        assert_eq!(store.archived_chats().unwrap(), ["BBBBBBBB"]);
+        assert_eq!(store.marked_unread_chats().unwrap().len(), 1);
+        assert!(store.setting("draft:BBBBBBBB").unwrap().is_some());
+
+        store.delete_conversation("BBBBBBBB").unwrap();
+        assert!(store.archived_chats().unwrap().is_empty());
+        assert!(store.marked_unread_chats().unwrap().is_empty());
+        assert_eq!(store.setting("draft:BBBBBBBB").unwrap(), None);
+        assert_eq!(store.setting("draftQuote:BBBBBBBB").unwrap(), None);
+        // (A pin ends an archive mark, a private mark both.)
+        store.set_pinned("BBBBBBBB", true).unwrap();
+        store.delete_conversation("BBBBBBBB").unwrap();
+        assert!(store.pinned_chats().unwrap().is_empty());
+        assert!(store.conversations().unwrap().is_empty(), "no empty row");
+        store.set_private("BBBBBBBB", true).unwrap();
+        store.delete_conversation("BBBBBBBB").unwrap();
+        // These belong to the contact, and the mark keeps hiding what comes next.
+        assert!(store.chat_notifications("BBBBBBBB").unwrap().is_some());
+        assert_eq!(store.chat_tones().unwrap().len(), 1);
+        assert!(store.is_private("BBBBBBBB").unwrap());
     }
 
     #[test]

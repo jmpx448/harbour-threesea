@@ -1572,12 +1572,15 @@ Page {
     // What the core has stored, so that an unchanged input doesn't write again.
     readonly property string noDraft: draftKey("", "")
     property string savedDraft: noDraft
+    // Deleted while this page is open (from its attached page, by the contact's deletion): what
+    // is in the input isn't kept for a chat that is gone.
+    property bool chatDeleted: false
     function draftKey(text, quoteId) {
         return JSON.stringify([text, quoteId])
     }
     function saveDraft() {
         draftSaver.stop()
-        if (!inputField) return
+        if (!inputField || chatDeleted) return
         var editing = editingMessageId !== ""
         var text = editing ? encodeMentions(beforeEdit.text, beforeEdit.mentions)
                            : encodeMentions(inputField.text)
@@ -1679,7 +1682,10 @@ Page {
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "messageAdded" && data.message.conversation === page.identity) {
+            if (name === "chatDeleted" && data.identity === page.identity) {
+                page.chatDeleted = true
+            } else if (name === "messageAdded" && data.message.conversation === page.identity) {
+                page.chatDeleted = false
                 page.lastInsertAt = Date.now()
                 page.addMessage(data.message, true)
                 page.typing = false

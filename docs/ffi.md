@@ -129,7 +129,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `retryUpload` | `message` (local id) | `{}`; an upload that failed tries again, with its automatic tries starting over. By itself it tries again after growing pauses (1 min to 8 h, five times) while connected, unless the server refused it or the file can't be read. An upload cut short by the end of the process counts as such a try and shows as failed until its pause ends. |
 | `downloadFile` | `message` (local id) | `{}`; fetch the file (or retry the thumbnail) |
 | `saveFile` | `message` (local id), `directory` (the UI passes `StandardPaths.download`) | `{path, openable}`; decrypted copy outside the encrypted store, sanitised name, " (n)" if taken, an identical existing file is reused. `openable`: the saved name is a document, media type or contact card that may go to the system's app; anything else stays saved only |
-| `deleteConversation` | `identity` | `{}`; also `{"event": "conversationRead", "identity"}`, so the UI takes the notification away |
+| `deleteConversation` | `identity` | `{}`; also `{"event": "conversationRead", "identity"}`, so the UI takes the notification away, and `{"event": "chatDeleted", "identity"}`, so that a page open on the chat keeps no draft |
 | `connectionState` | – | `{state: disconnected\|connecting\|connected}` |
 | `reconnect` | – | `{}`; skip the backoff wait |
 | `searchMessages` | `query` (≥ 2 characters), optional `identity` (one chat) | `{results: [message JSON + snippet (the matching raw text/caption/name), displayName (chat), group, senderName]}`, newest first, at most 100; mentions match by name |

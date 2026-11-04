@@ -1190,6 +1190,9 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             refresh();
         } else if (name == QLatin1String("contactsChanged")) {
             refreshContacts();
+        } else if (name == QLatin1String("chatDeleted")) {
+            // A group's or list's tone may have gone with it.
+            refreshChatTones();
         } else if (name == QLatin1String("connectionState")) {
             m_connectionState = message.value(QStringLiteral("state")).toString();
             emit connectionStateChanged();

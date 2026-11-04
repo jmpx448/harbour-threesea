@@ -1580,6 +1580,9 @@ ApplicationWindow {
                 // Read in Threema Web, on another device, or from a notification.
                 window.clearNotification(data.identity)
                 backend.refreshUnread()
+            } else if (name === "chatDeleted") {
+                // There is no place left to come back to.
+                delete window.readingPlaces[data.identity]
             } else if (name === "privateChanged") {
                 // Marked here, on another device or by a restore: its text leaves Events too.
                 if (data.private) {

@@ -604,6 +604,7 @@ impl Store {
     /// writing, and the creator's answer to the next sync request brings the group back. Anything
     /// else queued for the group goes with it.
     pub fn delete_group(&self, key: &str) -> Result<(), StoreError> {
+        let step = self.conn.unchecked_transaction()?;
         self.conn
             .execute("DELETE FROM groups WHERE key = ?1", [key])?;
         for entry in self.outbox_until(key, i64::MAX)? {
@@ -623,7 +624,17 @@ impl Store {
             .execute("DELETE FROM group_member_lookups WHERE key = ?1", [key])?;
         self.conn
             .execute("DELETE FROM group_picture_syncs WHERE key = ?1", [key])?;
-        self.delete_conversation(key)
+        // Its calls' keys, and the marks of who was resynced lately (`resync_allowed`).
+        self.conn
+            .execute("DELETE FROM group_calls WHERE conversation = ?1", [key])?;
+        self.conn.execute(
+            "DELETE FROM group_resyncs WHERE key = ?1 OR substr(key, 1, length(?1) + 1) = ?1 || '|'",
+            [key],
+        )?;
+        self.forget_chat_choices(key)?;
+        self.delete_chat_rows(key)?;
+        step.commit()?;
+        Ok(())
     }
 
     /// Insert an incoming group message from `sender`; `None` if seen before.
@@ -2559,6 +2570,50 @@ mod tests {
         store.drop_invalid_members(&[CREATOR.to_owned()]).unwrap();
         assert!(store.outbox().unwrap().is_empty());
         assert!(text_in_a_made_up_group(&store, max).send);
+    }
+
+    #[test]
+    fn a_deleted_group_leaves_nothing_of_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let key = "g:ECHOECHO:0000000000000001";
+        let other = "g:ECHOECHO:0000000000000002";
+        for key in [key, other] {
+            store.set_pinned(key, true).unwrap();
+            store
+                .set_setting(&format!("draft:{key}"), "unsent")
+                .unwrap();
+            store
+                .set_chat_notifications(key, Some((crate::chat_notifications::Policy::Never, None)))
+                .unwrap();
+            store.set_chat_tone(key, Some("a.ogg")).unwrap();
+            assert!(store.resync_allowed(key).unwrap());
+            assert!(store.resync_allowed(&format!("{key}|00000BOB")).unwrap());
+        }
+        let call = crate::group_calls::RunningCall {
+            call_id: [1; 32],
+            conversation: key.into(),
+            gck: [2; 32],
+            sfu_base_url: "https://sfu.threema.ch".into(),
+            protocol_version: 1,
+            received_at: 5,
+            failed: 0,
+        };
+        store.add_group_call(&call).unwrap();
+
+        store.delete_group(key).unwrap();
+
+        assert!(store.conn.is_autocommit(), "no transaction left open");
+        assert!(store.group_calls(key).unwrap().is_empty());
+        assert_eq!(store.pinned_chats().unwrap(), [other]);
+        assert_eq!(store.setting(&format!("draft:{key}")).unwrap(), None);
+        assert_eq!(store.chat_notifications(key).unwrap(), None);
+        assert_eq!(store.chat_tones().unwrap().len(), 1);
+        assert!(store.resync_allowed(key).unwrap());
+        assert!(store.resync_allowed(&format!("{key}|00000BOB")).unwrap());
+        // The other group's marks are its own.
+        assert!(!store.resync_allowed(other).unwrap());
+        assert!(!store.resync_allowed(&format!("{other}|00000BOB")).unwrap());
     }
 
     #[test]

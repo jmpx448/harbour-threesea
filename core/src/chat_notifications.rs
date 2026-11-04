@@ -133,6 +133,17 @@ impl Store {
     }
 
     /// `{policy: "never"|"mentioned"|null, until: ms|null}` for the UI.
+    /// The contact or group these were for is gone.
+    pub fn forget_chat_choices(&self, conversation: &str) -> Result<(), StoreError> {
+        for table in ["chat_notifications", "chat_tones"] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE conversation = ?1"),
+                [conversation],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn chat_notifications_json(&self, conversation: &str) -> Value {
         match self.chat_notifications(conversation).ok().flatten() {
             Some((policy, until)) => json!({ "policy": policy.as_str(), "until": until }),

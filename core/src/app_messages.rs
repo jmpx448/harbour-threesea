@@ -1188,7 +1188,6 @@ impl App {
 
     pub(crate) fn delete_conversation(&mut self, identity: &str) -> Result<Value, ApiError> {
         let (id, conversation) = self.readable_conversation(identity)?;
-        self.remove_draft(&id)?;
         match conversation {
             // A group's conversation goes with the group, which must have been left.
             Conversation::Group(group) if group.left => {
@@ -1200,14 +1199,21 @@ impl App {
             // A list's chat goes with the list.
             Conversation::List(_) => self.store.delete_distribution_list(&id)?,
         }
+        self.chat_removed(&id);
+        Ok(json!({}))
+    }
+
+    /// A chat's rows are gone: its media go too. The UI takes its notification, and with it the
+    /// notification's action token, away; a page still open on it no longer keeps a draft.
+    pub(crate) fn chat_removed(&self, key: &str) {
         let store = Rc::clone(&self.store);
         self.media
             .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
-        // The UI takes its notification, and with it the notification's action token, away.
-        let _ = self.media_events.send(crate::providers::CoreEvent::Call(
-            json!({ "event": "conversationRead", "identity": id }),
-        ));
-        Ok(json!({}))
+        for event in ["conversationRead", "chatDeleted"] {
+            let _ = self.media_events.send(crate::providers::CoreEvent::Call(
+                json!({ "event": event, "identity": key }),
+            ));
+        }
     }
 }
 

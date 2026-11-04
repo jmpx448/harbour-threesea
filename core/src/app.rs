@@ -2494,6 +2494,11 @@ fn sync_change(
         | Command::SetChatNotifications { identity, .. } => {
             SyncChange::Conversation(identity.clone())
         }
+        // Its pin or archive mark goes with it. (Of a left group the other devices hear nothing
+        // from this, as the row is gone by then.)
+        Command::DeleteConversation { identity } if chat_is_marked(store, identity) => {
+            SyncChange::Conversation(identity.clone())
+        }
         Command::CreateGroup { .. } => SyncChange::Group {
             key: None,
             created: true,
@@ -2524,6 +2529,13 @@ fn sync_change(
         }
         _ => return None,
     })
+}
+
+fn chat_is_marked(store: &crate::store::Store, conversation: &str) -> bool {
+    let among = |chats: Result<Vec<String>, _>| {
+        chats.is_ok_and(|chats| chats.iter().any(|chat| chat == conversation))
+    };
+    among(store.pinned_chats()) || among(store.archived_chats())
 }
 
 /// What a scanned QR code is, for the one place that decides what to do with it, however it
@@ -3584,6 +3596,10 @@ mod tests {
         app.delete_conversation("ABCD1234").unwrap();
         let event = events.try_recv().unwrap().to_json(&app.store, true);
         assert_eq!(event["event"], "conversationRead");
+        assert_eq!(event["identity"], "ABCD1234");
+        // An open chat page stops keeping its draft.
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "chatDeleted");
         assert_eq!(event["identity"], "ABCD1234");
     }
 
