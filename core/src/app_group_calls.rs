@@ -455,10 +455,16 @@ impl App {
         }
     }
 
-    /// A `GroupCallStart` arrived in a group. With group calls off (Android's group call
-    /// policy) the device stays out of it: no peek at the SFU, no banner, no notification.
+    /// This device takes part in group calls: a build with calls (ADR 0012), and the user didn't
+    /// turn them off (Android's group call policy). Otherwise it stays out of them: no SFU
+    /// credentials, no peek at the SFU, no stored call key, no banner, no notification.
+    fn group_calls_wanted(&self) -> bool {
+        self.calls_supported && self.group_calls_setting().unwrap_or(true)
+    }
+
+    /// A `GroupCallStart` arrived in a group.
     pub(crate) fn on_group_call_start(&self, conversation: &str, start: &GroupCallStartMessage) {
-        if !self.group_calls_setting().unwrap_or(true) {
+        if !self.group_calls_wanted() {
             return;
         }
         let context = self.group_call_context();
@@ -469,7 +475,7 @@ impl App {
     /// `groupCallRefresh {conversation}`: peek the group's calls now (the chat shows a running
     /// call); answers with the `groupCall` event.
     pub(crate) fn group_call_refresh(&self, conversation: &str) -> Value {
-        if !self.group_calls_setting().unwrap_or(true) {
+        if !self.group_calls_wanted() {
             return json!({});
         }
         let context = self.group_call_context();
@@ -488,7 +494,7 @@ impl App {
         fingerprint: &str,
         create: bool,
     ) -> Result<Value, ApiError> {
-        if !self.group_calls_setting()? {
+        if !self.group_calls_wanted() {
             return Err(ApiError::GroupCallNotRunning);
         }
         let started = crate::messages::now_ms();
@@ -1006,6 +1012,60 @@ impl App {
 
     fn emit_group_call(&self, event: Value) {
         let _ = self.media_events.send(CoreEvent::Call(event));
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use libthreema::model::message::GroupCallStartMessage;
+
+    use super::*;
+    use crate::{app::StartConfig, store::StoredIdentity};
+
+    fn app(calls: bool) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        (dir, app)
+    }
+
+    /// No `LocalSet` here: anything spawned for the SFU would panic, so these only pass if the
+    /// build without calls stays out of the announcement and the refresh altogether.
+    #[test]
+    fn a_build_without_calls_stays_out_of_group_calls() {
+        let (_dir, app) = app(false);
+        assert!(!app.group_calls_wanted());
+        app.on_group_call_start(
+            "group",
+            &GroupCallStartMessage {
+                protocol_version: 1,
+                gck: [1; 32],
+                sfu_base_url: "https://sfu.example.org".into(),
+            },
+        );
+        assert_eq!(app.group_call_refresh("group"), json!({}));
+    }
+
+    #[test]
+    fn group_calls_follow_the_build_and_the_setting() {
+        let (_dir, app) = app(true);
+        assert!(app.group_calls_wanted());
+        app.store.set_setting(keys::GROUP_CALLS, "0").unwrap();
+        assert!(!app.group_calls_wanted());
     }
 }
 
