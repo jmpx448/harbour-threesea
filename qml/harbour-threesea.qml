@@ -123,6 +123,8 @@ ApplicationWindow {
     }
 
     function showLock() {
+        // Nothing to lock any more (the grace timer can outlive a failed start).
+        if (backend.state !== "ready" && backend.state !== "needsLicense") return
         locked = true
         settleStack()
     }
