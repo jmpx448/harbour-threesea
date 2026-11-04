@@ -186,6 +186,34 @@ function text(kind, message) {
     case "identityExists":
         //% "This device already has a Threema ID."
         return qsTrId("threesea-la-error-identity-exists")
+    case "diskFull":
+        //% "The phone's storage is full. Free some space."
+        return qsTrId("threesea-la-error-disk-full")
+    case "upgradeNoRoom":
+        //% "Updating the stored chats needs more free space. Free some space; the chats stay as they were until then."
+        return qsTrId("threesea-la-error-upgrade-no-room")
+    case "storeTooNew":
+        //% "This version of Threesea is older than your stored data. Install the newest version."
+        return qsTrId("threesea-la-error-store-too-new")
+    case "storeKey":
+        // With SQLCipher a wrong key and a damaged first page are the same error.
+        //% "The stored data could not be opened: the key does not fit, or the file is damaged. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone."
+        return qsTrId("threesea-la-error-store-key")
+    case "storeDamaged":
+        //% "Part of the stored data could not be read. It may be damaged. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone."
+        return qsTrId("threesea-la-error-store-damaged")
+    case "storeUnreadable":
+        //% "The stored data could not be read. Check that the phone has free storage."
+        return qsTrId("threesea-la-error-store-unreadable")
+    case "store":
+        //% "The stored data could not be opened."
+        return qsTrId("threesea-la-error-store")
+    case "keyMissing":
+        //% "The key to the stored data was not found in the phone's key storage, so the data could not be opened. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone."
+        return qsTrId("threesea-la-error-key-missing")
+    case "secrets":
+        //% "Threesea could not get the key to its data from the phone's key storage. Allow the access if the phone asks for it."
+        return qsTrId("threesea-la-error-secrets")
     case "server":
         // Message from the Threema server, possibly already localized. Stored errors keep only
         // the kind, so there may be none.

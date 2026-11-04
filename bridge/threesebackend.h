@@ -10,6 +10,7 @@
 #include <QJSValue>
 
 class QJSEngine;
+class QJsonObject;
 #include <QObject>
 #include <QRectF>
 #include <QReadWriteLock>
@@ -37,6 +38,9 @@ class ThreeseBackend : public QObject
     // needsIdentity | ready | error
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     Q_PROPERTY(QString identity READ identity NOTIFY stateChanged)
+    // State "error": what went wrong as Errors.js tells it apart, and the same with its code, for
+    // support.
+    Q_PROPERTY(QString errorKind READ errorKind NOTIFY stateChanged)
     Q_PROPERTY(QString errorText READ errorText NOTIFY stateChanged)
     Q_PROPERTY(QObject *contacts READ contacts CONSTANT)
     // disconnected | connecting | connected
@@ -114,6 +118,7 @@ public:
     QString coreVersion() const;
     QString state() const { return m_state; }
     QString identity() const { return m_identity; }
+    QString errorKind() const { return m_errorKind; }
     QString errorText() const { return m_errorText; }
     QObject *contacts() const;
     QString connectionState() const { return m_connectionState; }
@@ -340,6 +345,8 @@ public:
     // dataRemovalFailed says how it ended.
     Q_INVOKABLE void removeAllData(const QString &pin);
     Q_INVOKABLE void retryDataRemoval();
+    // From state "error", not while removing the ID: from the key on, as if just launched.
+    Q_INVOKABLE void retryStart();
     // Reload the contact list model.
     Q_INVOKABLE void refreshContacts();
     // Recount unread messages (cover, notifications).
@@ -367,6 +374,7 @@ signals:
 
 private slots:
     void handleMessage(const QByteArray &json);
+    void startAgain();
     void onKeyWorkDone(quint64 id, const QByteArray &result);
     void reportNetwork();
     void finishDataRemoval();
@@ -380,7 +388,8 @@ private:
     // version as the second one.
     void sendSquarePicture(const QString &path, QVariantMap request, const QJSValue &callback,
                            bool safeCopy = false);
-    void fail(const QString &reason);
+    void fail(const QString &kind, const QString &detail = QString());
+    void failFromCore(const QJsonObject &error);
     // A command that can't reach a core still gets its answer: a refusal, or whoever waits for it
     // (a page holding its text, a reply from a notification) would wait for ever. `id`: the
     // sources of a file command, cleaned up after the answer.
@@ -415,6 +424,7 @@ private:
     QSet<quint64> m_contactRequests;
     QString m_state = QStringLiteral("starting");
     QString m_identity;
+    QString m_errorKind;
     QString m_errorText;
     QString m_connectionState = QStringLiteral("disconnected");
     int m_unreadCount = 0;

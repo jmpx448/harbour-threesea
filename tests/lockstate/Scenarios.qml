@@ -973,6 +973,45 @@ QtObject {
                 check("update", window.pendingUpdate, false)
             }, 0],
         ],
+        // A failed start says what happened and how to go on, also when nobody is looking.
+        failedStartExplains: [
+            [function() {
+                harness.setActive(false)
+                backend.errorKind = "secrets"
+                backend.errorText = "secrets read 22"
+                backend.state = "error"
+            }, 3300],
+            [function() {
+                var n = window.notifications["startFailed"]
+                check("its notification", !!n, true)
+                check("its title", n.summary, "threesea-la-startup-failed")
+                var page = stack.currentPage
+                check("can try again", page.canRetry, true)
+                var hint = page.failureHint()
+                check("the text for the kind", hint.indexOf("threesea-la-error-secrets") >= 0, true)
+                check("how to go on", hint.indexOf("threesea-la-startup-try-again") >= 0, true)
+                check("the code apart from the text", hint.indexOf("threesea-la-startup-code") >= 0, true)
+                backend.errorKind = "storeTooNew"
+                check("a retry can't help a downgrade", page.canRetry, false)
+                check("nor does the text offer it",
+                      page.failureHint().indexOf("threesea-la-startup-try-again") >= 0, false)
+                backend.state = "starting"
+            }, 50],
+            [function() {
+                check("gone when trying again", window.notifications["startFailed"], undefined)
+                checkStack("")
+            }, 0],
+        ],
+        // A failure the window is looking at needs no notification.
+        failedStartInFrontStaysQuiet: [
+            [function() {
+                harness.setActive(true)
+                backend.errorKind = "diskFull"
+                backend.errorText = "diskFull sqlite 13"
+                backend.state = "error"
+            }, 3300],
+            [function() { check("no notification", window.notifications["startFailed"], undefined) }, 0],
+        ],
         // The store fails after the passphrase: the failure shows.
         failsAfterPassphrase: [
             [function() { backend.state = "locked" }, 100],

@@ -1,19 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import "../components/Errors.js" as Errors
 
 Page {
     allowedOrientations: Orientation.All
+
+    // Trying again doesn't make an older version newer.
+    readonly property bool canRetry: backend.state === "error"
+                                     && (backend.dataRemovalStuck || backend.errorKind !== "storeTooNew")
+
+    function failureHint() {
+        var lines = [Errors.text(backend.errorKind, "")]
+        //% "Pull down to try again."
+        if (canRetry) lines.push(qsTrId("threesea-la-startup-try-again"))
+        //% "Code: %1"
+        lines.push(qsTrId("threesea-la-startup-code").arg(backend.errorText))
+        return lines.join("\n")
+    }
 
     SilicaFlickable {
         anchors.fill: parent
 
         PullDownMenu {
-            visible: backend.dataRemovalStuck
+            visible: canRetry
             MenuItem {
                 //% "Try again"
                 text: qsTrId("threesea-me-try-again")
-                onClicked: backend.retryDataRemoval()
+                onClicked: backend.dataRemovalStuck ? backend.retryDataRemoval() : backend.retryStart()
             }
         }
 
@@ -41,11 +55,10 @@ Page {
                   ? qsTrId("threesea-la-removal-stuck")
                   //% "Threesea could not start"
                   : qsTrId("threesea-la-startup-failed")
-            hintText: (backend.dataRemovalStuck
-                       //% "Pull down to try again, or close Threesea and open it again (%1)."
-                       ? qsTrId("threesea-la-removal-stuck-hint")
-                       //% "The encrypted storage could not be opened (%1)."
-                       : qsTrId("threesea-la-startup-failed-hint")).arg(backend.errorText)
+            hintText: backend.dataRemovalStuck
+                      //% "Pull down to try again, or close Threesea and open it again (%1)."
+                      ? qsTrId("threesea-la-removal-stuck-hint").arg(backend.errorText)
+                      : (enabled ? failureHint() : "")
         }
     }
 }

@@ -41,6 +41,14 @@ Secret::Identifier secretId(const QString &name = SecretName)
     return Secret::Identifier(name, CollectionName, SecretManager::DefaultEncryptedStoragePluginName);
 }
 
+// What Secrets answered, for support: which step, and its error code.
+QString secretsCode(const char *step, const Result &result)
+{
+    // log-ok: the secrets daemon's own text about its request, no user data in it
+    qWarning("threesea: Sailfish Secrets: %s: %s", step, qPrintable(result.errorMessage()));
+    return QStringLiteral("%1 %2").arg(QLatin1String(step)).arg(static_cast<int>(result.errorCode()));
+}
+
 } // namespace
 
 SecretStore::SecretStore(QObject *parent)
@@ -78,7 +86,7 @@ void SecretStore::ensureCollection()
     whenFinished(request, [this](CreateCollectionRequest *r) {
         const Result result = r->result();
         if (result.code() == Result::Failed && result.errorCode() != Result::CollectionAlreadyExistsError) {
-            emit failed(QStringLiteral("collection: ") + result.errorMessage());
+            emit failed(QStringLiteral("secrets"), secretsCode("collection", result));
             return;
         }
         if (m_replaceKey) {
@@ -88,10 +96,11 @@ void SecretStore::ensureCollection()
             // key must not stay behind while a new one works.
             remove(StagingName, [this](bool) {
                 remove(SecretName, [this](bool) {
-                    fetch(StagingName, [this](bool stagedFound, const QByteArray &) {
-                        fetch(SecretName, [this, stagedFound](bool keyFound, const QByteArray &) {
-                            if (stagedFound || keyFound) {
-                                emit failed(QStringLiteral("old key still stored"));
+                    fetch(StagingName, [this](const Fetched &staged) {
+                        const bool stagedFound = staged.found;
+                        fetch(SecretName, [this, stagedFound](const Fetched &key) {
+                            if (stagedFound || key.found) {
+                                emit failed(QStringLiteral("oldKeyStored"));
                                 return;
                             }
                             storeNewKey();
@@ -105,19 +114,36 @@ void SecretStore::ensureCollection()
     });
 }
 
+bool SecretStore::readFailed(const Fetched &fetched)
+{
+    // With no database there is nothing to protect: on to a new key, and writing it shows what's
+    // wrong. Also when a secret that isn't there were reported under another code than we expect.
+    if (m_allowCreate || fetched.missing) {
+        return false;
+    }
+    emit failed(QStringLiteral("secrets"), fetched.code);
+    return true;
+}
+
 void SecretStore::fetchKey()
 {
-    fetch(SecretName, [this](bool found, const QByteArray &data) {
-        if (found) {
-            useKey(data, true);
+    fetch(SecretName, [this](const Fetched &key) {
+        if (key.found) {
+            useKey(key.data, true);
+            return;
+        }
+        if (readFailed(key)) {
             return;
         }
         // Interrupted while replacing it: the staging copy is the current one.
-        fetch(StagingName, [this](bool found, const QByteArray &data) {
-            if (!found) {
-                useKey(QByteArray(), false);
+        fetch(StagingName, [this](const Fetched &staged) {
+            if (!staged.found) {
+                if (!readFailed(staged)) {
+                    useKey(QByteArray(), false);
+                }
                 return;
             }
+            const QByteArray data = staged.data;
             qWarning("threesea: finishing an interrupted database key replacement");
             write(SecretName, data, [this, data](bool ok) {
                 if (ok) {
@@ -129,14 +155,27 @@ void SecretStore::fetchKey()
     });
 }
 
-void SecretStore::fetch(const QString &name, std::function<void(bool, const QByteArray &)> done)
+void SecretStore::fetch(const QString &name, std::function<void(const Fetched &)> done)
 {
     auto *request = new StoredSecretRequest(this);
     request->setManager(m_manager);
     request->setIdentifier(secretId(name));
     request->setUserInteractionMode(SecretManager::SystemInteraction);
     whenFinished(request, [done](StoredSecretRequest *r) {
-        done(r->result().code() == Result::Succeeded, r->secret().data());
+        const Result result = r->result();
+        Fetched fetched;
+        fetched.found = result.code() == Result::Succeeded;
+        if (fetched.found) {
+            fetched.data = r->secret().data();
+        } else {
+            // Not InvalidCollectionError: the daemon also answers that when its metadata query
+            // fails, and ensureCollection has made the collection by now.
+            fetched.missing = result.errorCode() == Result::InvalidSecretError;
+            if (!fetched.missing) {
+                fetched.code = secretsCode("read", result);
+            }
+        }
+        done(fetched);
     });
 }
 
@@ -179,7 +218,7 @@ void SecretStore::useKey(const QByteArray &key, bool found)
         storeNewKey();
     } else {
         // A database exists but its key is gone: never silently create a new one.
-        emit failed(QStringLiteral("database key missing"));
+        emit failed(QStringLiteral("keyMissing"));
     }
 }
 
@@ -215,7 +254,7 @@ void SecretStore::storeNewKey()
         key = random.read(32);
     }
     if (key.size() != 32) {
-        emit failed(QStringLiteral("no randomness"));
+        emit failed(QStringLiteral("noRandomness"));
         return;
     }
     Secret secret(secretId());
@@ -231,7 +270,7 @@ void SecretStore::storeNewKey()
         if (r->result().code() == Result::Succeeded) {
             emit keyReady(key);
         } else {
-            emit failed(QStringLiteral("store: ") + r->result().errorMessage());
+            emit failed(QStringLiteral("secrets"), secretsCode("store", r->result()));
         }
         key.fill('\0');
     });

@@ -453,7 +453,7 @@ void ThreeseBackend::finishDataRemoval()
     emit dataEncryptionChanged();
     if (!removed) {
         // A new key couldn't open what stayed. The user can try again, or the next start does.
-        fail(QStringLiteral("removing the stored data"));
+        fail(QStringLiteral("removingData"));
         return;
     }
     m_state = QStringLiteral("starting");
@@ -474,21 +474,60 @@ void ThreeseBackend::startCore(QByteArray key)
     key.fill('\0');
     locker.unlock();
     if (!m_core) {
-        fail(QStringLiteral("core start"));
+        // If the core could still say why, its `fatal` follows.
+        fail(QStringLiteral("coreStart"));
     }
 }
 
-void ThreeseBackend::fail(const QString &reason)
+void ThreeseBackend::fail(const QString &kind, const QString &detail)
 {
-    qWarning("threesea: startup failed: %s", qPrintable(reason)); // log-ok: the app's own codes and core error kinds
+    m_errorKind = kind;
+    m_errorText = detail.isEmpty() ? kind : kind + QLatin1Char(' ') + detail;
+    qWarning("threesea: startup failed: %s", qPrintable(m_errorText)); // log-ok: the app's own codes and core error kinds
     m_state = QStringLiteral("error");
-    m_errorText = reason;
-    if (m_removingData) {
-        // The settings are back at their defaults, so the process would stay when the window
-        // closes and no new start could ever finish this. It must be able to end.
-        QGuiApplication::setQuitOnLastWindowClosed(true);
-    }
+    // Nothing runs, so nothing is there to keep running for, and with the process staying the next
+    // launch would only show this window again: closing it must end the process.
+    QGuiApplication::setQuitOnLastWindowClosed(true);
     emit stateChanged();
+}
+
+void ThreeseBackend::retryStart()
+{
+    if (m_state != QLatin1String("error") || m_removingData) {
+        return;
+    }
+    // A core can be there: one that came up but whose status failed.
+    stopCore();
+    m_discardCoreMessages = true;
+    m_errorKind.clear();
+    m_errorText.clear();
+    m_state = QStringLiteral("starting");
+    QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+    emit stateChanged();
+    // After everything the old core has posted.
+    QMetaObject::invokeMethod(this, "startAgain", Qt::QueuedConnection);
+}
+
+void ThreeseBackend::startAgain()
+{
+    m_discardCoreMessages = false;
+    m_callbacks.clear();
+    m_nativeCallbacks.clear();
+    m_statusRequests.clear();
+    m_contactRequests.clear();
+    m_firstLiveId = m_nextId;
+    m_dbKey.fill('\0');
+    m_dbKey.clear();
+    m_wrappedKey.clear();
+    m_unlockedAtStart = false;
+    m_secrets->loadKey(!QFile::exists(databasePath()));
+}
+
+void ThreeseBackend::failFromCore(const QJsonObject &error)
+{
+    const QString kind = error.value(QStringLiteral("kind")).toString();
+    // The store's kinds have a code as their message; an internal error's could say anything.
+    fail(kind, kind == QLatin1String("internal") ? QString() : error.value(QStringLiteral("message")).toString());
 }
 
 void ThreeseBackend::onCoreMessage(void *userData, const char *json)
@@ -1134,7 +1173,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             }
             refresh();
         } else if (name == QLatin1String("fatal")) {
-            fail(message.value(QStringLiteral("kind")).toString());
+            failFromCore(message);
         } else if (name == QLatin1String("licenseChanged")) {
             refresh();
         } else if (name == QLatin1String("contactsChanged")) {
@@ -1157,10 +1196,23 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
 
     // Status replies drive the onboarding state machine. Only those: message replies have a
     // (delivery) `state` too.
-    if (m_statusRequests.remove(id) && ok && !m_removingData) {
+    const bool statusReply = m_statusRequests.remove(id) && !m_removingData;
+    if (statusReply && !ok) {
+        // The core is up and can't read what it needs to go on. Only at the start: a status that
+        // fails later must not take a running app to the error page.
+        if (m_state == QLatin1String("starting")) {
+            failFromCore(error);
+        }
+    } else if (statusReply) {
         const QString previous = m_state;
         m_state = result.value(QStringLiteral("state")).toString();
         m_identity = result.value(QStringLiteral("identity")).toString();
+        if (previous == QLatin1String("error")) {
+            // The core could read after all. It runs now, so the window closing must not end it.
+            m_errorKind.clear();
+            m_errorText.clear();
+            QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+        }
         emit stateChanged();
         if (m_state == QLatin1String("ready") && previous != m_state) {
             refreshContacts();

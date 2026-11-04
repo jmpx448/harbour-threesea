@@ -90,6 +90,28 @@ ApplicationWindow {
         }
     }
 
+    // The start failed: in the background (the Full flavour's login start) nothing else says that
+    // nothing will arrive.
+    function startFailedNotification() {
+        if (backend.state === "error" && !backend.dataRemovalStuck) {
+            if (Qt.application.state !== Qt.ApplicationActive) startFailedLater.restart()
+        } else if (backend.state !== "error") {
+            startFailedLater.stop()
+            clearNotification("startFailed")
+        }
+    }
+    Timer {
+        id: startFailedLater
+        // Not while the window is just being opened, like the one above.
+        interval: 3000
+        onTriggered: {
+            if (backend.state !== "error" || Qt.application.state === Qt.ApplicationActive) return
+            plainNotification("startFailed", qsTrId("threesea-la-startup-failed"),
+                              //% "Open it to see why. Messages arrive again once it runs."
+                              qsTrId("threesea-la-startup-failed-notification-body"))
+        }
+    }
+
     // Threema's directory refused the license and nothing arrives any more: in the background
     // there is no other way to find out.
     function licenseNotification() {
@@ -249,6 +271,7 @@ ApplicationWindow {
                 window.sayCaptureDiscarded()
             }
             window.lockedNotification()
+            window.startFailedNotification()
             // The group may have become private during the call.
             if (Qt.application.state !== Qt.ApplicationActive && groupCalls.conversation.length > 0
                     && window.groupCallName.length > 0) {
@@ -947,8 +970,10 @@ ApplicationWindow {
             // It opens the chat, but isn't that chat's notification.
             identity = identity ? "replyNotSent:" + identity : "replyNotSent"
         } else if (!identity && actions.length > 0 && actions[0].method === "activate") {
-            // The private chats' notification opens the app only, and so does the one for the lock.
-            identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked" : "private"
+            // The private chats' notification opens the app only, and so do the ones for the lock
+            // and for a failed start.
+            identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked"
+                     : n.summary === qsTrId("threesea-la-startup-failed") ? "startFailed" : "private"
         }
         if (identity && !notifications[identity]) {
             notifications[identity] = n
@@ -1532,6 +1557,7 @@ ApplicationWindow {
             // behind the passphrase too. They would otherwise last until it is entered.
             if (backend.state === "locked") window.hideNotifications()
             window.showStatePage()
+            window.startFailedNotification()
             window.syncAddressBook(false)
             if (backend.state === "ready") window.clearNotification("license")
             window.runNotificationActions()

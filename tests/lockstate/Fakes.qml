@@ -7,7 +7,10 @@ import QtQuick 2.6
 QtObject {
     property QtObject backend: QtObject {
         property string state: "starting"
+        property string errorKind
         property string errorText
+        property int startRetries: 0
+        function retryStart() { startRetries++ }
         property bool unlockedAtStart: false
         property bool keepRunning: false
         property bool addressBookSync: false
