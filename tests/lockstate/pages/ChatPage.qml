@@ -6,7 +6,9 @@ Page {
     objectName: "chat"
     property string identity
     property bool isPrivate
-    readonly property var inputField: null
+    property QtObject inputField: QtObject { property string text }
+    property var attached: []
+    function attachAll(files) { attached = files }
     Component.onCompleted: window.openChat = identity
     Component.onDestruction: if (window.openChat === identity) window.openChat = ""
 }

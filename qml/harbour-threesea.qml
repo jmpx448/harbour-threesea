@@ -307,15 +307,18 @@ ApplicationWindow {
         })
     }
 
-    // Replace `chatPage` (a private chat while they are hidden) with the PIN, then the chat.
+    // Replace `chatPage` (a private chat while they are hidden) with the PIN, then the chat, with
+    // the text a link put into its input.
     function unlockChat(chatPage, identity) {
+        var text = chatPage.inputField ? chatPage.inputField.text : ""
         var unlock = pageStack.replace(Qt.resolvedUrl("pages/UnlockPage.qml"), {
             privateChats: true,
             //% "Private chats"
             title: qsTrId("threesea-he-private-chats")
         }, PageStackAction.Immediate)
         unlock.unlocked.connect(function() {
-            pageStack.replace(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity })
+            var chat = pageStack.replace(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity })
+            if (text.length > 0 && chat.inputField) chat.inputField.text = text
         })
     }
 

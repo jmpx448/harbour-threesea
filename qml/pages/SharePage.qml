@@ -9,6 +9,7 @@ import "../components/Format.js" as Fmt
 // text opens the chat ready to send; several files are sent right away.
 Page {
     id: page
+    objectName: "share"
     allowedOrientations: Orientation.All
 
     property var files: []
@@ -19,7 +20,34 @@ Page {
     property var forwardMessages: []
     readonly property bool forwarding: forwardMessage >= 0 || forwardMessages.length > 0
 
+    // A tap waits for the core's answer below: one at a time.
+    property bool opening: false
+
+    // A private chat hidden right now takes nothing: the PIN comes first, above this page, so
+    // that its X comes back to this choice with the content still here. `draft` answers `locked`
+    // for such a chat and changes nothing.
     function open(identity) {
+        if (opening) return
+        opening = true
+        backend.call("draft", { identity: identity }, function(ok, result, kind) {
+            page.opening = false
+            // The app locked or a call came in meanwhile: this stays for when they are over.
+            if (pageStack.busy || pageStack.currentPage !== page) return
+            if (ok || kind !== "locked") {
+                page.deliver(identity)
+                return
+            }
+            var unlock = pageStack.push(Qt.resolvedUrl("UnlockPage.qml"), {
+                privateChats: true,
+                //% "Private chats"
+                title: qsTrId("threesea-he-private-chats")
+            })
+            unlock.unlocked.connect(function() { page.deliver(identity) })
+        })
+    }
+
+    // Called from this page or from the PIN's above it.
+    function deliver(identity) {
         if (forwarding) {
             // The core sends them in order (this page is gone before the replies come).
             var ids = forwardMessage >= 0 ? [forwardMessage] : forwardMessages.slice()
@@ -31,7 +59,8 @@ Page {
             return
         }
         // Waiting above the input, like picked files: sent in order with the next send.
-        var chat = pageStack.replace(Qt.resolvedUrl("ChatPage.qml"), { identity: identity })
+        var chat = pageStack.replaceAbove(pageStack.previousPage(page), Qt.resolvedUrl("ChatPage.qml"),
+                                          { identity: identity })
         chat.attachAll(files)
         if (text.length > 0 && chat.inputField) chat.inputField.text = text
     }

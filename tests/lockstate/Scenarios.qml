@@ -289,6 +289,92 @@ QtObject {
                 check("chosen", chosen, "1234")
             }, 0],
         ],
+        // A hidden private chat: the PIN before anything is handed over; the X comes back to
+        // the choice with the content still there.
+        shareToPrivateChat: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                backend.refused["draft"] = "locked"
+                var share = push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }], text: "hello" })
+                share.open("ABCD1234")
+                share.open("ABCD1234")
+            }, 800],
+            [function() {
+                checkStack("conversations share unlock")
+                check("private chats", page("unlock").privateChats, true)
+                stack.pop(undefined, PageStackAction.Immediate)
+                checkStack("conversations share")
+                page("share").open("ABCD1234")
+            }, 800],
+            [function() {
+                checkStack("conversations share unlock")
+                page("unlock").unlocked("1234")
+                checkStack("conversations chat")
+                var chat = page("chat")
+                check("identity", chat.identity, "ABCD1234")
+                check("files", chat.attached.length, 1)
+                check("text", chat.inputField.text, "hello")
+            }, 0],
+        ],
+        forwardToPrivateChat: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                backend.refused["draft"] = "locked"
+                push("pages/RealSharePage.qml", { forwardMessage: 7 }).open("ABCD1234")
+            }, 800],
+            [function() {
+                checkStack("conversations share unlock")
+                check("nothing sent yet", countSent("forwardMessages"), 0)
+                page("unlock").unlocked("1234")
+                checkStack("conversations chat")
+                check("sent", countSent("forwardMessages"), 1)
+                check("to", backend.lastArgs["forwardMessages"].identity, "ABCD1234")
+            }, 0],
+        ],
+        // A chat that can be read needs no PIN; other errors aren't the PIN's business either.
+        shareToOpenChat: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).open("ABCD1234")
+            }, 800],
+            [function() {
+                checkStack("conversations chat")
+                check("files", page("chat").attached.length, 1)
+            }, 0],
+        ],
+        // The app locks while the core answers: the lock stays on top, the choice stays open.
+        lockWhileChoosingShareTarget: [
+            [function() { ready(true) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                backend.hold("draft")
+                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).open("ABCD1234")
+                window.lockNow()
+                backend.release("draft")
+            }, 800],
+            [function() {
+                checkStack("conversations share unlock")
+                check("the window's lock", stack.currentPage, window.lockPage)
+                unlock()
+            }, 100],
+            [function() { checkStack("conversations share") }, 0],
+        ],
+        // A link's text for a private chat, set before the chat found out: it survives the PIN.
+        linkTextToPrivateChat: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var chat = push("pages/ChatPage.qml", { identity: "ABCD1234" })
+                chat.inputField.text = "hello"
+                window.unlockChat(chat, "ABCD1234")
+                checkStack("conversations unlock")
+                page("unlock").unlocked("1234")
+                checkStack("conversations chat")
+                check("text", page("chat").inputField.text, "hello")
+            }, 0],
+        ],
         // The license refused under the lock: the lock stays over the license page, and a new key
         // doesn't ask twice.
         licenseRefused: [
