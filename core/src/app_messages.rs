@@ -52,11 +52,17 @@ impl Conversation {
     }
 
     /// Groups that were left can't be written to.
-    /// We can write here: still in the group, the contact not blocked by us (`blocked`: the
-    /// block list; Android asks to unblock first).
+    /// We can write here: still in the group, the contact's ID not revoked and the contact not
+    /// blocked by us (`blocked`: the block list; Android asks to unblock first).
     pub(crate) fn check_writable(&self, blocked: &[String]) -> Result<(), ApiError> {
         match self {
             Self::Group(group) if group.left => Err(ApiError::GroupLeft),
+            Self::Contact(contact)
+                if contact.activity_state
+                    == libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid =>
+            {
+                Err(ApiError::ContactRevoked)
+            }
             Self::Contact(contact) if blocked.contains(&contact.identity.to_string()) => {
                 Err(ApiError::ContactBlocked)
             }

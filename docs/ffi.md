@@ -175,7 +175,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setPinned` | `identity`, `pinned` | `{}`; pinned chats come first in `conversations` (field `pinned`: their place, else null) |
 | `movePinned` | `identity`, `offset` (−1 up, 1 down) | `{}` |
 | `sendLocation` | `identity`, `latitude`, `longitude`, optional `accuracy` (m), `name`, `address` | the outgoing message JSON (kind `location`, body `{latitude, longitude, accuracy, name, address}`) |
-| `setBlocked` | `identity`, `blocked` | contact JSON (or `{}` for a non-contact); the block list is `blockedContacts` in the app settings (in Threema Safe too); libthreema discards their messages, sending to them fails with `contactBlocked`. Contact JSON has `blocked` |
+| `setBlocked` | `identity`, `blocked` | contact JSON (or `{}` for a non-contact); the block list is `blockedContacts` in the app settings (in Threema Safe too); libthreema discards their messages, sending to them fails with `contactBlocked` (to a revoked ID: `contactRevoked`). Contact JSON has `blocked` and `invalid` (revoked) |
 | `blockedContacts` | – | `{blocked: [{identity, displayName}]}` |
 | `forwardMessage` | `message` (local id), `identity` (target chat) | the new message JSON; texts without their quote, files re-uploaded from the encrypted store with a new key (errors `fileNotDownloaded`, `notForwardable`) |
 | `forwardMessages` | `messages` (local ids, in order), `identity` | `{forwarded, failed}` |

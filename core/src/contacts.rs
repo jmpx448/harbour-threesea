@@ -349,8 +349,10 @@ pub fn to_json(c: &Contact) -> Value {
         "canEdit": c.feature_mask.0 & libthreema::common::FeatureMask::EDIT_MESSAGE_SUPPORT != 0,
         "canDelete": c.feature_mask.0 & libthreema::common::FeatureMask::DELETE_MESSAGE_SUPPORT != 0,
         "canPoll": c.feature_mask.0 & libthreema::common::FeatureMask::POLL_SUPPORT != 0,
-        "canCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_AUDIO_CALL_SUPPORT != 0,
-        "canVideoCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_VIDEO_CALL_SUPPORT != 0,
+        "canCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_AUDIO_CALL_SUPPORT != 0
+            && c.activity_state != pc::ActivityState::Invalid,
+        "canVideoCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_VIDEO_CALL_SUPPORT != 0
+            && c.activity_state != pc::ActivityState::Invalid,
         // 32-byte key, shown as fingerprint-like groups in the UI.
         "publicKey": c.public_key.to_string(),
         // This contact's own choice (Android): 0 like the app setting, 1 send, 2 don't send.

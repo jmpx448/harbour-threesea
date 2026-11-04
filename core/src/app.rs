@@ -971,6 +971,8 @@ pub enum ApiError {
     LinkInvalid,
     #[error("this contact is blocked")]
     ContactBlocked,
+    #[error("this contact's ID was revoked")]
+    ContactRevoked,
     #[error("the file has not been downloaded")]
     FileNotDownloaded,
     #[error("this message cannot be forwarded")]
@@ -1107,6 +1109,7 @@ impl ApiError {
             Self::LinkInvalid => "linkInvalid",
             Self::FileNotDownloaded => "fileNotDownloaded",
             Self::ContactBlocked => "contactBlocked",
+            Self::ContactRevoked => "contactRevoked",
             Self::NotForwardable => "notForwardable",
             Self::QrMismatch => "qrMismatch",
             Self::QrExpired => "qrExpired",

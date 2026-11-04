@@ -1212,6 +1212,22 @@ mod contact_policy_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_revoked_id_cannot_be_written_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.activity_state = libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid;
+        app.store.upsert_contact(&contact).unwrap();
+        let send = json!({"cmd": "sendText", "identity": "BBBBBBBB", "text": "hello"});
+        let reply = call(&mut app, send).await;
+        assert_eq!(reply["error"]["kind"], "contactRevoked");
+        let shown = call(&mut app, json!({"cmd": "contact", "identity": "BBBBBBBB"})).await;
+        assert_eq!(shown["result"]["invalid"], true);
+        assert_eq!(shown["result"]["canCall"], false);
+        assert_eq!(shown["result"]["canVideoCall"], false);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn writing_to_someone_makes_them_a_direct_contact() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(dir.path());

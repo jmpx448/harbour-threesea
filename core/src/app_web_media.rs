@@ -275,6 +275,7 @@ impl App {
             return Err(match reply["error"]["kind"].as_str() {
                 Some("fileTooLarge") => "fileTooLarge",
                 Some("contactBlocked") => "blocked",
+                Some("contactRevoked") => "invalidIdentity",
                 _ => "internalError",
             });
         }

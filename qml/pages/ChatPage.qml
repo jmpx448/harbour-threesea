@@ -65,7 +65,9 @@ Page {
     readonly property bool groupLeft: isGroup && contact.left === true
     // Blocked by us: no input (unblock on the attached contact page).
     readonly property bool blocked: !isGroup && !isList && contact.blocked === true
-    readonly property bool readOnly: groupLeft || blocked
+    // The ID was revoked (found by the directory check): nobody to write to any more.
+    readonly property bool revoked: !isGroup && !isList && contact.invalid === true
+    readonly property bool readOnly: groupLeft || blocked || revoked
     property bool typing: false
     property string stickyDay: ""
     // Editing one of our messages in the input box (its message id), "" when writing a new one.
@@ -1855,18 +1857,21 @@ Page {
                     }
                 }
 
-                // A group we are no longer in, or a blocked contact: no input.
+                // A group we are no longer in, a blocked contact or a revoked ID: no input.
                 Label {
                     visible: page.readOnly
                     anchors.fill: input
                     z: 2
                     verticalAlignment: Text.AlignVCenter
                     horizontalAlignment: Text.AlignHCenter
-                    text: page.blocked
-                          //% "You have blocked this contact"
-                          ? qsTrId("threesea-la-blocked-input")
-                          //% "You are no longer in this group"
-                          : qsTrId("threesea-la-group-left-input")
+                    text: page.revoked
+                          //% "This Threema ID was revoked"
+                          ? qsTrId("threesea-la-revoked-input")
+                          : page.blocked
+                            //% "You have blocked this contact"
+                            ? qsTrId("threesea-la-blocked-input")
+                            //% "You are no longer in this group"
+                            : qsTrId("threesea-la-group-left-input")
                     color: Theme.secondaryHighlightColor
                     wrapMode: Text.Wrap
                 }

@@ -49,6 +49,9 @@ function text(kind, message) {
     case "contactBlocked":
         //% "You have blocked this contact."
         return qsTrId("threesea-la-error-contact-blocked")
+    case "contactRevoked":
+        //% "This Threema ID was revoked."
+        return qsTrId("threesea-la-error-contact-revoked")
     case "fileNotDownloaded":
         //% "Download the file first."
         return qsTrId("threesea-la-error-file-not-downloaded")
