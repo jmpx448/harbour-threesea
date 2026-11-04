@@ -262,7 +262,8 @@ mod tests {
             message::task::{
                 incoming::IncomingMessageLoop,
                 outgoing::{
-                    encode_contact_message_body, encode_outgoing_contact_message_encapsulated,
+                    encode_contact_message_body, encode_outgoing_contact_message,
+                    encode_outgoing_contact_message_encapsulated,
                     encode_outgoing_fs_control_message,
                 },
             },
@@ -573,6 +574,110 @@ mod tests {
         let (_, replies) = bob.receive(&alice, first_message(&alice, &bob));
         assert_eq!(session_count(&bob, &alice), 1);
         assert_eq!(replies.len(), 1, "the Accept");
+    }
+
+    /// Both sides in RL44, the events drained.
+    fn established() -> (Party, Party) {
+        let (mut alice, mut bob) = pair();
+        let (_, accept) = bob.receive(&alice, first_message(&alice, &bob));
+        let _ = alice.receive(&bob, accept);
+        let _ = bob.receive(&alice, alice.send_text(&bob, "4DH"));
+        let _ = alice.receive(&bob, bob.send_text(&alice, "4DH too"));
+        (alice, bob)
+    }
+
+    /// What the connection sends with forward secrecy off or for a contact without it.
+    fn plain_text(from: &Party, to: &Party) -> MessageWithMetadataBox {
+        let message = OutgoingMessage {
+            id: MessageId::random(),
+            overrides: MessageOverrides::default(),
+            created_at: 1_700_000_000_000,
+            body: OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: to.id,
+                body: ContactMessageBody::Text(TextMessage {
+                    text: "plain".to_owned(),
+                }),
+            }),
+        };
+        encode_outgoing_contact_message(
+            from.id,
+            &ClientKey::from(from.key),
+            None,
+            to.id,
+            &ClientKey::from(to.key).public_key(),
+            &message,
+            Nonce::random(),
+        )
+        .unwrap()
+    }
+
+    /// The statuses a payload leaves behind, passed through the incoming task.
+    fn statuses(receiver: &mut Party, payload: MessageWithMetadataBox) -> Vec<FsStatus> {
+        let mut task = receiver.e2e.handle_incoming_message(payload);
+        let IncomingMessageLoop::Done(_) = task.poll(receiver.e2e.context()).unwrap() else {
+            panic!("no instruction expected");
+        };
+        receiver
+            .events
+            .borrow_mut()
+            .drain(..)
+            .filter_map(|event| match event {
+                CoreEvent::FsStatus { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_plain_message_on_a_live_session_is_reported_and_still_arrives() {
+        let (alice, mut bob) = established();
+        let texts = |bob: &Party| -> i64 {
+            bob.store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE body = 'plain'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(texts(&bob), 0);
+        let plain = plain_text(&alice, &bob);
+        let found = statuses(&mut bob, plain);
+        assert_eq!(found, vec![FsStatus::MessageWithoutFs]);
+        assert_eq!(texts(&bob), 1);
+
+        // Its receipts and typing add no rows, so these don't add a line per receipt.
+        let chat = alice.id.to_string();
+        assert!(
+            !bob.store
+                .newest_is_status(&chat, "fsMessageWithoutFs")
+                .unwrap()
+        );
+        bob.store
+            .insert_status(&chat, "fsMessageWithoutFs")
+            .unwrap();
+        assert!(
+            bob.store
+                .newest_is_status(&chat, "fsMessageWithoutFs")
+                .unwrap()
+        );
+        assert!(!bob.store.newest_is_status(&chat, "fsReset").unwrap());
+    }
+
+    #[test]
+    fn a_plain_message_is_no_news_without_a_session() {
+        let (alice, mut bob) = pair();
+        let plain = plain_text(&alice, &bob);
+        assert_eq!(statuses(&mut bob, plain), Vec::new());
+    }
+
+    #[test]
+    fn a_blocked_senders_plain_message_is_not_reported() {
+        let (alice, mut bob) = established();
+        block(&bob, &alice);
+        let plain = plain_text(&alice, &bob);
+        assert_eq!(statuses(&mut bob, plain), Vec::new());
     }
 
     #[test]

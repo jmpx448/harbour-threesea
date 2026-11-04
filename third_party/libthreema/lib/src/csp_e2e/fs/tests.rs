@@ -413,7 +413,7 @@ fn a_reject_says_whether_it_ended_a_session_and_which_group_it_is_about() {
 #[test]
 fn a_terminate_is_reported_for_a_known_session_or_when_the_peer_disabled_forward_security() {
     let mut alice = alice();
-    let mut bob = bob();
+    let bob = bob();
     let first = alice.send(&bob, 0x01, b"one");
     let session_id: [u8; 16] = Envelope::decode(first.prelude[0].as_slice())
         .unwrap()
@@ -446,6 +446,48 @@ fn a_terminate_is_reported_for_a_known_session_or_when_the_peer_disabled_forward
             FsStatus::Terminated { session_known: false },
         ]
     );
+}
+
+#[test]
+fn a_message_without_forward_security_is_reported_if_the_session_covers_its_type() {
+    let mut alice = alice();
+    let mut bob = bob();
+    let reports = |party: &Party| {
+        party.with_store(|store| {
+            store
+                .statuses
+                .drain(..)
+                .filter(|(_, status)| *status == FsStatus::MessageWithoutFs)
+                .count()
+        })
+    };
+
+    // No session: nothing to compare with.
+    check_message_without_fs(&bob.fs, alice.id, 0x01).unwrap();
+    assert_eq!(reports(&bob), 0);
+
+    // Bring the session to RL44 on Bob's side, at version 1.2.
+    let first = alice.send(&bob, 0x01, b"hello");
+    let _ = bob.receive(&alice, &first.prelude[0], 1);
+    let accept = bob.take_controls();
+
+    // While it is R24, only what version 1.0 covers counts.
+    check_message_without_fs(&bob.fs, alice.id, 0x80).unwrap();
+    assert_eq!(reports(&bob), 0, "receipts aren't covered at 1.0");
+    check_message_without_fs(&bob.fs, alice.id, 0x01).unwrap();
+    assert_eq!(reports(&bob), 1, "texts are");
+
+    let _ = alice.receive(&bob, &accept[0], 2);
+    let later = alice.send(&bob, 0x01, b"4dh");
+    let _ = bob.receive(&alice, later.envelope.as_ref().unwrap(), 3);
+    check_message_without_fs(&bob.fs, alice.id, 0x80).unwrap();
+    assert_eq!(reports(&bob), 1, "receipts are covered now");
+    check_message_without_fs(&bob.fs, alice.id, 0x41).unwrap();
+    assert_eq!(reports(&bob), 1, "so are group messages");
+
+    // Never encapsulated, so never missing it.
+    check_message_without_fs(&bob.fs, alice.id, 0xfe).unwrap();
+    assert_eq!(reports(&bob), 0);
 }
 
 #[test]

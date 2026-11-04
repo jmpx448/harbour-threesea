@@ -118,6 +118,9 @@ function status(code) {
     case "fsMessageRejected":
         //% "Forward secrecy was reset. Affected messages are sent again."
         return qsTrId("threesea-la-status-fs-message-rejected")
+    case "fsMessageWithoutFs":
+        //% "A message without forward secrecy was received. Check with the contact that they turned it off on purpose."
+        return qsTrId("threesea-la-status-fs-message-without")
     case "fsUnavailable":
         //% "Forward secrecy is off in this chat because this contact's app is not using it at the moment."
         return qsTrId("threesea-la-status-fs-unavailable")

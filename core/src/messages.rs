@@ -696,6 +696,20 @@ impl Store {
         self.message(self.conn.last_insert_rowid())
     }
 
+    /// Whether the chat's newest row is the status line `code`.
+    pub fn newest_is_status(&self, conversation: &str, code: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT kind = 'status' AND body = ?2 FROM messages WHERE conversation = ?1
+                 ORDER BY id DESC LIMIT 1",
+                params![conversation, code],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// The chat with `peer` shows the call `call_id` (`call|…|callId`) among its last few calls
     /// (Android looks at the last 4 too).
     pub fn call_recorded(&self, peer: &str, call_id: u32) -> Result<bool, StoreError> {

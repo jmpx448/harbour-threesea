@@ -80,6 +80,9 @@ pub enum FsStatus {
         /// Whether it ended a session we had.
         session_known: bool,
     },
+    /// A message arrived without forward security although the session with its sender covers
+    /// that message type: the sender dropped it, or someone else holds its long-term key.
+    MessageWithoutFs,
 }
 
 /// Storage of FS sessions (implemented by the app, persisted encrypted, never backed up) plus the
@@ -499,6 +502,33 @@ fn handle_encapsulated(
         inner_type,
         data: data.to_vec(),
     })
+}
+
+/// A message arrived from `peer` outside of an envelope: report it if the best session with `peer`
+/// would have covered `message_type` (Android's `warnIfMessageWithoutForwardSecurityReceived`).
+pub(crate) fn check_message_without_fs(
+    fs: &FsContext,
+    peer: ThreemaId,
+    message_type: u8,
+) -> Result<(), ProviderError> {
+    let Some(required) = minimum_version_for(message_type) else {
+        return Ok(());
+    };
+    let mut store = fs.store.borrow_mut();
+    let Some(session) = store.get_best(peer)? else {
+        return Ok(());
+    };
+    if session
+        .minimum_incoming_applied_version()
+        .is_ok_and(|minimum| required <= minimum)
+    {
+        warn!(
+            message_type,
+            "Message without forward security on an active session"
+        );
+        store.status(peer, FsStatus::MessageWithoutFs)?;
+    }
+    Ok(())
 }
 
 /// Turn the peer ratchet past the acknowledged incoming message and store it.

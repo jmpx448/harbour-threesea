@@ -734,6 +734,15 @@ impl State {
             }
         }
 
+        // A message that should have arrived in the forward security session we have with its
+        // sender
+        if message.outer.message_type != CspE2eMessageType::ForwardSecurityEnvelope
+            && let Some(fs) = context.csp_e2e.fs.as_ref()
+            && let Ok(message_type) = u8::try_from(inner_type as i32)
+        {
+            fs::check_message_without_fs(fs, sender.inner().identity, message_type)?;
+        }
+
         // Apply special contact handling (right now, this is only `*3MAPUSH`)
         if sender.inner().identity == PredefinedContact::_3MAPUSH_IDENTITY {
             // Only use case right now is the `web-session-resume` which we just forward

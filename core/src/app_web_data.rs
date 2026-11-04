@@ -149,6 +149,11 @@ fn status_text(code: &str) -> String {
         "fsMessageRejected" => {
             "Forward secrecy was reset. Affected messages are sent again.".into()
         }
+        "fsMessageWithoutFs" => {
+            "A message without forward secrecy was received. Check with the contact that they \
+             turned it off on purpose."
+                .into()
+        }
         "fsUnavailable" => {
             "Forward secrecy is off in this chat because this contact's app is not using it at the \
              moment."

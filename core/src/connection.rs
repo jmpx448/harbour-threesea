@@ -411,6 +411,22 @@ fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Protocol(error.to_string())
 }
 
+/// A message without forward secrecy reports it before the message is stored, and its line goes
+/// into the chat after the message: the events have to say so in that order too, or a live chat
+/// shows the line above the message until it is opened again.
+fn status_after_messages(mut events: Vec<CoreEvent>) -> Vec<CoreEvent> {
+    events.sort_by_key(|event| {
+        matches!(
+            event,
+            CoreEvent::FsStatus {
+                status: FsStatus::MessageWithoutFs,
+                ..
+            }
+        )
+    });
+    events
+}
+
 /// What became of a rejected message.
 #[derive(Default)]
 struct Requeued {
@@ -439,6 +455,9 @@ fn requeue_rejected(
     })
 }
 
+/// The status line for a message that came without forward secrecy on a session that has it.
+const FS_MESSAGE_WITHOUT: &str = "fsMessageWithoutFs";
+
 /// Whether a contact's feature mask says it supports forward secrecy.
 fn has_fs_support(contact: &libthreema::model::contact::ContactInit) -> bool {
     contact.feature_mask.0 & FeatureMask::FORWARD_SECURITY_SUPPORT != 0
@@ -452,6 +471,8 @@ fn fs_status_line(status: &FsStatus, supports_fs: bool, resending: bool) -> Opti
     match status {
         FsStatus::Established => supports_fs.then_some("fsEstablished"),
         FsStatus::Reset => Some("fsReset"),
+        FsStatus::MessageWithoutFs if supports_fs => Some(FS_MESSAGE_WITHOUT),
+        FsStatus::MessageWithoutFs => Some("fsUnavailable"),
         FsStatus::MessageRejected {
             session_known: false,
             ..
@@ -1677,6 +1698,15 @@ impl<'a> Session<'a> {
                 let Some(code) = fs_status_line(&status, supports_fs, requeued.resending) else {
                     return Ok(None);
                 };
+                // A visible message adds a row and so gets its line, as on Android; a run of
+                // receipts or typing adds none and gets one.
+                if code == FS_MESSAGE_WITHOUT
+                    && store
+                        .newest_is_status(&peer, code)
+                        .map_err(protocol_error)?
+                {
+                    return Ok(None);
+                }
                 Ok(store
                     .insert_status(&peer, code)
                     .map_err(protocol_error)?
@@ -1786,7 +1816,11 @@ impl<'a> Session<'a> {
                     MaskCheck::Unknown => false,
                 }
             }
-            FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } => {
+            // Whoever holds the contact's long-term key can send without forward secrecy too, so
+            // that goes by what the directory says as well.
+            FsStatus::MessageRejected { .. }
+            | FsStatus::Terminated { .. }
+            | FsStatus::MessageWithoutFs => {
                 self.check_feature_mask(peer, FS_MASK_CHECK_INTERVAL)
                     .await?
                     != MaskCheck::Unknown
@@ -2882,7 +2916,7 @@ impl<'a> Session<'a> {
 
     /// What handling an incoming message left to do.
     async fn after_incoming(&mut self) -> Result<(), ConnectionError> {
-        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
+        let events = status_after_messages(self.events.borrow_mut().drain(..).collect());
         for event in events {
             // A group change goes out before the next message of a burst is even looked at, or
             // the other devices get a message for a group they don't have yet, and drop it.
@@ -3095,6 +3129,34 @@ mod fs_status_tests {
     }
 
     #[test]
+    fn the_line_for_a_message_without_forward_secrecy_follows_the_message() {
+        let without = || CoreEvent::FsStatus {
+            peer: "ABCD1234".into(),
+            status: FsStatus::MessageWithoutFs,
+        };
+        let established = || CoreEvent::FsStatus {
+            peer: "ABCD1234".into(),
+            status: FsStatus::Established,
+        };
+        let events =
+            status_after_messages(vec![without(), established(), CoreEvent::ContactsChanged]);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                CoreEvent::FsStatus {
+                    status: FsStatus::Established,
+                    ..
+                },
+                CoreEvent::ContactsChanged,
+                CoreEvent::FsStatus {
+                    status: FsStatus::MessageWithoutFs,
+                    ..
+                },
+            ]
+        ));
+    }
+
+    #[test]
     fn a_rejected_message_is_back_in_the_queue_with_nothing_sent() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
@@ -3164,6 +3226,18 @@ mod fs_status_tests {
         );
         assert_eq!(
             fs_status_line(&rejected(true), false, true),
+            Some("fsUnavailable")
+        );
+    }
+
+    #[test]
+    fn a_message_without_forward_secrecy_warns_while_the_contact_supports_it() {
+        assert_eq!(
+            fs_status_line(&FsStatus::MessageWithoutFs, true, false),
+            Some(FS_MESSAGE_WITHOUT)
+        );
+        assert_eq!(
+            fs_status_line(&FsStatus::MessageWithoutFs, false, false),
             Some("fsUnavailable")
         );
     }
