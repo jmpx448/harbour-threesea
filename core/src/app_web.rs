@@ -823,13 +823,12 @@ async fn run_session(
         }
         for action in actions {
             match action {
-                Action::Chunk(chunk) => {
-                    out.push(
-                        responder
-                            .send_data(Value::Binary(chunk))
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
+                Action::Chunk(chunk) => match responder.send_data(Value::Binary(chunk)) {
+                    Ok(frame) => out.push(frame),
+                    // Between two browsers: the old connection's last words go nowhere.
+                    Err(saltyrtc::Error::NotConnected) => {}
+                    Err(error) => return Err(error.to_string()),
+                },
                 Action::Message(message) => {
                     events
                         .send(FromWeb::Message {
