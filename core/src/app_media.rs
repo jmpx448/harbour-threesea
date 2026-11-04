@@ -176,13 +176,28 @@ impl Store {
     /// Age by arrival, as on Android: an incoming `created_at` is the sender's clock, which could
     /// make a late or backdated message vanish before anyone saw it. Rows with no arrival time
     /// (ours, imported ones, status lines) have only the one clock.
-    pub fn delete_messages_before(&self, before: i64) -> Result<usize, StoreError> {
+    ///
+    /// `spare_notes`: leave notes groups alone (a group whose only member is us, the same test as
+    /// `upload_target`). Keep messages does, like Android's auto-delete: nobody else has a copy
+    /// of a notebook, and a period chosen for chats shouldn't eat it. Clean up doesn't, again like
+    /// Android: there the user asks for this, now, in every chat.
+    pub fn delete_messages_before(
+        &self,
+        before: i64,
+        spare_notes: bool,
+    ) -> Result<usize, StoreError> {
         Ok(self.conn.execute(
             "DELETE FROM messages
              WHERE COALESCE(received_at, created_at) < ?1 AND starred = 0 AND kind != 'status'
                AND NOT (outgoing = 1 AND state = ?2)
-               AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)",
-            params![before, crate::messages::OutgoingState::Pending as i64],
+               AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
+               AND NOT (?3 AND conversation IN
+                        (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))",
+            params![
+                before,
+                crate::messages::OutgoingState::Pending as i64,
+                spare_notes
+            ],
         )?)
     }
 
@@ -584,6 +599,11 @@ fn finish_upload(
     if let Ok(Some(message)) = store.set_upload_state(message, state) {
         let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
     }
+}
+
+/// `days` in milliseconds.
+fn days_ms(days: u32) -> i64 {
+    i64::from(days) * 86_400_000
 }
 
 /// How long files may take to arrive once their chat is hidden.
@@ -1051,14 +1071,10 @@ impl App {
         let before = if days == 0 {
             i64::MAX
         } else {
-            crate::messages::now_ms() - i64::from(days) * 86_400_000
+            crate::messages::now_ms() - days_ms(days)
         };
         let removed = if messages {
-            let removed = self.store.delete_messages_before(before)?;
-            let store = Rc::clone(&self.store);
-            self.media
-                .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
-            removed
+            self.delete_messages_with_media(before, false)?
         } else {
             let ids = self.store.files_before(before)?;
             for id in &ids {
@@ -1069,6 +1085,19 @@ impl App {
         };
         tracing::info!(removed, messages, "storage cleaned up");
         Ok(json!({ "removed": removed }))
+    }
+
+    /// [`Store::delete_messages_before`], and the media of what went.
+    fn delete_messages_with_media(
+        &self,
+        before: i64,
+        spare_notes: bool,
+    ) -> Result<usize, ApiError> {
+        let removed = self.store.delete_messages_before(before, spare_notes)?;
+        let store = Rc::clone(&self.store);
+        self.media
+            .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
+        Ok(removed)
     }
 
     /// After how many days messages go by themselves (0: they stay).
@@ -1099,8 +1128,8 @@ impl App {
         if now - last < 12 * 3_600_000 {
             return false;
         }
-        let removed = match self.clean_up(days, true) {
-            Ok(result) => result["removed"].as_u64().unwrap_or(0),
+        let removed = match self.delete_messages_with_media(now - days_ms(days), true) {
+            Ok(removed) => removed,
             Err(error) => {
                 tracing::warn!(kind = error.kind(), "auto-delete failed");
                 return false;
@@ -1783,7 +1812,7 @@ mod tests {
             .unwrap();
         let week = 7 * 86_400_000;
         assert!(store.files_before(now - week).unwrap().is_empty());
-        assert_eq!(store.delete_messages_before(now - week).unwrap(), 0);
+        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 0);
         assert!(store.message(backdated.id).unwrap().is_some());
 
         // Dated ahead: it doesn't outstay the others either.
@@ -1798,7 +1827,7 @@ mod tests {
                 params![now - 2 * week, future.id],
             )
             .unwrap();
-        assert_eq!(store.delete_messages_before(now - week).unwrap(), 1);
+        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 1);
         assert!(store.message(future.id).unwrap().is_none());
 
         // Rows without an arrival time (ours, imported ones) go by their only clock.
@@ -1816,7 +1845,7 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_eq!(store.delete_messages_before(now - week).unwrap(), 1);
+        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 1);
         assert!(store.message(own.id).unwrap().is_none());
     }
 
@@ -1856,7 +1885,7 @@ mod tests {
             .unwrap();
         arrived_when_written(&store);
 
-        assert_eq!(store.delete_messages_before(now - 1).unwrap(), 2);
+        assert_eq!(store.delete_messages_before(now - 1, false).unwrap(), 2);
         let left: Vec<String> = store
             .conversation_messages("AAAAAAAA", 50)
             .unwrap()
@@ -1867,6 +1896,82 @@ mod tests {
             left,
             vec!["keep this", "new", r#"{"state":0}"#, "unsent"],
             "starred, open poll and unsent stay"
+        );
+    }
+
+    /// Keep messages leaves notes groups alone, as Android's auto-delete does: nobody else has a
+    /// copy. Clean up is asked for in every chat, and a group we left or one with members is an
+    /// ordinary chat either way.
+    #[test]
+    fn keep_messages_spares_notes_groups() {
+        let (_dir, mut app) = app();
+        let group = |key: &str, members: Vec<&str>, left: bool| crate::groups::Group {
+            key: key.into(),
+            identity: libthreema::common::GroupIdentity {
+                creator_identity: "ABCD1234".parse().unwrap(),
+                group_id: 1,
+            },
+            name: String::new(),
+            members: members.into_iter().map(str::to_owned).collect(),
+            left,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        let notes = "g:ABCD1234:0000000000000001";
+        let with_members = "g:ABCD1234:0000000000000002";
+        let left = "g:ABCD1234:0000000000000003";
+        app.store
+            .upsert_group(&group(notes, Vec::new(), false))
+            .unwrap();
+        app.store
+            .upsert_group(&group(with_members, vec!["ECHOECHO"], false))
+            .unwrap();
+        app.store
+            .upsert_group(&group(left, Vec::new(), true))
+            .unwrap();
+        for (id, chat) in [notes, with_members, left, "ECHOECHO"]
+            .into_iter()
+            .enumerate()
+        {
+            let sent = app
+                .store
+                .insert_outgoing(chat, id as u64 + 1, "text", "old")
+                .unwrap();
+            app.store
+                .conn
+                .execute(
+                    "UPDATE messages SET created_at = 1000, state = ?1 WHERE id = ?2",
+                    params![crate::messages::OutgoingState::Sent as i64, sent.id],
+                )
+                .unwrap();
+        }
+        let chats_with_messages = |app: &App| {
+            let mut chats: Vec<String> = app
+                .store
+                .conn
+                .prepare("SELECT conversation FROM messages")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            chats.sort();
+            chats
+        };
+
+        app.store.set_setting(keys::AUTO_DELETE_DAYS, "7").unwrap();
+        assert!(app.auto_delete_scheduled());
+        assert_eq!(
+            chats_with_messages(&app),
+            [notes],
+            "only the notebook stays"
+        );
+
+        app.clean_up(7, true).unwrap();
+        assert!(
+            chats_with_messages(&app).is_empty(),
+            "Clean up means every chat"
         );
     }
 
@@ -2217,7 +2322,7 @@ mod tests {
         }
         arrived_when_written(&store);
         assert_eq!(store.files_before(5_000).unwrap(), vec![old.id]);
-        assert_eq!(store.delete_messages_before(5_000).unwrap(), 2);
+        assert_eq!(store.delete_messages_before(5_000, false).unwrap(), 2);
         assert!(store.message(old.id).unwrap().is_none());
         assert!(store.message(starred.id).unwrap().is_some());
         assert!(store.message(recent.id).unwrap().is_some());
