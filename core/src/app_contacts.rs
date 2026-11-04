@@ -870,25 +870,41 @@ impl App {
     }
 
     /// `verifyQrCode`: a scanned `3mid:` code. The key must be the one we have (or, for someone
-    /// new, the directory's): then the contact is _fully verified_ (and added if new).
+    /// new, the directory's): then the contact is _fully verified_ (and added if new). A code
+    /// that doesn't match, or has expired, changes nothing.
     pub(crate) async fn verify_qr_code(&mut self, text: &str) -> Result<Value, ApiError> {
         let code = crate::qr::parse(text).ok_or(ApiError::QrInvalid)?;
         if code.is_expired(crate::messages::now_ms() / 1000) {
             return Err(ApiError::QrExpired);
         }
-        let (id, key) = (code.identity, code.public_key);
         let own = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
-        if own.threema_id == id {
+        if own.threema_id == code.identity {
             return Err(ApiError::ContactIsSelf);
         }
-        let mut contact = match self.store.contact(&id)? {
+        let contact = match self.store.contact(&code.identity)? {
             Some(contact) => contact,
             None => {
-                self.add_contact(&id).await?;
-                self.store.contact(&id)?.ok_or(ApiError::ContactNotFound)?
+                let id = contacts::parse_identity(&code.identity)
+                    .ok_or(ApiError::IdentityFormat)?
+                    .to_string();
+                let mut found = contacts::lookup(&self.https, std::slice::from_ref(&id)).await?;
+                let Some((_, Lookup::Found(contact))) = found.pop() else {
+                    return Err(ApiError::ContactInvalid);
+                };
+                *contact
             }
         };
-        if contacts::hex_bytes(&contact.public_key.to_string()).as_slice() != key {
+        self.verify_with_key(contact, &code.public_key)
+    }
+
+    /// The key of a scanned code against the contact's (stored or just looked up, then stored
+    /// only if it matches).
+    fn verify_with_key(
+        &mut self,
+        mut contact: libthreema::model::contact::ContactInit,
+        public_key: &[u8; 32],
+    ) -> Result<Value, ApiError> {
+        if contacts::hex_bytes(&contact.public_key.to_string()).as_slice() != public_key {
             tracing::warn!("scanned QR code doesn't match the contact's public key");
             return Err(ApiError::QrMismatch);
         }
@@ -1058,6 +1074,35 @@ mod contact_policy_tests {
         .await;
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(answer["result"]["number"], Value::Null, "{answer}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_new_contact_with_another_key_is_not_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let contact = crate::contacts::test_contact("BBBBBBBB");
+        assert!(matches!(
+            app.verify_with_key(contact, &[1; 32]),
+            Err(crate::app::ApiError::QrMismatch)
+        ));
+        assert!(app.store.contact("BBBBBBBB").unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_new_contact_with_the_right_key_is_added_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let contact = crate::contacts::test_contact("BBBBBBBB");
+        app.verify_with_key(contact, &[9; 32]).unwrap();
+        let stored = app.store.contact("BBBBBBBB").unwrap().expect("added");
+        assert_eq!(
+            stored.verification_level,
+            libthreema::protobuf::d2d_sync::contact::VerificationLevel::FullyVerified
+        );
+        assert_eq!(
+            stored.acquaintance_level,
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct
+        );
     }
 
     // Before anything else, so also here where there is no identity and no network.
