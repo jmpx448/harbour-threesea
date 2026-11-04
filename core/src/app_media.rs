@@ -298,6 +298,12 @@ pub const AUTO_DOWNLOAD_MOBILE: [&str; 1] = ["image"];
 /// Media downloads running at once (each holds its blob and the decrypted data in memory).
 static DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
 
+/// Whether `message` is still the outgoing file with this key, which is random per file. See
+/// [`Download::wanted`].
+fn same_file(store: &Store, message: i64, key: &[u8; 32]) -> bool {
+    matches!(store.file_keys(message), Ok(Some(keys)) if *keys.key == *key)
+}
+
 /// Android's scopes for `done`: in public scope only for incoming 1:1 messages (group members and
 /// the other devices still need it).
 fn done_scope(outgoing: bool, group: bool) -> media::BlobScope {
@@ -488,7 +494,10 @@ async fn upload(
             )
             .await?,
         );
-        if let Some(thumbnail) = media.read(message, MediaPart::Thumbnail)? {
+        // Deleted meanwhile: the thumbnail under this id may be another file's by now.
+        if same_file(&store, message, &keys.key)
+            && let Some(thumbnail) = media.read(message, MediaPart::Thumbnail)?
+        {
             keys.thumbnail_blob_id = Some(
                 media::upload_scoped(
                     &https,
@@ -502,16 +511,37 @@ async fn upload(
         Ok::<_, media::MediaError>(())
     }
     .await;
-    match result.map(|()| store.set_file_keys(message, &keys)) {
-        Ok(Ok(())) => changed(store.set_upload_state(message, STATE_LOCAL)),
+    finish_upload(&store, &events, message, &keys, result);
+}
+
+/// Record how an upload went. No await in here: nothing can come between the check and the writes.
+/// A file deleted during its upload leaves no trace: its blob ids on the next file sent, which got
+/// its row id, would send the deleted file in that one's place, and a failure would hold that one
+/// back.
+fn finish_upload(
+    store: &Store,
+    events: &mpsc::UnboundedSender<CoreEvent>,
+    message: i64,
+    keys: &FileKeys,
+    result: Result<(), media::MediaError>,
+) {
+    if !same_file(store, message, &keys.key) {
+        tracing::info!("upload dropped, its message is gone");
+        return;
+    }
+    let state = match result.map(|()| store.set_file_keys(message, keys)) {
+        Ok(Ok(())) => STATE_LOCAL,
         Ok(Err(error)) => {
             tracing::warn!(%error, "storing blob ids failed");
-            changed(store.set_upload_state(message, STATE_FAILED));
+            STATE_FAILED
         }
         Err(error) => {
             tracing::warn!(%error, "upload failed");
-            changed(store.set_upload_state(message, STATE_FAILED));
+            STATE_FAILED
         }
+    };
+    if let Ok(Some(message)) = store.set_upload_state(message, state) {
+        let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
     }
 }
 
@@ -1437,6 +1467,70 @@ mod tests {
         keys.blob_id = Some(libthreema::common::BlobId([9; 16]));
         app.store.set_file_keys(id, &keys).unwrap();
         assert!(!download.wanted(&app.store));
+    }
+
+    fn outgoing_file(store: &Store, message_id: u64, key: u8) -> i64 {
+        let body = json!({"mediaType": "video/mp4", "size": 1, "uploadState": STATE_LOADING});
+        let message = store
+            .insert_outgoing("ABCD1234", message_id, "file", &body.to_string())
+            .unwrap();
+        store
+            .set_file_keys(
+                message.id,
+                &FileKeys {
+                    key: Zeroizing::new([key; 32]),
+                    blob_id: None,
+                    thumbnail_blob_id: None,
+                },
+            )
+            .unwrap();
+        message.id
+    }
+
+    /// The wrong video deleted during its upload, and the right one sent, under the same row id:
+    /// the old upload's blob must not go out as the new message.
+    #[test]
+    fn an_upload_of_a_deleted_file_leaves_the_next_file_alone() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let wrong = outgoing_file(&app.store, 1, 1);
+        let mut uploaded = app.store.file_keys(wrong).unwrap().unwrap();
+        uploaded.blob_id = Some(libthreema::common::BlobId([7; 16]));
+        app.store.remove_message(wrong).unwrap();
+        let right = outgoing_file(&app.store, 2, 2);
+        assert_eq!(right, wrong, "SQLite gives the newest row's id out again");
+
+        finish_upload(&app.store, &events, wrong, &uploaded, Ok(()));
+        let keys = app.store.file_keys(right).unwrap().unwrap();
+        assert_eq!(*keys.key, [2; 32]);
+        assert!(keys.blob_id.is_none());
+        assert_eq!(
+            state(&app.store, right, "uploadState"),
+            Some(STATE_LOADING),
+            "still its own upload's business"
+        );
+
+        // Nor does its failure hold the new one back.
+        let failed = Err(media::MediaError::Server("status 500".into()));
+        finish_upload(&app.store, &events, wrong, &uploaded, failed);
+        assert_eq!(state(&app.store, right, "uploadState"), Some(STATE_LOADING));
+    }
+
+    #[test]
+    fn a_finished_upload_is_recorded() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = outgoing_file(&app.store, 1, 1);
+        let mut uploaded = app.store.file_keys(id).unwrap().unwrap();
+        uploaded.blob_id = Some(libthreema::common::BlobId([7; 16]));
+        finish_upload(&app.store, &events, id, &uploaded, Ok(()));
+        let keys = app.store.file_keys(id).unwrap().unwrap();
+        assert_eq!(keys.blob_id.unwrap().0, [7; 16]);
+        assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOCAL));
+
+        let failed = Err(media::MediaError::Server("status 500".into()));
+        finish_upload(&app.store, &events, id, &uploaded, failed);
+        assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
     }
 
     /// A file left by a download that outlived its message's deletion goes at the next start.
