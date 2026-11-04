@@ -457,7 +457,8 @@ impl PollSetupMessage {
     const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
     const CONTACT_PROPERTIES: MessageProperties = TextMessage::CONTACT_PROPERTIES;
     const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::PollSetup;
-    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    // Exempt from blocking in groups (the poll state must stay consistent).
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
     const GROUP_PROPERTIES: GroupMessageProperties = TextMessage::GROUP_PROPERTIES;
     const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupPollSetup;
 }
@@ -923,7 +924,8 @@ impl ContactMessageBody {
     }
 
     /// Determine whether the 1:1 message is exempt from blocking.
-    const fn is_exempt_from_blocking(&self) -> bool {
+    #[must_use]
+    pub const fn is_exempt_from_blocking(&self) -> bool {
         match &self {
             ContactMessageBody::Text(_) => TextMessage::CONTACT_EXEMPT_FROM_BLOCKING,
             ContactMessageBody::Location(_) => LocationMessage::CONTACT_EXEMPT_FROM_BLOCKING,
@@ -1282,7 +1284,8 @@ impl GroupMessageBody {
 
     /// Determine whether the group message is exempt from blocking.
     #[inline]
-    fn is_exempt_from_blocking(&self) -> bool {
+    #[must_use]
+    pub fn is_exempt_from_blocking(&self) -> bool {
         match &self {
             GroupMessageBody::Text(_) => TextMessage::GROUP_EXEMPT_FROM_BLOCKING,
             GroupMessageBody::Location(_) => LocationMessage::GROUP_EXEMPT_FROM_BLOCKING,
