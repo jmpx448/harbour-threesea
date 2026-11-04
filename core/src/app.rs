@@ -1460,7 +1460,7 @@ impl App {
                 .to_string();
             }
         };
-        let change = sync_change(&request.command);
+        let change = sync_change(&self.store, &request.command);
         let outcome = self.execute(request.command).await;
         let made_direct = self.made_direct.take();
         if !made_direct.is_empty() {
@@ -2303,7 +2303,10 @@ impl App {
 }
 
 /// What a command changes that other devices of the group keep too (multi-device).
-fn sync_change(command: &Command) -> Option<crate::app_multidevice::SyncChange> {
+fn sync_change(
+    store: &crate::store::Store,
+    command: &Command,
+) -> Option<crate::app_multidevice::SyncChange> {
     use crate::app_multidevice::SyncChange;
     Some(match command {
         Command::AddContact { identity }
@@ -2320,12 +2323,18 @@ fn sync_change(command: &Command) -> Option<crate::app_multidevice::SyncChange> 
         Command::CreateGroup { .. } => SyncChange::Group {
             key: None,
             created: true,
+            previous_members: None,
         },
-        Command::RenameGroup { key, .. }
-        | Command::SetGroupMembers { key, .. }
-        | Command::LeaveGroup { key } => SyncChange::Group {
+        Command::RenameGroup { key, .. } | Command::LeaveGroup { key } => SyncChange::Group {
             key: Some(key.clone()),
             created: false,
+            previous_members: None,
+        },
+        // The list as it is before the command runs: the difference goes along.
+        Command::SetGroupMembers { key, .. } => SyncChange::Group {
+            key: Some(key.clone()),
+            created: false,
+            previous_members: store.group(key).ok().flatten().map(|group| group.members),
         },
         Command::SetSetting { .. }
         | Command::SetBlocked { .. }

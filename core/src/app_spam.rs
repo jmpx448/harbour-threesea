@@ -165,6 +165,7 @@ impl App {
             if matches!(conversation, Conversation::Group(_)) {
                 let left = self.leave_group(key)?;
                 let change = SyncChange::Group {
+                    previous_members: None,
                     key: Some(key.to_owned()),
                     created: false,
                 };

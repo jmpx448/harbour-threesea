@@ -751,6 +751,7 @@ impl<'a> Session<'a> {
                 store: Rc::clone(store),
                 events: Rc::clone(&events),
                 user: setup.identity,
+                from_sync: false,
             })),
         });
 

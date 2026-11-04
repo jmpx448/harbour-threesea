@@ -352,6 +352,7 @@ mod tests {
                     store: Rc::clone(&store),
                     events: Rc::clone(&events),
                     user: id,
+                    from_sync: false,
                 })),
             });
             Self {

@@ -523,6 +523,11 @@ pub struct GroupOutcome {
 /// Group receive steps; `user` is our identity, `contact_exists` whether we have a contact (any
 /// acquaintance) for an identity, `blocked` whether the user blocked one explicitly (ADR 0019),
 /// `name_of` its display name (for status lines).
+///
+/// `from_sync`: another device, the leader, reflected this message after running these steps
+/// itself and answering whatever needed an answer. Group control is discarded then, like Android's
+/// `executeMessageStepsFromSync`: the leader reflects a `GroupSync` for it (csp.struct.yml), and
+/// that makes the status lines. Content is simply stored, and nothing goes out from here.
 #[expect(clippy::too_many_arguments, reason = "the receive context")]
 pub fn receive(
     store: &Store,
@@ -531,6 +536,7 @@ pub fn receive(
     message_id: u64,
     created_at: i64,
     message: IncomingGroupMessageBody,
+    from_sync: bool,
     contact_exists: &dyn Fn(&str) -> bool,
     blocked: &dyn Fn(&str) -> Result<bool, StoreError>,
     name_of: &dyn Fn(&str) -> String,
@@ -541,6 +547,24 @@ pub fn receive(
     let user_is_creator = creator == user;
     let mut outcome = GroupOutcome::default();
     let group = store.group(&key)?;
+
+    if from_sync {
+        if matches!(
+            message.body,
+            GroupMessageBody::Setup(_)
+                | GroupMessageBody::Name(_)
+                | GroupMessageBody::Leave(_)
+                | GroupMessageBody::SyncRequest(_)
+                | GroupMessageBody::SetProfilePicture(_)
+                | GroupMessageBody::DeleteProfilePicture(_)
+        ) {
+            return Ok(outcome);
+        }
+        if group.is_none() {
+            tracing::info!("reflected group message for an unknown group, discarded");
+            return Ok(outcome);
+        }
+    }
 
     match message.body {
         GroupMessageBody::Setup(setup) => {
@@ -616,7 +640,7 @@ pub fn receive(
         return Ok(outcome);
     };
     let reply_to = vec![sender.to_owned()];
-    if group.left {
+    if group.left && !from_sync {
         if user_is_creator {
             store.group_outbox_add(
                 &key,
@@ -630,7 +654,7 @@ pub fn receive(
         outcome.send = true;
         return Ok(outcome);
     }
-    if !group.members.iter().any(|m| m == sender) {
+    if !group.members.iter().any(|m| m == sender) && !from_sync {
         if user_is_creator {
             store.group_outbox_add(
                 &key,
@@ -1022,6 +1046,7 @@ mod tests {
                 group_identity: gid(creator),
                 body,
             },
+            false,
             &|m| m != "UNKNOWN1",
             &|m| Ok(m == BLOCKED),
             &|m| format!("~{m}"),
@@ -1284,6 +1309,30 @@ mod tests {
         assert!(kinds.contains(&(OUTBOX_GROUP_LEAVE.into(), vec!["UNKNOWN1".into()])));
     }
 
+    fn run_reflected(
+        store: &Store,
+        sender: &str,
+        creator: &str,
+        body: GroupMessageBody,
+    ) -> GroupOutcome {
+        receive(
+            store,
+            USER,
+            sender,
+            rand::random(),
+            1,
+            IncomingGroupMessageBody {
+                group_identity: gid(creator),
+                body,
+            },
+            true,
+            &|_| true,
+            &|_| Ok(false),
+            &|m| format!("~{m}"),
+        )
+        .unwrap()
+    }
+
     fn stored_group(store: &Store, creator: &str, members: &[&str], left: bool) -> String {
         let group_key = key(&gid(creator));
         store
@@ -1299,6 +1348,57 @@ mod tests {
             })
             .unwrap();
         group_key
+    }
+
+    #[test]
+    fn reflected_group_control_changes_nothing_and_gets_no_answer() {
+        let (_dir, store) = store();
+        let own = stored_group(&store, USER, &[BOB], false);
+        let before = store.group(&own).unwrap();
+        let outcome = run_reflected(
+            &store,
+            BOB,
+            USER,
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+        );
+        assert!(!outcome.send);
+        assert!(outbox_kinds(&store).is_empty());
+
+        let theirs = stored_group(&store, CREATOR, &[CREATOR, BOB], false);
+        for body in [
+            setup(&[USER]),
+            GroupMessageBody::Name(GroupNameMessage { name: "New".into() }),
+            GroupMessageBody::Leave(GroupLeaveMessage),
+        ] {
+            let sender = if matches!(body, GroupMessageBody::Leave(_)) {
+                BOB
+            } else {
+                CREATOR
+            };
+            let outcome = run_reflected(&store, sender, CREATOR, body);
+            assert!(outcome.added.is_empty() && !outcome.groups_changed);
+        }
+        assert_eq!(store.group(&own).unwrap(), before);
+        let group = store.group(&theirs).unwrap().unwrap();
+        assert_eq!(group.name, "Crew");
+        assert_eq!(group.members, vec![CREATOR, BOB]);
+        assert!(outbox_kinds(&store).is_empty());
+    }
+
+    #[test]
+    fn reflected_content_is_stored_without_asking_anyone() {
+        let (_dir, store) = store();
+        let text = || GroupMessageBody::Text(TextMessage { text: "hi".into() });
+        // A group we don't know: not stored, and the creator isn't asked.
+        assert!(run_reflected(&store, BOB, CREATOR, text()).added.is_empty());
+        assert!(outbox_kinds(&store).is_empty());
+
+        // The leader let it through, whatever our lists say.
+        stored_group(&store, CREATOR, &[CREATOR], false);
+        assert_eq!(run_reflected(&store, BOB, CREATOR, text()).added.len(), 1);
+        stored_group(&store, CREATOR, &[CREATOR, BOB], true);
+        assert_eq!(run_reflected(&store, BOB, CREATOR, text()).added.len(), 1);
+        assert!(outbox_kinds(&store).is_empty());
     }
 
     #[test]

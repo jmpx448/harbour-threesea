@@ -142,6 +142,7 @@ pub fn apply(
                 store: Rc::clone(store),
                 events: Rc::clone(events),
                 user,
+                from_sync: true,
             };
             conversations
                 .add_or_update_incoming_message(IncomingMessage {

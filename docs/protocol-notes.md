@@ -272,6 +272,12 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   ignored, only `Create` makes one (like Android).
 - `user_state`: `groups.kicked` tells of the groups we are out of (`left_group`) whether the creator
   removed us. Groups from before that column stay "left"; they can't be told apart.
+- Group control reflected as an incoming message (another device leads) is discarded like on
+  Android, and nothing goes out in reply: that device answered, and tells us by `GroupSync`. The
+  status lines come from that sync: `member_state_changes` checked against the old and new
+  lists (md-d2d.proto), and the name and `user_state` when they differ. Content is stored as it
+  comes, whatever our lists say, as the leader ran the receive steps. Member changes made here
+  fill `member_state_changes` for the others.
 - Not yet: group calls, per-receiver legacy reactions.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We

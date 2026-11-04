@@ -502,6 +502,9 @@ pub struct StoreConversations {
     pub events: EventSink,
     /// Our own identity (group receive steps).
     pub user: ThreemaId,
+    /// The messages come reflected from another device, not from the chat server: that device
+    /// has answered them and told the others.
+    pub from_sync: bool,
 }
 
 /// The call signalling message types (csp.struct.yml `call-*`).
@@ -569,6 +572,7 @@ impl ConversationProvider for StoreConversations {
                     message.id.0,
                     i64::try_from(message.created_at).unwrap_or(i64::MAX),
                     group,
+                    self.from_sync,
                     &|identity| store.contact(identity).ok().flatten().is_some(),
                     &|identity| store.is_explicitly_blocked(identity),
                     &|identity| {
@@ -583,6 +587,7 @@ impl ConversationProvider for StoreConversations {
                 // A group message from someone whose picture we don't have: ask them, like a
                 // 1:1 message does (bounded by the request backoff).
                 if !outcome.added.is_empty()
+                    && !self.from_sync
                     && self
                         .store
                         .request_picture(&message.sender_identity.to_string())
@@ -923,6 +928,51 @@ mod tests {
             })
             .unwrap();
         key
+    }
+
+    #[test]
+    fn a_reflected_group_message_asks_nobody() {
+        use libthreema::model::message::{GroupMessageBody, IncomingGroupMessageBody, TextMessage};
+        let (_dir, store) = store();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::GroupOrDeleted,
+            pc::ActivityState::Active,
+        );
+        let key = group(&store, &["ABCD1234", MEMBER], false);
+        let store = Rc::new(store);
+        let receive = |from_sync: bool, id: u64| {
+            let events: EventSink = Rc::default();
+            let mut conversations = StoreConversations {
+                store: Rc::clone(&store),
+                events: Rc::clone(&events),
+                user: ThreemaId::try_from("USER0001").unwrap(),
+                from_sync,
+            };
+            conversations
+                .add_or_update_incoming_message(IncomingMessage {
+                    sender_identity: ThreemaId::try_from(MEMBER).unwrap(),
+                    id: MessageId(id),
+                    overrides: libthreema::model::message::MessageOverrides::default(),
+                    created_at: 1,
+                    body: IncomingMessageBody::Group(IncomingGroupMessageBody {
+                        group_identity: crate::groups::parse_key(&key).unwrap(),
+                        body: GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+                    }),
+                })
+                .unwrap();
+            let added = events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, CoreEvent::MessageAdded { .. }));
+            assert!(added);
+        };
+        // Reflected: the leader asks for the sender's picture if anyone does.
+        receive(true, 1);
+        assert!(store.outbox().unwrap().is_empty());
+        receive(false, 2);
+        assert!(!store.outbox().unwrap().is_empty());
     }
 
     #[test]

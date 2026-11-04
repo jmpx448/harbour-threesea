@@ -6,6 +6,8 @@
 //! (`optional` in md-d2d-sync.proto). Pictures come as blob mirror references
 //! (`CoreEvent::SyncPicture`, fetched by `App::apply_synced_picture`).
 
+use std::collections::HashMap;
+
 use libthreema::{
     common::{FeatureMask, ThreemaId, keys::PublicKey},
     model::contact::Contact,
@@ -13,7 +15,7 @@ use libthreema::{
         common::GroupIdentity as ProtoGroupIdentity,
         d2d::{
             ContactSync, GroupSync, SettingsSync, UserProfileSync, contact_sync, group_sync,
-            settings_sync, user_profile_sync,
+            group_sync::update::MemberStateChange, settings_sync, user_profile_sync,
         },
         d2d_sync::{
             self, ConversationCategory, ConversationVisibility, ReadReceiptPolicy,
@@ -245,11 +247,64 @@ fn group_key(
     Some((crate::groups::key(&group), group))
 }
 
+/// One line per person a group sync says came or went, as if the change had been made here.
+/// Only what fits the lists (md-d2d.proto, `GroupSync.Update`): the other device may have told
+/// us of a change we already have.
+fn member_change_lines(
+    store: &Store,
+    key: &str,
+    changes: &HashMap<String, i32>,
+    old_members: &[String],
+    new_members: &[String],
+    events: &mut Vec<CoreEvent>,
+) -> Result<(), StoreError> {
+    let mut changes: Vec<_> = changes.iter().collect();
+    changes.sort();
+    for (identity, change) in changes {
+        let was_in = old_members.contains(identity);
+        let is_in = new_members.contains(identity);
+        let code = match MemberStateChange::try_from(*change) {
+            Ok(MemberStateChange::Added) if !was_in && is_in => "groupMemberAdded",
+            Ok(MemberStateChange::Kicked) if was_in && !is_in => "groupMemberRemoved",
+            Ok(MemberStateChange::Left) if was_in && !is_in => "groupMemberLeft",
+            _ => continue,
+        };
+        let name = store.contact(identity)?.map_or_else(
+            || identity.clone(),
+            |contact| crate::contacts::display_name(&contact),
+        );
+        status_line(store, key, &format!("{code}|{name}"), events)?;
+    }
+    Ok(())
+}
+
+fn status_line(
+    store: &Store,
+    key: &str,
+    code: &str,
+    events: &mut Vec<CoreEvent>,
+) -> Result<(), StoreError> {
+    if let Some(message) = store.insert_status(key, code)? {
+        events.push(CoreEvent::MessageAdded {
+            message,
+            send_delivery_receipt: false,
+        });
+    }
+    Ok(())
+}
+
+/// How a group sync comes in: `Create` makes the group if need be, `Update` only changes one we
+/// have (only some fields, which wouldn't make a group) and may name who came and went.
+enum GroupAction<'a> {
+    Create,
+    Update(&'a HashMap<String, i32>),
+}
+
 fn apply_group(
     store: &Store,
     user: &str,
     mut synced: d2d_sync::Group,
-    create: bool,
+    action: &GroupAction<'_>,
     events: &mut Vec<CoreEvent>,
 ) -> Result<bool, StoreError> {
     let Some((key, identity)) = group_key(synced.group_identity.as_ref()) else {
@@ -257,10 +312,12 @@ fn apply_group(
     };
     let creator = identity.creator_identity.to_string();
     let existing = store.group(&key)?;
-    if existing.is_none() && !create {
+    if existing.is_none() && matches!(action, GroupAction::Update(_)) {
         tracing::info!("group sync update for an unknown group, ignored");
         return Ok(false);
     }
+    let is_new = existing.is_none();
+    let was_left = existing.as_ref().is_some_and(|group| group.left);
     let mut stored = existing.unwrap_or(crate::groups::Group {
         key: key.clone(),
         identity,
@@ -274,9 +331,15 @@ fn apply_group(
         picture: None,
         picture_version: 0,
     });
+    let old_members = stored.members.clone();
+    let renamed = synced
+        .name
+        .as_ref()
+        .is_some_and(|name| *name != stored.name);
     if let Some(name) = synced.name {
         stored.name = name;
     }
+    let members_given = synced.member_identities.is_some();
     if let Some(members) = synced.member_identities {
         stored.members = crate::groups::normalized_members(members.identities, &creator, user);
     }
@@ -330,6 +393,50 @@ fn apply_group(
         synced.conversation_category,
         events,
     )?;
+    // The status lines a change made here would have added: reflected group control adds none.
+    let user_is_creator = creator == user;
+    if is_new {
+        if !stored.left {
+            let code = if user_is_creator {
+                "groupCreated"
+            } else {
+                "groupJoined"
+            };
+            status_line(store, &key, code, events)?;
+        }
+        return Ok(true);
+    }
+    match user_state {
+        Some(group::UserState::Member) if was_left => {
+            status_line(store, &key, "groupJoined", events)?;
+        }
+        Some(group::UserState::Kicked) if !was_left => {
+            status_line(store, &key, "groupRemoved", events)?;
+        }
+        Some(group::UserState::Left) if !was_left => {
+            let code = if user_is_creator {
+                "groupDisbanded"
+            } else {
+                "groupLeft"
+            };
+            status_line(store, &key, code, events)?;
+        }
+        _ => {}
+    }
+    if renamed {
+        status_line(
+            store,
+            &key,
+            &format!("groupRenamed|{}", stored.name),
+            events,
+        )?;
+    }
+    if let GroupAction::Update(changes) = action
+        && members_given
+        && !was_left
+    {
+        member_change_lines(store, &key, changes, &old_members, &stored.members, events)?;
+    }
     Ok(true)
 }
 
@@ -359,11 +466,14 @@ pub fn group_sync(
 ) -> Result<(), StoreError> {
     let changed = match sync.action {
         Some(group_sync::Action::Create(create)) => match create.group {
-            Some(group) => apply_group(store, user, group, true, events)?,
+            Some(group) => apply_group(store, user, group, &GroupAction::Create, events)?,
             None => false,
         },
         Some(group_sync::Action::Update(update)) => match update.group {
-            Some(group) => apply_group(store, user, group, false, events)?,
+            Some(group) => {
+                let changes = GroupAction::Update(&update.member_state_changes);
+                apply_group(store, user, group, &changes, events)?
+            }
             None => false,
         },
         Some(group_sync::Action::Delete(delete)) => match group_key(delete.group_identity.as_ref())
@@ -528,14 +638,17 @@ mod tests {
         events
     }
 
-    fn update(store: &Store, group: d2d_sync::Group) {
+    fn update(store: &Store, group: d2d_sync::Group, changes: &[(&str, MemberStateChange)]) {
         group_sync(
             store,
             USER,
             GroupSync {
                 action: Some(group_sync::Action::Update(group_sync::Update {
                     group: Some(group),
-                    member_state_changes: Default::default(),
+                    member_state_changes: changes
+                        .iter()
+                        .map(|(id, change)| ((*id).to_owned(), *change as i32))
+                        .collect(),
                 })),
             },
             &mut Vec::new(),
@@ -548,6 +661,15 @@ mod tests {
         key
     }
 
+    fn lines(store: &Store, creator: &str) -> Vec<String> {
+        store
+            .conversation_messages(&key(creator), 20)
+            .unwrap()
+            .into_iter()
+            .map(|message| message.body)
+            .collect()
+    }
+
     #[test]
     fn the_creator_stays_a_member_of_someone_elses_group() {
         let (_dir, store) = store();
@@ -557,19 +679,19 @@ mod tests {
             store.group(&key(CREATOR)).unwrap().unwrap().members,
             vec![CREATOR, BOB]
         );
-        update(&store, listing(CREATOR, &[BOB, EVE]));
+        update(&store, listing(CREATOR, &[BOB, EVE]), &[]);
         assert_eq!(
             store.group(&key(CREATOR)).unwrap().unwrap().members,
             vec![CREATOR, BOB, EVE]
         );
         // Whatever a device sends: no doubles, not us.
-        update(&store, listing(CREATOR, &[EVE, USER, CREATOR, EVE]));
+        update(&store, listing(CREATOR, &[EVE, USER, CREATOR, EVE]), &[]);
         assert_eq!(
             store.group(&key(CREATOR)).unwrap().unwrap().members,
             vec![CREATOR, EVE]
         );
         // Nothing said about members: nothing changes.
-        update(&store, synced(CREATOR));
+        update(&store, synced(CREATOR), &[]);
         assert_eq!(
             store.group(&key(CREATOR)).unwrap().unwrap().members,
             vec![CREATOR, EVE]
@@ -632,17 +754,90 @@ mod tests {
         create(&store, listing(CREATOR, &[BOB]));
         assert!(!store.group_kicked(&group_key).unwrap());
 
-        update(&store, state(group::UserState::Kicked));
+        update(&store, state(group::UserState::Kicked), &[]);
         assert!(store.group(&group_key).unwrap().unwrap().left);
         assert!(store.group_kicked(&group_key).unwrap());
 
-        update(&store, state(group::UserState::Member));
+        update(&store, state(group::UserState::Member), &[]);
         assert!(!store.group(&group_key).unwrap().unwrap().left);
         assert!(!store.group_kicked(&group_key).unwrap());
 
-        update(&store, state(group::UserState::Left));
+        update(&store, state(group::UserState::Left), &[]);
         assert!(store.group(&group_key).unwrap().unwrap().left);
         assert!(!store.group_kicked(&group_key).unwrap());
+    }
+
+    #[test]
+    fn changes_from_the_other_device_show_as_lines() {
+        let (_dir, store) = store();
+        let events = create(&store, listing(CREATOR, &[BOB]));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            CoreEvent::MessageAdded { message, send_delivery_receipt: false }
+                if message.body == "groupJoined"
+        )));
+        update(
+            &store,
+            listing(CREATOR, &[EVE]),
+            &[
+                (EVE, MemberStateChange::Added),
+                (BOB, MemberStateChange::Kicked),
+            ],
+        );
+        update(
+            &store,
+            listing(CREATOR, &[]),
+            &[(EVE, MemberStateChange::Left)],
+        );
+        update(
+            &store,
+            d2d_sync::Group {
+                name: Some("Crew".into()),
+                ..synced(CREATOR)
+            },
+            &[],
+        );
+        // The same name, and changes that don't fit the lists: no lines.
+        update(
+            &store,
+            d2d_sync::Group {
+                name: Some("Crew".into()),
+                ..listing(CREATOR, &[])
+            },
+            &[
+                (EVE, MemberStateChange::Kicked),
+                (BOB, MemberStateChange::Added),
+                (CREATOR, MemberStateChange::Left),
+            ],
+        );
+        update(&store, state(group::UserState::Kicked), &[]);
+        update(&store, state(group::UserState::Kicked), &[]);
+        assert_eq!(
+            lines(&store, CREATOR),
+            vec![
+                "groupJoined",
+                format!("groupMemberRemoved|{BOB}").as_str(),
+                format!("groupMemberAdded|{EVE}").as_str(),
+                format!("groupMemberLeft|{EVE}").as_str(),
+                "groupRenamed|Crew",
+                "groupRemoved",
+            ]
+        );
+    }
+
+    #[test]
+    fn our_own_groups_lines_say_what_we_did() {
+        let (_dir, store) = store();
+        create(&store, listing(USER, &[BOB]));
+        update(
+            &store,
+            d2d_sync::Group {
+                user_state: Some(group::UserState::Left as i32),
+                ..synced(USER)
+            },
+            &[],
+        );
+        assert_eq!(lines(&store, USER), vec!["groupCreated", "groupDisbanded"]);
     }
 
     #[test]

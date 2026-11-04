@@ -8,7 +8,7 @@ use libthreema::protobuf::{
     common::{DeltaImage, Unit, delta_image},
     d2d::{
         ContactSync, GroupSync, contact_sync, envelope::Content, group_sync,
-        transaction_scope::Scope,
+        group_sync::update::MemberStateChange, transaction_scope::Scope,
     },
 };
 use serde_json::{Value, json};
@@ -138,6 +138,9 @@ impl App {
                         group.picture_version = if data.is_some() {
                             crate::profile_pictures::next_version(group.picture_version)
                         } else {
+                            // Its descriptor goes too, or it would be downloaded again as one
+                            // that never made it onto the device.
+                            group.picture = None;
                             0
                         };
                         store.upsert_group(&group)?;
@@ -550,7 +553,11 @@ impl App {
                     }
                     out
                 }
-                SyncChange::Group { key, created } => {
+                SyncChange::Group {
+                    key,
+                    created,
+                    previous_members,
+                } => {
                     let key = key.or_else(|| result["key"].as_str().map(str::to_owned));
                     let Some(group) = key.and_then(|key| self.store.group(&key).ok().flatten())
                     else {
@@ -566,7 +573,9 @@ impl App {
                     } else {
                         group_sync::Action::Update(group_sync::Update {
                             group: Some(synced),
-                            member_state_changes: HashMap::new(),
+                            member_state_changes: previous_members
+                                .map(|previous| member_changes_by_command(&previous, &group))
+                                .unwrap_or_default(),
                         })
                     };
                     vec![(
@@ -753,6 +762,20 @@ fn group_delta(group: &Group) -> libthreema::protobuf::d2d_sync::Group {
     }
 }
 
+/// `member_state_changes` of a member change the user made here: who is new, who was removed.
+fn member_changes_by_command(previous: &[String], group: &Group) -> HashMap<String, i32> {
+    let added = group
+        .members
+        .iter()
+        .filter(|member| !previous.contains(member))
+        .map(|member| (member.clone(), MemberStateChange::Added as i32));
+    let removed = previous
+        .iter()
+        .filter(|member| !group.members.contains(member))
+        .map(|member| (member.clone(), MemberStateChange::Kicked as i32));
+    added.chain(removed).collect()
+}
+
 impl App {
     /// The picture stored as `target`, encrypted and uploaded to the mirror (local scope) as a
     /// sync `DeltaImage`; `None` if there is none (the "removed" placeholder stays).
@@ -795,6 +818,8 @@ pub(crate) enum SyncChange {
     Group {
         key: Option<String>,
         created: bool,
+        /// The members before a member change: the difference goes along, as a status line there.
+        previous_members: Option<Vec<String>>,
     },
     /// A chat's pin, archive, private state or notifications: contact or group.
     Conversation(String),
@@ -887,6 +912,94 @@ mod tests {
                 .unwrap();
         }
         group
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_picture_removed_on_another_device_does_not_come_back() {
+        let (_dir, app) = app();
+        let mut group = foreign_group(&app);
+        group.picture = Some(crate::groups::GroupPicture {
+            blob_id: libthreema::common::BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        });
+        group.picture_version = 5;
+        app.store.upsert_group(&group).unwrap();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                app.apply_synced_picture(group.key.clone(), None);
+                while app
+                    .store
+                    .group(&group.key)
+                    .unwrap()
+                    .unwrap()
+                    .picture_version
+                    != 0
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        // Not a download still to be retried.
+        assert!(
+            app.store
+                .group(&group.key)
+                .unwrap()
+                .unwrap()
+                .picture
+                .is_none()
+        );
+        assert!(app.store.groups_with_pending_picture().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn changing_members_here_says_who_came_and_went() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        for id in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        let created: Value = serde_json::from_str(
+            &app.handle(
+                &json!({"id": 1, "cmd": "createGroup", "name": "Crew", "members": ["BBBBBBBB"]})
+                    .to_string(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(created["ok"], true, "{created}");
+        let key = created["result"]["key"].as_str().unwrap().to_owned();
+        let _rx = in_a_group(&mut app);
+
+        let change =
+            json!({"id": 2, "cmd": "setGroupMembers", "key": key, "members": ["CCCCCCCC"]});
+        let reply: Value = serde_json::from_str(&app.handle(&change.to_string()).await).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        let update = update_of(next_group_sync(&app));
+        assert_eq!(
+            update.member_state_changes,
+            [
+                ("CCCCCCCC".to_owned(), MemberStateChange::Added as i32),
+                ("BBBBBBBB".to_owned(), MemberStateChange::Kicked as i32),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(
+            update.group.unwrap().member_identities.unwrap().identities,
+            vec!["CCCCCCCC"]
+        );
+
+        // A rename says nobody came or went.
+        let rename = json!({"id": 3, "cmd": "renameGroup", "key": key, "name": "Ship"});
+        app.handle(&rename.to_string()).await;
+        assert!(
+            update_of(next_group_sync(&app))
+                .member_state_changes
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
