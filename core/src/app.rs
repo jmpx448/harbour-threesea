@@ -687,6 +687,9 @@ pub enum Command {
     },
     CallReject,
     CallHangUp,
+    CallFailed {
+        reason: String,
+    },
     CallTimeout,
     CallCandidates {
         candidates: Vec<crate::calls::Candidate>,
@@ -1837,6 +1840,7 @@ impl App {
             Command::CallAccept { sdp, video } => self.call_accept(&sdp, video),
             Command::CallReject => Ok(self.call_reject()),
             Command::CallHangUp => Ok(self.call_hang_up()),
+            Command::CallFailed { reason } => Ok(self.call_failed(&reason)),
             Command::CallTimeout => Ok(self.call_timeout()),
             Command::CallCandidates { candidates } => Ok(self.call_candidates(candidates)),
             Command::CallState => Ok(self.call_state()),

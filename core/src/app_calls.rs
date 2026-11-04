@@ -101,7 +101,7 @@ impl App {
                         }
                         Err(error) => {
                             tracing::warn!(%error, "incoming call offer unusable");
-                            let effects = self.calls.reject(false, crate::messages::now_ms());
+                            let effects = self.calls.fail(crate::messages::now_ms());
                             self.apply_call_effects(effects);
                         }
                     }
@@ -120,7 +120,7 @@ impl App {
                         })),
                         _ => {
                             tracing::warn!("call answer unusable");
-                            let effects = self.calls.hang_up(crate::messages::now_ms());
+                            let effects = self.calls.fail(crate::messages::now_ms());
                             self.apply_call_effects(effects);
                         }
                     }
@@ -300,6 +300,15 @@ impl App {
         json!({})
     }
 
+    /// `callFailed`: the media side gave up (`reason`: `certificate`, else `connection`).
+    pub(crate) fn call_failed(&mut self, reason: &str) -> Value {
+        let certificate = reason == "certificate";
+        tracing::warn!(certificate, "call failed");
+        let effects = self.calls.fail(crate::messages::now_ms());
+        self.apply_call_effects(effects);
+        json!({})
+    }
+
     /// `callCandidates`: our ICE candidates.
     pub(crate) fn call_candidates(&mut self, candidates: Vec<Candidate>) -> Value {
         let effects = self.calls.local_candidates(candidates);
@@ -310,6 +319,7 @@ impl App {
     /// `callConnected`: the media is up (`relayed`: through TURN). Sends our video quality
     /// profile to the peer like Android does when its call connects.
     pub(crate) fn call_connected(&mut self, relayed: bool) -> Value {
+        self.calls.connected(crate::messages::now_ms());
         self.call_media.relayed = relayed;
         let own = VideoParams::from_setting(&self.video_quality_setting().unwrap_or_default());
         self.send_on_channel(&call_video::encode_quality(&own));
@@ -842,6 +852,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_incoming_call_is_no_declined_call() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        sent(&mut rx);
+        call_events(&mut events);
+
+        app.call_failed("connection");
+        assert_eq!(
+            sent(&mut rx),
+            vec![Signal::Reject {
+                call_id: 7,
+                reason: RejectReason::Unknown,
+            }]
+        );
+        assert!(app.calls.current.is_none());
+        let (lines, calls) = drain(&mut events);
+        assert_eq!(lines, vec!["call|failed|0|0|7"]);
+        assert_eq!(calls[0]["event"], "callEnded");
+        assert_eq!(calls[0]["record"]["result"], "failed");
+    }
+
+    #[test]
     fn an_answer_without_video_reaches_the_ui() {
         let (_dir, mut app, _rx) = app(true);
         let mut events = app.take_media_events().unwrap();
@@ -859,6 +893,25 @@ mod tests {
         assert_eq!(event["event"], "callAnswer");
         assert_eq!(event["video"], false);
         assert_eq!(app.call_state()["call"]["video"], false);
+    }
+
+    #[test]
+    fn an_unusable_offer_is_a_failure_not_a_decline() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        // No Opus: the patcher refuses it.
+        let (kind, json) = Signal::Offer {
+            call_id: 7,
+            sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 0\r\n".into(),
+            video: false,
+        }
+        .encode();
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert!(sent(&mut rx).contains(&Signal::Reject {
+            call_id: 7,
+            reason: RejectReason::Unknown,
+        }));
+        assert_eq!(drain(&mut events).0, vec!["call|failed|0|0|7"]);
     }
 
     fn call_events(events: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<Value> {

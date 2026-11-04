@@ -49,7 +49,7 @@ also when synced from another device),
 Call events (Full, ADR 0012): `callIncoming {identity, callId, sdp (patched), video}`,
 `callRinging`, `callAnswer {sdp, video}` (`video`: both sides take video; else it is an audio
 call now), `callCandidates {candidates}`, `callEnded {record: {peer, callId, outgoing, result,
-duration, at}}`, `callChannelSend {data}` (base64, for the call's data channel),
+duration, at}}` (`duration` counts from `callConnected`), `callChannelSend {data}` (base64, for the call's data channel),
 `callRemoteCapture {device: camera|microphone, on}`, `callVideoParams {bitrateKbps, fps, width,
 height}` (what our video sender may use: Android's quality profiles, the lower of both sides,
 MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`.
@@ -187,6 +187,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012) |
 | `callAccept` | `sdp` (engine's answer), `video` | `{}` |
 | `callReject` / `callHangUp` | – | `{}`; the call ends with a status message `call\|result\|outgoing (0/1)\|seconds\|callId` (imported lines have no call id) |
+| `callFailed` | `reason` (`certificate`, `connection`, `other`) | `{}`; the media side gave up: the peer is told (hangup, or reject "unknown" before the answer went out), the status message says `failed` |
 | `callTimeout` | – | `{}`; nobody answered within the ring time (60 s): incoming → rejected "timeout" (missed), outgoing → hung up (unanswered) |
 | `callConnected` | `relayed` | `{}`; media is up: our video quality profile goes to the peer (`callChannelSend`), `callVideoParams` follows |
 | `callChannel` | `data` (base64, from the call's data channel) | `{}`; events `callRemoteCapture` or `callVideoParams` |

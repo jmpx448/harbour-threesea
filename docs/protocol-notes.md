@@ -33,6 +33,7 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   holds after a restart). It never touches a call in progress. Offers whose call is over are ignored
   the same way (delivered again after a lost acknowledgement).
 - Offers during a call: rejected "busy" and recorded as missed (Android too).
+- Rejected "unknown" means the other app could not take the call, not that anyone declined.
 
 ## Reporting spam
 - From iOS 7.5.2 (`ServerAPIConnector.m`, `SpamDetector`, `GroupSpamDetector`), newer than Android's
