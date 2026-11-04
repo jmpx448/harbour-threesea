@@ -143,13 +143,7 @@ impl App {
     }
 
     /// A call message from the chat server (or reflected from another device).
-    pub(crate) fn on_call_signal(
-        &mut self,
-        peer: &str,
-        kind: CallSignalKind,
-        json: &[u8],
-        at: i64,
-    ) {
+    pub(crate) fn on_call_signal(&mut self, peer: &str, kind: CallSignalKind, json: &[u8]) {
         let signal = match Signal::decode(kind, json) {
             Ok(signal) => signal,
             Err(error) => {
@@ -157,8 +151,6 @@ impl App {
                 return;
             }
         };
-        // Old offers (the short-lived queue keeps them for about 30 s) are missed calls.
-        let now = crate::messages::now_ms();
         if !self.calls_enabled() {
             if let Signal::Offer { call_id, .. } = signal {
                 self.tell_connection(ToConnection::CallSignal {
@@ -171,18 +163,11 @@ impl App {
             }
             return;
         }
-        if matches!(signal, Signal::Offer { .. }) && now - at > 60_000 {
-            let effects = self.calls.on_signal(
-                peer,
-                Signal::Hangup {
-                    call_id: signal.call_id(),
-                },
-                now,
-            );
-            self.apply_call_effects(effects);
-            return;
-        }
-        let effects = self.calls.on_signal(peer, signal, now);
+        // No age check on offers: `created_at` is the sender's clock, and the server's short-lived
+        // queue (about 30 s) and our ring time bound them anyway.
+        let effects = self
+            .calls
+            .on_signal(peer, signal, crate::messages::now_ms());
         self.apply_call_effects(effects);
     }
 
@@ -569,7 +554,7 @@ mod tests {
     fn without_calls_offers_are_rejected() {
         let (_dir, mut app, mut rx) = app(false);
         let (kind, json) = offer(7);
-        app.on_call_signal("ECHOECHO", kind, &json, crate::messages::now_ms());
+        app.on_call_signal("ECHOECHO", kind, &json);
         assert_eq!(
             sent(&mut rx),
             vec![Signal::Reject {
@@ -627,7 +612,7 @@ mod tests {
         let (_dir, mut app, mut rx) = app(true);
         app.set_app_setting("threemaCalls", false).unwrap();
         let (kind, json) = offer(8);
-        app.on_call_signal("ECHOECHO", kind, &json, crate::messages::now_ms());
+        app.on_call_signal("ECHOECHO", kind, &json);
         assert_eq!(
             sent(&mut rx),
             vec![Signal::Reject {
@@ -638,20 +623,11 @@ mod tests {
     }
 
     #[test]
-    fn incoming_call_rings_and_old_offers_are_missed() {
+    fn incoming_call_rings() {
         let (_dir, mut app, mut rx) = app(true);
         let mut events = app.take_media_events().unwrap();
         let (kind, json) = offer(7);
-        let now = crate::messages::now_ms();
-        app.on_call_signal("ECHOECHO", kind, &json, now - 120_000);
-        assert!(app.calls.current.is_none());
-        let Ok(CoreEvent::MessageAdded { message, .. }) = events.try_recv() else {
-            panic!("no call record");
-        };
-        assert_eq!(message.body, "call|missed|0|0");
-        assert!(matches!(events.try_recv(), Ok(CoreEvent::Call(_))));
-
-        app.on_call_signal("ECHOECHO", kind, &json, now);
+        app.on_call_signal("ECHOECHO", kind, &json);
         let Ok(CoreEvent::Call(event)) = events.try_recv() else {
             panic!("no incoming call");
         };
@@ -762,7 +738,7 @@ mod tests {
             video: true,
         }
         .encode();
-        app.on_call_signal("ECHOECHO", kind, &json, crate::messages::now_ms());
+        app.on_call_signal("ECHOECHO", kind, &json);
         let incoming = call_events(&mut events);
         assert_eq!(incoming[0]["event"], "callIncoming");
         assert_eq!(incoming[0]["video"], false);

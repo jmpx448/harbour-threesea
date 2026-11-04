@@ -89,7 +89,6 @@ pub enum CoreEvent {
         peer: String,
         kind: CallSignalKind,
         json: Vec<u8>,
-        at: i64,
     },
     /// Internal: a picture changed on another device of the group: fetch it from the blob
     /// mirror (`target`: `me`, `contact:<ID>` or a group key; `None` blob: removed).
@@ -456,13 +455,11 @@ impl StoreConversations {
         peer: &str,
         kind: CallSignalKind,
         json: Vec<u8>,
-        at: i64,
     ) -> Result<(), ProviderError> {
         self.events.borrow_mut().push(CoreEvent::CallSignal {
             peer: peer.to_owned(),
             kind,
             json,
-            at,
         });
         Ok(())
     }
@@ -769,24 +766,19 @@ impl ConversationProvider for StoreConversations {
             }
             // Calls (ADR 0012): the call logic decides what they mean.
             ContactMessageBody::CallOffer(m) => {
-                return self.call_signal(&sender, CallSignalKind::Offer, m.json, created_at);
+                return self.call_signal(&sender, CallSignalKind::Offer, m.json);
             }
             ContactMessageBody::CallAnswer(m) => {
-                return self.call_signal(&sender, CallSignalKind::Answer, m.json, created_at);
+                return self.call_signal(&sender, CallSignalKind::Answer, m.json);
             }
             ContactMessageBody::CallIceCandidate(m) => {
-                return self.call_signal(
-                    &sender,
-                    CallSignalKind::IceCandidates,
-                    m.json,
-                    created_at,
-                );
+                return self.call_signal(&sender, CallSignalKind::IceCandidates, m.json);
             }
             ContactMessageBody::CallHangup(m) => {
-                return self.call_signal(&sender, CallSignalKind::Hangup, m.json, created_at);
+                return self.call_signal(&sender, CallSignalKind::Hangup, m.json);
             }
             ContactMessageBody::CallRinging(m) => {
-                return self.call_signal(&sender, CallSignalKind::Ringing, m.json, created_at);
+                return self.call_signal(&sender, CallSignalKind::Ringing, m.json);
             }
         };
         if contact.acquaintance_level != pc::AcquaintanceLevel::Direct {

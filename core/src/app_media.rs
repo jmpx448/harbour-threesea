@@ -661,12 +661,7 @@ impl App {
                 conversation,
                 start,
             } => self.on_group_call_start(conversation, start),
-            CoreEvent::CallSignal {
-                peer,
-                kind,
-                json,
-                at,
-            } => self.on_call_signal(peer, *kind, json, *at),
+            CoreEvent::CallSignal { peer, kind, json } => self.on_call_signal(peer, *kind, json),
             CoreEvent::SyncPicture { target, blob } => {
                 self.apply_synced_picture(target.clone(), blob.clone());
             }
