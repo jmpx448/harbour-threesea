@@ -132,12 +132,14 @@ pub fn file_keys(file: &FileMessage) -> FileKeys {
 }
 
 impl Store {
-    /// File messages created before `before` (ms) whose file is on the device and can come back:
-    /// not starred, not still on their way out (their upload reads the file), and with a blob. A
-    /// list's own copy or an unsent imported file has none, so its bytes here are the only ones.
+    /// File messages that reached this device before `before` (ms) whose file is on the device
+    /// and can come back: not starred, not still on their way out (their upload reads the file),
+    /// and with a blob. A list's own copy or an unsent imported file has none, so its bytes here
+    /// are the only ones. Age by arrival: an incoming `created_at` is the sender's clock.
     pub fn files_before(&self, before: i64) -> Result<Vec<i64>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT id FROM messages WHERE kind = 'file' AND created_at < ?1 AND starred = 0
+            "SELECT id FROM messages WHERE kind = 'file' AND starred = 0
+               AND COALESCE(received_at, created_at) < ?1
                AND json_extract(body, '$.fileState') = ?2
                AND NOT (outgoing = 1 AND state = ?3)
                AND EXISTS (SELECT 1 FROM files
@@ -166,15 +168,18 @@ impl Store {
         Ok(())
     }
 
-    /// Delete messages created before `before` (ms), except starred ones and status lines.
-    /// Returns how many.
-    /// Messages older than `before`, except starred ones, status lines, messages still on
-    /// their way out and polls that are still open (Android's auto-delete keeps those two as
-    /// well: a message nobody has seen and a vote still running are not old news).
+    /// Delete the messages that reached this device before `before` (ms), except starred ones,
+    /// status lines, messages still on their way out and polls that are still open (Android's
+    /// auto-delete keeps those two as well: a message nobody has seen and a vote still running
+    /// are not old news). Returns how many.
+    ///
+    /// Age by arrival, as on Android: an incoming `created_at` is the sender's clock, which could
+    /// make a late or backdated message vanish before anyone saw it. Rows with no arrival time
+    /// (ours, imported ones, status lines) have only the one clock.
     pub fn delete_messages_before(&self, before: i64) -> Result<usize, StoreError> {
         Ok(self.conn.execute(
             "DELETE FROM messages
-             WHERE created_at < ?1 AND starred = 0 AND kind != 'status'
+             WHERE COALESCE(received_at, created_at) < ?1 AND starred = 0 AND kind != 'status'
                AND NOT (outgoing = 1 AND state = ?2)
                AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)",
             params![before, crate::messages::OutgoingState::Pending as i64],
@@ -1748,6 +1753,73 @@ mod tests {
         assert_eq!(saved(), ["x.desktop.jpg"]);
     }
 
+    /// Old rows for the tests below: these messages also reached the device when they say.
+    fn arrived_when_written(store: &Store) {
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = created_at WHERE received_at IS NOT NULL",
+                [],
+            )
+            .unwrap();
+    }
+
+    /// An incoming `created_at` is the sender's clock: a backdated message, or one held back for
+    /// days, is new to this device and stays as long as any other.
+    #[test]
+    fn age_goes_by_arrival_not_by_the_senders_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let now = crate::messages::now_ms();
+        let body = json!({"mediaType": "image/jpeg", "fileState": STATE_LOCAL}).to_string();
+        let backdated_file = store
+            .insert_incoming("AAAAAAAA", 1, "file", &body, 1_000)
+            .unwrap()
+            .unwrap();
+        with_blob(&store, backdated_file.id, Some(1));
+        let backdated = store
+            .insert_incoming("AAAAAAAA", 2, "text", "backdated", 1_000)
+            .unwrap()
+            .unwrap();
+        let week = 7 * 86_400_000;
+        assert!(store.files_before(now - week).unwrap().is_empty());
+        assert_eq!(store.delete_messages_before(now - week).unwrap(), 0);
+        assert!(store.message(backdated.id).unwrap().is_some());
+
+        // Dated ahead: it doesn't outstay the others either.
+        let future = store
+            .insert_incoming("AAAAAAAA", 3, "text", "ahead", now + 365 * 86_400_000)
+            .unwrap()
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = ?1 WHERE id = ?2",
+                params![now - 2 * week, future.id],
+            )
+            .unwrap();
+        assert_eq!(store.delete_messages_before(now - week).unwrap(), 1);
+        assert!(store.message(future.id).unwrap().is_none());
+
+        // Rows without an arrival time (ours, imported ones) go by their only clock.
+        let own = store
+            .insert_outgoing("AAAAAAAA", 4, "text", "sent long ago")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET created_at = ?1, state = ?2 WHERE id = ?3",
+                params![
+                    now - 2 * week,
+                    crate::messages::OutgoingState::Sent as i64,
+                    own.id
+                ],
+            )
+            .unwrap();
+        assert_eq!(store.delete_messages_before(now - week).unwrap(), 1);
+        assert!(store.message(own.id).unwrap().is_none());
+    }
+
     #[test]
     fn deleting_old_messages_keeps_what_is_not_old_news() {
         let dir = tempfile::tempdir().unwrap();
@@ -1782,6 +1854,7 @@ mod tests {
                 [old],
             )
             .unwrap();
+        arrived_when_written(&store);
 
         assert_eq!(store.delete_messages_before(now - 1).unwrap(), 2);
         let left: Vec<String> = store
@@ -2142,6 +2215,7 @@ mod tests {
         for message in [old.id, starred.id, recent.id] {
             with_blob(&store, message, Some(1));
         }
+        arrived_when_written(&store);
         assert_eq!(store.files_before(5_000).unwrap(), vec![old.id]);
         assert_eq!(store.delete_messages_before(5_000).unwrap(), 2);
         assert!(store.message(old.id).unwrap().is_none());
