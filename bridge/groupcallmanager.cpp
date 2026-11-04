@@ -178,6 +178,15 @@ void GroupCallManager::onCoreEvent(const QString &name, const QVariantMap &data)
         m_engine->setMicrophoneMids(mids);
 #endif
         emit participantsChanged();
+    } else if (name == QLatin1String("groupCallMicrophoneOff")) {
+        // A big call starts muted; the core has already noted that.
+        if (!m_muted) {
+            m_muted = true;
+#ifdef THREESEA_FULL
+            m_engine->setMuted(true);
+#endif
+            emit mutedChanged();
+        }
     } else if (name == QLatin1String("groupCallAlone")) {
         leave();
     } else if (name == QLatin1String("groupCallChannelSend")) {

@@ -399,6 +399,12 @@ fn camera_subscription(participant_id: u32, on: bool) -> Vec<u8> {
     )
 }
 
+/// Joining a call with this many others starts with the microphone off, so a big room doesn't
+/// hear us before we meant to speak (Android's `MUTE_MICROPHONE_PARTICIPANT_THRESHOLD`).
+fn starts_muted(others: usize) -> bool {
+    others >= 4
+}
+
 /// Our microphone's capture state for another participant.
 fn microphone_state(on: bool) -> participant_to_participant::Envelope {
     use participant_to_participant::capture_state::{self, microphone};
@@ -572,7 +578,7 @@ impl App {
             peers: HashMap::new(),
             media_keys: vec![media_key],
             their_keys: HashMap::new(),
-            // On when joining a small call (the spec: fewer than 4 others); the UI can mute.
+            // On unless the call turns out to be big (see `starts_muted`); the UI can mute.
             microphone: true,
             their_microphones: HashMap::new(),
             camera: false,
@@ -729,6 +735,7 @@ impl App {
         let mut outgoing = Vec::new();
         let mut changed = false;
         let mut participants_changed = false;
+        let mut microphone_off = false;
         match envelope.content {
             Some(Content::Hello(hello)) => {
                 if call.hello {
@@ -741,6 +748,12 @@ impl App {
                     call.hello = true;
                     call.participants = hello.participant_ids;
                     changed = true;
+                    // Before the handshakes: the others can't decrypt our audio until then, and
+                    // the state they are told afterwards reads this.
+                    if starts_muted(call.participants.len()) {
+                        call.microphone = false;
+                        microphone_off = true;
+                    }
                     // We are the newcomer: our Hello to everyone.
                     let local = Local {
                         identity: &identity.threema_id,
@@ -906,6 +919,9 @@ impl App {
             };
         }
         outgoing.extend(call.due(now, &identity.threema_id, &nickname));
+        if microphone_off {
+            self.emit_group_call(json!({ "event": "groupCallMicrophoneOff" }));
+        }
         for data in outgoing {
             self.emit_group_call(
                 json!({ "event": "groupCallChannelSend", "data": BASE64.encode(&data) }),
@@ -1060,6 +1076,63 @@ mod app_tests {
         assert_eq!(app.group_call_refresh("group"), json!({}));
     }
 
+    /// In a call, at the point where the SFU's Hello arrives with `others` participants: what
+    /// the app thinks of our microphone and what it told the bridge.
+    fn after_hello(others: u32) -> (bool, Vec<Value>) {
+        let (_dir, mut app) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([7; 32]),
+                server_group: "30".into(),
+            })
+            .unwrap();
+        let mut call = super::tests::call();
+        call.hello = false;
+        app.group_call = Some(call);
+        #[expect(
+            deprecated,
+            reason = "the field is part of the message a test has to build"
+        )]
+        let envelope = sfu_to_participant::Envelope {
+            padding: Vec::new(),
+            content: Some(sfu_to_participant::envelope::Content::Hello(
+                sfu_to_participant::Hello {
+                    participant_ids: (2..2 + others).collect(),
+                },
+            )),
+        };
+        app.group_call_channel(&BASE64.encode(&envelope.encode_to_vec()))
+            .unwrap();
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let CoreEvent::Call(event) = event {
+                seen.push(event);
+            }
+        }
+        (app.group_call.unwrap().microphone, seen)
+    }
+
+    fn says_microphone_off(events: &[Value]) -> bool {
+        events
+            .iter()
+            .any(|event| event["event"] == "groupCallMicrophoneOff")
+    }
+
+    #[test]
+    fn a_big_call_starts_with_the_microphone_off() {
+        let (microphone, events) = after_hello(3);
+        assert!(microphone, "three others: on");
+        assert!(!says_microphone_off(&events));
+
+        let (microphone, events) = after_hello(4);
+        assert!(!microphone, "four others: off");
+        assert!(says_microphone_off(&events), "the bridge must mute too");
+        // Before anything goes out to the others.
+        assert_eq!(events[0]["event"], "groupCallMicrophoneOff");
+    }
+
     #[test]
     fn group_calls_follow_the_build_and_the_setting() {
         let (_dir, app) = app(true);
@@ -1073,7 +1146,7 @@ mod app_tests {
 mod tests {
     use super::*;
 
-    fn call() -> ActiveGroupCall {
+    pub(super) fn call() -> ActiveGroupCall {
         let session = Session {
             local: 1,
             ice_ufrag: String::new(),

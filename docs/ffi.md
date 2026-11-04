@@ -53,6 +53,11 @@ duration, at}}`, `callChannelSend {data}` (base64, for the call's data channel),
 height}` (what our video sender may use: Android's quality profiles, the lower of both sides,
 MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`.
 
+Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCallOffer {sdp}`,
+`groupCallParticipants {participants}`, `groupCallChannelSend {data}`, `groupCallAlone`, and
+`groupCallMicrophoneOff`: the call we joined has 4 or more others, so we start muted like Android
+(the core already counts the microphone as off; the bridge mutes the engine).
+
 | `cmd` | Args | Result |
 |---|---|---|
 | `status` | – | `{state: needsLicense\|needsIdentity\|ready, identity}` |
