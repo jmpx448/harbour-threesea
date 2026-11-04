@@ -315,7 +315,8 @@ pub struct ConnectionSetup {
     pub storage_failing: StorageFailing,
     pub failing_items: FailingItems,
     /// Answers to what has been received that the last connection couldn't send
-    /// ([`waits_for_the_next_connection`]).
+    /// ([`waits_for_the_next_connection`]). In the store too (`FS_EVENTS_CARRIED`); here for when
+    /// writing that failed, as it may well.
     pub carried_events: RefCell<Vec<CoreEvent>>,
 }
 
@@ -525,14 +526,116 @@ fn runs_before_the_next_message(event: &CoreEvent) -> bool {
     matches!(event, CoreEvent::SyncQueued | CoreEvent::UnknownMembers(_))
 }
 
-/// An event only memory holds: the message that caused it is acknowledged and won't come again.
-/// What the others are for waits in the store. An answer lost here would be a forward secrecy
-/// session the peer never gets to use, or a rejected message that stays "sent" with it.
+/// An event nothing else in the store stands for: the message that caused it is acknowledged, with
+/// its nonce noted, so libthreema won't answer again. An answer lost here is a session the peer
+/// never gets to use or a message of theirs that stays "sent", and a lost report of a Reject is a
+/// session gone and our message not sent again.
 fn waits_for_the_next_connection(event: &CoreEvent) -> bool {
     matches!(
         event,
         CoreEvent::FsControl { .. } | CoreEvent::FsStatus { .. }
     )
+}
+
+/// How such an event lies in the store, encrypted like everything there. All it holds: IDs, and a
+/// control envelope (Accept, Reject or Terminate), which has a session id, a public key, the id of
+/// a rejected message and its group, and never a message's content.
+fn carried_to_json(event: &CoreEvent) -> Option<serde_json::Value> {
+    use serde_json::json;
+    match event {
+        CoreEvent::FsControl {
+            peer,
+            peer_key,
+            envelope,
+        } => Some(json!({
+            "peer": peer,
+            "peerKey": peer_key.map(|key| key.to_string()),
+            "envelope": data_encoding::HEXLOWER.encode(envelope),
+        })),
+        CoreEvent::FsStatus { peer, status } => {
+            let mut stored = match status {
+                FsStatus::Established => json!({"status": "established"}),
+                FsStatus::Reset => json!({"status": "reset"}),
+                FsStatus::MessageWithoutFs => json!({"status": "messageWithoutFs"}),
+                FsStatus::Terminated { session_known } => {
+                    json!({"status": "terminated", "sessionKnown": session_known})
+                }
+                FsStatus::MessageRejected {
+                    message_id,
+                    group_identity,
+                    session_known,
+                } => json!({
+                    "status": "messageRejected",
+                    "messageId": format!("{message_id:016x}"),
+                    "group": group_identity.as_ref().map(crate::groups::key),
+                    "sessionKnown": session_known,
+                }),
+            };
+            stored["peer"] = json!(peer);
+            Some(stored)
+        }
+        _ => None,
+    }
+}
+
+fn carried_from_json(stored: &serde_json::Value) -> Option<CoreEvent> {
+    let peer = stored["peer"].as_str()?.to_owned();
+    let session_known = stored["sessionKnown"].as_bool().unwrap_or(true);
+    if let Some(envelope) = stored["envelope"].as_str() {
+        let peer_key = match stored["peerKey"].as_str() {
+            Some(key) => {
+                let key = data_encoding::HEXLOWER.decode(key.as_bytes()).ok()?;
+                Some(PublicKey::try_from(key.as_slice()).ok()?)
+            }
+            None => None,
+        };
+        return Some(CoreEvent::FsControl {
+            peer,
+            peer_key,
+            envelope: data_encoding::HEXLOWER.decode(envelope.as_bytes()).ok()?,
+        });
+    }
+    let status = match stored["status"].as_str()? {
+        "established" => FsStatus::Established,
+        "reset" => FsStatus::Reset,
+        "messageWithoutFs" => FsStatus::MessageWithoutFs,
+        "terminated" => FsStatus::Terminated { session_known },
+        "messageRejected" => FsStatus::MessageRejected {
+            message_id: u64::from_str_radix(stored["messageId"].as_str()?, 16).ok()?,
+            group_identity: stored["group"].as_str().and_then(crate::groups::parse_key),
+            session_known,
+        },
+        _ => return None,
+    };
+    Some(CoreEvent::FsStatus { peer, status })
+}
+
+/// What a connection ended on, for the next one, also after a restart.
+fn save_carried_events(
+    store: &crate::store::Store,
+    events: &[CoreEvent],
+) -> Result<(), crate::store::StoreError> {
+    use crate::store::keys::FS_EVENTS_CARRIED;
+    if events.is_empty() {
+        return store.delete_setting(FS_EVENTS_CARRIED);
+    }
+    let stored: Vec<_> = events.iter().filter_map(carried_to_json).collect();
+    store.set_setting(
+        FS_EVENTS_CARRIED,
+        &serde_json::Value::from(stored).to_string(),
+    )
+}
+
+fn saved_carried_events(
+    store: &crate::store::Store,
+) -> Result<Vec<CoreEvent>, crate::store::StoreError> {
+    let saved = store.setting(crate::store::keys::FS_EVENTS_CARRIED)?;
+    Ok(saved
+        .and_then(|saved| serde_json::from_str::<Vec<serde_json::Value>>(&saved).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(carried_from_json)
+        .collect())
 }
 
 impl From<TransportError> for ConnectionError {
@@ -971,12 +1074,19 @@ impl Drop for Session<'_> {
     fn drop(&mut self) {
         self.emit_events_unless(needs_the_connection);
         self.release_held_notifications(true);
-        self.setup.carried_events.borrow_mut().extend(
+        let mut carried = self.setup.carried_events.borrow_mut();
+        carried.extend(
             self.events
                 .borrow_mut()
                 .drain(..)
                 .filter(waits_for_the_next_connection),
         );
+        if let Err(error) = save_carried_events(&self.setup.store, &carried) {
+            tracing::warn!(
+                code = error.sqlite_code(),
+                "saving what is left to send failed"
+            );
+        }
     }
 }
 
@@ -2307,11 +2417,19 @@ impl<'a> Session<'a> {
         });
     }
 
-    /// What the last connection couldn't send.
+    /// What the last connection couldn't send, even if the app has been restarted since. It stays
+    /// in the store until it is done: if this connection ends too, [`Self::drop`] replaces it.
     async fn resume_carried_events(&mut self) -> Result<(), ConnectionError> {
-        let carried = core::mem::take(&mut *self.setup.carried_events.borrow_mut());
+        let mut carried = core::mem::take(&mut *self.setup.carried_events.borrow_mut());
+        if carried.is_empty() {
+            carried = saved_carried_events(&self.setup.store).map_err(storage_error)?;
+        }
+        if carried.is_empty() {
+            return Ok(());
+        }
         self.events.borrow_mut().extend(carried);
-        self.after_incoming().await
+        self.after_incoming().await?;
+        save_carried_events(&self.setup.store, &[]).map_err(storage_error)
     }
 
     /// This step went fine: if the store was failing in it, that is over.
@@ -4862,6 +4980,109 @@ mod sync_order_tests {
             sent_to_ui(&mut rx).as_slice(),
             [CoreEvent::MessageAdded { message }] if message.body == "fsReset"
         ));
+    }
+
+    /// A message the peer rejected goes out again and a Reject of ours goes to the peer, whatever
+    /// happens to the app in between: they are in the store from when the connection ends.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_connection_left_to_do_survives_a_restart() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sent = setup
+            .store
+            .insert_outgoing(CREATOR, 7, "text", "hi")
+            .unwrap();
+        setup
+            .store
+            .raise_outgoing_state(CREATOR, &[7], OutgoingState::Sent)
+            .unwrap();
+        {
+            let session = session(&setup, &tx).await;
+            session.events.borrow_mut().push(CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageRejected {
+                    message_id: 7,
+                    group_identity: None,
+                    session_known: true,
+                },
+            });
+        }
+
+        // A new process: nothing in memory.
+        let (setup, _) = contact_without_fs_support(&app);
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), true);
+        assert!(setup.carried_events.borrow().is_empty());
+        let mut session = session(&setup, &tx).await;
+        // Sending fails on this socket without a handshake; it's queued by then.
+        let _ = session.resume_carried_events().await;
+        let state = setup.store.message(sent.id).unwrap().unwrap().state;
+        assert_eq!(state, OutgoingState::Pending as i64);
+    }
+
+    /// All there is to know of a control message or a status comes back, and what isn't either
+    /// isn't stored. Only an envelope and IDs are: this is what lies in the store.
+    #[test]
+    fn carried_events_keep_what_they_say() {
+        let group = GroupIdentity {
+            creator_identity: CREATOR.parse().unwrap(),
+            group_id: 7,
+        };
+        let key = ClientKey::from([5; 32]).public_key();
+        let events = [
+            CoreEvent::FsControl {
+                peer: CREATOR.into(),
+                peer_key: Some(key),
+                envelope: vec![1, 2, 3],
+            },
+            CoreEvent::FsControl {
+                peer: CREATOR.into(),
+                peer_key: None,
+                envelope: vec![4],
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageRejected {
+                    message_id: u64::MAX,
+                    group_identity: Some(group),
+                    session_known: false,
+                },
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageRejected {
+                    message_id: 1,
+                    group_identity: None,
+                    session_known: true,
+                },
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Terminated {
+                    session_known: false,
+                },
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Established,
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Reset,
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageWithoutFs,
+            },
+        ];
+        for event in &events {
+            let stored = carried_to_json(event).unwrap();
+            let back = carried_from_json(&stored).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{event:?}"));
+        }
+        assert!(carried_to_json(&CoreEvent::ContactsChanged).is_none());
+        assert!(carried_from_json(&serde_json::json!({"peer": CREATOR})).is_none());
+        assert!(carried_from_json(&serde_json::json!({"status": "reset"})).is_none());
     }
 
     /// What is still to come when a step fails isn't lost with it. A step that fails for another

@@ -320,6 +320,9 @@ pub mod keys {
     /// Restored Safe data not yet imported (contacts/groups/lists/settings JSON) — kept until
     /// contact and group storage exist, and carried into new backups so nothing is lost.
     pub const SAFE_PENDING_IMPORT: &str = "safe_pending_import";
+    /// Forward secrecy answers and statuses a connection ended on, as JSON
+    /// (`connection::carried_to_json`): until the next one has handled them.
+    pub const FS_EVENTS_CARRIED: &str = "fs_events_carried";
     /// Why the last pending Safe import attempt failed (an error kind; absent after success).
     pub const SAFE_IMPORT_ERROR: &str = "safe_import_error";
     /// Android-format backups written by us: target folder, schedule (`off`/`daily`/`weekly`),

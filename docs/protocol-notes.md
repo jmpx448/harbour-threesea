@@ -140,8 +140,9 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   receipt included (an outbox entry; sent after the next login if not now); the UI hears of it; then
   the acknowledgement; then what takes the network. So the connection can die at any point: what is
   stored is announced (`Session::drop`), and what the server sends again is known and only
-  acknowledged. Forward secrecy answers only memory holds wait for the next connection
-  (`carried_events`). A store failure ends the connection without an acknowledgement, so the message
+  acknowledged. Forward secrecy answers and statuses the store holds nowhere else wait for the next
+  connection (`FS_EVENTS_CARRIED`, saved when a connection ends; only IDs and Accept, Reject and
+  Terminate envelopes, no message content). A store failure ends the connection without an acknowledgement, so the message
   comes again and holds up the queue behind it: the log gets SQLite's code, the user one notice per
   streak (`storageProblem`), since the server keeps messages only for a limited time.
 - What fails the same way every time mustn't hold up everything behind it: after 3 tries in a row
