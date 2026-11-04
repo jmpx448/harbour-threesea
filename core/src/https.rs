@@ -325,6 +325,40 @@ pub fn tofu_tls_config(
         .with_no_client_auth())
 }
 
+const RESPONSE_TOO_LARGE: &str = "response too large";
+
+/// Whether a request failed because the answer was over its limit.
+pub fn is_too_large(error: &HttpsError) -> bool {
+    matches!(error, HttpsError::InvalidResponse(message) if message == RESPONSE_TOO_LARGE)
+}
+
+/// A response body that may not grow past its limit: refused up front if the server says it
+/// would, else as soon as a chunk takes it there, so what a server sends can't fill the memory.
+struct LimitedBody {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl LimitedBody {
+    fn new(content_length: Option<u64>, limit: usize) -> Result<Self, HttpsError> {
+        if content_length.is_some_and(|length| length > limit as u64) {
+            return Err(HttpsError::InvalidResponse(RESPONSE_TOO_LARGE.into()));
+        }
+        Ok(Self {
+            bytes: Vec::new(),
+            limit,
+        })
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<(), HttpsError> {
+        if self.bytes.len() + chunk.len() > self.limit {
+            return Err(HttpsError::InvalidResponse(RESPONSE_TOO_LARGE.into()));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct HttpsClient {
     client: reqwest::Client,
@@ -354,8 +388,15 @@ impl HttpsClient {
         Ok(Self { client })
     }
 
-    /// Execute a libthreema [`HttpsRequest`].
+    /// Execute a libthreema [`HttpsRequest`], reading up to the largest answer Threema's servers
+    /// give (a blob), not whatever a server sends.
     pub async fn send(&self, request: HttpsRequest) -> HttpsResult {
+        self.send_limited(request, MAX_RESPONSE).await
+    }
+
+    /// Like [`Self::send`], refusing an answer of more than `limit` bytes while it comes in; see
+    /// [`is_too_large`].
+    pub async fn send_limited(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
         let method = match request.method {
             HttpsMethod::Delete => reqwest::Method::DELETE,
             HttpsMethod::Get => reqwest::Method::GET,
@@ -380,23 +421,14 @@ impl HttpsClient {
         }
         let mut response = builder.send().await.map_err(map_error)?;
         let status = response.status().as_u16();
-        // Read up to the largest answer Threema's servers give (a blob), not whatever a server
-        // sends (security audit 2026-10-27, S06).
-        let too_large = || HttpsError::InvalidResponse("response too large".into());
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE as u64)
-        {
-            return Err(too_large());
-        }
-        let mut body = Vec::new();
+        let mut body = LimitedBody::new(response.content_length(), limit)?;
         while let Some(chunk) = response.chunk().await.map_err(map_error)? {
-            if body.len() + chunk.len() > MAX_RESPONSE {
-                return Err(too_large());
-            }
-            body.extend_from_slice(&chunk);
+            body.push(&chunk)?;
         }
-        Ok(HttpsResponse { status, body })
+        Ok(HttpsResponse {
+            status,
+            body: body.bytes,
+        })
     }
 
     /// POST a JSON body and return the response (for directory endpoints libthreema lacks).
@@ -457,6 +489,21 @@ mod tests {
         assert!(!is_threema_url("not a url"));
         assert!(pins_for_host("threema.ch.evil.example").is_none());
         assert!(pins_for_host("example.org").is_none());
+    }
+
+    #[test]
+    fn a_response_stops_at_its_limit() {
+        // Said up front: not one byte is read.
+        assert!(is_too_large(&LimitedBody::new(Some(11), 10).err().unwrap()));
+        // Not said, or wrongly: refused once the chunks pass it.
+        let mut body = LimitedBody::new(None, 10).unwrap();
+        body.push(&[0; 6]).unwrap();
+        body.push(&[0; 4]).unwrap();
+        assert!(is_too_large(&body.push(&[0]).unwrap_err()));
+        assert_eq!(body.bytes.len(), 10);
+        let mut body = LimitedBody::new(Some(1), 10).unwrap();
+        assert!(is_too_large(&body.push(&[0; 11]).unwrap_err()));
+        assert!(!is_too_large(&HttpsError::InvalidResponse("other".into())));
     }
 
     #[test]

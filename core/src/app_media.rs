@@ -347,7 +347,11 @@ async fn download(
     let result = async {
         // A few at a time: each can hold a blob of up to 100 MiB, twice (S06).
         let _slot = DOWNLOAD_SLOTS.acquire().await;
-        let blob = media::download(&https, &blob_id, download_scope).await?;
+        let limit = match part {
+            MediaPart::File => media::MAX_FILE_DOWNLOAD,
+            MediaPart::Thumbnail => media::MAX_PICTURE_DOWNLOAD,
+        };
+        let blob = media::download(&https, &blob_id, download_scope, limit).await?;
         let data = media::decrypt_blob(&keys.key, part, &blob)?;
         media.write(message, part, &data)?;
         if let Some(directory) = save_to {

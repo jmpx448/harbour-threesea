@@ -47,6 +47,27 @@ pub(crate) const MIGRATION: &str = "
 /// Largest blob we download or upload (Threema's limit).
 pub const MAX_BLOB_SIZE: usize = 100 * 1024 * 1024;
 
+/// Largest encrypted message file fetched: its size plus the secretbox tag.
+pub const MAX_FILE_DOWNLOAD: usize = MAX_BLOB_SIZE + 16;
+
+/// Largest contact or group picture, or message thumbnail, fetched. These come without anyone
+/// asking, also on mobile data, and senders scale them down.
+pub const MAX_PICTURE_DOWNLOAD: usize = 10 * 1024 * 1024;
+
+/// Contact and group pictures downloading at once; apart from the message media's own slots, so
+/// a stranger's pictures can't hold those up.
+pub static PICTURE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Wait for one of `slots`; `None` if the work isn't `wanted` any more by then (a newer picture
+/// came while it waited).
+pub async fn slot_if_wanted(
+    slots: &tokio::sync::Semaphore,
+    wanted: impl FnOnce() -> bool,
+) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    let permit = slots.acquire().await.ok()?;
+    wanted().then_some(permit)
+}
+
 const UPLOAD_URL: &str = "https://ds-blobp-upload.threema.ch/upload";
 const MULTIPART_BOUNDARY: &str = "---------------------------Boundary_Line";
 const BLOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(100);
@@ -388,29 +409,31 @@ fn network(error: libthreema::https::HttpsError) -> MediaError {
     MediaError::Network(error.to_string())
 }
 
-/// Download a blob (through the mirror with multi-device, in `scope`).
+/// Download a blob of at most `limit` bytes (through the mirror with multi-device, in `scope`).
 pub async fn download(
     https: &HttpsClient,
     blob_id: &BlobId,
     scope: BlobScope,
+    limit: usize,
 ) -> Result<Vec<u8>, MediaError> {
     let url =
         mirror_url(&HEXLOWER.encode(&blob_id.0), scope).unwrap_or_else(|| download_url(blob_id));
-    let response = https
-        .send(HttpsRequest {
-            timeout: BLOB_TIMEOUT,
-            url,
-            method: HttpsMethod::Get,
-            headers: Vec::new(),
-            body: Vec::new(),
-        })
-        .await
-        .map_err(network)?;
+    let request = HttpsRequest {
+        timeout: BLOB_TIMEOUT,
+        url,
+        method: HttpsMethod::Get,
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    let response = https.send_limited(request, limit).await.map_err(|error| {
+        if crate::https::is_too_large(&error) {
+            MediaError::TooLarge
+        } else {
+            network(error)
+        }
+    })?;
     if response.status != 200 {
         return Err(MediaError::Server(format!("status {}", response.status)));
-    }
-    if response.body.len() > MAX_BLOB_SIZE + 16 {
-        return Err(MediaError::TooLarge);
     }
     Ok(response.body)
 }
@@ -569,6 +592,64 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Twenty pictures in a row: two run at a time, and those superseded while waiting for a
+    /// slot do nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn picture_slots_bound_the_work_and_skip_what_is_superseded() {
+        use std::{cell::Cell, rc::Rc};
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let newest = Rc::new(Cell::new(0));
+        let running = Rc::new(Cell::new(0));
+        let most = Rc::new(Cell::new(0));
+        let done = Rc::new(Cell::new(0));
+        let local = tokio::task::LocalSet::new();
+        for generation in 1..=20 {
+            newest.set(generation);
+            let (newest, running, most, done) = (
+                Rc::clone(&newest),
+                Rc::clone(&running),
+                Rc::clone(&most),
+                Rc::clone(&done),
+            );
+            local.spawn_local(async move {
+                let wanted = || newest.get() == generation;
+                let Some(_slot) = slot_if_wanted(&SLOTS, wanted).await else {
+                    return;
+                };
+                running.set(running.get() + 1);
+                most.set(most.get().max(running.get()));
+                tokio::task::yield_now().await;
+                running.set(running.get() - 1);
+                done.set(done.get() + 1);
+            });
+        }
+        local.await;
+        assert_eq!(done.get(), 1, "only the newest was worked on");
+        assert_eq!(most.get(), 1);
+
+        // Still wanted: at most two at once, then every one of them.
+        let (running, most, done) = (
+            Rc::new(Cell::new(0)),
+            Rc::new(Cell::new(0)),
+            Rc::new(Cell::new(0)),
+        );
+        let local = tokio::task::LocalSet::new();
+        for _ in 0..20 {
+            let (running, most, done) = (Rc::clone(&running), Rc::clone(&most), Rc::clone(&done));
+            local.spawn_local(async move {
+                let _slot = slot_if_wanted(&SLOTS, || true).await.unwrap();
+                running.set(running.get() + 1);
+                most.set(most.get().max(running.get()));
+                tokio::task::yield_now().await;
+                running.set(running.get() - 1);
+                done.set(done.get() + 1);
+            });
+        }
+        local.await;
+        assert_eq!(done.get(), 20);
+        assert_eq!(most.get(), 2);
+    }
 
     #[test]
     fn media_store_roundtrip() {

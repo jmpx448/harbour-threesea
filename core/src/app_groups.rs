@@ -43,6 +43,25 @@ pub(crate) fn title(
         .join(", ")
 }
 
+/// Fetch and decrypt a contact's or group's picture: refused by its claimed size before anything
+/// is fetched, and cut off at the same limit whatever it claimed.
+async fn fetch_picture(
+    https: &crate::https::HttpsClient,
+    picture: &GroupPicture,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, media::MediaError> {
+    if picture.size as usize > media::MAX_PICTURE_DOWNLOAD {
+        return Err(media::MediaError::TooLarge);
+    }
+    let blob = media::download(
+        https,
+        &picture.blob_id,
+        media::BlobScope::Public,
+        media::MAX_PICTURE_DOWNLOAD,
+    )
+    .await?;
+    media::decrypt_blob(&picture.key, MediaPart::File, &blob)
+}
+
 impl App {
     pub(crate) fn user(&self) -> Result<String, ApiError> {
         Ok(self
@@ -299,13 +318,13 @@ impl App {
             let Some(picture) = group.picture.clone() else {
                 return;
             };
-            let result = async {
-                // No `done`: the blob is persisted for every member.
-                let blob =
-                    media::download(&https, &picture.blob_id, media::BlobScope::Public).await?;
-                media::decrypt_blob(&picture.key, MediaPart::File, &blob)
-            }
-            .await;
+            // Superseded while waiting for a slot? Then the newer picture's task does the work.
+            let wanted = || matches!(store.group(&key), Ok(Some(group)) if group.picture.as_ref() == Some(&picture));
+            let Some(_slot) = media::slot_if_wanted(&media::PICTURE_SLOTS, wanted).await else {
+                return;
+            };
+            // No `done`: the blob is persisted for every member.
+            let result = fetch_picture(&https, &picture).await;
             match result {
                 Ok(data) => {
                     // Still the same picture? Then write and apply it — the check and the write
@@ -433,12 +452,13 @@ impl App {
             let Ok(Some((picture, generation))) = store.picture_download(&identity) else {
                 return;
             };
-            let result = async {
-                let blob =
-                    media::download(&https, &picture.blob_id, media::BlobScope::Public).await?;
-                media::decrypt_blob(&picture.key, MediaPart::File, &blob)
-            }
-            .await;
+            // Superseded while waiting for a slot? Then the newer picture's task does the work.
+            let wanted =
+                || matches!(store.picture_download(&identity), Ok(Some((_, g))) if g == generation);
+            let Some(_slot) = media::slot_if_wanted(&media::PICTURE_SLOTS, wanted).await else {
+                return;
+            };
+            let result = fetch_picture(&https, &picture).await;
             match result {
                 Ok(data) => {
                     // Still the newest? Everything from the check to the version advance runs
@@ -459,11 +479,14 @@ impl App {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "contact picture download failed");
-                    let gone = matches!(error, media::MediaError::Decrypt)
-                        || matches!(&error, media::MediaError::Server(s) if s.contains("404"));
+                    let gone = matches!(
+                        error,
+                        media::MediaError::Decrypt | media::MediaError::TooLarge
+                    ) || matches!(&error, media::MediaError::Server(s) if s.contains("404"));
                     if gone {
-                        // The blob expired (or the key is wrong): retrying the download is
-                        // useless; only a freshly requested picture helps.
+                        // The blob expired (or the key is wrong, or it is far too large):
+                        // retrying the download is useless; only a freshly requested picture
+                        // helps.
                         let _ = store.cancel_picture_download(&identity);
                         let _ = store.pause_picture_requests(
                             &identity,
@@ -574,5 +597,27 @@ impl App {
             .to_string();
         self.store.set_picture_recipient(&id, share)?;
         self.contact_json(&id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use libthreema::common::BlobId;
+
+    use super::*;
+
+    /// A picture that says it is too large isn't even asked for (the test has no network).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_picture_claiming_too_much_is_not_fetched() {
+        let https = crate::https::HttpsClient::new().unwrap();
+        let picture = GroupPicture {
+            blob_id: BlobId([1; 16]),
+            key: [2; 32],
+            size: u32::try_from(media::MAX_PICTURE_DOWNLOAD).unwrap() + 1,
+        };
+        assert!(matches!(
+            fetch_picture(&https, &picture).await,
+            Err(media::MediaError::TooLarge)
+        ));
     }
 }

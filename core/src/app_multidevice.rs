@@ -74,8 +74,14 @@ impl App {
             let data = match &blob {
                 Some(blob) => {
                     let result = async {
-                        let encrypted =
-                            media::download(&https, &blob.id, media::BlobScope::Local).await?;
+                        let _slot = media::PICTURE_SLOTS.acquire().await;
+                        let encrypted = media::download(
+                            &https,
+                            &blob.id,
+                            media::BlobScope::Local,
+                            media::MAX_PICTURE_DOWNLOAD,
+                        )
+                        .await?;
                         let data =
                             media::decrypt_blob_with_nonce(&blob.key, &blob.nonce, &encrypted)?;
                         media::mark_done(&https, &blob.id, media::BlobScope::Local).await;
