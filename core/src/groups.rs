@@ -89,6 +89,8 @@ pub(crate) const MIGRATION_SYNC: &str = r#"
 const RESYNC_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// Outbox kinds of group control messages (`body` in brackets).
+/// How many group sync requests wait at once at most; they normally leave with the next ack.
+const SYNC_REQUESTS_QUEUED_MAX: i64 = 64;
 pub const OUTBOX_GROUP_SETUP: &str = "groupSetup"; // {members: [id]}
 pub const OUTBOX_GROUP_NAME: &str = "groupName"; // {name}
 pub const OUTBOX_GROUP_LEAVE: &str = "groupLeave";
@@ -697,6 +699,27 @@ impl Store {
         Ok(outgoing)
     }
 
+    /// Group outbox entries older than `before` stop waiting for a receiver with no contact, once
+    /// even the retries on reconnect and in maintenance didn't get them one. An entry nobody is
+    /// left for goes. Returns how many receivers gave up on.
+    pub(crate) fn expire_unresolved_outbox(&self, before: i64) -> Result<usize, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT p.receiver, p.message_id FROM pending_receivers p
+                 JOIN outbox o ON o.conversation = p.conversation AND o.message_id = p.message_id
+                 WHERE o.created_at < ?1
+                     AND p.receiver NOT IN (SELECT identity FROM contacts)",
+        )?;
+        let expired: Vec<(String, i64)> = statement
+            .query_map([before], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        for (receiver, message_id) in &expired {
+            for conversation in self.receiver_done(receiver, message_id.cast_unsigned())? {
+                self.outbox_remove(&conversation, message_id.cast_unsigned())?;
+            }
+        }
+        Ok(expired.len())
+    }
+
     /// `recently resynced` marks: `true` (and marked now) if not marked within the last hour.
     fn resync_allowed(&self, mark: &str) -> Result<bool, StoreError> {
         let at: Option<i64> = self
@@ -711,6 +734,12 @@ impl Store {
         if at.is_some_and(|at| now - at < RESYNC_INTERVAL_MS) {
             return Ok(false);
         }
+        // Marks past the hour say nothing any more. The key holds what a sender made up (any group
+        // ID will do), so they can't be left to pile up.
+        self.conn.execute(
+            "DELETE FROM group_resyncs WHERE at <= ?1",
+            [now - RESYNC_INTERVAL_MS],
+        )?;
         self.conn.execute(
             "INSERT OR REPLACE INTO group_resyncs (key, at) VALUES (?1, ?2)",
             params![mark, now],
@@ -1254,6 +1283,16 @@ fn sync_request(
     creator: &str,
     outcome: &mut GroupOutcome,
 ) -> Result<(), StoreError> {
+    // Any contact can name any group ID and creator in a group message, and each new pair asks here.
+    let queued: i64 = store.conn.query_row(
+        "SELECT COUNT(*) FROM outbox WHERE kind = ?1",
+        [OUTBOX_GROUP_SYNC_REQUEST],
+        |row| row.get(0),
+    )?;
+    if queued >= SYNC_REQUESTS_QUEUED_MAX {
+        tracing::warn!(queued, "too many group sync requests waiting, none added");
+        return Ok(());
+    }
     if !store.resync_allowed(key)? {
         tracing::info!("group recently resynced, no new sync request");
         return Ok(());
@@ -2314,6 +2353,109 @@ mod tests {
         );
         assert!(known.send);
         assert!(known.unknown_members.is_empty());
+    }
+
+    fn text_in_a_made_up_group(store: &Store, group_id: u64) -> GroupOutcome {
+        receive(
+            store,
+            USER,
+            BOB,
+            rand::random(),
+            1,
+            IncomingGroupMessageBody {
+                group_identity: GroupIdentity {
+                    creator_identity: id(CREATOR),
+                    group_id,
+                },
+                body: GroupMessageBody::Text(TextMessage { text: "x".into() }),
+            },
+            false,
+            &|_| true,
+            &|_| Ok(false),
+            &|m| m.to_owned(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn made_up_groups_can_only_queue_so_many_sync_requests() {
+        let (_dir, store) = store();
+        let max = u64::try_from(SYNC_REQUESTS_QUEUED_MAX).unwrap();
+        for group_id in 0..max {
+            assert!(text_in_a_made_up_group(&store, group_id).send);
+        }
+        let over = text_in_a_made_up_group(&store, max);
+        assert!(!over.send);
+        assert!(over.unknown_members.is_empty());
+        assert_eq!(store.outbox().unwrap().len(), usize::try_from(max).unwrap());
+        // Not marked as asked: with room again, it can ask.
+        store.drop_invalid_members(&[CREATOR.to_owned()]).unwrap();
+        assert!(store.outbox().unwrap().is_empty());
+        assert!(text_in_a_made_up_group(&store, max).send);
+    }
+
+    #[test]
+    fn resync_marks_past_the_hour_go() {
+        let (_dir, store) = store();
+        store
+            .conn
+            .execute(
+                "INSERT INTO group_resyncs (key, at) VALUES ('old', ?1)",
+                [now_ms() - RESYNC_INTERVAL_MS - 1],
+            )
+            .unwrap();
+        assert!(store.resync_allowed("new").unwrap());
+        let marks: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM group_resyncs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(marks, 1);
+    }
+
+    #[test]
+    fn an_old_outbox_entry_stops_waiting_for_someone_with_no_contact() {
+        let (_dir, store) = store();
+        store
+            .upsert_contact(&crate::contacts::test_contact(BOB))
+            .unwrap();
+        let everyone = vec![BOB.to_owned(), "UNKNOWN1".to_owned()];
+        let group_key = stored_group(&store, CREATOR, &[BOB], false);
+        store
+            .group_outbox_add(
+                &group_key,
+                &everyone,
+                OUTBOX_GROUP_NAME,
+                &json!({"name": "a"}),
+            )
+            .unwrap();
+        store
+            .group_outbox_add(
+                "g:ABCD1234:1",
+                &["UNKNOWN1".to_owned()],
+                OUTBOX_GROUP_SYNC_REQUEST,
+                &json!({}),
+            )
+            .unwrap();
+        // Too recent: still waiting.
+        assert_eq!(
+            store.expire_unresolved_outbox(now_ms() - 60_000).unwrap(),
+            0
+        );
+        assert_eq!(store.outbox().unwrap().len(), 2);
+
+        assert_eq!(
+            store.expire_unresolved_outbox(now_ms() + 60_000).unwrap(),
+            2
+        );
+        // Bob still gets his; the request nobody is left for goes.
+        let left = store.outbox().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            store
+                .pending_receivers(&group_key, left[0].message_id)
+                .unwrap(),
+            vec![BOB]
+        );
     }
 
     #[test]

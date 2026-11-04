@@ -49,6 +49,10 @@ fn now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// How long a queued group message waits for someone whose lookup keeps failing, with the
+/// directory otherwise answering (it would say who doesn't exist). Then it goes without them.
+const UNRESOLVED_OUTBOX_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 /// How many missing contact pictures one recovery round (connect, maintenance) may request.
 const PICTURE_REQUEST_BATCH: usize = 20;
 
@@ -1108,6 +1112,16 @@ impl App {
         self.run_restore_setup().await;
         self.resume_picture_downloads();
         self.request_missing_pictures(PICTURE_REQUEST_BATCH);
+        match self
+            .store
+            .expire_unresolved_outbox(crate::messages::now_ms() - UNRESOLVED_OUTBOX_MAX_AGE_MS)
+        {
+            Ok(0) => {}
+            Ok(receivers) => {
+                tracing::warn!(receivers, "gave up on group receivers with no contact")
+            }
+            Err(error) => tracing::warn!(%error, "expiring the group outbox failed"),
+        }
         if self.check_email_link().await.unwrap_or(false) {
             events.push("profileChanged");
         }
