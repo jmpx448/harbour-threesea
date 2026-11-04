@@ -27,3 +27,7 @@ unblocking, the group comes back with their next group-setup or the next message
 
 libthreema runs this check before the setup can create a contact (a group-setup makes its sender a
 direct contact), so a stranger on the block list doesn't become one by trying.
+
+Under "Block unknown senders", a stranger's group-setup makes them a direct contact, even one that
+doesn't name the user and so brings no group. From then on the setting no longer stops them. Android
+does the same.

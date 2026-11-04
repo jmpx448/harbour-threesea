@@ -1216,14 +1216,31 @@ mod tests {
         );
     }
 
+    /// What the connection would reflect next is a new contact: whose, removed from the queue.
+    fn next_contact_create(app: &App) -> String {
+        use prost::Message as _;
+        let (id, scope, content) = app.store.next_sync().unwrap().unwrap();
+        app.store.sync_done(id).unwrap();
+        assert_eq!(scope, Scope::ContactSync as i32);
+        let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+        let Some(Content::ContactSync(sync)) = envelope.content else {
+            panic!("not a contact sync");
+        };
+        let Some(contact_sync::Action::Create(create)) = sync.action else {
+            panic!("not a new contact");
+        };
+        create.contact.unwrap().identity
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn a_lookup_another_device_asked_for_tells_nobody() {
+    async fn a_contact_any_lookup_stores_goes_to_the_other_devices() {
         let (_dir, mut app) = app();
         with_identity(&app);
         let _rx = in_a_group(&mut app);
         let found = crate::contacts::test_contact("DDDDDDDD");
+        // Nobody noted waiting for them, as for a sync request's creator: no list to go out.
         assert!(
-            !crate::sync::members_looked_up(
+            crate::sync::members_looked_up(
                 &app.store,
                 vec![(
                     "DDDDDDDD".to_owned(),
@@ -1234,7 +1251,43 @@ mod tests {
             .queued
         );
         assert!(app.store.contact("DDDDDDDD").unwrap().is_some());
+        assert_eq!(next_contact_create(&app), "DDDDDDDD");
         assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_member_found_by_the_retry_gets_into_the_list_for_the_other_devices() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        group.members.push("DDDDDDDD".to_owned());
+        app.store.upsert_group(&group).unwrap();
+
+        app.store.note_unresolved_member_lookups().unwrap();
+        let found = crate::contacts::test_contact("DDDDDDDD");
+        crate::sync::members_looked_up(
+            &app.store,
+            vec![(
+                "DDDDDDDD".to_owned(),
+                crate::contacts::Lookup::Found(Box::new(found)),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(next_contact_create(&app), "DDDDDDDD");
+        let update = update_of(next_group_sync(&app));
+        assert!(
+            update
+                .group
+                .unwrap()
+                .member_identities
+                .unwrap()
+                .identities
+                .contains(&"DDDDDDDD".to_owned())
+        );
+        // It was in the group all along, so nobody came.
+        assert!(update.member_state_changes.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

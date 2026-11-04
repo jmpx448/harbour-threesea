@@ -621,6 +621,9 @@ impl App {
                 });
             }
         }
+        if let Err(error) = self.store.note_unresolved_member_lookups() {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
         let due = self.member_lookups_due();
         if !due.is_empty() {
             self.fetch_members(due);

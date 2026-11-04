@@ -553,9 +553,10 @@ pub(crate) struct MembersLookedUp {
     pub lines: Vec<crate::messages::Message>,
 }
 
-/// What the directory said about group members, as one store step: their contacts, and for the
-/// lookups the other devices are owed, each contact as a `ContactSync.Create` and then, for each
-/// group waiting for it, the list with them in it. Someone the directory doesn't know stops being
+/// What the directory said about group members, as one store step: their contacts, in a device
+/// group each as a `ContactSync.Create`, and for the lookups the other devices are owed, for each
+/// group waiting for it, the list with them in it. So is an "added" line for those who came with a
+/// change. Someone the directory doesn't know stops being
 /// waited for. Returns whether something was queued. A failed lookup never gets here: what it owed
 /// stays noted and is tried again.
 pub(crate) fn members_looked_up(
@@ -580,7 +581,10 @@ pub(crate) fn members_looked_up(
             let mut contact = *contact;
             contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
             store.upsert_contact(&contact)?;
-            if device_group && !waiting.is_empty() {
+            // Whatever the lookup was for (a member, a creator asked for a group, a retry): a later
+            // group sync can name them, and the other devices refuse one naming someone unknown.
+            // A device that has them already discards this.
+            if device_group {
                 store.queue_sync_content(
                     Scope::ContactSync,
                     Content::ContactSync(ContactSync {

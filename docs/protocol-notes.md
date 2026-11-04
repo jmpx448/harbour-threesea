@@ -411,7 +411,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   only people with a contact, and `group_member_lookups` notes the rest. Once looked up, one
   store transaction stores their contacts and queues `ContactSync.Create` and then a
   `GroupSync.Update` with them in the list (`ADDED` for those who came with a change, not for a new
-  group's). No group sync names anyone before their contact has gone out. A failed lookup is tried
+  group's). No group sync names anyone before their contact has gone out: every contact a lookup stores goes
+  out as `ContactSync.Create`, whatever the lookup was for, and a member found only by the retry is
+  noted so that the list with them in it follows. A failed lookup is tried
   again on reconnect and hourly. Threema Desktop diffs the lists and uses only the map's `LEFT`
   (`model/group.ts`), so it shows such a late member of a new group as "added"; accepted, as
   the alternative is holding back the new group. `SyncQueued` makes the connection reflect the

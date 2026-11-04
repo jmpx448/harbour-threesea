@@ -510,6 +510,23 @@ impl Store {
         Ok(changed)
     }
 
+    /// In a device group, a lookup that gets to someone only now, from the retry or a setup that
+    /// changes nothing, also owes the other devices the list with them in it, as the lists so far
+    /// have left them out.
+    pub(crate) fn note_unresolved_member_lookups(&self) -> Result<(), StoreError> {
+        if self.multi_device()?.is_none() {
+            return Ok(());
+        }
+        for group in self.groups()?.into_iter().filter(|group| !group.left) {
+            for member in &group.members {
+                if self.contact(member)?.is_none() {
+                    self.add_member_lookup(&group.key, member, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The other devices have to hear of `identity` in this group once its contact is here.
     pub(crate) fn add_member_lookup(
         &self,
@@ -1566,6 +1583,11 @@ fn receive_setup(
             // A list without the creator is a change, whatever else it says: an older version's
             // group sync could have taken them out, and this setup is what brings them back.
             if current == members && group.members.contains(&creator) {
+                if store.multi_device()?.is_some() {
+                    for member in &unknown_members {
+                        store.add_member_lookup(key, member, false)?;
+                    }
+                }
                 outcome.unknown_members = unknown_members;
                 return Ok(());
             }
