@@ -7,6 +7,10 @@ function text(kind, message) {
     case "network":
         //% "Could not reach the Threema servers. Check your internet connection and try again."
         return qsTrId("threesea-la-error-network")
+    case "messageTooLong":
+        // Message texts and captions, and also group and list names and polls.
+        //% "The text is too long. Shorten it and try again."
+        return qsTrId("threesea-la-error-text-too-long")
     case "licenseFormat":
         //% "A license key looks like ABCDE-12345."
         return qsTrId("threesea-la-error-license-format")

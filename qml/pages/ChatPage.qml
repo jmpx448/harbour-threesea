@@ -390,14 +390,21 @@ Page {
         }
     }
 
-    function editMessage(messageId, text) {
+    // The edit stays in the input, and the mode with it, until the core has it: a refused one
+    // is not lost, and can be changed or cancelled.
+    function sendEdit(text) {
+        var messageId = editingMessageId
+        var sent = inputField.text
+        sendingText = true
         backend.call("editMessage", { identity: identity, messageId: messageId, text: text },
                      function(ok, result, kind, message) {
-            if (ok) {
-                if (result) page.addMessage(result)
-            } else {
+            page.sendingText = false
+            if (!ok) {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                return
             }
+            if (result) page.addMessage(result)
+            if (page.editingMessageId === messageId && page.inputField.text === sent) page.endEdit()
         })
     }
 
@@ -622,6 +629,7 @@ Page {
 
     // Editing pulls the message back into the input box; the draft comes back afterwards.
     function startEdit(messageId, raw, mentions) {
+        if (sendingText) return
         stopTyping()
         if (editingMessageId === "") {
             beforeEdit = { text: inputField.text, mentions: composeMentions, quoting: quoting }
@@ -1019,7 +1027,29 @@ Page {
         }
     }
 
+    // A text on its way to the core. It stays in the input until the core has accepted it, as
+    // does its quote, so a refused one is still there; one send at a time.
+    property bool sendingText: false
+    function textAccepted(sent, quoteId, sentDraft) {
+        // The core took the draft along with it, if it is still that one.
+        if (savedDraft === sentDraft) savedDraft = noDraft
+        if (quoting && quoting.messageId === quoteId) quoting = null
+        var text = inputField.text
+        if (text === sent) {
+            composeMentions = {}
+            setInput("")
+        } else if (text.indexOf(sent) === 0) {
+            // Typed on meanwhile: that stays.
+            setInput(text.substring(sent.length).replace(/^\s+/, ""))
+        }
+        // Keep writing, like Jolla Messages: refocus once the list has inserted the message.
+        if (status === PageStatus.Active) refocus.restart()
+    }
+
     function send() {
+        // The keyboard may still hold the last word as a prediction.
+        Qt.inputMethod.commit()
+        if (sendingText) return
         if (recordingHere) {
             if (voiceRecorder.held) sendRecording(voiceRecorder.duration)
             else voiceRecorder.stop()
@@ -1030,35 +1060,37 @@ Page {
             voiceRecorder.start(page)
             return
         }
+        var sent = page.inputField.text
+        var text = encodeMentions(sent.trim())
+        // An edit is never a caption, whatever waits to be sent.
+        if (editingMessageId !== "") {
+            if (text.length > 0) sendEdit(text)
+            return
+        }
         if (attachment) {
             sendAttachment()
             return
         }
-        var text = encodeMentions(page.inputField.text.trim())
         if (text.length === 0) return
-        composeMentions = {}
-        if (editingMessageId !== "") {
-            editMessage(editingMessageId, text)
-            endEdit()
-            return
-        }
+        // In the draft first: if the send is refused, or the app ends, the words are still there.
+        // The core takes the draft away when it accepts the text.
+        saveDraft()
+        var sentDraft = savedDraft
         var args = { identity: identity, text: text }
-        if (quoting) args.quote = quoting.messageId
-        quoting = null
+        var quoteId = quoting ? quoting.messageId : ""
+        if (quoting) args.quote = quoteId
+        sendingText = true
         backend.call("sendText", args, function(ok, result, kind, message) {
+            page.sendingText = false
             if (ok) {
                 page.addMessage(result)
                 // Whoever gets an answer is no stranger any more.
                 page.spamPotential = false
+                page.textAccepted(sent, quoteId, sentDraft)
             } else {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             }
         })
-        setInput("")
-        // Sent: no draft left, even if the app ends before the page saves it.
-        saveDraft()
-        // Keep writing, like Jolla Messages: refocus once the list has inserted the message.
-        refocus.restart()
     }
 
     Timer {
@@ -2057,7 +2089,7 @@ Page {
                     textLeftMargin: Theme.paddingSmall
                     width: parent.width - x - sendButton.width - Theme.horizontalPageMargin - Theme.paddingMedium
                     onActiveFocusChanged: if (activeFocus) page.emojiPanelOpen = false
-                    placeholderText: page.attachment
+                    placeholderText: page.attachment && page.editingMessageId === ""
                                      //% "Add a caption"
                                      ? qsTrId("threesea-la-add-caption")
                                      //% "Type message"
@@ -2179,14 +2211,14 @@ Page {
                         sourceSize.height: height
                         source: "image://theme/" + (page.canRecord ? "icon-m-mic" : "icon-m-send")
                                 + "?" + (sendArea.pressed || page.recordingHere ? Theme.highlightColor : Theme.primaryColor)
-                        opacity: input.text.trim().length > 0 || page.attachment || page.canRecord
-                                 || page.recordingHere ? 1.0 : Theme.opacityLow
+                        opacity: (input.text.trim().length > 0 || page.attachment || page.canRecord
+                                  || page.recordingHere) && !page.sendingText ? 1.0 : Theme.opacityLow
                     }
                     MouseArea {
                         id: sendArea
                         anchors.fill: parent
-                        enabled: input.text.trim().length > 0 || page.attachment || page.canRecord
-                                 || page.recordingHere
+                        enabled: (input.text.trim().length > 0 || page.attachment || page.canRecord
+                                  || page.recordingHere) && !page.sendingText
                         onClicked: page.send()
                     }
                 }
