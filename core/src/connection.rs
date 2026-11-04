@@ -1540,6 +1540,11 @@ impl<'a> Session<'a> {
                         }
                     }
                 }
+                if !crate::providers::shows_fs_status(store, &self.setup.config, &peer)
+                    .map_err(protocol_error)?
+                {
+                    return Ok(None);
+                }
                 let code = match status {
                     FsStatus::Established => "fsEstablished",
                     FsStatus::Reset | FsStatus::MessageRejected { .. } => "fsReset",

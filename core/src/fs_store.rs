@@ -472,6 +472,107 @@ mod tests {
         }
     }
 
+    /// Alice starts a session with Bob: what she sends, ready for Bob's `receive`.
+    fn first_message(alice: &Party, bob: &Party) -> Vec<MessageWithMetadataBox> {
+        alice.send_text(bob, "hello")
+    }
+
+    fn session_count(party: &Party, peer: &Party) -> usize {
+        party
+            .store
+            .fs_sessions(&peer.id.to_string(), party.id)
+            .unwrap()
+            .len()
+    }
+
+    fn block(party: &Party, peer: &Party) {
+        party
+            .store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockedContacts": [peer.id.to_string()] }).to_string(),
+            )
+            .unwrap();
+    }
+
+    fn make_group_member(party: &Party, peer: &Party) {
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: peer.id,
+            group_id: 1,
+        };
+        party
+            .store
+            .upsert_group(&crate::groups::Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: String::new(),
+                members: vec![peer.id.to_string()],
+                left: false,
+                created_at: 0,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+    }
+
+    fn pair() -> (Party, Party) {
+        let (alice_key, bob_key) = ([1; 32], [2; 32]);
+        (
+            Party::new("ABCD1234", alice_key, ("EFGH5678", bob_key)),
+            Party::new("EFGH5678", bob_key, ("ABCD1234", alice_key)),
+        )
+    }
+
+    /// Nothing but the acknowledgement: no session, no control message, no status event.
+    fn assert_no_trace(receiver: &mut Party, sender: &Party) {
+        let payloads = first_message(sender, receiver);
+        for payload in payloads {
+            let mut task = receiver.e2e.handle_incoming_message(payload);
+            let IncomingMessageLoop::Done(result) = task.poll(receiver.e2e.context()).unwrap()
+            else {
+                panic!("no instruction expected");
+            };
+            assert!(result.outgoing_message_ack.is_some());
+        }
+        assert_eq!(session_count(receiver, sender), 0);
+        assert!(receiver.events.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_blocked_contact_gets_no_session_and_no_answer() {
+        let (alice, mut bob) = pair();
+        block(&bob, &alice);
+        assert_no_trace(&mut bob, &alice);
+    }
+
+    #[test]
+    fn an_unknown_sender_keeps_a_session_with_block_unknown_on_but_gets_no_text_through() {
+        let (alice, mut bob) = pair();
+        let mut known = bob.store.contact("ABCD1234").unwrap().unwrap();
+        known.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
+        bob.store.upsert_contact(&known).unwrap();
+        bob.store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockUnknown": true }).to_string(),
+            )
+            .unwrap();
+        // Their group-setup is exempt and may be encapsulated, so the session has to exist.
+        let (texts, _) = bob.receive(&alice, first_message(&alice, &bob));
+        assert_eq!(session_count(&bob, &alice), 1);
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn a_blocked_group_member_keeps_a_session_for_the_exempt_messages() {
+        let (alice, mut bob) = pair();
+        block(&bob, &alice);
+        make_group_member(&bob, &alice);
+        let (_, replies) = bob.receive(&alice, first_message(&alice, &bob));
+        assert_eq!(session_count(&bob, &alice), 1);
+        assert_eq!(replies.len(), 1, "the Accept");
+    }
+
     #[test]
     fn session_keys_survive_the_store() {
         let dir = tempfile::tempdir().unwrap();

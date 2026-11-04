@@ -304,6 +304,12 @@ pub fn group_receivers(
     Ok(kept)
 }
 
+/// Forward secrecy status lines appear in a chat with someone we have a contact for and don't
+/// block. Anyone else's control messages must not create or bump a chat.
+pub fn shows_fs_status(store: &Store, config: &Config, peer: &str) -> Result<bool, StoreError> {
+    Ok(store.contact(peer)?.is_some() && !identity_blocked(store, config, peer)?)
+}
+
 /// Nothing to wake (no Threema Web while restoring forward secrecy state, fs_store).
 pub struct NoShortcuts;
 
@@ -1033,6 +1039,33 @@ mod tests {
             pc::ActivityState::Invalid,
         );
         assert!(!may(false) && !may(true), "a revoked ID, nothing at all");
+    }
+
+    #[test]
+    fn fs_status_lines_only_for_contacts_not_blocked() {
+        let (_dir, store) = store();
+        let config = config();
+        let shows = |id: &str| shows_fs_status(&store, &config, id).unwrap();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        assert!(shows(MEMBER));
+        assert!(!shows(STRANGER), "no contact, no chat");
+        settings(&store, &json!({ "blockedContacts": [MEMBER] }));
+        assert!(!shows(MEMBER));
+        // Known but neither direct nor in a group with us, with "block unknown senders" on.
+        contact(
+            &store,
+            OTHER,
+            pc::AcquaintanceLevel::GroupOrDeleted,
+            pc::ActivityState::Active,
+        );
+        assert!(shows(OTHER));
+        settings(&store, &json!({ "blockUnknown": true }));
+        assert!(!shows(OTHER));
     }
 
     #[test]
