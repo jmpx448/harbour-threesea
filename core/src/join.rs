@@ -353,6 +353,20 @@ pub(crate) fn last_updates(store: &Store) -> Result<HashMap<String, u64>, StoreE
         .collect())
 }
 
+/// Whether the other devices can take this group at all: Threema Desktop refuses a group whose
+/// creator it has no contact for, and with it the whole join (`dom/backend/join.ts`). A creator
+/// without a contact has no public key we could give them either.
+pub(crate) fn group_syncable(
+    store: &Store,
+    stored: &crate::groups::Group,
+) -> Result<bool, StoreError> {
+    let creator = stored.identity.creator_identity.to_string();
+    let user = store
+        .identity()?
+        .ok_or_else(|| StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+    Ok(creator == user.threema_id || store.contact(&creator)?.is_some())
+}
+
 /// Collect everything for the new device. `dgk`: the device group key.
 pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<JoinData, StoreError> {
     let identity = store
@@ -403,7 +417,12 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
 
     // Groups.
     let mut groups = Vec::new();
+    let mut left_out = 0_u32;
     for stored in store.groups()? {
+        if !group_syncable(store, &stored)? {
+            left_out += 1;
+            continue;
+        }
         let mut group = group_sync(store, &stored)?;
         // Version 0: no picture, whatever a file may say (a removal that didn't finish).
         if stored.picture_version != 0
@@ -418,6 +437,13 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
                 .copied()
                 .unwrap_or_else(|| u64::try_from(stored.created_at).unwrap_or_default()),
         });
+    }
+
+    if left_out > 0 {
+        tracing::warn!(
+            groups = left_out,
+            "groups without a creator's contact left out of the join"
+        );
     }
 
     // Before the secrets are copied into the message: nothing leaves early after that.
@@ -524,6 +550,52 @@ mod tests {
             vec!["ABCD1234"]
         );
         assert_eq!(synced.user_state, Some(group::UserState::Member as i32));
+    }
+
+    #[test]
+    fn a_group_is_only_for_the_other_devices_with_its_creators_contact() {
+        let (_dir, store, group) = with_group(true);
+        assert!(group_syncable(&store, &group).unwrap());
+        store.delete_contact("CREATOR1").unwrap();
+        assert!(!group_syncable(&store, &group).unwrap());
+
+        // Ours needs no contact of ourselves.
+        let ours = GroupIdentity {
+            creator_identity: ThreemaId::try_from("TESTTEST").unwrap(),
+            group_id: 8,
+        };
+        let ours = crate::groups::Group {
+            key: crate::groups::key(&ours),
+            identity: ours,
+            ..group
+        };
+        store.upsert_group(&ours).unwrap();
+        assert!(group_syncable(&store, &ours).unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let media = MediaStore::open(dir.path(), &[3; 32]).unwrap();
+        let data = collect(&store, &media, &[1; 32]).unwrap();
+        let Some(ed_to_nd::Content::EssentialData(essential)) =
+            EdToNd::decode(data.essential_data.as_slice())
+                .unwrap()
+                .content
+        else {
+            panic!("not essential data");
+        };
+        let keys: Vec<u64> = essential
+            .groups
+            .iter()
+            .map(|g| {
+                g.group
+                    .as_ref()
+                    .unwrap()
+                    .group_identity
+                    .as_ref()
+                    .unwrap()
+                    .group_id
+            })
+            .collect();
+        assert_eq!(keys, vec![8]);
     }
 
     #[test]

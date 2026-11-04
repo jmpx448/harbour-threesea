@@ -532,6 +532,9 @@ pub(crate) fn queue_received_group_change(
     let Some(group) = store.group(key)? else {
         return Ok(false);
     };
+    if !crate::join::group_syncable(store, &group)? {
+        return Ok(false);
+    }
     let content = received_change_sync(store, &group, change)?;
     store.queue_sync_content(Scope::GroupSync, content)?;
     for identity in unknown {
@@ -590,6 +593,9 @@ pub(crate) fn members_looked_up(
             let Some(group) = store.group(&key)? else {
                 continue;
             };
+            if !crate::join::group_syncable(store, &group)? {
+                continue;
+            }
             let identities = crate::join::group_sync_members(store, &group)?;
             // Nobody new in the list (the directory didn't know them): nothing to say.
             if !members

@@ -316,6 +316,29 @@ impl Store {
         Ok(false)
     }
 
+    /// Whether any group names `identity` as creator or member, a group we left too: such a group
+    /// still goes to the other devices, which need a contact for everyone it names.
+    pub fn is_named_by_a_group(&self, identity: &str) -> Result<bool, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT creator, members FROM groups WHERE creator = ?1 OR members LIKE '%' || ?1 || '%'",
+        )?;
+        let rows = statement.query_map([identity], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (creator, members) = row?;
+            if creator == identity
+                || serde_json::from_str::<Vec<String>>(&members)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|member| member == identity)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Groups whose picture descriptor is known but whose image never made it onto the device
     /// (version 0): their downloads are tried again on reconnect and by maintenance.
     pub fn groups_with_pending_picture(&self) -> Result<Vec<String>, StoreError> {
@@ -2036,6 +2059,9 @@ mod tests {
     /// says so in its outcome.
     fn control_messages(store: &Store) -> Vec<(bool, usize)> {
         let group_key = key(&gid(CREATOR));
+        store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
         let mut seen = Vec::new();
         let mut note = |outcome: GroupOutcome| {
             seen.push((outcome.sync_queued, queued(store)));
@@ -2162,6 +2188,9 @@ mod tests {
         store
             .set_multi_device(Some(&crate::multidevice::Properties::generate()))
             .unwrap();
+        store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
         // New group: nobody came "with the change".
         run(&store, CREATOR, CREATOR, setup(&[USER, "UNKNOWN1"]));
         assert_eq!(
@@ -2174,6 +2203,9 @@ mod tests {
         );
         assert!(store.outstanding_member_lookups().unwrap().is_empty());
         // Added to a group we have: they did.
+        store
+            .upsert_contact(&crate::contacts::test_contact(BLOCKED))
+            .unwrap();
         let identity = GroupIdentity {
             creator_identity: id(BLOCKED),
             group_id: 9,
@@ -2456,6 +2488,17 @@ mod tests {
                 .unwrap(),
             vec![BOB]
         );
+    }
+
+    #[test]
+    fn a_group_we_left_still_names_its_people() {
+        let (_dir, store) = store();
+        stored_group(&store, CREATOR, &[BOB], true);
+        assert!(store.is_named_by_a_group(BOB).unwrap());
+        assert!(store.is_named_by_a_group(CREATOR).unwrap());
+        assert!(!store.is_named_by_a_group(EVE).unwrap());
+        // Unlike a group we are in, it doesn't let them past "block unknown senders".
+        assert!(!store.is_group_member(BOB).unwrap());
     }
 
     #[test]

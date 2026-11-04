@@ -566,6 +566,9 @@ impl App {
                     else {
                         return Ok(Vec::new());
                     };
+                    if !crate::join::group_syncable(&self.store, &group)? {
+                        return Ok(Vec::new());
+                    }
                     let mut synced = crate::join::group_sync(&self.store, &group)?;
                     // Unchanged here: leave it alone there.
                     synced.profile_picture = None;
@@ -592,6 +595,9 @@ impl App {
                     return Ok(if conversation.starts_with("g:") {
                         self.store
                             .group(&conversation)?
+                            .filter(|group| {
+                                crate::join::group_syncable(&self.store, group).unwrap_or(false)
+                            })
                             .map_or_else(Vec::new, |group| {
                                 crate::join::group_sync(&self.store, &group)
                                     .map(|mut synced| {

@@ -365,6 +365,11 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Creator: create (setup + name + delete-picture to all), rename, change members (setup to all
   old and new, name/picture to added), dissolve (empty setup). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.
+- Threema Desktop refuses to link at all over a group naming someone it has no contact for
+  (`dom/backend/join.ts`), and asserts the same on `GroupSync`. So no group data names a member
+  without a contact (`join::group_sync_members`), a group whose creator has none stays out of it
+  altogether (`join::group_syncable`), and a contact a group still names, a left group too, stays
+  as a group acquaintance when deleted.
 - Group pictures: JPEG, uploaded with `persist=1` (members fetch it without `done`), sent with
   sync answers and to new members.
 - Group sync (`GroupSync`, multi-device): `member_identities` holds neither the creator nor the

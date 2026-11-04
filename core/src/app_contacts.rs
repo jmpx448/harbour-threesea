@@ -523,11 +523,13 @@ impl App {
     pub(crate) fn delete_contact(&mut self, identity: &str) -> Result<Value, ApiError> {
         let id = contacts::parse_identity(identity).ok_or(ApiError::IdentityFormat)?;
         let key = id.to_string();
-        // A member of a group we are still in stays as a group acquaintance, like Android's
+        // Someone a group names stays as a group acquaintance, like Android's
         // AcquaintanceLevel.GROUP: the group needs the name and the public key, and such a
-        // contact is out of the contact list either way.
+        // contact is out of the contact list either way. A group we left counts too: it still
+        // goes to the other devices, and Threema Desktop refuses to link for a group naming
+        // someone it has no contact for.
         let demoted = match self.store.contact(&key)? {
-            Some(mut contact) if self.store.is_group_member(&key)? => {
+            Some(mut contact) if self.store.is_named_by_a_group(&key)? => {
                 contact.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
                 self.store.upsert_contact(&contact)?;
                 true
@@ -1301,6 +1303,42 @@ mod contact_policy_tests {
     // Deleting a contact who is in one of our groups keeps it as a group acquaintance, like
     // Android: the group needs the name and the public key, and the contact list hides it
     // either way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleting_someone_a_left_group_names_keeps_it_for_the_other_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "CCCCCCCC".parse().unwrap(),
+            group_id: 0x1234,
+        };
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: "Crew".into(),
+                members: vec!["BBBBBBBB".into()],
+                left: true,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+
+        call(
+            &mut app,
+            json!({"cmd": "deleteContact", "identity": "BBBBBBBB"}),
+        )
+        .await;
+        let kept = app.store.contact("BBBBBBBB").unwrap().expect("kept");
+        assert_eq!(
+            kept.acquaintance_level,
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::GroupOrDeleted
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn deleting_a_group_member_keeps_it_as_acquaintance() {
         let dir = tempfile::tempdir().unwrap();
