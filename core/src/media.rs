@@ -94,6 +94,8 @@ pub const THUMBNAIL_NONCE: [u8; 24] = {
 pub enum MediaError {
     #[error("blob server: {0}")]
     Server(String),
+    #[error("blob server: status {0}")]
+    Status(u16),
     #[error("network: {0}")]
     Network(String),
     #[error("decryption failed")]
@@ -105,6 +107,18 @@ pub enum MediaError {
     FileGone,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl MediaError {
+    /// Whether the same transfer may work later: not what the server refused (but for its "not
+    /// now"s), nor what is wrong on this side.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Network(_) | Self::Server(_) => true,
+            Self::Status(status) => matches!(status, 408 | 429 | 500..=599),
+            Self::Decrypt | Self::TooLarge | Self::FileGone | Self::Io(_) => false,
+        }
+    }
 }
 
 /// Which of a message's files.
@@ -389,7 +403,7 @@ pub enum BlobScope {
 }
 
 impl BlobScope {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Public => "public",
@@ -475,7 +489,7 @@ pub async fn download(
         }
     })?;
     if response.status != 200 {
-        return Err(MediaError::Server(format!("status {}", response.status)));
+        return Err(MediaError::Status(response.status));
     }
     Ok(response.body)
 }
@@ -557,7 +571,7 @@ async fn upload_to(
         .await
         .map_err(network)?;
     if response.status != 200 {
-        return Err(MediaError::Server(format!("status {}", response.status)));
+        return Err(MediaError::Status(response.status));
     }
     let hex = String::from_utf8_lossy(&response.body);
     data_encoding::HEXLOWER_PERMISSIVE
@@ -733,6 +747,32 @@ mod tests {
         assert!(media.has(2, MediaPart::File));
         media.remove(2);
         assert!(!media.has(2, MediaPart::File));
+    }
+
+    #[test]
+    fn what_may_work_later() {
+        for transient in [
+            MediaError::Network("timeout".into()),
+            MediaError::Server("invalid blob id".into()),
+            MediaError::Status(408),
+            MediaError::Status(429),
+            MediaError::Status(500),
+            MediaError::Status(503),
+        ] {
+            assert!(transient.is_transient(), "{transient}");
+        }
+        for last in [
+            MediaError::Status(307),
+            MediaError::Status(400),
+            MediaError::Status(404),
+            MediaError::Status(413),
+            MediaError::Decrypt,
+            MediaError::TooLarge,
+            MediaError::FileGone,
+            MediaError::Io(std::io::ErrorKind::StorageFull.into()),
+        ] {
+            assert!(!last.is_transient(), "{last}");
+        }
     }
 
     #[test]

@@ -814,6 +814,7 @@ impl App {
     /// emit.
     pub async fn on_connected(&mut self) -> Vec<&'static str> {
         self.check_device_group();
+        self.retry_failed_transfers();
         let now = tokio::time::Instant::now();
         if self
             .last_import_attempt
@@ -833,7 +834,6 @@ impl App {
         self.run_restore_setup().await;
         self.resume_picture_downloads();
         self.request_missing_pictures(PICTURE_REQUEST_BATCH);
-        self.retry_failed_uploads();
         events
     }
 

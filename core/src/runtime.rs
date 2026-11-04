@@ -354,7 +354,7 @@ pub fn set_log_level(level: &str) {
 fn on_media_event(app: &mut App, event: &CoreEvent, emit: &Emit) {
     app.gate_media(event);
     emit(event.to_json(&app.store, app.unlocked).to_string());
-    app.on_media_event();
+    app.on_media_event(event);
     app.web_on_core_event(event);
     app.web_refresh();
 }
@@ -390,6 +390,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
     // Locked at start: the private chats' media stay hidden from the UI's readers.
     app.update_media_gate();
     loop {
+        let transfer_retry_at = app.transfer_retry_at;
         tokio::select! {
             request = rx.recv() => {
                 let Some(request) = request else { break };
@@ -465,6 +466,12 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     app.web_refresh();
                 }
             }
+            () = async {
+                match transfer_retry_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => app.retry_failed_transfers(),
             _ = tick.tick() => {
                 for event in app.maintenance().await {
                     emit(json!({ "event": event }).to_string());

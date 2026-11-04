@@ -564,8 +564,10 @@ impl App {
                     tracing::warn!(%error, "contact picture download failed");
                     let gone = matches!(
                         error,
-                        media::MediaError::Decrypt | media::MediaError::TooLarge
-                    ) || matches!(&error, media::MediaError::Server(s) if s.contains("404"));
+                        media::MediaError::Decrypt
+                            | media::MediaError::TooLarge
+                            | media::MediaError::Status(404)
+                    );
                     if gone {
                         // The blob expired (or the key is wrong, or it is far too large):
                         // retrying the download is useless; only a freshly requested picture

@@ -1330,6 +1330,8 @@ pub struct App {
     pub(crate) android_export_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// When the pending Safe import was last tried automatically (reconnect rate limit).
     pub(crate) last_import_attempt: Option<tokio::time::Instant>,
+    /// When the core loop next looks for failed transfers to try again.
+    pub(crate) transfer_retry_at: Option<tokio::time::Instant>,
     /// When this device last looked whether it is alone in its device group.
     pub(crate) last_group_check: Option<tokio::time::Instant>,
     /// Private chats readable (ADR 0009); memory only, starts locked.
@@ -1405,6 +1407,7 @@ impl App {
             android_export: None,
             android_export_cancel: Arc::default(),
             last_import_attempt: None,
+            transfer_retry_at: None,
             last_group_check: None,
             unlocked: false,
             on_wifi: false,

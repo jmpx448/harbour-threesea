@@ -5,7 +5,9 @@
 //! A file message's `body` (UI JSON) carries `fileState` / `thumbnailState`:
 //! 0 on the server, 1 downloading, 2 on the device, 3 failed; outgoing ones also `uploadState`:
 //! 1 uploading, 2 uploaded (the message can be sent), 3 failed. `fileOnDemand`: the user cleaned
-//! the file up, so it comes back only when asked for.
+//! the file up, so it comes back only when asked for. `uploadRetry`: how often the upload failed
+//! and when it may try again by itself; `uploadedFile`: when the file part went up, if the rest
+//! of the upload didn't.
 //!
 //! Sending: the file is first stored in the (encrypted) media store, then uploaded from there,
 //! so a failed upload can be retried after a restart without the original file.
@@ -13,7 +15,7 @@
 use std::{rc::Rc, sync::Arc};
 
 use libthreema::model::message::{FileMessage, FileRenderingType};
-use rusqlite::{named_params, params};
+use rusqlite::{OptionalExtension as _, named_params, params};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -32,6 +34,79 @@ pub const STATE_REMOTE: i64 = 0;
 pub const STATE_LOADING: i64 = 1;
 pub const STATE_LOCAL: i64 = 2;
 pub const STATE_FAILED: i64 = 3;
+
+/// The pauses before a failed transfer tries again by itself, in minutes: as many automatic tries
+/// as there are pauses, on top of the first one. They only cost data on a link that keeps breaking
+/// off, so a large file doesn't get to do that for long. A tap always tries, and starts them over.
+const RETRY_PAUSES_MINUTES: [i64; 5] = [1, 5, 30, 120, 480];
+const MINUTE_MS: i64 = 60_000;
+/// The longest pause.
+const RETRY_PAUSE_MAX_MS: i64 = RETRY_PAUSES_MINUTES[RETRY_PAUSES_MINUTES.len() - 1] * MINUTE_MS;
+const UPLOAD_RETRY: &str = "$.uploadRetry";
+const UPLOADED_FILE: &str = "$.uploadedFile";
+
+/// How long an uploaded file part is good for a later try of the rest of its upload. How long the
+/// server keeps a blob nobody fetched isn't on record, so this stays well on the safe side.
+const UPLOADED_FILE_KEPT_MS: i64 = 24 * 60 * MINUTE_MS;
+
+/// What goes in a message's retry field after a failure, the `tries`-th in a row: `at`, the time of
+/// the next try by itself, stays empty when there won't be one.
+fn retry_after_failure(tries: i64, transient: bool, now: i64) -> Value {
+    let pause = usize::try_from(tries - 1)
+        .ok()
+        .and_then(|index| RETRY_PAUSES_MINUTES.get(index))
+        .filter(|_| transient);
+    json!({"tries": tries, "at": pause.map(|minutes| now + minutes * MINUTE_MS)})
+}
+
+/// Whether a try planned for `at` is due. A time further ahead than any pause comes from a clock
+/// that went back since, and nothing should wait for that clock to catch up.
+fn retry_due(at: i64, now: i64) -> bool {
+    at <= now || at > now + RETRY_PAUSE_MAX_MS
+}
+
+/// What the core loop has to do about failed transfers.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TransferRetries {
+    /// Outgoing file messages whose upload may try again now.
+    pub uploads: Vec<i64>,
+    /// When the next one comes due.
+    pub next_at: Option<i64>,
+}
+
+impl TransferRetries {
+    /// `at` for a try: due, or to look at again by then.
+    fn sort_in(&mut self, at: i64, now: i64) -> bool {
+        let due = retry_due(at, now);
+        if !due {
+            self.next_at = Some(self.next_at.map_or(at, |next| next.min(at)));
+        }
+        due
+    }
+}
+
+/// Where an upload's blobs go at the moment.
+#[derive(Clone, Copy)]
+struct UploadTarget {
+    /// To the device group's mirror.
+    mirror: bool,
+    scope: media::BlobScope,
+    persist: bool,
+}
+
+/// May an upload's next try leave out the file part that went up earlier? Not after a long time,
+/// and not if the blobs go another way by now: to another server (a device was linked or removed
+/// since), or for others to fetch as well (a notes group that gained a member, as what we sent
+/// for ourselves may be gone by the time they ask).
+fn uploaded_file_good(body: &Value, now: i64, target: UploadTarget) -> bool {
+    let uploaded = &body["uploadedFile"];
+    uploaded["mirror"].as_bool() == Some(target.mirror)
+        && uploaded["scope"].as_str() == Some(target.scope.as_str())
+        && uploaded["persist"].as_bool() == Some(target.persist)
+        && uploaded["at"]
+            .as_i64()
+            .is_some_and(|at| at <= now && now - at < UPLOADED_FILE_KEPT_MS)
+}
 
 fn state_field(part: MediaPart) -> &'static str {
     match part {
@@ -283,7 +358,8 @@ impl Store {
         self.message(message)
     }
 
-    /// Set `uploadState` of an outgoing file message.
+    /// Set `uploadState` of an outgoing file message. Once it is up, what was noted on the way
+    /// there is over.
     pub fn set_upload_state(
         &self,
         message: i64,
@@ -294,7 +370,86 @@ impl Store {
              WHERE id = ?1 AND kind = 'file' AND outgoing = 1",
             params![message, state, now_ms()],
         )?;
+        if state == STATE_LOCAL {
+            self.conn.execute(
+                "UPDATE messages SET body = json_remove(body, ?2, ?3) WHERE id = ?1 AND kind = 'file'",
+                params![message, UPLOAD_RETRY, UPLOADED_FILE],
+            )?;
+        }
         self.message(message)
+    }
+
+    /// The upload failed. `transient`: it may try again by itself after a pause, as long as it
+    /// has tries left.
+    pub fn set_upload_failed(
+        &self,
+        message: i64,
+        transient: bool,
+        now: i64,
+    ) -> Result<Option<Message>, StoreError> {
+        let tries = self.transfer_tries(message, UPLOAD_RETRY)? + 1;
+        self.conn.execute(
+            "UPDATE messages SET body = json_set(body, '$.uploadState', ?2, ?3, json(?4)),
+                                 updated_at = ?5
+             WHERE id = ?1 AND kind = 'file' AND outgoing = 1",
+            params![
+                message,
+                STATE_FAILED,
+                UPLOAD_RETRY,
+                retry_after_failure(tries, transient, now).to_string(),
+                now
+            ],
+        )?;
+        self.message(message)
+    }
+
+    fn transfer_tries(&self, message: i64, retry_field: &str) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT json_extract(body, ?2 || '.tries') FROM messages WHERE id = ?1",
+                params![message, retry_field],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or(0))
+    }
+
+    /// The user asked for this transfer: its tries start over.
+    fn forget_transfer_tries(&self, message: i64, retry_field: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE messages SET body = json_remove(body, ?2) WHERE id = ?1 AND kind = 'file'",
+            params![message, retry_field],
+        )?;
+        Ok(())
+    }
+
+    /// A file part is up, whatever becomes of the rest of the upload: a later try needn't send
+    /// it again.
+    fn keep_uploaded_file(
+        &self,
+        message: i64,
+        keys: &FileKeys,
+        now: i64,
+        target: UploadTarget,
+    ) -> Result<(), StoreError> {
+        self.set_file_keys(message, keys)?;
+        self.conn.execute(
+            "UPDATE messages SET body = json_set(body, ?2, json(?3)) WHERE id = ?1",
+            params![
+                message,
+                UPLOADED_FILE,
+                json!({
+                    "at": now,
+                    "mirror": target.mirror,
+                    "scope": target.scope.as_str(),
+                    "persist": target.persist,
+                })
+                .to_string()
+            ],
+        )?;
+        Ok(())
     }
 
     /// Outgoing file messages whose upload didn't finish (interrupted or failed earlier).
@@ -307,14 +462,36 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Outgoing file messages whose upload failed and whose message never went out.
-    pub fn failed_uploads(&self) -> Result<Vec<i64>, StoreError> {
+    /// What may try again by itself: an upload that failed for a message that never went out, if
+    /// it hasn't failed for good, and whose pause is over. One that failed before tries were
+    /// counted has no note on it and counts as due.
+    pub fn transfers_to_retry(&self, now: i64) -> Result<TransferRetries, StoreError> {
+        let mut retries = TransferRetries::default();
         let mut statement = self.conn.prepare(
-            "SELECT id FROM messages WHERE kind = 'file' AND outgoing = 1 AND state = 0
+            "SELECT id, json_extract(body, '$.uploadRetry.tries'),
+                    json_extract(body, '$.uploadRetry.at')
+             FROM messages WHERE kind = 'file' AND outgoing = 1 AND state = 0
                  AND json_extract(body, '$.uploadState') = ?1",
         )?;
-        let rows = statement.query_map([STATE_FAILED], |row| row.get(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let rows = statement.query_map([STATE_FAILED], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, tries, at) = row?;
+            let due = match (tries, at) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(_), Some(at)) => retries.sort_in(at, now),
+            };
+            if due {
+                retries.uploads.push(id);
+            }
+        }
+        Ok(retries)
     }
 
     /// After a restart nothing is loading any more.
@@ -620,47 +797,63 @@ async fn upload(
     events: mpsc::UnboundedSender<CoreEvent>,
     message: i64,
 ) {
-    let changed = |result: Result<Option<Message>, StoreError>| {
-        if let Ok(Some(message)) = result {
-            let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
-        }
-    };
     let Ok(Some(mut keys)) = store.file_keys(message) else {
         return;
     };
-    changed(store.set_upload_state(message, STATE_LOADING));
     let (scope, persist) = upload_target(&store, message);
-    let result = async {
+    let target = UploadTarget {
+        mirror: media::mirror_active(),
+        scope,
+        persist,
+    };
+    let result = upload_parts(&store, &media, message, &mut keys, target, async |blob| {
+        media::upload_scoped(&https, &blob, persist, scope).await
+    })
+    .await;
+    finish_upload(&store, &events, message, &keys, result);
+}
+
+/// Send what is still to go up of a stored outgoing file. `keys` end up with the blob ids that came
+/// back.
+async fn upload_parts(
+    store: &Store,
+    media: &MediaStore,
+    message: i64,
+    keys: &mut FileKeys,
+    target: UploadTarget,
+    send: impl AsyncFn(Vec<u8>) -> Result<libthreema::common::BlobId, media::MediaError>,
+) -> Result<(), media::MediaError> {
+    let body = store
+        .message(message)
+        .ok()
+        .flatten()
+        .map_or(Value::Null, |message| {
+            serde_json::from_str(&message.body).unwrap_or_default()
+        });
+    if !uploaded_file_good(&body, now_ms(), target) {
+        keys.blob_id = None;
+    }
+    keys.thumbnail_blob_id = None;
+    if keys.blob_id.is_none() {
         let file = media
             .read(message, MediaPart::File)?
             .ok_or(media::MediaError::FileGone)?;
-        keys.blob_id = Some(
-            media::upload_scoped(
-                &https,
-                &media::encrypt_blob(&keys.key, MediaPart::File, &file),
-                persist,
-                scope,
-            )
-            .await?,
-        );
-        // Deleted meanwhile: the thumbnail under this id may be another file's by now.
-        if same_file(&store, message, &keys.key)
-            && let Some(thumbnail) = media.read(message, MediaPart::Thumbnail)?
+        keys.blob_id = Some(send(media::encrypt_blob(&keys.key, MediaPart::File, &file)).await?);
+        // Deleted meanwhile: this id may be another file's by now.
+        if same_file(store, message, &keys.key)
+            && let Err(error) = store.keep_uploaded_file(message, keys, now_ms(), target)
         {
-            keys.thumbnail_blob_id = Some(
-                media::upload_scoped(
-                    &https,
-                    &media::encrypt_blob(&keys.key, MediaPart::Thumbnail, &thumbnail),
-                    persist,
-                    scope,
-                )
-                .await?,
-            );
+            tracing::warn!(%error, "keeping an uploaded file's blob id failed");
         }
-        Ok::<_, media::MediaError>(())
     }
-    .await;
-    finish_upload(&store, &events, message, &keys, result);
+    // Deleted meanwhile: the thumbnail under this id may be another file's by now.
+    if same_file(store, message, &keys.key)
+        && let Some(thumbnail) = media.read(message, MediaPart::Thumbnail)?
+    {
+        let blob = media::encrypt_blob(&keys.key, MediaPart::Thumbnail, &thumbnail);
+        keys.thumbnail_blob_id = Some(send(blob).await?);
+    }
+    Ok(())
 }
 
 /// Record how an upload went. No await in here: nothing can come between the check and the writes.
@@ -678,27 +871,26 @@ fn finish_upload(
         tracing::info!("upload dropped, its message is gone");
         return;
     }
-    let state = match result.map(|()| store.set_file_keys(message, keys)) {
-        Ok(Ok(())) => STATE_LOCAL,
+    let changed = match result.map(|()| store.set_file_keys(message, keys)) {
+        Ok(Ok(())) => store.set_upload_state(message, STATE_LOCAL),
         Ok(Err(error)) => {
             tracing::warn!(%error, "storing blob ids failed");
-            STATE_FAILED
+            store.set_upload_failed(message, false, now_ms())
         }
-        // There is nothing left to send: the message fails for good, or every reconnect would try
-        // again (`failed_uploads` asks for messages still pending) and its clock would never end.
+        // There is nothing left to send: the message fails for good, or its clock would never end.
         Err(media::MediaError::FileGone) => {
             tracing::warn!("upload failed for good, the file is gone");
             if let Err(error) = store.set_outgoing_failed(message) {
                 tracing::warn!(%error, "storing the failed state failed");
             }
-            STATE_FAILED
+            store.set_upload_failed(message, false, now_ms())
         }
         Err(error) => {
             tracing::warn!(%error, "upload failed");
-            STATE_FAILED
+            store.set_upload_failed(message, error.is_transient(), now_ms())
         }
     };
-    if let Ok(Some(message)) = store.set_upload_state(message, state) {
+    if let Ok(Some(message)) = changed {
         let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
     }
 }
@@ -930,26 +1122,60 @@ impl App {
             .ok_or_else(|| ApiError::Internal("no such file".into()))?;
         let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
         if body["uploadState"].as_i64() == Some(STATE_FAILED) {
+            self.store.forget_transfer_tries(id, UPLOAD_RETRY)?;
             self.spawn_upload(id);
         }
         Ok(json!({}))
     }
 
-    /// Online (again): uploads that failed get another try by themselves, so a voice message
-    /// sent on a bad connection does not sit behind its clock until it is tapped (user report
-    /// 2026-10-28). Each reconnect is one new attempt per file.
-    pub(crate) fn retry_failed_uploads(&self) {
-        match self.store.failed_uploads() {
-            Ok(uploads) => {
-                for message in uploads {
+    /// Online, with a connection or a pause just ended: transfers that failed get another try by
+    /// themselves, so a voice message sent on a bad connection does not sit behind its clock until
+    /// it is tapped (user report 2026-10-28). Offline there is no use: the next connection comes
+    /// here again.
+    pub(crate) fn retry_failed_transfers(&mut self) {
+        self.transfer_retry_at = None;
+        if self.connection_state != "connected" {
+            return;
+        }
+        let now = now_ms();
+        match self.store.transfers_to_retry(now) {
+            Ok(retries) => {
+                for message in retries.uploads {
                     self.spawn_upload(message);
                 }
+                if let Some(at) = retries.next_at {
+                    self.look_at_retries_by(at, now);
+                }
             }
-            Err(error) => tracing::warn!(%error, "listing failed uploads failed"),
+            Err(error) => tracing::warn!(%error, "listing failed transfers failed"),
         }
     }
 
+    /// The core loop's timer stands for the earliest try planned.
+    fn look_at_retries_by(&mut self, at: i64, now: i64) {
+        let wait = u64::try_from(at.saturating_sub(now).clamp(0, RETRY_PAUSE_MAX_MS)).unwrap_or(0);
+        let at = tokio::time::Instant::now() + std::time::Duration::from_millis(wait);
+        self.transfer_retry_at = Some(self.transfer_retry_at.map_or(at, |next| next.min(at)));
+    }
+
+    /// Start an upload. It counts as uploading from here on, before its task first runs: the lists
+    /// of what is to try again don't name it twice.
     fn spawn_upload(&self, message: i64) {
+        if !matches!(self.store.file_keys(message), Ok(Some(_))) {
+            return;
+        }
+        match self.store.set_upload_state(message, STATE_LOADING) {
+            Ok(Some(changed)) => {
+                let _ = self
+                    .media_events
+                    .send(CoreEvent::MessagesChanged(vec![changed]));
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "marking an upload failed");
+                return;
+            }
+        }
         tokio::task::spawn_local(upload(
             Rc::clone(&self.store),
             self.https.clone(),
@@ -959,8 +1185,20 @@ impl App {
         ));
     }
 
-    /// A media task reported progress: an upload may have finished, so send what's pending.
-    pub(crate) fn on_media_event(&mut self) {
+    /// A media task reported progress: an upload may have finished, so send what's pending; one
+    /// that failed has its next try to look forward to.
+    pub(crate) fn on_media_event(&mut self, event: &CoreEvent) {
+        if let CoreEvent::MessagesChanged(messages) = event {
+            let now = now_ms();
+            for message in messages.iter().filter(|m| m.body.contains("Retry")) {
+                let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
+                if body["uploadState"].as_i64() == Some(STATE_FAILED)
+                    && let Some(at) = body["uploadRetry"]["at"].as_i64()
+                {
+                    self.look_at_retries_by(at, now);
+                }
+            }
+        }
         self.send_pending_messages();
     }
 
@@ -1293,10 +1531,21 @@ impl App {
     pub(crate) fn resume_media(&mut self) {
         // First of all: the tasks started below write under the same temporary names.
         self.media.remove_temporary_files();
+        // An upload the end of the process cut short is a try that failed, and comes again on the
+        // usual schedule: a process that keeps being closed doesn't send it again each time.
         match self.store.unfinished_uploads() {
             Ok(uploads) => {
+                let now = now_ms();
                 for message in uploads {
-                    self.spawn_upload(message);
+                    match self.store.set_upload_failed(message, true, now) {
+                        Ok(Some(changed)) => {
+                            let _ = self
+                                .media_events
+                                .send(CoreEvent::MessagesChanged(vec![changed]));
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error, "marking an upload failed"),
+                    }
                 }
             }
             Err(error) => tracing::warn!(%error, "listing uploads failed"),
@@ -1714,13 +1963,13 @@ mod tests {
         );
 
         // A second fetch of the same blob, which the server has dropped since.
-        let gone = Err(media::MediaError::Server("status 404".into()));
+        let gone = Err(media::MediaError::Status(404));
         assert!(!download.finish(&app.store, &app.media, &events, gone));
         assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOCAL));
 
         // Nothing here and nothing fetched: failed.
         let other = job(&app.store, id, MediaPart::Thumbnail);
-        let gone = Err(media::MediaError::Server("status 404".into()));
+        let gone = Err(media::MediaError::Status(404));
         assert!(!other.finish(&app.store, &app.media, &events, gone));
         assert_eq!(state(&app.store, id, "thumbnailState"), Some(STATE_FAILED));
     }
@@ -1755,7 +2004,7 @@ mod tests {
 
         assert!(!download.finish(&app.store, &app.media, &events, Ok(blob)));
         assert!(!app.media.has(next, MediaPart::File));
-        let failed = Err(media::MediaError::Server("status 404".into()));
+        let failed = Err(media::MediaError::Status(404));
         assert!(!download.finish(&app.store, &app.media, &events, failed));
         assert_eq!(state(&app.store, next, "fileState"), Some(STATE_REMOTE));
     }
@@ -1815,7 +2064,7 @@ mod tests {
         );
 
         // Nor does its failure hold the new one back.
-        let failed = Err(media::MediaError::Server("status 500".into()));
+        let failed = Err(media::MediaError::Status(500));
         finish_upload(&app.store, &events, wrong, &uploaded, failed);
         assert_eq!(state(&app.store, right, "uploadState"), Some(STATE_LOADING));
     }
@@ -1832,13 +2081,13 @@ mod tests {
         assert_eq!(keys.blob_id.unwrap().0, [7; 16]);
         assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOCAL));
 
-        let failed = Err(media::MediaError::Server("status 500".into()));
+        let failed = Err(media::MediaError::Status(500));
         finish_upload(&app.store, &events, id, &uploaded, failed);
         assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
     }
 
-    /// A failure of the network gets another try at the next reconnect; a file that is gone can't
-    /// get better, so the message shows as failed and stops being retried.
+    /// A failure of the network gets another try; a file that is gone can't get better, so the
+    /// message shows as failed and stops being retried.
     #[test]
     fn an_upload_without_its_file_fails_for_good() {
         let (_dir, app) = app();
@@ -1846,18 +2095,336 @@ mod tests {
         let id = outgoing_file(&app.store, 1, 1);
         let keys = app.store.file_keys(id).unwrap().unwrap();
         let state_of = || app.store.message(id).unwrap().unwrap().state;
+        let later = now_ms() + RETRY_PAUSE_MAX_MS;
 
         let network = Err(media::MediaError::Network("timeout".into()));
         finish_upload(&app.store, &events, id, &keys, network);
-        assert_eq!(app.store.failed_uploads().unwrap(), vec![id]);
+        assert_eq!(
+            app.store.transfers_to_retry(later).unwrap().uploads,
+            vec![id]
+        );
         assert_eq!(state_of(), crate::messages::OutgoingState::Pending as i64);
 
         let gone = Err(media::MediaError::FileGone);
         finish_upload(&app.store, &events, id, &keys, gone);
         assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
         assert_eq!(state_of(), crate::messages::OutgoingState::Failed as i64);
-        assert!(app.store.failed_uploads().unwrap().is_empty());
+        assert!(
+            app.store
+                .transfers_to_retry(later)
+                .unwrap()
+                .uploads
+                .is_empty()
+        );
         assert!(app.store.pending_outgoing().unwrap().is_empty());
+    }
+
+    /// Each failure in a row waits longer, and the tries run out.
+    #[test]
+    fn a_failing_upload_pauses_longer_and_stops() {
+        let (_dir, app) = app();
+        let id = outgoing_file(&app.store, 1, 1);
+        let mut now = 1_000_000;
+        for minutes in RETRY_PAUSES_MINUTES {
+            app.store.set_upload_failed(id, true, now).unwrap();
+            let retries = app.store.transfers_to_retry(now).unwrap();
+            assert!(retries.uploads.is_empty(), "not before the pause is over");
+            assert_eq!(retries.next_at, Some(now + minutes * MINUTE_MS));
+            now += minutes * MINUTE_MS;
+            assert_eq!(app.store.transfers_to_retry(now).unwrap().uploads, vec![id]);
+        }
+        app.store.set_upload_failed(id, true, now).unwrap();
+        assert_eq!(
+            app.store
+                .transfers_to_retry(now + 365 * RETRY_PAUSE_MAX_MS)
+                .unwrap(),
+            TransferRetries::default(),
+            "out of tries"
+        );
+
+        // A tap starts them over.
+        app.store.forget_transfer_tries(id, UPLOAD_RETRY).unwrap();
+        app.store.set_upload_failed(id, true, now).unwrap();
+        assert_eq!(
+            app.store.transfers_to_retry(now).unwrap().next_at,
+            Some(now + MINUTE_MS)
+        );
+
+        // And what got through leaves no note.
+        app.store.set_upload_state(id, STATE_LOCAL).unwrap();
+        let body = app.store.message(id).unwrap().unwrap().body;
+        assert!(!body.contains("uploadRetry"), "{body}");
+    }
+
+    /// What the server refused doesn't get better by itself, its "not now" does.
+    #[test]
+    fn a_refused_upload_waits_for_a_tap() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let later = now_ms() + 2 * MINUTE_MS;
+        let keys = |id| app.store.file_keys(id).unwrap().unwrap();
+
+        let too_large = outgoing_file(&app.store, 1, 1);
+        let refused = Err(media::MediaError::Status(413));
+        finish_upload(&app.store, &events, too_large, &keys(too_large), refused);
+        assert_eq!(
+            state(&app.store, too_large, "uploadState"),
+            Some(STATE_FAILED)
+        );
+        assert_eq!(
+            app.store.message(too_large).unwrap().unwrap().state,
+            crate::messages::OutgoingState::Pending as i64,
+            "a tap can still send it"
+        );
+
+        let busy = outgoing_file(&app.store, 2, 2);
+        let not_now = Err(media::MediaError::Status(429));
+        finish_upload(&app.store, &events, busy, &keys(busy), not_now);
+
+        assert_eq!(
+            app.store.transfers_to_retry(later).unwrap().uploads,
+            vec![busy]
+        );
+    }
+
+    /// An upload that failed before tries were counted isn't forgotten.
+    #[test]
+    fn an_upload_failed_before_tries_were_counted_is_due() {
+        let (_dir, app) = app();
+        let id = outgoing_file(&app.store, 1, 1);
+        app.store.set_upload_state(id, STATE_FAILED).unwrap();
+        assert_eq!(app.store.transfers_to_retry(0).unwrap().uploads, vec![id]);
+    }
+
+    /// A clock that went back doesn't hold a try up until it has caught up.
+    #[test]
+    fn a_try_planned_by_a_clock_since_gone_back_is_due() {
+        let (_dir, app) = app();
+        let id = outgoing_file(&app.store, 1, 1);
+        let ahead = 1_000 * 24 * 60 * MINUTE_MS;
+        app.store.set_upload_failed(id, true, ahead).unwrap();
+        assert_eq!(app.store.transfers_to_retry(0).unwrap().uploads, vec![id]);
+    }
+
+    /// Starting one marks it at once: a second look before its task ran doesn't name it again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retried_upload_starts_once() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                app.connection_state = "connected";
+                let id = outgoing_file(&app.store, 1, 1);
+                app.store.set_upload_state(id, STATE_FAILED).unwrap();
+                app.retry_failed_transfers();
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOADING));
+                assert!(
+                    app.store
+                        .transfers_to_retry(now_ms())
+                        .unwrap()
+                        .uploads
+                        .is_empty()
+                );
+            })
+            .await;
+    }
+
+    /// Offline nothing starts, and no timer runs for it: the next connection looks.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_nothing_tries_again() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                app.connection_state = "disconnected";
+                let id = outgoing_file(&app.store, 1, 1);
+                app.store.set_upload_failed(id, true, 0).unwrap();
+                app.retry_failed_transfers();
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+                assert!(app.transfer_retry_at.is_none());
+            })
+            .await;
+    }
+
+    /// A pause in progress has the loop's timer set for its end, from the event of the failure and
+    /// from a look at the list alike.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_loop_wakes_for_the_next_try() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let id = outgoing_file(&app.store, 1, 1);
+                let failed = app
+                    .store
+                    .set_upload_failed(id, true, now_ms())
+                    .unwrap()
+                    .unwrap();
+                app.on_media_event(&CoreEvent::MessagesChanged(vec![failed]));
+                let wait = app.transfer_retry_at.unwrap() - tokio::time::Instant::now();
+                assert!(wait <= std::time::Duration::from_secs(60));
+                assert!(wait > std::time::Duration::from_secs(30));
+
+                app.connection_state = "connected";
+                app.transfer_retry_at = None;
+                app.retry_failed_transfers();
+                assert!(app.transfer_retry_at.is_some());
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+            })
+            .await;
+    }
+
+    /// An upload cut short by the end of the process counts as a try: each start leaves it to the
+    /// usual schedule, and the tries run out as for any failure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_upload_cut_short_counts_as_a_try() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let id = outgoing_file(&app.store, 1, 1);
+                for tries in 1..=RETRY_PAUSES_MINUTES.len() {
+                    app.store.set_upload_state(id, STATE_LOADING).unwrap();
+                    app.resume_media();
+                    assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+                    let retries = app.store.transfers_to_retry(now_ms()).unwrap();
+                    assert!(retries.uploads.is_empty(), "not at the start itself");
+                    let waits = RETRY_PAUSES_MINUTES[tries - 1] * MINUTE_MS;
+                    assert!(retries.next_at.unwrap() <= now_ms() + waits);
+                }
+                app.store.set_upload_state(id, STATE_LOADING).unwrap();
+                app.resume_media();
+                assert_eq!(
+                    app.store
+                        .transfers_to_retry(now_ms() + 365 * RETRY_PAUSE_MAX_MS)
+                        .unwrap(),
+                    TransferRetries::default(),
+                    "out of tries"
+                );
+            })
+            .await;
+    }
+
+    const TO_CONTACT: UploadTarget = UploadTarget {
+        mirror: false,
+        scope: media::BlobScope::Public,
+        persist: false,
+    };
+
+    /// The thumbnail failing doesn't send the file a second time, and the blob that did go up ends
+    /// up in the message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_thumbnail_keeps_the_uploaded_file() {
+        use std::cell::{Cell, RefCell};
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = outgoing_file(&app.store, 1, 1);
+        app.media.write(id, MediaPart::File, b"file").unwrap();
+        app.media.write(id, MediaPart::Thumbnail, b"thumb").unwrap();
+        let key = *app.store.file_keys(id).unwrap().unwrap().key;
+        let file = media::encrypt_blob(&key, MediaPart::File, b"file");
+        let sent = RefCell::new(Vec::new());
+        let thumbnail_works = Cell::new(false);
+        let send = async |blob: Vec<u8>| {
+            sent.borrow_mut().push(blob.clone());
+            if blob == file {
+                Ok(libthreema::common::BlobId([1; 16]))
+            } else if thumbnail_works.get() {
+                Ok(libthreema::common::BlobId([2; 16]))
+            } else {
+                Err(media::MediaError::Network("timeout".into()))
+            }
+        };
+
+        let mut keys = app.store.file_keys(id).unwrap().unwrap();
+        let result = upload_parts(&app.store, &app.media, id, &mut keys, TO_CONTACT, &send).await;
+        finish_upload(&app.store, &events, id, &keys, result);
+        assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+        assert_eq!(sent.borrow().len(), 2);
+        let stored = app.store.file_keys(id).unwrap().unwrap();
+        assert_eq!(stored.blob_id.unwrap().0, [1; 16]);
+
+        thumbnail_works.set(true);
+        let mut keys = app.store.file_keys(id).unwrap().unwrap();
+        let result = upload_parts(&app.store, &app.media, id, &mut keys, TO_CONTACT, &send).await;
+        finish_upload(&app.store, &events, id, &keys, result);
+        assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOCAL));
+        assert_eq!(sent.borrow().len(), 3, "the thumbnail alone");
+        assert_ne!(sent.borrow()[2], file);
+        let stored = app.store.file_keys(id).unwrap().unwrap();
+        assert_eq!(stored.blob_id.unwrap().0, [1; 16]);
+        assert_eq!(stored.thumbnail_blob_id.unwrap().0, [2; 16]);
+        let body = app.store.message(id).unwrap().unwrap().body;
+        assert!(!body.contains("uploadedFile"), "{body}");
+    }
+
+    /// A file part that went up is sent again if it would now go another way: a notes group that
+    /// gained a member needs a blob for the others to fetch, which stays.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_file_part_kept_for_another_way_goes_up_again() {
+        use std::cell::Cell;
+        let (_dir, app) = app();
+        let id = outgoing_file(&app.store, 1, 1);
+        app.media.write(id, MediaPart::File, b"file").unwrap();
+        let sent = Cell::new(0);
+        let send = async |_: Vec<u8>| {
+            sent.set(sent.get() + 1);
+            Ok(libthreema::common::BlobId([1; 16]))
+        };
+        let notes = UploadTarget {
+            mirror: false,
+            scope: media::BlobScope::Local,
+            persist: false,
+        };
+        let group = UploadTarget {
+            mirror: false,
+            scope: media::BlobScope::Public,
+            persist: true,
+        };
+        let mut keys = app.store.file_keys(id).unwrap().unwrap();
+        upload_parts(&app.store, &app.media, id, &mut keys, notes, &send)
+            .await
+            .unwrap();
+        assert_eq!(sent.get(), 1);
+        upload_parts(&app.store, &app.media, id, &mut keys, notes, &send)
+            .await
+            .unwrap();
+        assert_eq!(sent.get(), 1, "the same way: no need");
+        upload_parts(&app.store, &app.media, id, &mut keys, group, &send)
+            .await
+            .unwrap();
+        assert_eq!(sent.get(), 2);
+    }
+
+    /// An uploaded file part is good for a day, and for the way it went.
+    #[test]
+    fn how_long_an_uploaded_file_is_good() {
+        let body = json!({"uploadedFile": {
+            "at": 1000, "mirror": false, "scope": "public", "persist": false
+        }});
+        let other = |mirror, scope, persist| UploadTarget {
+            mirror,
+            scope,
+            persist,
+        };
+        let (public, local) = (media::BlobScope::Public, media::BlobScope::Local);
+        assert!(uploaded_file_good(&body, 1000, TO_CONTACT));
+        let last = 1000 + UPLOADED_FILE_KEPT_MS - 1;
+        assert!(uploaded_file_good(&body, last, TO_CONTACT));
+        assert!(!uploaded_file_good(&body, last + 1, TO_CONTACT));
+        assert!(
+            !uploaded_file_good(&body, 999, TO_CONTACT),
+            "a clock gone back"
+        );
+        let mirror = other(true, public, false);
+        assert!(
+            !uploaded_file_good(&body, 1000, mirror),
+            "another server now"
+        );
+        let scope = other(false, local, false);
+        assert!(!uploaded_file_good(&body, 1000, scope), "another scope now");
+        let persist = other(false, public, true);
+        assert!(
+            !uploaded_file_good(&body, 1000, persist),
+            "kept for others now"
+        );
+        assert!(!uploaded_file_good(&json!({}), 1000, TO_CONTACT));
     }
 
     /// A file left by a download that outlived its message's deletion goes at the next start.
