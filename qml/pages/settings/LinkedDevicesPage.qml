@@ -12,26 +12,36 @@ Page {
     property var devices: []
     property bool active: false
     property bool loading: true
+    // The list couldn't be fetched for lack of a connection, or the connection didn't answer.
+    property bool offline: false
     // This device's label, as the other devices show it.
     property string label: ""
 
 
     function load() {
         backend.call("multiDevice", {}, function(ok, result) {
-            if (!ok) return
+            if (!ok) {
+                page.loading = false
+                return
+            }
             page.active = result.active
             if (!result.active) {
+                page.offline = false
                 page.devices = []
                 page.loading = false
                 return
             }
             backend.call("linkedDevices", {}, function(ok, result, kind, message) {
                 page.loading = false
+                page.offline = !ok && kind === "network"
                 if (ok) {
                     page.devices = result.devices
                     page.label = result.label || ""
                 } else {
-                    Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                    // No list, rather than an old one that may be wrong.
+                    page.devices = []
+                    if (page.offline) retry.restart()
+                    else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                 }
             })
         })
@@ -71,11 +81,21 @@ Page {
     Connections {
         target: backend
         onCoreEvent: if (name === "multiDeviceChanged") page.load()
+        // Back online: the list that couldn't be fetched.
+        onConnectionStateChanged: if (backend.connectionState === "connected" && page.offline) page.load()
     }
 
     SilicaListView {
         id: list
         anchors.fill: parent
+    // Connected, and the list still timed out (a long backlog after a time offline): no state
+    // change will bring it.
+    Timer {
+        id: retry
+        interval: 15000
+        onTriggered: if (page.offline && page.status === PageStatus.Active && backend.connectionState === "connected") page.load()
+    }
+
         model: page.devices
 
         PullDownMenu {
@@ -177,6 +197,20 @@ Page {
             text: qsTrId("threesea-la-no-linked-devices")
             //% "With Threema for Desktop you can read and write your chats on a computer. Open it there and pull down here to link it."
             hintText: qsTrId("threesea-la-no-linked-devices-hint")
+        }
+
+        ViewPlaceholder {
+            enabled: !page.loading && page.active && page.devices.length === 0
+            text: page.offline
+                  //% "Waiting for the connection"
+                  ? qsTrId("threesea-la-linked-devices-offline")
+                  //% "The list of linked devices did not load"
+                  : qsTrId("threesea-la-linked-devices-failed")
+            hintText: page.offline
+                      //% "The linked devices appear here once the server answers."
+                      ? qsTrId("threesea-la-linked-devices-offline-hint")
+                      //% "Open this page again to load it."
+                      : qsTrId("threesea-la-linked-devices-failed-hint")
         }
 
         BusyIndicator {

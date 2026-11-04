@@ -2,14 +2,32 @@
 //! Multi-device commands (ADR 0011): state, linked devices, removing devices, turning it on
 //! (from linking) and off.
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::timeout};
 
 use crate::{
     app::{ApiError, App},
-    connection::ToConnection,
+    connection::{DeviceGroupError, ToConnection},
     multidevice::{Properties, SETTING_FS_TERMINATE},
 };
+
+/// A question to the mediator (30 s) and the wait for a connection coming up (15 s).
+const DEVICES_REPLY_LIMIT: Duration = Duration::from_secs(50);
+
+/// No connection is shown as such by the UI; the server's or protocol's "no" keeps its text.
+fn device_group_error(error: DeviceGroupError) -> ApiError {
+    match error {
+        DeviceGroupError::NotConnected => ApiError::Network(error.to_string()),
+        DeviceGroupError::Failed(reason) => ApiError::Internal(reason),
+    }
+}
+
+/// The connection never answered (ended, or still busy after the limit).
+fn no_connection() -> ApiError {
+    device_group_error(DeviceGroupError::NotConnected)
+}
 
 /// A name the user typed: trimmed, and short enough for the protobuf fields it travels in
 /// (the label goes out in every D2M client-hello).
@@ -125,10 +143,11 @@ impl App {
         }
         let (reply, answer) = oneshot::channel();
         self.tell_connection(ToConnection::Devices(reply));
-        let devices = answer
+        let devices = timeout(DEVICES_REPLY_LIMIT, answer)
             .await
-            .map_err(|_| ApiError::Internal("connection gone".into()))?
-            .map_err(ApiError::Internal)?;
+            .map_err(|_| no_connection())?
+            .map_err(|_| no_connection())?
+            .map_err(device_group_error)?;
         let mut devices =
             serde_json::to_value(devices).map_err(|error| ApiError::Internal(error.to_string()))?;
         for device in devices.as_array_mut().into_iter().flatten() {
@@ -203,8 +222,8 @@ impl App {
         self.tell_connection(ToConnection::DropDevices { ids, reply });
         answer
             .await
-            .map_err(|_| ApiError::Internal("connection gone".into()))?
-            .map_err(ApiError::Internal)?;
+            .map_err(|_| no_connection())?
+            .map_err(device_group_error)?;
         self.linked_devices().await
     }
 
@@ -239,9 +258,9 @@ impl App {
             self.tell_connection(ToConnection::DropDevices { ids, reply });
             tokio::time::timeout(std::time::Duration::from_secs(30), answer)
                 .await
-                .map_err(|_| ApiError::Internal("timeout".into()))?
-                .map_err(|_| ApiError::Internal("connection gone".into()))?
-                .map_err(ApiError::Internal)
+                .map_err(|_| no_connection())?
+                .map_err(|_| no_connection())?
+                .map_err(device_group_error)
         }
         .await;
         if let Err(error) = dropped {
@@ -643,4 +662,91 @@ pub(crate) enum SyncChange {
     },
     /// A group's picture (set or removed).
     GroupPicture(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::app::StartConfig;
+
+    fn app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        (dir, app)
+    }
+
+    /// A device group this phone is in, and the other end of its connection.
+    fn in_a_group(app: &mut App) -> mpsc::UnboundedReceiver<ToConnection> {
+        app.store
+            .set_multi_device(Some(&Properties::generate()))
+            .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.connection = Some(tx);
+        rx
+    }
+
+    /// A connection waiting for its next try, as `connection::run` answers then.
+    async fn offline(mut rx: mpsc::UnboundedReceiver<ToConnection>) {
+        while let Some(message) = rx.recv().await {
+            match message {
+                ToConnection::Devices(reply) => {
+                    let _ = reply.send(Err(DeviceGroupError::NotConnected));
+                }
+                ToConnection::DropDevices { reply, .. } => {
+                    let _ = reply.send(Err(DeviceGroupError::NotConnected));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_is_a_network_error_not_an_internal_one() {
+        let (_dir, mut app) = app();
+        let rx = in_a_group(&mut app);
+        tokio::spawn(offline(rx));
+        assert_eq!(app.linked_devices().await.unwrap_err().kind(), "network");
+        let id = format!("{:016x}", 7);
+        assert_eq!(app.drop_devices(&[id]).await.unwrap_err().kind(), "network");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refusal_keeps_its_own_kind() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        tokio::spawn(async move {
+            if let Some(ToConnection::Devices(reply)) = rx.recv().await {
+                let _ = reply.send(Err(DeviceGroupError::Failed(
+                    "expected devices info".into(),
+                )));
+            }
+        });
+        let error = app.linked_devices().await.unwrap_err();
+        assert_ne!(error.kind(), "network");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_connection_that_is_gone_is_a_network_error_too() {
+        let (_dir, mut app) = app();
+        let rx = in_a_group(&mut app);
+        drop(rx);
+        assert_eq!(app.linked_devices().await.unwrap_err().kind(), "network");
+    }
 }

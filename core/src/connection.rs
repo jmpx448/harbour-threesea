@@ -134,7 +134,7 @@ pub enum ToConnection {
     /// Drop the connection and connect again at once (the server addresses changed).
     Reconnect,
     /// Multi-device: the linked devices (fails without the mediator).
-    Devices(oneshot::Sender<Result<Vec<LinkedDevice>, String>>),
+    Devices(oneshot::Sender<Result<Vec<LinkedDevice>, DeviceGroupError>>),
     /// Multi-device: send the essential data to a new device over its rendezvous link, inside a
     /// NEW_DEVICE_SYNC transaction (device join, ADR 0011).
     NewDeviceSync {
@@ -149,13 +149,36 @@ pub enum ToConnection {
     /// own id, multi-device ends here and the connection goes back to the chat server.
     DropDevices {
         ids: Vec<u64>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), DeviceGroupError>>,
     },
     /// A call signalling message (ADR 0012); dropped while disconnected, the call times out.
     CallSignal {
         peer: String,
         signal: crate::calls::Signal,
     },
+}
+
+/// Why the connection couldn't answer a question about the device group.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceGroupError {
+    /// No working connection now (the UI says to check the network).
+    #[error("not connected")]
+    NotConnected,
+    /// The server or the protocol said no.
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<ConnectionError> for DeviceGroupError {
+    fn from(error: ConnectionError) -> Self {
+        match error {
+            ConnectionError::Io(_)
+            | ConnectionError::Timeout
+            | ConnectionError::Stopped
+            | ConnectionError::Reconnect => Self::NotConnected,
+            other => Self::Failed(other.to_string()),
+        }
+    }
 }
 
 /// A device of the device group (multi-device), for the Linked devices page.
@@ -229,7 +252,14 @@ impl From<TransportError> for ConnectionError {
     fn from(error: TransportError) -> Self {
         match error {
             TransportError::Io(error) => Self::Io(error),
-            TransportError::Closed => Self::Protocol("connection closed".into()),
+            TransportError::Closed => Self::Io(std::io::ErrorKind::ConnectionAborted.into()),
+            // The socket itself, or its end without a close code.
+            TransportError::WebSocket(WebSocketError::Socket(error)) => {
+                Self::Io(std::io::Error::other(error))
+            }
+            TransportError::WebSocket(WebSocketError::Closed { code: None, .. }) => {
+                Self::Io(std::io::ErrorKind::ConnectionAborted.into())
+            }
             TransportError::WebSocket(WebSocketError::Closed {
                 code: Some(code),
                 reason,
@@ -358,10 +388,10 @@ pub async fn run(
                     None => return,
                     Some(ToConnection::Wake | ToConnection::Reconnect) => break,
                     Some(ToConnection::Devices(reply)) => {
-                        let _ = reply.send(Err("not connected".into()));
+                        let _ = reply.send(Err(DeviceGroupError::NotConnected));
                     }
                     Some(ToConnection::DropDevices { reply, .. }) => {
-                        let _ = reply.send(Err("not connected".into()));
+                        let _ = reply.send(Err(DeviceGroupError::NotConnected));
                     }
                     // Lost while offline (like Android's tasks, which need a connection too).
                     // Queued in the store: sent after connecting.
@@ -2151,13 +2181,13 @@ impl<'a> Session<'a> {
                     },
                     Some(ToConnection::Devices(reply)) => {
                         let devices = self.devices().await;
-                        let _ = reply.send(devices.map_err(|error| error.to_string()));
+                        let _ = reply.send(devices.map_err(DeviceGroupError::from));
                     },
                     Some(ToConnection::DropDevices { ids, reply }) => {
                         let own = self.multi_device.as_ref().map(|p| p.mediator_device_id);
                         let result = self.drop_devices(&ids).await;
                         let dropped_self = result.is_ok() && own.is_some_and(|own| ids.contains(&own));
-                        let _ = reply.send(result.map_err(|error| error.to_string()));
+                        let _ = reply.send(result.map_err(DeviceGroupError::from));
                         if dropped_self {
                             // Like Android's removeMultiDeviceLocally: forget the group, then
                             // connect directly again (forward security comes back with it).
@@ -2609,5 +2639,44 @@ mod liveness_tests {
         liveness.received(answered);
         assert!(!liveness.awaiting_echo());
         assert_eq!(liveness.deadline(), answered + ECHO_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod device_group_error_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_lost_connection_counts_as_offline() {
+        for lost in [
+            ConnectionError::Timeout,
+            ConnectionError::Reconnect,
+            ConnectionError::from(TransportError::Closed),
+            ConnectionError::from(TransportError::Io(
+                std::io::ErrorKind::ConnectionReset.into(),
+            )),
+            ConnectionError::from(TransportError::WebSocket(WebSocketError::Closed {
+                code: None,
+                reason: "end of stream".into(),
+            })),
+        ] {
+            assert_eq!(DeviceGroupError::from(lost), DeviceGroupError::NotConnected);
+        }
+        for refused in [
+            ConnectionError::Protocol("expected devices info".into()),
+            ConnectionError::MediatorClosed {
+                code: 4114,
+                reason: String::new(),
+            },
+            ConnectionError::Closed {
+                message: "maintenance".into(),
+                can_reconnect: true,
+            },
+        ] {
+            assert!(matches!(
+                DeviceGroupError::from(refused),
+                DeviceGroupError::Failed(_)
+            ));
+        }
     }
 }
