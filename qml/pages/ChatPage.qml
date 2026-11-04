@@ -107,11 +107,16 @@ Page {
         // In the bottom-to-top list the top of the view is contentY.
         var top = listView.contentY
         var index = listView.indexAt(listView.width / 2, top + Theme.paddingSmall)
-        // Above the oldest message (short chats have a spacer there): the oldest message's day.
-        if (index < 0) index = messages.count - 1
+        if (index < 0) {
+            // No row there. Over the input (in landscape it can fill the view) the newest
+            // message's day; else it is above the oldest message (short chats have a spacer
+            // there): the oldest message's day.
+            var header = listView.headerItem
+            index = header && top + Theme.paddingSmall >= header.y ? 0 : messages.count - 1
+        }
         if (index !== page.stickyIndex) {
             page.stickyIndex = index
-            stickyDay = index >= 0 ? Fmt.day(messages.get(index).createdAt) : ""
+            stickyDay = index >= 0 && index < messages.count ? Fmt.day(messages.get(index).createdAt) : ""
         }
         var reach = dayBand.height * 2
         var hidden = false
@@ -227,6 +232,8 @@ Page {
                 page.unreadMarkerId = result.firstUnread
             }
             page.settling = true
+            // Other rows, however alike their count: the band reads its day again below.
+            page.stickyIndex = -1
             messages.update(result.messages.reverse())
             if (focusMessage >= 0) {
                 if (!page.showLoadedMessage(focusMessage, page.focusMode)) listView.positionViewAtBeginning()
@@ -241,6 +248,7 @@ Page {
                 listView.positionViewAtBeginning()
             }
             page.settling = false
+            page.updateStickyDay()
             page.reachedNewest()
         })
         markRead()
