@@ -77,6 +77,8 @@ private slots:
 
 private:
     void setState(const QString &state);
+    // After a call: unmuted and without camera for the next one.
+    void resetDevices();
 
     ThreeseBackend *m_backend;
     GroupCallEngine *m_engine = nullptr;

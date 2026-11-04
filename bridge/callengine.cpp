@@ -148,6 +148,8 @@ bool CallEngine::build(const QVariantMap &turn, bool relayOnly, int opusPayloadT
     g_value_unset(&item);
     gst_iterator_free(sinkPads);
     m_micVolume = gst_bin_get_by_name(GST_BIN(m_pipeline), "mic");
+    // Muted while there was no pipeline yet (the TURN servers take a moment).
+    g_object_set(m_micVolume, "mute", m_muted ? TRUE : FALSE, nullptr);
     m_echoCanceller.reset(new EchoCanceller);
     GstElement *aec = gst_bin_get_by_name(GST_BIN(m_pipeline), "aec");
     GstPad *aecPad = gst_element_get_static_pad(aec, "src");
@@ -282,6 +284,7 @@ void CallEngine::addCandidate(const QVariantMap &candidate)
 
 void CallEngine::setMuted(bool muted)
 {
+    m_muted = muted;
     if (m_micVolume) {
         g_object_set(m_micVolume, "mute", muted ? TRUE : FALSE, nullptr);
     }

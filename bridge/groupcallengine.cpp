@@ -401,6 +401,8 @@ bool GroupCallEngine::buildAudio(const QString &offer)
     gst_object_unref(playbackPad);
     gst_object_unref(playback);
     m_micVolume = gst_bin_get_by_name(GST_BIN(sendBin), "mic");
+    // Muted while there was no pipeline yet ("Joining…" takes seconds).
+    g_object_set(m_micVolume, "mute", m_muted ? TRUE : FALSE, nullptr);
     m_mixer = gst_bin_get_by_name(GST_BIN(bin), "mix");
     return true;
 }
@@ -611,6 +613,7 @@ void GroupCallEngine::linkMicrophone()
 
 void GroupCallEngine::setMuted(bool muted)
 {
+    m_muted = muted;
     if (m_micVolume) {
         g_object_set(m_micVolume, "mute", muted ? TRUE : FALSE, nullptr);
     }

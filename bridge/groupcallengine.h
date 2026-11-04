@@ -48,6 +48,8 @@ public:
     // Participants came or went: the core's new remote offer.
     void updateOffer(const QString &offer);
     void sendChannel(const QByteArray &data);
+    // Also before the pipeline exists: it starts as asked, and a new call keeps this until told
+    // otherwise.
     void setMuted(bool muted);
     // Which participant sends on which MID (microphone and camera, from the core's participant
     // list).
@@ -113,6 +115,7 @@ private:
     GstElement *m_webrtc = nullptr;
     GstWebRTCDataChannel *m_channel = nullptr;
     GstElement *m_micVolume = nullptr;
+    bool m_muted = false;
     unsigned m_busWatch = 0;
     // The microphone's RTP end until linkMicrophone() hands it to webrtcbin.
     GstElement *m_sendTail = nullptr;

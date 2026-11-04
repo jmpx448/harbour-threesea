@@ -49,6 +49,8 @@ public:
     unsigned audioFramesReceived() const { return m_framesReceived; }
     // `[{candidate, sdpMid, sdpMLineIndex}]`; kept until the remote description is set.
     void addRemoteCandidates(const QVariantList &candidates);
+    // Also before the pipeline exists: it starts as asked, and a new call keeps this until told
+    // otherwise.
     void setMuted(bool muted);
     // A message for the peer's data channel (o2o-call.proto envelope from the core); kept until
     // the channel is open.
@@ -110,6 +112,7 @@ private:
     GstElement *m_pipeline = nullptr;
     GstElement *m_webrtc = nullptr;
     GstElement *m_micVolume = nullptr;
+    bool m_muted = false;
     GstWebRTCDataChannel *m_channel = nullptr;
     QScopedPointer<EchoCanceller> m_echoCanceller;
     // This call's DTLS certificate and key (PEM, ECDSA P-256).

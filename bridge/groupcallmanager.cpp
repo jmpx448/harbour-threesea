@@ -73,9 +73,16 @@ void GroupCallManager::join(const QString &conversation, bool create)
                            }
                            if (!ok) {
                                m_error = kind;
+                               resetDevices();
                                setState(QStringLiteral("ended"));
                                setState(QStringLiteral("idle"));
                                return;
+                           }
+                           // Muted before the core knew of this call: it has to say so too.
+                           if (m_muted) {
+                               QVariantMap mute;
+                               mute.insert(QStringLiteral("muted"), true);
+                               m_backend->request(QStringLiteral("groupCallMute"), mute);
                            }
                            setState(QStringLiteral("connecting"));
                            m_engine->start(result.value(QStringLiteral("offer")).toString(),
@@ -138,16 +145,24 @@ void GroupCallManager::leave()
     m_engine->stop();
 #endif
     m_backend->request(QStringLiteral("groupCallLeave"), QVariantMap());
+    resetDevices();
+    setState(QStringLiteral("ended"));
+    setState(QStringLiteral("idle"));
+}
+
+void GroupCallManager::resetDevices()
+{
     if (m_muted) {
         m_muted = false;
+#ifdef THREESEA_FULL
+        m_engine->setMuted(false);
+#endif
         emit mutedChanged();
     }
     if (m_camera) {
         m_camera = false;
         emit cameraChanged();
     }
-    setState(QStringLiteral("ended"));
-    setState(QStringLiteral("idle"));
 }
 
 void GroupCallManager::onCoreEvent(const QString &name, const QVariantMap &data)
