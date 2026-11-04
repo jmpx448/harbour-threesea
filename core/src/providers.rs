@@ -835,7 +835,7 @@ impl ConversationProvider for StoreConversations {
                     .store
                     .message_by_id(&sender, false, delete.message_id.0)
                     .map_err(foreign)?
-                    .filter(|original| !matches!(original.kind.as_str(), "status" | "deleted"))
+                    .filter(|original| crate::messages::delete_applies_to(&original.kind))
                 {
                     let changed = self
                         .store
@@ -1033,6 +1033,77 @@ mod tests {
             let body: serde_json::Value = serde_json::from_str(&edited.body).unwrap();
             assert_eq!(body["caption"], caption);
             assert_eq!(edited.edited_at, Some(50));
+        }
+    }
+
+    /// Android lets nobody delete a poll: one that came in stays what votes and a close refer to,
+    /// from the contact and in a group.
+    #[test]
+    fn a_received_deletion_applies_to_texts_locations_and_files_only() {
+        use libthreema::model::message::{
+            DeleteMessage, GroupMessageBody, IncomingGroupMessageBody,
+        };
+        let (_dir, store) = store();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        let key = group(&store, &["ABCD1234", MEMBER], false);
+        let insert = |conversation: &str, id, kind: &str| {
+            if conversation == key {
+                store.insert_incoming_group(&key, MEMBER, id, kind, "{}", 1)
+            } else {
+                store.insert_incoming(conversation, id, kind, "{}", 1)
+            }
+            .unwrap()
+            .unwrap()
+            .id
+        };
+        let cases: Vec<(&str, i64, u64)> = vec![
+            ("text", insert(MEMBER, 1, "text"), 1),
+            ("location", insert(MEMBER, 2, "location"), 2),
+            ("file", insert(MEMBER, 3, "file"), 3),
+            ("poll", insert(MEMBER, 4, "poll"), 4),
+            ("pollClosed", insert(MEMBER, 5, "pollClosed"), 5),
+        ];
+        let in_group: Vec<(&str, i64, u64)> = vec![
+            ("text", insert(&key, 11, "text"), 11),
+            ("poll", insert(&key, 12, "poll"), 12),
+        ];
+        let store = Rc::new(store);
+        for (_, _, id) in &cases {
+            deliver(
+                &store,
+                MEMBER,
+                100 + id,
+                IncomingMessageBody::Contact(ContactMessageBody::Delete(DeleteMessage {
+                    message_id: MessageId(*id),
+                })),
+            );
+        }
+        for (_, _, id) in &in_group {
+            deliver(
+                &store,
+                MEMBER,
+                100 + id,
+                IncomingMessageBody::Group(IncomingGroupMessageBody {
+                    group_identity: crate::groups::parse_key(&key).unwrap(),
+                    body: GroupMessageBody::Delete(DeleteMessage {
+                        message_id: MessageId(*id),
+                    }),
+                }),
+            );
+        }
+        for (kind, id, _) in cases.iter().chain(&in_group) {
+            let stored = store.message(*id).unwrap().unwrap();
+            let expected = if crate::messages::delete_applies_to(kind) {
+                "deleted"
+            } else {
+                kind
+            };
+            assert_eq!(stored.kind, expected);
         }
     }
 

@@ -1139,7 +1139,7 @@ impl App {
             return Ok(json!({ "removed": true }));
         }
         let (id, contact, message) = self.own_message(identity, message_id)?;
-        if matches!(message.kind.as_str(), "status" | "deleted") {
+        if !crate::messages::delete_applies_to(&message.kind) {
             return Err(ApiError::Internal("not a deletable message".into()));
         }
         if message.state == OutgoingState::Pending as i64

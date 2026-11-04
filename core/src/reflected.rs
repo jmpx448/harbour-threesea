@@ -368,7 +368,10 @@ fn outgoing_message(
             return Ok(());
         }
         ContactMessageBody::Delete(delete) => {
-            if let Some(original) = store.message_by_id(&conversation, true, delete.message_id.0)? {
+            if let Some(original) = store
+                .message_by_id(&conversation, true, delete.message_id.0)?
+                .filter(|original| crate::messages::delete_applies_to(&original.kind))
+            {
                 let changed = store.mark_deleted(original.id, created_at)?;
                 push_changed(events, changed.into_iter().collect());
             }

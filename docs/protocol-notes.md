@@ -274,7 +274,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Sender side only: own messages, at most 6 hours old. The receiver accepts any age but only
   from the original sender (we look up the message in the sender's direction only), and applies an
   edit to a text or a file's caption, as Android does. Editing our own captions isn't offered yet.
-- A deleted message becomes a placeholder (kind `deleted`, content and reactions removed,
+- A deletion applies to texts, locations and files only, as on Android; a poll stays what votes
+  and its close refer to.
+- A deleted message becomes a placeholder (kind `deleted`, content, reactions and poll entry removed,
   `edited_at` = deletion time). It has nothing left to send: a later Reject of it changes nothing.
   Messages nobody received yet (pending/failed) are simply changed or removed without telling the peer.
 - "Delete" on its own removes a message from this device only (any message).

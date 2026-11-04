@@ -299,6 +299,12 @@ pub fn edit_applies_to(kind: &str) -> bool {
     matches!(kind, "text" | "file")
 }
 
+/// Whether a deletion for everyone applies to this kind of message, sent or received (Android's
+/// `doesMessageTypeAllowRemoteDeletion`). A poll isn't one: it has to stay what votes refer to.
+pub fn delete_applies_to(kind: &str) -> bool {
+    matches!(kind, "text" | "location" | "file")
+}
+
 /// Threema's quote format (Android `QuoteUtil`, "quote v2"): `> quote #<message id hex>\n\n`
 /// before the text. Returns the quoted message id and the text without the prefix. The hex is
 /// the id's 8 bytes in wire order (little endian, as Android's `MessageId.toString()` and
@@ -1300,6 +1306,9 @@ impl Store {
             .execute("DELETE FROM reactions WHERE message = ?1", [id])?;
         self.conn
             .execute("DELETE FROM files WHERE message = ?1", [id])?;
+        // Whatever refers to it by ID has nothing to find any more: a poll takes no more votes.
+        self.conn
+            .execute("DELETE FROM polls WHERE message = ?1", [id])?;
         // Nothing of it is left to send, to anyone.
         self.conn.execute(
             "DELETE FROM pending_receivers WHERE (conversation, message_id) IN

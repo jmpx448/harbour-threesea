@@ -963,7 +963,7 @@ fn receive_steps(
         }
         GroupMessageBody::Delete(delete) => {
             if let Some(original) = own_message_of(store, &key, sender, delete.message_id.0)?
-                .filter(|m| !matches!(m.kind.as_str(), "status" | "deleted"))
+                .filter(|m| crate::messages::delete_applies_to(&m.kind))
             {
                 outcome
                     .changed

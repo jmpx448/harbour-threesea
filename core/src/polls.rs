@@ -218,8 +218,10 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
+        // Older versions kept the entry of a poll someone deleted for everyone: a placeholder
+        // that takes no votes and can't be closed.
         Ok(match id {
-            Some(id) => self.message(id)?,
+            Some(id) => self.message(id)?.filter(|message| message.kind == "poll"),
             None => None,
         })
     }
@@ -408,6 +410,56 @@ fn valid_vote(poll: &Value, choices: &Value) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poll deleted before this version's rule, by a client that shouldn't have: votes and a
+    /// close leave its placeholder alone, and no "Poll closed" without a question appears.
+    #[test]
+    fn a_deleted_poll_takes_no_votes_and_cant_be_closed() {
+        for keep_entry in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+            let setup = json!({"s": 0, "a": 0, "t": 0, "d": "Who?", "c": [{"i": 0, "n": "a"}]});
+            let (poll, _) = receive_setup(
+                &store,
+                "ABCD1234",
+                "ABCD1234",
+                false,
+                1,
+                1,
+                9,
+                &setup.to_string(),
+            )
+            .unwrap();
+            let poll = poll.unwrap();
+            store.mark_deleted(poll.id, 5).unwrap();
+            if keep_entry {
+                store
+                    .register_poll("ABCD1234", "ABCD1234", 9, poll.id)
+                    .unwrap();
+            }
+
+            let vote = receive_vote(&store, "ABCD1234", "B0B0B0B0", "ABCD1234", 9, "[[0, 1]]");
+            assert!(vote.unwrap().is_none());
+            let closing = json!({"s": 1, "a": 0, "t": 0, "d": "Who?", "p": [], "c": [{"i": 0, "n": "a", "r": []}]});
+            let (added, changed) = receive_setup(
+                &store,
+                "ABCD1234",
+                "ABCD1234",
+                false,
+                2,
+                2,
+                9,
+                &closing.to_string(),
+            )
+            .unwrap();
+            assert!(added.is_none() && changed.is_none());
+            let stored = store.message(poll.id).unwrap().unwrap();
+            assert_eq!(
+                (stored.kind.as_str(), stored.body.as_str()),
+                ("deleted", "")
+            );
+        }
+    }
 
     #[test]
     fn a_received_vote_stays_within_the_poll() {
