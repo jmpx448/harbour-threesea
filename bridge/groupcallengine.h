@@ -151,6 +151,8 @@ private:
     // MID → participant, read from GStreamer threads.
     QMutex m_midsLock;
     QHash<QString, quint32> m_mids;
+    // This call's certificate and key (PEM). This copy is wiped in stop(); the copies GStreamer
+    // makes when it gets them are not cleared (see there).
     QByteArray m_certificate;
     QVariantList m_candidates;
     bool m_candidatesAdded = false;

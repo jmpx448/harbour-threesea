@@ -73,6 +73,8 @@ void GroupCallManager::join(const QString &conversation, bool create)
                            }
                            if (!ok) {
                                m_error = kind;
+                               // Wipes our copy of the certificate made for this join.
+                               m_engine->stop();
                                resetDevices();
                                setState(QStringLiteral("ended"));
                                setState(QStringLiteral("idle"));

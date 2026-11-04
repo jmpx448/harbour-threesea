@@ -64,6 +64,8 @@ build for three architectures.
   certificate per call and puts it on webrtcbin's DTLS decoders when the transports are added
   (deep-element-added). webrtcbin computes the SDP fingerprint earlier, from its default
   certificate, so the engine writes our certificate's fingerprint into every SDP it hands out.
+  The engine wipes its copy of the private key when the call ends; the copies GStreamer took of
+  the PEM are out of our reach and not cleared. The key is good for that one call.
 - webrtcbin does not check the peer's certificate against the SDP fingerprint. The engine does,
   once the peer connection is up, and ends the call on a mismatch (otherwise anyone on the media
   path could take a call over; libwebrtc checks it). DTLS, and so SRTP, is up before that check

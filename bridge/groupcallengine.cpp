@@ -689,7 +689,9 @@ void GroupCallEngine::stop()
     m_remotePassword.clear();
     m_pendingChannel.clear();
     m_receivedChannel.clear();
-    // This call's DTLS private key (PEM) is not kept beyond it.
+    // Our copy of this call's DTLS private key (PEM). GStreamer's own copies (the elements' `pem`
+    // and the DTLS agents it keeps per PEM) are out of our reach and not cleared; the key is good
+    // for this call only.
     m_certificate.fill('\0');
     m_certificate.clear();
     m_candidates.clear();

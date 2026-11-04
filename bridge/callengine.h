@@ -115,7 +115,8 @@ private:
     bool m_muted = false;
     GstWebRTCDataChannel *m_channel = nullptr;
     QScopedPointer<EchoCanceller> m_echoCanceller;
-    // This call's DTLS certificate and key (PEM, ECDSA P-256).
+    // This call's DTLS certificate and key (PEM, ECDSA P-256). This copy is wiped in stop(); the
+    // copies GStreamer makes when it gets them are not cleared (see there).
     QByteArray m_certificate;
     QString m_fingerprint;
     // The peer's, from its SDP: checked against its certificate once DTLS is up.
