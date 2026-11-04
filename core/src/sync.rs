@@ -249,13 +249,19 @@ fn apply_group(
     store: &Store,
     user: &str,
     mut synced: d2d_sync::Group,
+    create: bool,
     events: &mut Vec<CoreEvent>,
 ) -> Result<bool, StoreError> {
     let Some((key, identity)) = group_key(synced.group_identity.as_ref()) else {
         return Ok(false);
     };
     let creator = identity.creator_identity.to_string();
-    let mut stored = store.group(&key)?.unwrap_or(crate::groups::Group {
+    let existing = store.group(&key)?;
+    if existing.is_none() && !create {
+        tracing::info!("group sync update for an unknown group, ignored");
+        return Ok(false);
+    }
+    let mut stored = existing.unwrap_or(crate::groups::Group {
         key: key.clone(),
         identity,
         name: String::new(),
@@ -348,11 +354,11 @@ pub fn group_sync(
 ) -> Result<(), StoreError> {
     let changed = match sync.action {
         Some(group_sync::Action::Create(create)) => match create.group {
-            Some(group) => apply_group(store, user, group, events)?,
+            Some(group) => apply_group(store, user, group, true, events)?,
             None => false,
         },
         Some(group_sync::Action::Update(update)) => match update.group {
-            Some(group) => apply_group(store, user, group, events)?,
+            Some(group) => apply_group(store, user, group, false, events)?,
             None => false,
         },
         Some(group_sync::Action::Delete(delete)) => match group_key(delete.group_identity.as_ref())
@@ -580,6 +586,31 @@ mod tests {
             store.group(&key(CREATOR)).unwrap().unwrap().members,
             vec![CREATOR]
         );
+    }
+
+    #[test]
+    fn an_update_makes_no_group() {
+        let (_dir, store) = store();
+        let mut events = Vec::new();
+        let pinned = d2d_sync::Group {
+            conversation_visibility: Some(ConversationVisibility::Pinned as i32),
+            ..synced(CREATOR)
+        };
+        group_sync(
+            &store,
+            USER,
+            GroupSync {
+                action: Some(group_sync::Action::Update(group_sync::Update {
+                    group: Some(pinned),
+                    member_state_changes: Default::default(),
+                })),
+            },
+            &mut events,
+        )
+        .unwrap();
+        assert!(store.group(&key(CREATOR)).unwrap().is_none());
+        assert!(events.is_empty());
+        assert!(store.pinned_chats().unwrap().is_empty());
     }
 
     #[test]

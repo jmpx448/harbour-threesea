@@ -268,7 +268,8 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Group sync (`GroupSync`, multi-device): `member_identities` holds neither the creator nor the
   user, ours (above) has the creator. `groups::normalized_members` turns a synced list into ours
   and `join::group_sync_members` ours into a synced one, which also leaves out anyone without a
-  contact, as the other devices wouldn't know them.
+  contact, as the other devices wouldn't know them. An `Update` for a group we don't have is
+  ignored, only `Create` makes one (like Android).
 - Not yet: group calls, per-receiver legacy reactions.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We
