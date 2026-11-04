@@ -54,9 +54,10 @@ pub struct Archive {
 }
 
 impl Archive {
-    /// Open and validate the container: entry count, names (flat, short, no traversal),
-    /// methods (stored/deflate only), everything encrypted, no duplicate names. The password
-    /// is only checked when an entry is read.
+    /// Open and validate the container: entry count, names (flat, short, ASCII, no traversal),
+    /// methods (stored/deflate only), everything encrypted, no duplicate names and no two
+    /// entries sharing bytes. The password is only checked when an entry is read. Reads every
+    /// local header, so this belongs on a blocking thread.
     pub fn open(path: &Path, password: &str) -> Result<Self, ArchiveError> {
         let file = std::fs::File::open(path)?;
         let mut zip =
@@ -67,8 +68,20 @@ impl Archive {
                 zip.len()
             )));
         }
+        // The reader's list is keyed by name and keeps the last record of a name, so a second
+        // record would silently replace an authentic entry; only this count still shows it.
+        // Records sharing bytes would let many names inflate the same small entry. Android and
+        // our export write neither.
+        if zip.has_duplicate_names() {
+            return Err(ArchiveError::Invalid("duplicate entry".into()));
+        }
+        if zip
+            .has_overlapping_entries()
+            .map_err(|error| ArchiveError::Invalid(error.to_string()))?
+        {
+            return Err(ArchiveError::Invalid("overlapping entries".into()));
+        }
         let mut entries = Vec::with_capacity(zip.len());
-        let mut seen = std::collections::HashSet::new();
         for index in 0..zip.len() {
             let entry = zip
                 .by_index_raw(index)
@@ -77,8 +90,11 @@ impl Archive {
                 .name()
                 .map_err(|error| ArchiveError::Invalid(error.to_string()))?
                 .into_owned();
+            // ASCII like all of Android's names: the check above compares raw bytes, so two
+            // encodings of one non-ASCII name would pass it and still be one name here.
             if name.is_empty()
                 || name.len() > MAX_NAME_BYTES
+                || !name.is_ascii()
                 || name.contains(['/', '\\'])
                 || name.starts_with('.')
                 || name.chars().any(char::is_control)
@@ -94,9 +110,6 @@ impl Archive {
             }
             if !entry.encrypted() {
                 return Err(ArchiveError::Invalid("unencrypted entry".into()));
-            }
-            if !seen.insert(name.clone()) {
-                return Err(ArchiveError::Invalid("duplicate entry".into()));
             }
             entries.push(Entry {
                 kind: EntryKind::classify(&name),

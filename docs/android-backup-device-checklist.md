@@ -30,6 +30,11 @@ those folders, plus Pictures, Videos and Music).
      number of chats, group chats, media files and pictures.
    - These show on their own screen. Swiping back ("Cancel") imports nothing. With another
      Threema ID, "Import" cannot be accepted: the import only merges into the same ID.
+   - This also shows the reader accepts how Android lays out its archive: it refuses entries
+     that share bytes, and only synthetic archives have been through that so far. Do this with
+     one ordinary backup and, if you can make one, one over 4 GiB (ZIP64, a phone with many
+     media files). A refusal on such a file is a bug in the reader: note the size and the log
+     line.
 2. Swipe forward ("Import"). The progress screen first takes over contacts, groups, lists and
    pictures, then the message history and media with a progress bar ("Chat x of y", media,
    the number of messages so far). When done it goes back to the backup page by itself.

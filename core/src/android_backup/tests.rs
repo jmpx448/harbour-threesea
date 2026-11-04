@@ -272,6 +272,131 @@ fn bad_containers_are_rejected() {
 }
 
 #[test]
+fn duplicate_names_are_refused() {
+    // Someone without the password appends an older entry and a second central directory
+    // record: same name, different bytes, both authentic. Patching one name reproduces that.
+    let dir = tempfile::tempdir().unwrap();
+    let path = build_zip(
+        dir.path(),
+        &[
+            ("settings", b"\"version\",\"27\"\n", true),
+            ("settingz", b"\"version\",\"15\"\n", true),
+        ],
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    let mut patched = 0;
+    for start in 0..bytes.len() - 8 {
+        if &bytes[start..start + 8] == b"settingz" {
+            bytes[start..start + 8].copy_from_slice(b"settings");
+            patched += 1;
+        }
+    }
+    assert_eq!(patched, 2, "local header and central directory");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        Archive::open(&path, "test-password"),
+        Err(ArchiveError::Invalid(reason)) if reason == "duplicate entry"
+    ));
+}
+
+#[test]
+fn entries_sharing_bytes_are_refused() {
+    // Many names over one highly compressed entry: each read would inflate it again.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .with_aes_encryption(zip::AesMode::Aes256, "test-password");
+    writer.start_file("message_media_a", options).unwrap();
+    writer.write_all(&[0; 4096]).unwrap();
+    writer
+        .shallow_copy_file("message_media_a", "message_media_b")
+        .unwrap();
+    writer.finish().unwrap();
+    assert!(matches!(
+        Archive::open(&path, "test-password"),
+        Err(ArchiveError::Invalid(reason)) if reason == "overlapping entries"
+    ));
+}
+
+/// The archive rewritten the way a streaming writer lays it out: sizes and CRC zero in the local
+/// header, flag bit 3 set, and a data descriptor after each entry's data. Offsets and sizes in the
+/// central directory stay true.
+fn with_data_descriptors(zip: &[u8]) -> Vec<u8> {
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([zip[at], zip[at + 1]]));
+    let u32_at = |at: usize| u32::from_le_bytes(zip[at..at + 4].try_into().unwrap()) as usize;
+    let eocd = zip
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .unwrap();
+    let central_start = u32_at(eocd + 16);
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    let mut record = central_start;
+    for _ in 0..u16_at(eocd + 10) {
+        let compressed = u32_at(record + 20);
+        let local = u32_at(record + 42);
+        let data = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        let new_local = u32::try_from(out.len()).unwrap();
+        out.extend_from_slice(&zip[local..data + compressed]);
+        let header = &mut out[new_local as usize..];
+        header[6] |= 0x08;
+        header[14..26].fill(0);
+        out.extend_from_slice(b"PK\x07\x08");
+        out.extend_from_slice(&zip[record + 16..record + 28]);
+
+        let end = record + 46 + u16_at(record + 28) + u16_at(record + 30) + u16_at(record + 32);
+        let central_entry = central.len();
+        central.extend_from_slice(&zip[record..end]);
+        central[central_entry + 8] |= 0x08;
+        central[central_entry + 42..central_entry + 46].copy_from_slice(&new_local.to_le_bytes());
+        record = end;
+    }
+    let new_central = u32::try_from(out.len()).unwrap();
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&zip[eocd..]);
+    let new_eocd = out.len() - (zip.len() - eocd);
+    out[new_eocd + 16..new_eocd + 20].copy_from_slice(&new_central.to_le_bytes());
+    out
+}
+
+#[test]
+fn data_descriptors_between_entries_are_no_overlap() {
+    // The gap they leave lies outside what the central directory claims, so a streamed backup
+    // has to pass the refusal above and read as before.
+    let dir = tempfile::tempdir().unwrap();
+    let streamed = dir.path().join("streamed.zip");
+    let original = fixture("android-backup.zip");
+    std::fs::write(
+        &streamed,
+        with_data_descriptors(&std::fs::read(&original).unwrap()),
+    )
+    .unwrap();
+    let mut plain = Archive::open(&original, "test-password").unwrap();
+    let mut archive = Archive::open(&streamed, "test-password").unwrap();
+    let names: Vec<String> = plain.entries().iter().map(|e| e.name.clone()).collect();
+    assert!(names.len() > 3);
+    assert_eq!(archive.entries().len(), names.len());
+    for name in names {
+        assert_eq!(
+            archive.read(&name, 8 << 20).unwrap().as_slice(),
+            plain.read(&name, 8 << 20).unwrap().as_slice(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn non_ascii_names_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = build_zip(dir.path(), &[("message_m\u{e4}dia", b"x", true)]);
+    assert!(matches!(
+        Archive::open(&path, "test-password"),
+        Err(ArchiveError::Invalid(_))
+    ));
+}
+
+#[test]
 fn entry_names_classify() {
     use EntryKind::*;
     for (name, kind) in [
