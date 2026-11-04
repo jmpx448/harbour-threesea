@@ -1265,7 +1265,7 @@ impl<'a> Session<'a> {
                     }
                     self.awaiting_ack.push((receiver, message_id));
                 }
-                None => tracing::info!("group member without a contact yet, sending later"),
+                None => tracing::info!("group member can't be sent to yet, sending later"),
             }
         }
         Ok(false)
@@ -1471,7 +1471,7 @@ impl<'a> Session<'a> {
                 match self.end_fs_sessions(receiver) {
                     Ok(controls) => {
                         if !controls.is_empty() {
-                            self.show_fs_unavailable(receiver)?;
+                            self.show_fs_line(receiver, "fsUnavailable")?;
                         }
                         payloads.extend(controls);
                     }
@@ -1508,9 +1508,8 @@ impl<'a> Session<'a> {
             } else {
                 None
             };
-            match fs_protocol::encapsulate(
+            match crate::fs_store::encapsulate_or_replace(
                 &mut self.fs_store(),
-                self.setup.identity,
                 &client_key,
                 receiver_identity,
                 &receiver_key,
@@ -1519,7 +1518,12 @@ impl<'a> Session<'a> {
                 group_identity,
                 u64::try_from(crate::messages::now_ms()).unwrap_or(0),
             ) {
-                Ok(encapsulation) => {
+                Ok((encapsulation, replaced)) => {
+                    if replaced {
+                        // First the Terminate for the old session, then the new one's Init.
+                        payloads.extend(self.take_fs_controls(receiver)?);
+                        self.show_fs_line(receiver, "fsReset")?;
+                    }
                     for control in encapsulation.prelude {
                         payloads.extend(self.encode_control(
                             receiver,
@@ -1529,11 +1533,11 @@ impl<'a> Session<'a> {
                     }
                     envelope = encapsulation.envelope;
                 }
-                // Never fall back silently for a broken session: try again on the next send.
+                // Never fall back silently for a broken session. This contact's message stays
+                // unsent; everyone else's, and everything incoming, must not depend on it.
                 Err(error) => {
-                    return Err(ConnectionError::Protocol(format!(
-                        "forward security: {error}"
-                    )));
+                    tracing::warn!(%error, "cannot encapsulate; message not sent");
+                    return Ok(None);
                 }
             }
         }
@@ -1899,14 +1903,12 @@ impl<'a> Session<'a> {
         self.take_fs_controls(peer)
     }
 
-    /// The line saying that this chat has no forward secrecy any more.
-    fn show_fs_unavailable(&self, peer: &str) -> Result<(), ConnectionError> {
+    /// A forward secrecy status line, from where no event passes through [`Self::handle_fs_event`].
+    fn show_fs_line(&self, peer: &str, code: &str) -> Result<(), ConnectionError> {
         let store = &self.setup.store;
         if crate::providers::shows_fs_status(store, &self.setup.config, peer)
             .map_err(protocol_error)?
-            && let Some(message) = store
-                .insert_status(peer, "fsUnavailable")
-                .map_err(protocol_error)?
+            && let Some(message) = store.insert_status(peer, code).map_err(protocol_error)?
         {
             self.emit(CoreEvent::MessageAdded {
                 message,

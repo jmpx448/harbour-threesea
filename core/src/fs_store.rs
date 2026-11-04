@@ -5,13 +5,18 @@
 use std::rc::Rc;
 
 use libthreema::{
-    common::{ThreemaId, keys::PublicKey},
+    common::{
+        ThreemaId,
+        keys::{ClientKey, PublicKey},
+    },
     csp_e2e::fs::{
-        FsSessionStore, FsStatus,
+        Encapsulation, EncapsulationError, FsSessionStore, FsStatus, encapsulate,
         ratchet::Ratchet,
         session::{Session, SessionId, SessionState, Versions},
+        terminate_all,
     },
     model::provider::ProviderError,
+    protobuf::common::GroupIdentity,
 };
 use rusqlite::{OptionalExtension as _, Row, params};
 
@@ -95,13 +100,42 @@ fn from_row(row: &Row<'_>, my_identity: ThreemaId) -> rusqlite::Result<Session> 
     })
 }
 
+/// A row that can't be a session, as opposed to a database that can't be read. It is treated as
+/// no session and removed, so that the peer's messages are rejected and ours start a new one: left
+/// in place, it would stop the whole connection on every login, for everyone.
+fn is_damaged(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::InvalidColumnType(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..)
+            | rusqlite::Error::FromSqlConversionFailure(..)
+    )
+}
+
 impl Store {
     fn fs_sessions(&self, peer: &str, my_identity: ThreemaId) -> Result<Vec<Session>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM fs_sessions WHERE peer = ?1"
+            "SELECT {COLUMNS}, rowid FROM fs_sessions WHERE peer = ?1"
         ))?;
-        let rows = statement.query_map([peer], |row| from_row(row, my_identity))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let rows = statement.query_map([peer], |row| {
+            Ok((row.get::<_, i64>(15)?, from_row(row, my_identity)))
+        })?;
+        let mut sessions = Vec::new();
+        let mut damaged = Vec::new();
+        for row in rows {
+            let (rowid, session) = row?;
+            match session {
+                Ok(session) => sessions.push(session),
+                Err(error) if is_damaged(&error) => damaged.push(rowid),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for rowid in damaged {
+            tracing::warn!("removing a damaged forward secrecy session");
+            self.conn
+                .execute("DELETE FROM fs_sessions WHERE rowid = ?1", [rowid])?;
+        }
+        Ok(sessions)
     }
 
     /// Everyone we have an FS session with.
@@ -139,15 +173,23 @@ pub struct StoreFs {
 
 impl FsSessionStore for StoreFs {
     fn get(&self, peer: ThreemaId, id: SessionId) -> Result<Option<Session>, ProviderError> {
-        self.store
-            .conn
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM fs_sessions WHERE peer = ?1 AND session_id = ?2"),
-                params![peer.to_string(), &id.0[..]],
-                |row| from_row(row, self.my_identity),
-            )
-            .optional()
-            .map_err(storage)
+        let session = self.store.conn.query_row(
+            &format!("SELECT {COLUMNS} FROM fs_sessions WHERE peer = ?1 AND session_id = ?2"),
+            params![peer.to_string(), &id.0[..]],
+            |row| from_row(row, self.my_identity),
+        );
+        if session.as_ref().is_err_and(is_damaged) {
+            tracing::warn!("removing a damaged forward secrecy session");
+            self.store
+                .conn
+                .execute(
+                    "DELETE FROM fs_sessions WHERE peer = ?1 AND session_id = ?2",
+                    params![peer.to_string(), &id.0[..]],
+                )
+                .map_err(storage)?;
+            return Ok(None);
+        }
+        session.optional().map_err(storage)
     }
 
     fn get_best(&self, peer: ThreemaId) -> Result<Option<Session>, ProviderError> {
@@ -252,6 +294,50 @@ impl FsSessionStore for StoreFs {
 
 /// Two parties with our real stores exchange FS payloads through libthreema's incoming message
 /// task (no network): exactly the bytes the connection would send.
+/// [`fs::encapsulate`] for the connection: a session that can't be used (not one of the states a
+/// session can be in) is ended, with a Terminate for the peer, and replaced by a new one, so that
+/// one bad session costs a reset line and not this contact's messages. With `true` if that
+/// happened. An error now is about this contact alone: it must not stop the connection.
+///
+/// # Errors
+///
+/// [`EncapsulationError`] if storing failed, or a new session failed too.
+#[expect(clippy::too_many_arguments, reason = "what encapsulating takes")]
+pub fn encapsulate_or_replace(
+    fs: &mut StoreFs,
+    client_key: &ClientKey,
+    peer: ThreemaId,
+    peer_public_key: &PublicKey,
+    inner_type: u8,
+    inner_data: &[u8],
+    group_identity: Option<GroupIdentity>,
+    now_ms: u64,
+) -> Result<(Encapsulation, bool), EncapsulationError> {
+    let my_identity = fs.my_identity;
+    let attempt = |fs: &mut StoreFs| {
+        encapsulate(
+            fs,
+            my_identity,
+            client_key,
+            peer,
+            peer_public_key,
+            inner_type,
+            inner_data,
+            group_identity.clone(),
+            now_ms,
+        )
+    };
+    match attempt(fs) {
+        Ok(encapsulation) => Ok((encapsulation, false)),
+        Err(EncapsulationError::Session(error)) => {
+            tracing::warn!(%error, "replacing an unusable forward secrecy session");
+            terminate_all(fs, peer)?;
+            Ok((attempt(fs)?, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -761,12 +847,119 @@ mod tests {
         assert_eq!(back.my_ratchet_2dh.as_ref().unwrap().counter, 3);
         assert!(back.my_ratchet_4dh.is_none());
         assert_eq!(back.peer_ratchet_4dh.as_ref().unwrap().chain_key, [8; 32]);
-        // A key of the wrong size is an error, not a short key.
+        // A key of the wrong size is a damaged session, not a short key.
         store
             .conn
             .execute("UPDATE fs_sessions SET my_2dh_key = x'0404'", [])
             .unwrap();
-        assert!(fs.get(peer, id).is_err());
+        assert!(fs.get(peer, id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_damaged_session_counts_as_none_and_goes_away() {
+        let (alice, bob) = established();
+        let chat = bob.id.to_string();
+        assert_eq!(session_count(&alice, &bob), 1);
+        let good = alice.fs().get_best(bob.id).unwrap().unwrap();
+        let store = |id: &[u8; 16]| {
+            let mut copy = good.clone();
+            copy.id = SessionId(*id);
+            alice.fs().store(&copy).unwrap();
+        };
+        store(&[9; 16]);
+        store(&[10; 16]);
+        assert_eq!(session_count(&alice, &bob), 3);
+        let damage = |id: &[u8]| {
+            alice
+                .store
+                .conn
+                .execute(
+                    "UPDATE fs_sessions SET my_ephemeral_public = x'01' WHERE session_id = ?1",
+                    [id],
+                )
+                .unwrap();
+        };
+
+        // Looking one up by its ID.
+        damage(&[9; 16]);
+        assert!(
+            alice
+                .fs()
+                .get(bob.id, SessionId([9; 16]))
+                .unwrap()
+                .is_none()
+        );
+        // Looking for the best: what is good is still there.
+        damage(&[10; 16]);
+        let best = alice.fs().get_best(bob.id).unwrap().unwrap();
+        assert_eq!(best.id, good.id);
+        let left: i64 = alice
+            .store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM fs_sessions WHERE peer = ?1",
+                [&chat],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn an_unusable_session_is_replaced_and_the_peer_told() {
+        let (alice, bob) = pair();
+        let peer_key = ClientKey::from(bob.key).public_key();
+        let key = ClientKey::from(alice.key);
+        let send = || {
+            encapsulate_or_replace(
+                &mut alice.fs(),
+                &key,
+                bob.id,
+                &peer_key,
+                0x01,
+                b"hello",
+                None,
+                1,
+            )
+            .unwrap()
+        };
+
+        // The first message starts a session, nothing to replace.
+        let (first, replaced) = send();
+        assert!(!replaced);
+        assert_eq!(first.prelude.len(), 1);
+        let (second, replaced) = send();
+        assert!(!replaced);
+        assert!(second.prelude.is_empty(), "the session is reused");
+        assert!(alice.events.borrow().is_empty());
+
+        // No ratchets at all: not a state a session can be in.
+        let old = alice.fs().get_best(bob.id).unwrap().unwrap();
+        alice
+            .store
+            .conn
+            .execute(
+                "UPDATE fs_sessions SET my_2dh_key = NULL, my_2dh_counter = NULL,
+                     my_4dh_key = NULL, my_4dh_counter = NULL,
+                     peer_2dh_key = NULL, peer_2dh_counter = NULL,
+                     peer_4dh_key = NULL, peer_4dh_counter = NULL",
+                [],
+            )
+            .unwrap();
+        let (third, replaced) = send();
+        assert!(replaced);
+        assert_eq!(third.prelude.len(), 1, "the new session's Init");
+        assert!(third.envelope.is_some(), "and the message in it");
+        let new = alice.fs().get_best(bob.id).unwrap().unwrap();
+        assert_ne!(new.id, old.id);
+        assert_eq!(session_count(&alice, &bob), 1);
+        let terminates = alice
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, CoreEvent::FsControl { .. }))
+            .count();
+        assert_eq!(terminates, 1, "the old session's Terminate");
     }
 
     #[test]
