@@ -275,9 +275,8 @@ ApplicationWindow {
                 if (away > grace) window.lockNow()
             }
         }
-        // Nobody keeps the grace time from here on, and the next start may be far away.
         onAboutToQuit: {
-            if (window.lockInfo && window.lockInfo.lock && window.lockInfo.lock.appLock) window.hideNotifications()
+            window.appEnding()
         }
     }
     // The grace time is over while away: the cover, the media controls and the private chats
@@ -311,6 +310,7 @@ ApplicationWindow {
             hideNotifications()
         } else {
             clearNotification("appLocked")
+            appLockedNews = false
             runNotificationActions()
         }
     }
@@ -821,6 +821,15 @@ ApplicationWindow {
         if (backend.state === "locked") hideNotifications()
     }
     function takeOver(n) {
+        // The last run promised to send a reply and ended first: that promise can't stand. The
+        // app lock's reply waited in its chat's draft as well (keepWaitingReply).
+        if (n.body === qsTrId("threesea-la-app-locked-reply-body")
+                || n.body === qsTrId("threesea-la-locked-notification-reply-body")) {
+            var kept = n.body === qsTrId("threesea-la-app-locked-reply-body")
+            n.close()
+            replyEnded(kept)
+            return
+        }
         var actions = n.remoteActions || []
         var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
         if (n.summary === qsTrId("threesea-la-reply-not-sent")) {
@@ -832,6 +841,7 @@ ApplicationWindow {
         }
         if (identity && !notifications[identity]) {
             notifications[identity] = n
+            if (identity === "appLocked") appLockedNews = true
             watchClosed(identity, n)
         } else {
             n.close()
@@ -954,6 +964,8 @@ ApplicationWindow {
         }
         return n
     }
+    // It stands for more than a waiting reply.
+    property bool appLockedNews: false
     function appLockedBody() {
         return NotificationActions.replyWaiting()
                 //% "Open it and enter your PIN or passphrase to send your reply."
@@ -965,10 +977,36 @@ ApplicationWindow {
     // A message or missed call while locked, with the chosen sound and vibration.
     function notifyLocked(message, isPrivate) {
         var n = appLockedNotification()
+        appLockedNews = true
         n.itemCount = n.itemCount + 1
         n.timestamp = new Date(message.createdAt)
         alert(n, isPrivate ? "" : message.conversation, message.conversation.indexOf("g:") === 0,
               qsTrId("threesea-la-locked-notification"), appLockedBody())
+    }
+
+    // The app ends, and nobody keeps the grace time from here on: under a lock the words leave the
+    // screen, as the next start may be far away. What waited in memory ends here, and a promise to
+    // send it must not stay behind. All this reaches lipstick or doesn't before the process is
+    // gone (takeOver() catches a promise that stayed).
+    function appEnding() {
+        lockedNotificationLater.stop()
+        var kept = NotificationActions.allRepliesKept()
+        var lost = NotificationActions.drop()
+        if (lockInfo && lockInfo.lock && lockInfo.lock.appLock) hideNotifications()
+        if (!lost) return
+        clearNotification("locked")
+        // It stands for something else as well, or only for the reply.
+        if (appLockedNews) showAppLocked(0, false)
+        else clearNotification("appLocked")
+        replyEnded(kept)
+    }
+
+    function replyEnded(kept) {
+        plainNotification("replyNotSent", qsTrId("threesea-la-reply-not-sent"), kept
+                          //% "Threesea ended before sending it. Your text is kept as a draft in its chat."
+                          ? qsTrId("threesea-la-reply-not-sent-ended-kept")
+                          //% "Threesea ended before sending it. Write it again in the chat."
+                          : qsTrId("threesea-la-reply-not-sent-ended"))
     }
 
     // Without a sound; `banner`: it is an answer to something just done.
@@ -993,6 +1031,7 @@ ApplicationWindow {
             added += Math.max(notifications[key].itemCount, 1)
             if (closeNotification(key)) dbus.releaseToken(key)
         })
+        if (added > 0) appLockedNews = true
         var replyWaiting = NotificationActions.replyWaiting()
         // For the stored data's lock lockedNotification() tells about the reply.
         if (added > 0 || (replyWaiting && backend.state !== "locked")) showAppLocked(added, replyWaiting)
@@ -1104,7 +1143,10 @@ ApplicationWindow {
 
     function runNotificationActions() {
         // Only these two states have an app lock (showLock); not known yet counts as locked.
-        if ((backend.state === "ready" || backend.state === "needsLicense") && (!lockChecked || lockActive())) return
+        if ((backend.state === "ready" || backend.state === "needsLicense") && (!lockChecked || lockActive())) {
+            NotificationActions.repliesToKeep().forEach(window.keepWaitingReply)
+            return
+        }
         NotificationActions.release(backend.state).forEach(function(action) {
             if (action.text === undefined) {
                 window.markNotifiedRead(action.identity)
@@ -1113,8 +1155,12 @@ ApplicationWindow {
             backend.call("sendText", { identity: action.identity, text: action.text },
                          function(ok, result, kind, message) {
                 // Replying means it has been read; one that didn't go out hasn't been answered.
-                if (ok) window.markNotifiedRead(action.identity)
-                else window.replyRefused(action, Errors.text(kind, message))
+                if (ok) {
+                    window.markNotifiedRead(action.identity)
+                    if (action.kept || action.keeping) window.dropKeptReply(action.identity, action.text)
+                } else {
+                    window.replyRefused(action, Errors.text(kind, message))
+                }
             })
         })
         if (backend.state === "error" && NotificationActions.drop()) {
@@ -1134,7 +1180,7 @@ ApplicationWindow {
     // isn't on screen, and the notification it was typed in has gone: this one says so, without
     // the words, which go back into the chat and wait there.
     function replyRefused(action, reason) {
-        keepReply(action.identity, action.text, function(kept) {
+        keepReply(action, function(kept) {
             var key = "replyNotSent:" + action.identity
             var n = notifications[key]
             if (!n) {
@@ -1162,14 +1208,19 @@ ApplicationWindow {
     }
 
     // After what the chat's input holds already, there if the chat is open, otherwise in its draft.
-    function keepReply(identity, text, done) {
-        var chat = pageStack.find(function(page) { return page.identity === identity && page.inputField })
+    function keepReply(action, done) {
+        var chat = pageStack.find(function(page) { return page.identity === action.identity && page.inputField })
         if (chat) {
-            chat.keepText(text)
+            chat.keepText(action.text)
             chat.saveDraft()
             done(true)
             return
         }
+        if (action.kept || action.keeping) done(true)
+        else addToDraft(action.identity, action.text, done)
+    }
+
+    function addToDraft(identity, text, done) {
         backend.call("draft", { identity: identity }, function(ok, draft) {
             if (!ok) {
                 done(false)
@@ -1178,6 +1229,30 @@ ApplicationWindow {
             var args = { identity: identity, text: draft.text ? draft.text + "\n" + text : text }
             if (draft.quote) args.quote = draft.quote.messageId
             backend.call("setDraft", args, function(saved) { done(saved) })
+        })
+    }
+
+    // A reply waiting for the PIN: the core runs, so its words go into the chat's draft in the
+    // encrypted store meanwhile, or they would be gone if the app ended first. Nothing is sent.
+    function keepWaitingReply(action) {
+        action.keeping = true
+        addToDraft(action.identity, action.text, function(kept) {
+            action.keeping = false
+            action.kept = kept
+        })
+    }
+
+    // It went out after all: its words leave the draft, whatever else is there by now. A draft
+    // that held only them has gone already (the core's forget_sent_draft).
+    function dropKeptReply(identity, text) {
+        backend.call("draft", { identity: identity }, function(ok, draft) {
+            if (!ok || !draft.text) return
+            var at = draft.text.lastIndexOf(text)
+            if (at < 0) return
+            var args = { identity: identity,
+                         text: draft.text.substring(0, at).replace(/\n$/, "") + draft.text.substring(at + text.length) }
+            if (draft.quote) args.quote = draft.quote.messageId
+            backend.call("setDraft", args)
         })
     }
 

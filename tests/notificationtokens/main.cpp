@@ -232,6 +232,11 @@ void testActionsWaitForTheCore()
 
     engine.evaluate(QStringLiteral("add({ identity: 'ABCD1234', text: 'hello' })"));
     check(release("error").isEmpty(), "no core after a failed start");
+    check(engine.evaluate(QStringLiteral("repliesToKeep().length")).toInt() == 1, "a reply to keep");
+    check(!engine.evaluate(QStringLiteral("allRepliesKept()")).toBool(), "without its copy");
+    engine.evaluate(QStringLiteral("repliesToKeep()[0].kept = true"));
+    check(engine.evaluate(QStringLiteral("repliesToKeep().length")).toInt() == 0, "nothing left to keep");
+    check(engine.evaluate(QStringLiteral("allRepliesKept()")).toBool(), "with its copy");
     check(engine.evaluate(QStringLiteral("drop()")).toBool(), "the failed start lost a reply");
     check(!engine.evaluate(QStringLiteral("drop()")).toBool(), "and nothing is left");
     engine.evaluate(QStringLiteral("add({ identity: 'ABCD1234' })"));

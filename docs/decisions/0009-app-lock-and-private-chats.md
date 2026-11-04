@@ -138,3 +138,8 @@ without its words or chat, as any process on the session bus can make that call.
 
 The same when the stored data's lock shows at a start: the last run's notifications go at once. Until
 the app starts nothing can take them away; that is the limit after a crash or a restart of the phone.
+
+A reply waiting for the PIN is in its chat's draft as well, in the encrypted store, since the core
+runs; waiting for the passphrase it is in memory only. If the app ends first, "Your reply was not
+sent" replaces the promise to send it, at the end or, if that doesn't reach lipstick, at the next
+start, when the taken-over notification's wording gives it away.

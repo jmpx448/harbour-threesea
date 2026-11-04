@@ -4,8 +4,9 @@
 // Reply and Mark as read from a notification, on their way to the core. The core doesn't exist yet
 // when such a tap is what starts the app (the key comes from Sailfish Secrets first), nor until the
 // passphrase has opened the stored data, and the bridge drops whatever it is given without a core.
-// So they wait here, in memory only. Lipstick has already closed the notification by then, and the
-// action's token is used up, so this is the only place that still has a typed reply.
+// So they wait here, in memory. Lipstick has already closed the notification by then, and the
+// action's token is used up, so this is the only place that still has a typed reply, except for a
+// copy in its chat's draft wherever a core runs to take it (`kept`: the window, for the app lock).
 
 var waiting = []
 
@@ -27,6 +28,16 @@ function release(state) {
 
 function replyWaiting() {
     return waiting.some(function(action) { return action.text !== undefined })
+}
+
+// The replies still without a copy in their chat's draft.
+function repliesToKeep() {
+    return waiting.filter(function(action) { return action.text !== undefined && !action.kept && !action.keeping })
+}
+
+// Whether each reply has that copy.
+function allRepliesKept() {
+    return waiting.every(function(action) { return action.text === undefined || action.kept === true })
 }
 
 // The core won't start in this run. Says whether that lost a reply.

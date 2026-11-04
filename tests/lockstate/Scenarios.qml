@@ -1080,6 +1080,100 @@ QtObject {
             }, 200],
             [function() { check("over with the passphrase", window.notifications["appLocked"], undefined) }, 0],
         ],
+        // A reply waiting for the PIN is in the chat's draft meanwhile, and leaves it once sent.
+        waitingReplyKeptInDraft: [
+            [function() {
+                ready(true)
+                backend.results["draft"] = { text: "started earlier", quote: { messageId: "00ff" } }
+            }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("nothing sent", countSent("sendText"), 0)
+                check("kept", backend.lastArgs["setDraft"].text, "started earlier\na reply")
+                check("once", countSent("setDraft"), 1)
+                check("with its quote", backend.lastArgs["setDraft"].quote, "00ff")
+                backend.results["draft"] = { text: "started earlier\na reply and more", quote: { messageId: "00ff" } }
+                unlock()
+            }, 100],
+            [function() {
+                check("sent", backend.lastArgs["sendText"].text, "a reply")
+                check("out of the draft again", backend.lastArgs["setDraft"].text, "started earlier and more")
+                check("with its quote", backend.lastArgs["setDraft"].quote, "00ff")
+                check("no word of a failure", window.notifications["replyNotSent"], undefined)
+            }, 0],
+        ],
+        // Refused after the PIN: it stays where it is, not in there twice.
+        waitingReplyRefused: [
+            [function() {
+                ready(true)
+                backend.refused["sendText"] = "contactBlocked"
+            }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("kept", countSent("setDraft"), 1)
+                unlock()
+            }, 100],
+            [function() {
+                check("not twice", countSent("setDraft"), 1)
+                check("says so", window.notifications["replyNotSent:" + chat].summary, "threesea-la-reply-not-sent")
+            }, 0],
+        ],
+        // The app ends before the PIN: no promise stays, only what is true.
+        endingLosesWaitingReply: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("promised", window.notifications["appLocked"].body, "threesea-la-app-locked-reply-body")
+                Qt.application.aboutToQuit()
+                check("no promise left", window.notifications["appLocked"], undefined)
+                var n = window.notifications["replyNotSent"]
+                check("says so", n.summary, "threesea-la-reply-not-sent")
+                check("kept", n.body, "threesea-la-reply-not-sent-ended-kept")
+                check("no words", (n.body + n.previewBody).indexOf("a reply"), -1)
+            }, 0],
+        ],
+        // News as well: the notification stays for that, without the promise.
+        endingKeepsTheNews: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { incoming("the words") }, 50],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                Qt.application.aboutToQuit()
+                checkAppLocked(1)
+                check("says so", !!window.notifications["replyNotSent"], true)
+            }, 0],
+        ],
+        // Waiting for the passphrase there is no core and no copy.
+        endingBeforeThePassphrase: [
+            [function() { backend.state = "locked" }, 100],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("no draft", countSent("setDraft"), 0)
+                Qt.application.aboutToQuit()
+                check("not kept", window.notifications["replyNotSent"].body, "threesea-la-reply-not-sent-ended")
+            }, 0],
+        ],
+        // The promise from a last run that ended without taking it back.
+        promiseTakenOver: [
+            [function() { ready(true) }, 100],
+            [function() {
+                root.kept = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { summary: \"threesea-la-locked-notification\"; body: \"threesea-la-app-locked-reply-body\" }", root)
+                root.kept.remoteActions = [{ name: "default", displayName: "", service: "s", path: "/", iface: "i",
+                                             method: "activate", arguments: [] }]
+                window.takeOver(root.kept)
+                check("no promise", window.notifications["appLocked"], undefined)
+                check("says so", window.notifications["replyNotSent"].body, "threesea-la-reply-not-sent-ended-kept")
+                delete window.notifications["replyNotSent"]
+                var other = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { summary: \"threesea-la-locked-notification\"; body: \"threesea-la-locked-notification-reply-body\" }", root)
+                other.remoteActions = root.kept.remoteActions
+                window.takeOver(other)
+                check("no copy for the passphrase's", window.notifications["replyNotSent"].body, "threesea-la-reply-not-sent-ended")
+            }, 0],
+        ],
         // Before the first look at the lock nothing is known: these wait for the answer.
         messagesWaitForTheLockAnswer: [
             [function() {

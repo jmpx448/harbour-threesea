@@ -373,7 +373,12 @@ Notifications:
      last text stays until then.
    - Type a reply in a notification on the lock screen, let the app lock's grace time pass before
      unlocking the phone.
-     Expect: "Threesea is locked" says that the reply waits; it goes out after the PIN.
+     Expect: "Threesea is locked" says that the reply waits, its text is in the chat's draft in the
+     chat list; it goes out after the PIN and leaves the draft.
+   - The same, then `pkill harbour-threesea` (and again with `-9`) before the PIN, then start it.
+     Expect: "Your reply was not sent", its text in the chat's draft. With "Encrypt stored data"
+     before the passphrase the same notice, without a draft. No "to send your reply" stays behind,
+     and nothing goes out.
 
 Threema Web:
 
