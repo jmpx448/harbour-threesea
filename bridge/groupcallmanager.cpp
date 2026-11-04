@@ -180,6 +180,15 @@ void GroupCallManager::leave()
     setState(QStringLiteral("idle"));
 }
 
+void GroupCallManager::forget()
+{
+    leave();
+    if (!m_calls.isEmpty()) {
+        m_calls.clear();
+        emit runningChanged();
+    }
+}
+
 void GroupCallManager::resetDevices()
 {
     if (m_muted) {

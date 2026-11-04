@@ -372,6 +372,7 @@ ApplicationWindow {
         case "needsIdentity": page = Qt.resolvedUrl("pages/IdentitySetupPage.qml"); break
         case "ready": page = Qt.resolvedUrl("pages/ConversationsPage.qml"); break
         case "locked": page = Qt.resolvedUrl("pages/UnlockPage.qml"); break
+        case "removing": page = Qt.resolvedUrl("pages/StartupPage.qml"); break
         case "error":
             // After the passphrase or later: StartupPage again, which says what happened.
             if (shownState === "starting") return
@@ -432,7 +433,8 @@ ApplicationWindow {
         // Also after each reply: the app may have locked meanwhile. Running it again is safe,
         // adding a contact twice changes nothing.
         function mustWait() {
-            if (!stackHeld && !pageStack.busy && backend.state !== "starting" && backend.state !== "locked") {
+            if (!stackHeld && !pageStack.busy && backend.state !== "starting" && backend.state !== "locked"
+                    && backend.state !== "removing") {
                 return false
             }
             pendingLink = url
@@ -499,8 +501,8 @@ ApplicationWindow {
                 return
             }
             // Also wait while the stored data is locked (passphrase).
-            if (backend.state === "starting" || backend.state === "locked" || pageStack.busy
-                    || shownState !== backend.state) return
+            if (backend.state === "starting" || backend.state === "locked" || backend.state === "removing"
+                    || pageStack.busy || shownState !== backend.state) return
             if (window.pendingLink.length > 0) window.openLink(window.pendingLink, window.pendingLinkFromMessage)
             // showChat() and showShare() ask again for later if they still can't.
             var chat = window.pendingChat
@@ -819,7 +821,31 @@ ApplicationWindow {
     // The ID was removed from this device.
     function forgetNotifications() {
         Object.keys(notifications).forEach(clearNotification)
+        // And the ones outside that list: an update, the device cookie.
+        var shown = notificationQuery.notifications()
+        for (var i = 0; i < shown.length; ++i) shown[i].close()
         dbus.forgetAllTokens()
+    }
+
+    // Everything the window keeps of the ID (the bridge has done its part).
+    function dataRemoved(linkedDevicesRemain) {
+        forgetNotifications()
+        NotificationActions.drop()
+        addressBook.active = false
+        graceTimer.stop()
+        lockedNotificationLater.stop()
+        pendingLink = ""
+        pendingChat = ""
+        pendingShare = null
+        appSettings = ({})
+        lockInfo = null
+        lockChecked = false
+        leftAt = 0
+        callName = ""
+        groupCallName = ""
+        voiceFrom = ""
+        //% "This phone could not reach the server, so your linked devices stay linked to this ID."
+        if (linkedDevicesRemain) Notices.show(qsTrId("threesea-la-delete-data-linked-remain"), Notice.Long, Notice.Center)
     }
 
     onOpenChatChanged: if (openChat.length > 0) clearNotification(openChat)
@@ -1020,6 +1046,11 @@ ApplicationWindow {
             window.syncAddressBook(false)
             if (backend.state === "ready") window.clearNotification("license")
             window.runNotificationActions()
+        }
+        onDataRemoved: window.dataRemoved(linkedDevicesRemain)
+        onDataRemovalFailed: {
+            //% "The ID was not removed: %1"
+            Notices.show(qsTrId("threesea-la-delete-data-failed").arg(Errors.text(kind, message)), Notice.Long, Notice.Center)
         }
         onCoreEvent: {
             // `notify`: the chat's own notification setting (muted, mentions only) allows it.

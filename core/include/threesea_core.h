@@ -32,6 +32,9 @@ void threesea_core_send_data(ThreeseaCore *core, const char *request_json, const
                              const uint8_t *extra, size_t extra_len);
 /* Blocks until the core thread has stopped; no callbacks after it returns. */
 void threesea_core_stop(ThreeseaCore *core);
+/* Removes everything in the data directory (database, media, logs): the ID is being removed. The
+ * core must have stopped. False if something stayed. */
+bool threesea_data_remove(const char *data_dir);
 
 /* Decrypted media of a message (thumbnail or file) from the encrypted media store; thread-safe.
  * NULL if not on the device. Free with threesea_buffer_free(buffer, *out_len). */

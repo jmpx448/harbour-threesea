@@ -45,6 +45,11 @@ QString dataDir()
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
 
+// In the settings from the moment the core has wiped until the new key and database are there.
+// Found at a start: the app died in between, and goes on with the rest. The value is whether
+// linked devices remain.
+const QString RemovalPendingKey = QStringLiteral("removalPending");
+
 QString databasePath()
 {
     return dataDir() + QStringLiteral("/threesea.db");
@@ -97,7 +102,13 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     connect(m_network, &QNetworkConfigurationManager::configurationChanged, this, &ThreeseBackend::reportNetwork);
     connect(m_network, &QNetworkConfigurationManager::onlineStateChanged, this, &ThreeseBackend::reportNetwork);
     connect(m_secrets, &SecretStore::failed, this, &ThreeseBackend::fail);
-    m_secrets->loadKey(!QFile::exists(databasePath()));
+    if (QSettings().contains(RemovalPendingKey)) {
+        m_removingData = true;
+        m_state = QStringLiteral("removing");
+        QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+    } else {
+        m_secrets->loadKey(!QFile::exists(databasePath()));
+    }
 }
 
 ThreeseBackend::~ThreeseBackend()
@@ -305,8 +316,109 @@ static QString captureDir()
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/capture");
 }
 
+void ThreeseBackend::removeAllData(const QString &pin)
+{
+    if (!m_core || m_removingData) {
+        return;
+    }
+    m_removingData = true;
+    m_stateBeforeRemoval = m_state;
+    m_state = QStringLiteral("removing");
+    emit stateChanged();
+    // The core stops what runs, leaves the device group (that can take a while) and wipes.
+    request(QStringLiteral("deleteAllData"), QVariantMap{{QStringLiteral("pin"), pin}},
+            [this](bool ok, const QVariantMap &result, const QString &kind) {
+                if (!ok) {
+                    m_removingData = false;
+                    m_state = m_stateBeforeRemoval;
+                    emit stateChanged();
+                    emit dataRemovalFailed(kind, result.value(QStringLiteral("message")).toString());
+                    return;
+                }
+                QSettings settings;
+                settings.setValue(RemovalPendingKey, result.value(QStringLiteral("linkedDevicesRemain")).toBool());
+                settings.sync();
+                {
+                    QWriteLocker locker(&m_coreLock);
+                    threesea_core_stop(m_core);
+                    m_core = nullptr;
+                }
+                m_discardCoreMessages = true;
+                // After everything the old core has posted.
+                QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+            });
+}
+
+void ThreeseBackend::finishDataRemoval()
+{
+    m_discardCoreMessages = false;
+    // Listeners close what still shows or plays something of the ID.
+    emit dataRemoved(QSettings().value(RemovalPendingKey).toBool());
+
+    m_unreadTimer.stop();
+    m_callbacks.clear();
+    m_nativeCallbacks.clear();
+    m_statusRequests.clear();
+    m_keyWork.clear();
+    m_tempSources.clear();
+    m_chatTones.clear();
+    m_firstLiveId = m_nextId;
+    m_identity.clear();
+    m_unreadCount = 0;
+    m_unreadFrom.clear();
+    m_connectionState = QStringLiteral("disconnected");
+    m_contacts->update(QVariantList());
+    m_dbKey.fill('\0');
+    m_dbKey.clear();
+    m_wrappedKey.clear();
+    m_unlockedAtStart = false;
+
+    // All of them, the device's own too: chat IDs in the notification tokens, the address book
+    // opt-in (the next ID is asked again), the wallpaper. Getters read them live, so the signals
+    // below bring the UI along.
+    {
+        QSettings settings;
+        const QVariant pending = settings.value(RemovalPendingKey);
+        settings.clear();
+        settings.setValue(RemovalPendingKey, pending);
+        settings.sync();
+    }
+    applyQtLogLevel();
+    QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+
+    // Captures, a voice recording: all this app keeps there is plain files of the ID.
+    QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively();
+    const bool removed = threesea_data_remove(dataDir().toUtf8().constData());
+    // On a full disk the mark and the clearing above may have stayed in memory, and the core's
+    // mark file is gone now: with the space just freed they reach the disk before anything else.
+    QSettings().sync();
+
+    emit unreadCountChanged();
+    emit unreadFromChanged();
+    emit connectionStateChanged();
+    emit keepRunningChanged();
+    emit logLevelChanged();
+    emit notificationSettingsChanged();
+    emit dataEncryptionChanged();
+    if (!removed) {
+        // The new key couldn't open what stayed. The next start tries again.
+        fail(QStringLiteral("removing the stored data"));
+        return;
+    }
+    m_state = QStringLiteral("starting");
+    emit stateChanged();
+    m_secrets->replaceKey();
+}
+
 void ThreeseBackend::startCore(QByteArray key)
 {
+    if (m_removingData) {
+        // The old file and the old key are gone: nothing left to finish after a crash.
+        QSettings settings;
+        settings.remove(RemovalPendingKey);
+        settings.sync();
+        m_removingData = false;
+    }
     m_dbKey = key;
     QDir().mkpath(dataDir());
     // In-app captures left behind (e.g. the app was closed before sending): never kept.
@@ -724,8 +836,11 @@ void ThreeseBackend::sendVoice(const QString &identity, int durationMs, const QJ
 void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &data, const QByteArray &thumbnail,
                                   const QString &error)
 {
+    const quint64 id = request.value(QStringLiteral("id")).toULongLong();
+    if (id < m_firstLiveId) {
+        return;
+    }
     if (!error.isEmpty()) {
-        const quint64 id = request.value(QStringLiteral("id")).toULongLong();
         // Nothing was sent, so nothing will answer and clean up after it.
         removeTempSources(id);
         QJSValue callback = m_callbacks.take(id);
@@ -735,7 +850,7 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
         return;
     }
     if (!m_core) {
-        removeTempSources(request.value(QStringLiteral("id")).toULongLong());
+        removeTempSources(id);
         return;
     }
     QByteArray json = QJsonDocument(QJsonObject::fromVariantMap(request)).toJson(QJsonDocument::Compact);
@@ -906,6 +1021,9 @@ void ThreeseBackend::refreshContacts()
 
 void ThreeseBackend::handleMessage(const QByteArray &json)
 {
+    if (m_discardCoreMessages) {
+        return;
+    }
     const QJsonObject message = QJsonDocument::fromJson(json).object();
 
     if (message.contains(QStringLiteral("event"))) {
@@ -936,7 +1054,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
 
     // Status replies drive the onboarding state machine. Only those: message replies have a
     // (delivery) `state` too.
-    if (ok && m_statusRequests.remove(id)) {
+    if (m_statusRequests.remove(id) && ok && !m_removingData) {
         const QString previous = m_state;
         m_state = result.value(QStringLiteral("state")).toString();
         m_identity = result.value(QStringLiteral("identity")).toString();

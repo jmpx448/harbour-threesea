@@ -169,7 +169,8 @@ Rules:
   Full flavour adds a systemd user unit (ADR 0010).
 - `SecretStore`: the database key lives in Sailfish Secrets (required by the RPM; without it
   the app fails closed, no plaintext fallback). Optionally it is wrapped with a passphrase
-  ("Encrypt stored data", ADR 0009). The key is never written unencrypted.
+  ("Encrypt stored data", ADR 0009). The key is never written unencrypted. Removing the ID
+  replaces the key and the database file (ADR 0018).
 - No business logic in C++. If you find yourself writing protocol code here, move it to Rust.
 
 ---

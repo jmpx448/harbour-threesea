@@ -57,6 +57,13 @@ void SecretStore::loadKey(bool allowCreate)
     ensureCollection();
 }
 
+void SecretStore::replaceKey()
+{
+    m_allowCreate = true;
+    m_replaceKey = true;
+    ensureCollection();
+}
+
 void SecretStore::ensureCollection()
 {
     auto *request = new CreateCollectionRequest(this);
@@ -72,6 +79,15 @@ void SecretStore::ensureCollection()
         const Result result = r->result();
         if (result.code() == Result::Failed && result.errorCode() != Result::CollectionAlreadyExistsError) {
             emit failed(QStringLiteral("collection: ") + result.errorMessage());
+            return;
+        }
+        if (m_replaceKey) {
+            m_replaceKey = false;
+            // A wrapped key goes the same way: the passphrase belonged to the removed ID. Either
+            // may be absent. One that stays makes the store fail: Secrets refuses to overwrite.
+            remove(StagingName, [this](bool) {
+                remove(SecretName, [this](bool) { storeNewKey(); });
+            });
             return;
         }
         fetchKey();

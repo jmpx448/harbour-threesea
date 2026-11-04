@@ -328,6 +328,10 @@ public:
                                       const QJSValue &callback = QJSValue());
     // Re-query the onboarding state.
     Q_INVOKABLE void refresh();
+    // Settings → Remove ID: the state goes to "removing" and on to "starting" with a new, empty
+    // database under a new key; everything of the ID goes (ADR 0018). dataRemoved or
+    // dataRemovalFailed says how it ended.
+    Q_INVOKABLE void removeAllData(const QString &pin);
     // Reload the contact list model.
     Q_INVOKABLE void refreshContacts();
     // Recount unread messages (cover, notifications).
@@ -343,6 +347,11 @@ signals:
     void logLevelChanged();
     void notificationSettingsChanged();
     void dataEncryptionChanged();
+    // The ID's data is going, with what the UI and the players hold of it. `linkedDevicesRemain`:
+    // the device group could not be left, so linked devices keep the ID.
+    void dataRemoved(bool linkedDevicesRemain);
+    // Nothing was removed; the previous state is back.
+    void dataRemovalFailed(const QString &kind, const QString &message);
     // Internal: key work done on a worker thread (queued back to this thread).
     void keyWorkDone(quint64 id, const QByteArray &result);
 
@@ -350,6 +359,7 @@ private slots:
     void handleMessage(const QByteArray &json);
     void onKeyWorkDone(quint64 id, const QByteArray &result);
     void reportNetwork();
+    void finishDataRemoval();
     void filePrepared(const QVariantMap &request, const QByteArray &data, const QByteArray &thumbnail,
                       const QString &error);
 
@@ -395,6 +405,13 @@ private:
     QByteArray m_wrappedKey;
     class QNetworkConfigurationManager *m_network = nullptr;
     bool m_unlockedAtStart = false;
+    // Removing the ID: from the request until the new core runs. Status replies don't count then.
+    bool m_removingData = false;
+    QString m_stateBeforeRemoval;
+    // The old core has stopped: what it sent last is still queued, and is for nobody any more.
+    bool m_discardCoreMessages = false;
+    // Requests from before the removal (a video still being prepared) stay out of the new ID.
+    quint64 m_firstLiveId = 1;
     // Pending key work: what to do with the result.
     QHash<quint64, std::function<void(const QByteArray &)>> m_keyWork;
 };

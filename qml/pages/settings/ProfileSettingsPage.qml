@@ -74,12 +74,7 @@ Page {
                         // Last chance to undo, like Jolla's own destructive actions.
                         //% "Removing ID and data"
                         Remorse.popupAction(page, qsTrId("threesea-la-removing-data"), function() {
-                            backend.call("deleteAllData", { pin: pin }, function(ok) {
-                                // Refused (the PIN): the notifications still belong to live chats.
-                                if (ok) window.forgetNotifications()
-                                backend.refreshContacts()
-                                backend.refresh()
-                            })
+                            backend.removeAllData(pin)
                         })
                     })
                 })

@@ -62,6 +62,8 @@ public:
     // `create`: start a call if none runs.
     Q_INVOKABLE void join(const QString &conversation, bool create = false);
     Q_INVOKABLE void leave();
+    // The ID was removed: no call of it stays, nor what its groups' running calls were.
+    void forget();
 
 signals:
     void stateChanged();

@@ -571,3 +571,26 @@ pub unsafe extern "C" fn threesea_core_stop(core: *mut ThreeseaCore) {
         drop(unsafe { Box::from_raw(core) });
     }
 }
+
+/// Remove everything in the data directory (the ID is being removed, ADR 0018). The core must
+/// have stopped. False if something stayed.
+///
+/// # Safety
+/// `data_dir` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn threesea_data_remove(data_dir: *const c_char) -> bool {
+    if data_dir.is_null() {
+        return false;
+    }
+    // SAFETY: caller contract.
+    let Ok(data_dir) = unsafe { CStr::from_ptr(data_dir) }.to_str() else {
+        return false;
+    };
+    match crate::runtime::remove_data_dir(std::path::Path::new(data_dir)) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(%error, "the data directory could not be emptied");
+            false
+        }
+    }
+}

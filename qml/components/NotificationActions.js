@@ -17,7 +17,7 @@ function add(action) {
 // The actions the core can take in this state of the backend, oldest first; they leave this list.
 // In any state with a core it answers for itself, with an error if it can't do what is asked.
 function release(state) {
-    if (state === "starting" || state === "locked" || state === "error") {
+    if (state === "starting" || state === "locked" || state === "removing" || state === "error") {
         return []
     }
     var actions = waiting

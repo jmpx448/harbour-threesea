@@ -71,6 +71,8 @@ public:
     // The microphone goes to someone else (a group call) or the window closed: end a call that
     // has it or is about to. An incoming call that only rings keeps ringing.
     void endCallWithMicrophone();
+    // The ID was removed: the call and its media are gone at once, nobody is left to ask.
+    void forget();
 
 signals:
     void stateChanged();

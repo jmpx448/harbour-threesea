@@ -9,9 +9,20 @@ Page {
         anchors.fill: parent
 
         BusyIndicator {
+            id: busy
             anchors.centerIn: parent
             size: BusyIndicatorSize.Large
-            running: backend.state === "starting"
+            running: backend.state === "starting" || backend.state === "removing"
+        }
+
+        InfoLabel {
+            anchors {
+                bottom: busy.top
+                bottomMargin: Theme.paddingLarge
+            }
+            visible: backend.state === "removing"
+            //% "Removing ID and data"
+            text: qsTrId("threesea-la-removing-data")
         }
 
         ViewPlaceholder {

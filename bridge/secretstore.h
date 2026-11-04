@@ -27,6 +27,10 @@ public:
     // Replace what is stored (the key, or the wrapped key); emits stored(ok).
     void store(const QByteArray &data);
 
+    // The old key goes for good and a new one takes its place: the ID was removed and its
+    // database with it (ADR 0018). Emits keyReady or failed.
+    void replaceKey();
+
 signals:
     void keyReady(QByteArray key);
     // The key is encrypted with the app lock passphrase; `keyboard`: typed, not digits.
@@ -45,6 +49,7 @@ private:
 
     Sailfish::Secrets::SecretManager *m_manager;
     bool m_allowCreate = false;
+    bool m_replaceKey = false;
 };
 
 #endif // SECRETSTORE_H

@@ -237,6 +237,34 @@ pub fn log_clear(dir: &std::path::Path) {
     }
 }
 
+/// Remove everything in the data directory: the database with its `-wal` and `-shm`, media and
+/// logs, whatever may have been added there since. After the core has stopped; the next start
+/// makes a new database in the emptied directory (ADR 0018). The log attaches to a new file.
+///
+/// # Errors
+/// The first entry that could not be removed; the others are still tried.
+pub fn remove_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    let mut first_error = None;
+    for entry in entries {
+        let removed = entry.and_then(|entry| {
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            }
+        });
+        if let Err(error) = removed {
+            first_error.get_or_insert(error);
+        }
+    }
+    log_clear(dir);
+    first_error.map_or(Ok(()), Err)
+}
+
 /// Install stderr logging (ends up in the journal on device) and, with a directory, the
 /// in-app log file: warnings and errors until [`set_log_level`] says otherwise;
 /// `THREESEA_LOG` (an env filter) overrides it for development. Idempotent; the file sink
@@ -422,6 +450,34 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_data_dir_leaves_it_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "threesea.db",
+            "threesea.db-wal",
+            "threesea.db-shm",
+            LOG_FILE,
+            LOG_FILE_OLD,
+        ] {
+            std::fs::write(dir.path().join(name), b"old").unwrap();
+        }
+        std::fs::create_dir_all(dir.path().join("media/inner")).unwrap();
+        std::fs::write(dir.path().join("media/inner/1.file"), b"old").unwrap();
+
+        remove_data_dir(dir.path()).unwrap();
+
+        // The process-wide log sink belongs to no test here, so it may or may not reopen a log.
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != LOG_FILE)
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        // Nothing there is nothing to do: a repeat after a crash, say.
+        remove_data_dir(&dir.path().join("not there")).unwrap();
+    }
 
     #[test]
     fn log_file_rotates_reads_and_clears() {

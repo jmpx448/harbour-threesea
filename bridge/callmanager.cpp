@@ -312,6 +312,13 @@ void CallManager::endCallWithMicrophone()
 #endif
 }
 
+void CallManager::forget()
+{
+    stopMedia();
+    m_endedTimer.stop();
+    setState(QStringLiteral("idle"));
+}
+
 void CallManager::end(const QString &result)
 {
     stopMedia();
