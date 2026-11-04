@@ -117,6 +117,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_CHAT_SUMMARIES,
     // 34: per-chat notification tones (until now in the plain settings file)
     crate::chat_notifications::MIGRATION_TONES,
+    // 35: the creator back where a group sync dropped them
+    crate::groups::MIGRATION_SYNC,
 ];
 
 /// Setting keys.

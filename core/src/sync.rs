@@ -247,17 +247,19 @@ fn group_key(
 
 fn apply_group(
     store: &Store,
+    user: &str,
     mut synced: d2d_sync::Group,
     events: &mut Vec<CoreEvent>,
 ) -> Result<bool, StoreError> {
     let Some((key, identity)) = group_key(synced.group_identity.as_ref()) else {
         return Ok(false);
     };
+    let creator = identity.creator_identity.to_string();
     let mut stored = store.group(&key)?.unwrap_or(crate::groups::Group {
         key: key.clone(),
         identity,
         name: String::new(),
-        members: Vec::new(),
+        members: crate::groups::normalized_members([], &creator, user),
         left: false,
         created_at: synced
             .created_at
@@ -270,7 +272,7 @@ fn apply_group(
         stored.name = name;
     }
     if let Some(members) = synced.member_identities {
-        stored.members = members.identities;
+        stored.members = crate::groups::normalized_members(members.identities, &creator, user);
     }
     if let Some(state) = synced
         .user_state
@@ -279,6 +281,16 @@ fn apply_group(
         stored.left = state != group::UserState::Member;
     }
     store.upsert_group(&stored)?;
+    // Their contacts come first by the protocol; if one doesn't, messages to them would go nowhere.
+    let unknown: Vec<String> = stored
+        .members
+        .iter()
+        .filter(|member| !stored.left && store.contact(member).ok().flatten().is_none())
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        events.push(CoreEvent::UnknownMembers(unknown));
+    }
     if let Some(blob) = picture(synced.profile_picture.take()) {
         events.push(CoreEvent::SyncPicture {
             target: key.clone(),
@@ -330,16 +342,17 @@ pub fn contact_sync(
 
 pub fn group_sync(
     store: &Store,
+    user: &str,
     sync: GroupSync,
     events: &mut Vec<CoreEvent>,
 ) -> Result<(), StoreError> {
     let changed = match sync.action {
         Some(group_sync::Action::Create(create)) => match create.group {
-            Some(group) => apply_group(store, group, events)?,
+            Some(group) => apply_group(store, user, group, events)?,
             None => false,
         },
         Some(group_sync::Action::Update(update)) => match update.group {
-            Some(group) => apply_group(store, group, events)?,
+            Some(group) => apply_group(store, user, group, events)?,
             None => false,
         },
         Some(group_sync::Action::Delete(delete)) => match group_key(delete.group_identity.as_ref())
@@ -450,4 +463,136 @@ pub fn user_profile_sync(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use libthreema::protobuf::common::Identities;
+
+    use super::*;
+
+    const USER: &str = "USER0001";
+    const CREATOR: &str = "CREATOR1";
+    const BOB: &str = "00000BOB";
+    const EVE: &str = "00000EVE";
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        (dir, store)
+    }
+
+    fn synced(creator: &str) -> d2d_sync::Group {
+        d2d_sync::Group {
+            group_identity: Some(ProtoGroupIdentity {
+                group_id: 7,
+                creator_identity: creator.to_owned(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn listing(creator: &str, members: &[&str]) -> d2d_sync::Group {
+        d2d_sync::Group {
+            member_identities: Some(Identities {
+                identities: members.iter().map(ToString::to_string).collect(),
+            }),
+            ..synced(creator)
+        }
+    }
+
+    fn create(store: &Store, group: d2d_sync::Group) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        group_sync(
+            store,
+            USER,
+            GroupSync {
+                action: Some(group_sync::Action::Create(group_sync::Create {
+                    group: Some(group),
+                })),
+            },
+            &mut events,
+        )
+        .unwrap();
+        events
+    }
+
+    fn update(store: &Store, group: d2d_sync::Group) {
+        group_sync(
+            store,
+            USER,
+            GroupSync {
+                action: Some(group_sync::Action::Update(group_sync::Update {
+                    group: Some(group),
+                    member_state_changes: Default::default(),
+                })),
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
+    fn key(creator: &str) -> String {
+        let (key, _) = group_key(synced(creator).group_identity.as_ref()).unwrap();
+        key
+    }
+
+    #[test]
+    fn the_creator_stays_a_member_of_someone_elses_group() {
+        let (_dir, store) = store();
+        // The protocol's list has neither the creator nor us; what we keep has the creator.
+        create(&store, listing(CREATOR, &[BOB]));
+        assert_eq!(
+            store.group(&key(CREATOR)).unwrap().unwrap().members,
+            vec![CREATOR, BOB]
+        );
+        update(&store, listing(CREATOR, &[BOB, EVE]));
+        assert_eq!(
+            store.group(&key(CREATOR)).unwrap().unwrap().members,
+            vec![CREATOR, BOB, EVE]
+        );
+        // Whatever a device sends: no doubles, not us.
+        update(&store, listing(CREATOR, &[EVE, USER, CREATOR, EVE]));
+        assert_eq!(
+            store.group(&key(CREATOR)).unwrap().unwrap().members,
+            vec![CREATOR, EVE]
+        );
+        // Nothing said about members: nothing changes.
+        update(&store, synced(CREATOR));
+        assert_eq!(
+            store.group(&key(CREATOR)).unwrap().unwrap().members,
+            vec![CREATOR, EVE]
+        );
+    }
+
+    #[test]
+    fn our_own_group_keeps_just_the_others() {
+        let (_dir, store) = store();
+        create(&store, listing(USER, &[BOB]));
+        assert_eq!(store.group(&key(USER)).unwrap().unwrap().members, vec![BOB]);
+    }
+
+    #[test]
+    fn a_new_group_without_a_list_still_has_its_creator() {
+        let (_dir, store) = store();
+        create(&store, synced(CREATOR));
+        assert_eq!(
+            store.group(&key(CREATOR)).unwrap().unwrap().members,
+            vec![CREATOR]
+        );
+    }
+
+    #[test]
+    fn members_we_have_no_contact_for_are_looked_up() {
+        let (_dir, store) = store();
+        store
+            .upsert_contact(&crate::contacts::test_contact(BOB))
+            .unwrap();
+        let events = create(&store, listing(CREATOR, &[BOB, EVE]));
+        let asked = events.iter().find_map(|event| match event {
+            CoreEvent::UnknownMembers(identities) => Some(identities.clone()),
+            _ => None,
+        });
+        assert_eq!(asked, Some(vec![CREATOR.to_owned(), EVE.to_owned()]));
+    }
 }

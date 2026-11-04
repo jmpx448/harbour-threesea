@@ -54,6 +54,18 @@ pub(crate) const MIGRATION_PICTURES: &str = "
     ALTER TABLE groups ADD COLUMN picture TEXT;
     ALTER TABLE groups ADD COLUMN picture_version INTEGER NOT NULL DEFAULT 0;";
 
+/// Store migration 35. The creator back into the groups an older version's group sync took them
+/// out of: without them, everything they wrote was dropped as coming from a stranger, and nothing
+/// we wrote reached them. An empty list is how such a sync left a group it made by mistake; it is
+/// someone else's group, so it isn't the notes group it looked like.
+pub(crate) const MIGRATION_SYNC: &str = r#"
+    UPDATE groups
+       SET members = CASE WHEN members = '[]' THEN '["' || creator || '"]'
+                          ELSE '["' || creator || '",' || substr(members, 2) END
+     WHERE left_group = 0
+       AND creator != (SELECT threema_id FROM identity WHERE id = 1)
+       AND NOT EXISTS (SELECT 1 FROM json_each(groups.members) AS m WHERE m.value = groups.creator);"#;
+
 /// _Recently resynced_ lasts an hour (both directions).
 const RESYNC_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
@@ -97,6 +109,26 @@ impl GroupPicture {
     }
 }
 
+/// `members` as we keep them (see the module docs), from any list of identities: no duplicates,
+/// not the user, the creator first unless that is the user. The sync protocol's lists leave the
+/// creator out.
+pub(crate) fn normalized_members(
+    listed: impl IntoIterator<Item = String>,
+    creator: &str,
+    user: &str,
+) -> Vec<String> {
+    let mut members = Vec::new();
+    if creator != user {
+        members.push(creator.to_owned());
+    }
+    for member in listed {
+        if member != user && !members.contains(&member) && member != creator {
+            members.push(member);
+        }
+    }
+    members
+}
+
 /// A stored group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
@@ -132,6 +164,16 @@ pub fn parse_key(key: &str) -> Option<GroupIdentity> {
 }
 
 impl Group {
+    /// `members` as the sync protocol wants them: neither the creator nor the user.
+    pub(crate) fn sync_members(&self, user: &str) -> Vec<String> {
+        let creator = self.identity.creator_identity.as_str();
+        self.members
+            .iter()
+            .filter(|member| *member != creator && *member != user)
+            .cloned()
+            .collect()
+    }
+
     pub fn to_json(&self, user: &str, display_name: impl Fn(&str) -> String) -> Value {
         let creator = self.identity.creator_identity.to_string();
         json!({
@@ -825,7 +867,9 @@ fn receive_setup(
                 .cloned()
                 .collect();
             current.insert(user.to_owned());
-            if current == members {
+            // A list without the creator is a change, whatever else it says: an older version's
+            // group sync could have taken them out, and this setup is what brings them back.
+            if current == members && group.members.contains(&creator) {
                 return Ok(());
             }
         }
@@ -847,7 +891,7 @@ fn receive_setup(
     }
     // Everyone but us, the creator included.
     let mut new_members: Vec<String> = members.into_iter().filter(|m| m != user).collect();
-    new_members.insert(0, creator);
+    new_members.insert(0, creator.clone());
     outcome.unknown_members = new_members
         .iter()
         .filter(|m| !contact_exists(m))
@@ -869,9 +913,10 @@ fn receive_setup(
         }
         Some(mut group) => {
             let rejoined = group.left;
+            // The creator was always in it: coming back after a damaged sync is no news.
             let added: Vec<String> = new_members
                 .iter()
-                .filter(|m| rejoined || !group.members.contains(m))
+                .filter(|m| !rejoined && !group.members.contains(m) && **m != creator)
                 .cloned()
                 .collect();
             let removed: Vec<String> = if rejoined {
@@ -1209,6 +1254,82 @@ mod tests {
         let kinds = outbox_kinds(&store);
         assert_eq!(kinds.len(), before + 1);
         assert!(kinds.contains(&(OUTBOX_GROUP_LEAVE.into(), vec!["UNKNOWN1".into()])));
+    }
+
+    fn stored_group(store: &Store, creator: &str, members: &[&str], left: bool) -> String {
+        let group_key = key(&gid(creator));
+        store
+            .upsert_group(&Group {
+                key: group_key.clone(),
+                identity: gid(creator),
+                name: "Crew".into(),
+                members: members.iter().map(ToString::to_string).collect(),
+                left,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        group_key
+    }
+
+    #[test]
+    fn a_setup_brings_a_missing_creator_back_without_a_line() {
+        let (_dir, store) = store();
+        let group_key = stored_group(&store, CREATOR, &[BOB], false);
+        let outcome = run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        assert_eq!(
+            store.group(&group_key).unwrap().unwrap().members,
+            vec![CREATOR, BOB]
+        );
+        assert!(outcome.added.is_empty());
+    }
+
+    #[test]
+    fn the_migration_repairs_groups_a_sync_took_the_creator_out_of() {
+        let (_dir, store) = store();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: USER.into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        let damaged = stored_group(&store, CREATOR, &[BOB, "00000EVE"], false);
+        let emptied = {
+            let group = Group {
+                key: key(&GroupIdentity {
+                    creator_identity: id(CREATOR),
+                    group_id: 2,
+                }),
+                identity: GroupIdentity {
+                    creator_identity: id(CREATOR),
+                    group_id: 2,
+                },
+                name: String::new(),
+                members: Vec::new(),
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            };
+            store.upsert_group(&group).unwrap();
+            group.key
+        };
+        let notes = stored_group(&store, USER, &[], false);
+        let fine = stored_group(&store, BOB, &[BOB, CREATOR], false);
+        let left = stored_group(&store, BLOCKED, &[CREATOR], true);
+        let before = |key: &str| store.group(key).unwrap().unwrap().members;
+        let (notes_before, fine_before, left_before) =
+            (before(&notes), before(&fine), before(&left));
+
+        store.conn.execute_batch(MIGRATION_SYNC).unwrap();
+
+        assert_eq!(before(&damaged), vec![CREATOR, BOB, "00000EVE"]);
+        assert_eq!(before(&emptied), vec![CREATOR]);
+        assert_eq!(before(&notes), notes_before);
+        assert_eq!(before(&fine), fine_before);
+        assert_eq!(before(&left), left_before);
     }
 
     #[test]

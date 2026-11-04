@@ -192,7 +192,7 @@ pub fn apply(
         }
         Some(envelope::Content::GroupSync(sync)) => {
             let mut new_events = Vec::new();
-            crate::sync::group_sync(store, sync, &mut new_events)?;
+            crate::sync::group_sync(store, user.as_str(), sync, &mut new_events)?;
             events.borrow_mut().extend(new_events);
             Ok(())
         }

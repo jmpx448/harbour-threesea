@@ -2,8 +2,15 @@
 //! Multi-device commands (ADR 0011): state, linked devices, removing devices, turning it on
 //! (from linking) and off.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
+use libthreema::protobuf::{
+    common::{DeltaImage, Unit, delta_image},
+    d2d::{
+        ContactSync, GroupSync, contact_sync, envelope::Content, group_sync,
+        transaction_scope::Scope,
+    },
+};
 use serde_json::{Value, json};
 use tokio::{sync::oneshot, time::timeout};
 
@@ -12,7 +19,9 @@ use crate::{
     connection::{
         DeviceGroupError, DropOutcome, JOIN_REPLY_LIMIT, JoinOutcome, LinkedDevice, ToConnection,
     },
+    groups::Group,
     multidevice::{Properties, SETTING_FS_TERMINATE},
+    store::Store,
 };
 
 /// A question to the mediator (30 s) and the wait for a connection coming up (15 s).
@@ -516,8 +525,7 @@ impl App {
     /// After a command that changed something other devices keep too: reflect it.
     pub(crate) async fn reflect_change(&self, change: SyncChange, result: &Value) {
         use libthreema::protobuf::d2d::{
-            ContactSync, GroupSync, SettingsSync, UserProfileSync, contact_sync, envelope::Content,
-            group_sync, settings_sync, transaction_scope::Scope, user_profile_sync,
+            SettingsSync, UserProfileSync, settings_sync, user_profile_sync,
         };
         if !matches!(self.store.multi_device(), Ok(Some(_))) {
             return;
@@ -558,7 +566,7 @@ impl App {
                     } else {
                         group_sync::Action::Update(group_sync::Update {
                             group: Some(synced),
-                            member_state_changes: std::collections::HashMap::new(),
+                            member_state_changes: HashMap::new(),
                         })
                     };
                     vec![(
@@ -575,7 +583,13 @@ impl App {
                             .map_or_else(Vec::new, |group| {
                                 crate::join::group_sync(&self.store, &group)
                                     .map(|mut synced| {
+                                        // Only what a chat's marks change: the rest is the
+                                        // creator's and may have moved on elsewhere.
                                         synced.profile_picture = None;
+                                        synced.member_identities = None;
+                                        synced.name = None;
+                                        synced.created_at = None;
+                                        synced.user_state = None;
                                         vec![(
                                             Scope::GroupSync,
                                             Content::GroupSync(GroupSync {
@@ -615,9 +629,10 @@ impl App {
                     let Some(group) = self.store.group(&key)? else {
                         return Ok(Vec::new());
                     };
-                    let mut synced = crate::join::group_sync(&self.store, &group)?;
-                    synced.name = None;
-                    synced.member_identities = None;
+                    let mut synced = group_delta(&group);
+                    synced.profile_picture = Some(DeltaImage {
+                        image: Some(delta_image::Image::Removed(Unit {})),
+                    });
                     vec![(
                         Scope::GroupSync,
                         Content::GroupSync(GroupSync {
@@ -702,26 +717,39 @@ impl App {
         }
         match built {
             Ok(items) => {
-                use prost::Message as _;
-                for (scope, content) in items {
-                    #[expect(deprecated, reason = "Padding is still part of the envelope")]
-                    let envelope = libthreema::protobuf::d2d::Envelope {
-                        padding: Vec::new(),
-                        device_id: 0,
-                        protocol_version: 0,
-                        content: Some(content),
-                    };
-                    if let Err(error) = self
-                        .store
-                        .queue_sync(scope as i32, &envelope.encode_to_vec())
-                    {
-                        tracing::warn!(%error, "sync not queued");
-                    }
-                }
+                queue_syncs(&self.store, items);
                 self.tell_connection(ToConnection::ReflectSync);
             }
             Err(error) => tracing::warn!(%error, "sync not reflected"),
         }
+    }
+}
+
+/// Queue encoded sync envelopes; the connection reflects them in order, each in its transaction.
+fn queue_syncs(store: &Store, items: Vec<(Scope, Content)>) {
+    use prost::Message as _;
+    for (scope, content) in items {
+        #[expect(deprecated, reason = "Padding is still part of the envelope")]
+        let envelope = libthreema::protobuf::d2d::Envelope {
+            padding: Vec::new(),
+            device_id: 0,
+            protocol_version: 0,
+            content: Some(content),
+        };
+        if let Err(error) = store.queue_sync(scope as i32, &envelope.encode_to_vec()) {
+            tracing::warn!(%error, "sync not queued");
+        }
+    }
+}
+
+/// A group sync that only names the group: what changed goes on top.
+fn group_delta(group: &Group) -> libthreema::protobuf::d2d_sync::Group {
+    libthreema::protobuf::d2d_sync::Group {
+        group_identity: Some(libthreema::protobuf::common::GroupIdentity {
+            group_id: group.identity.group_id,
+            creator_identity: group.identity.creator_identity.as_str().to_owned(),
+        }),
+        ..Default::default()
     }
 }
 
@@ -815,6 +843,68 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         app.connection = Some(tx);
         rx
+    }
+
+    /// What the connection would reflect next, removed from the queue.
+    fn next_group_sync(app: &App) -> group_sync::Action {
+        use prost::Message as _;
+        let (id, scope, content) = app.store.next_sync().unwrap().unwrap();
+        app.store.sync_done(id).unwrap();
+        assert_eq!(scope, Scope::GroupSync as i32);
+        let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+        let Some(Content::GroupSync(sync)) = envelope.content else {
+            panic!("not a group sync");
+        };
+        sync.action.unwrap()
+    }
+
+    fn update_of(action: group_sync::Action) -> group_sync::Update {
+        let group_sync::Action::Update(update) = action else {
+            panic!("not an update");
+        };
+        update
+    }
+
+    fn foreign_group(app: &App) -> Group {
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: libthreema::common::ThreemaId::try_from("CREATOR1").unwrap(),
+            group_id: 7,
+        };
+        let group = Group {
+            key: crate::groups::key(&identity),
+            identity,
+            name: "Crew".into(),
+            members: vec!["CREATOR1".into(), "BBBBBBBB".into(), "CCCCCCCC".into()],
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        for id in ["CREATOR1", "BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        group
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn marking_someone_elses_group_sends_only_the_mark() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let group = foreign_group(&app);
+        let pin = json!({"id": 1, "cmd": "setPinned", "identity": group.key, "pinned": true});
+        let reply: Value = serde_json::from_str(&app.handle(&pin.to_string()).await).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        let synced = update_of(next_group_sync(&app)).group.unwrap();
+        assert!(synced.conversation_visibility.is_some());
+        assert!(synced.member_identities.is_none());
+        assert_eq!(
+            (synced.name, synced.user_state, synced.created_at),
+            (None, None, None)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -298,7 +298,7 @@ pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group,
             image: Some(delta_image::Image::Removed(Unit {})),
         }),
         member_identities: Some(Identities {
-            identities: stored.members.clone(),
+            identities: group_sync_members(store, stored)?,
         }),
         notification_trigger_policy_override: Some(group::NotificationTriggerPolicyOverride {
             r#override: Some(notification),
@@ -315,6 +315,25 @@ pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group,
         conversation_category: Some(category(store, &stored.key)?),
         conversation_visibility: Some(visibility(&stored.key, &pinned, &archived)),
     })
+}
+
+/// A group's member list for the other devices: without the creator and the user
+/// (md-d2d-sync.proto), and without anyone whose lookup hasn't given us a contact yet, as the
+/// others only get to know the people we have a contact for.
+pub(crate) fn group_sync_members(
+    store: &Store,
+    stored: &crate::groups::Group,
+) -> Result<Vec<String>, StoreError> {
+    let user = store
+        .identity()?
+        .ok_or_else(|| StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+    let mut members = Vec::new();
+    for member in stored.sync_members(&user.threema_id) {
+        if store.contact(&member)?.is_some() {
+            members.push(member);
+        }
+    }
+    Ok(members)
 }
 
 /// Collect everything for the new device. `dgk`: the device group key.
@@ -444,7 +463,58 @@ fn wipe_secrets(message: &mut EdToNd) {
 
 #[cfg(test)]
 mod tests {
+    use libthreema::common::{GroupIdentity, ThreemaId};
+
     use super::*;
+
+    fn with_group(left: bool) -> (tempfile::TempDir, Store, crate::groups::Group) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db"), &[2; 32]).unwrap();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "TESTTEST".into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        let identity = GroupIdentity {
+            creator_identity: ThreemaId::try_from("CREATOR1").unwrap(),
+            group_id: 7,
+        };
+        let group = crate::groups::Group {
+            key: crate::groups::key(&identity),
+            identity,
+            name: "Crew".into(),
+            members: vec![
+                "CREATOR1".into(),
+                "ABCD1234".into(),
+                "TESTTEST".into(),
+                "UNKNOWN1".into(),
+            ],
+            left,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        store.upsert_group(&group).unwrap();
+        for id in ["CREATOR1", "ABCD1234"] {
+            store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        (dir, store, group)
+    }
+
+    #[test]
+    fn a_group_goes_out_without_the_creator_the_user_and_people_without_a_contact() {
+        let (_dir, store, group) = with_group(false);
+        let synced = group_sync(&store, &group).unwrap();
+        assert_eq!(
+            synced.member_identities.unwrap().identities,
+            vec!["ABCD1234"]
+        );
+        assert_eq!(synced.user_state, Some(group::UserState::Member as i32));
+    }
 
     #[test]
     fn secrets_are_wiped_and_the_buffer_has_room_for_the_tag() {
