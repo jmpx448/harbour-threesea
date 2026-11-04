@@ -8,6 +8,15 @@ Page {
     SilicaFlickable {
         anchors.fill: parent
 
+        PullDownMenu {
+            visible: backend.dataRemovalStuck
+            MenuItem {
+                //% "Try again"
+                text: qsTrId("threesea-me-try-again")
+                onClicked: backend.retryDataRemoval()
+            }
+        }
+
         BusyIndicator {
             id: busy
             anchors.centerIn: parent
@@ -27,10 +36,16 @@ Page {
 
         ViewPlaceholder {
             enabled: backend.state === "error"
-            //% "Threesea could not start"
-            text: qsTrId("threesea-la-startup-failed")
-            //% "The encrypted storage could not be opened (%1)."
-            hintText: qsTrId("threesea-la-startup-failed-hint").arg(backend.errorText)
+            text: backend.dataRemovalStuck
+                  //% "Removing the ID did not finish"
+                  ? qsTrId("threesea-la-removal-stuck")
+                  //% "Threesea could not start"
+                  : qsTrId("threesea-la-startup-failed")
+            hintText: (backend.dataRemovalStuck
+                       //% "Pull down to try again, or close Threesea and open it again (%1)."
+                       ? qsTrId("threesea-la-removal-stuck-hint")
+                       //% "The encrypted storage could not be opened (%1)."
+                       : qsTrId("threesea-la-startup-failed-hint")).arg(backend.errorText)
         }
     }
 }

@@ -103,6 +103,8 @@ class ThreeseBackend : public QObject
     Q_PROPERTY(bool dataEncrypted READ dataEncrypted NOTIFY dataEncryptionChanged)
     // The database was opened with the passphrase this run (the app lock needn't ask again).
     Q_PROPERTY(bool unlockedAtStart READ unlockedAtStart NOTIFY stateChanged)
+    // Removing the ID stopped halfway (state "error"): retryDataRemoval goes on with it.
+    Q_PROPERTY(bool dataRemovalStuck READ dataRemovalStuck NOTIFY stateChanged)
 
 public:
     // `engine` is used to hand results to QML callbacks; it also becomes the parent.
@@ -317,6 +319,7 @@ public:
                                     static_cast<size_t>(m_wrappedKey.size())) == 1;
     }
     bool unlockedAtStart() const { return m_unlockedAtStart; }
+    bool dataRemovalStuck() const { return m_removingData && m_state == QLatin1String("error"); }
     bool dataEncrypted() const { return !m_wrappedKey.isEmpty(); }
     // Whether `passphrase` opens the encrypted key; callback(ok). Slow (scrypt), off the GUI thread.
     Q_INVOKABLE void checkPassphrase(const QString &passphrase, const QJSValue &callback = QJSValue());
@@ -332,6 +335,7 @@ public:
     // database under a new key; everything of the ID goes (ADR 0018). dataRemoved or
     // dataRemovalFailed says how it ended.
     Q_INVOKABLE void removeAllData(const QString &pin);
+    Q_INVOKABLE void retryDataRemoval();
     // Reload the contact list model.
     Q_INVOKABLE void refreshContacts();
     // Recount unread messages (cover, notifications).
@@ -373,6 +377,7 @@ private:
     void sendSquarePicture(const QString &path, QVariantMap request, const QJSValue &callback,
                            bool safeCopy = false);
     void fail(const QString &reason);
+    void stopCore();
     void requestDataRemoval(const QString &pin);
     void dataRemovalRefused(const QVariantMap &error, const QString &kind);
     void removeTempSources(quint64 id);
@@ -411,6 +416,8 @@ private:
     bool m_unlockedAtStart = false;
     // Removing the ID: from the request until the new core runs. Status replies don't count then.
     bool m_removingData = false;
+    // The window was told (once: a repeat after a failure has nothing new to say).
+    bool m_dataRemovedSent = false;
     QString m_stateBeforeRemoval;
     // The old core has stopped: what it sent last is still queued, and is for nobody any more.
     bool m_discardCoreMessages = false;

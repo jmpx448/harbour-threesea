@@ -366,22 +366,43 @@ void ThreeseBackend::requestDataRemoval(const QString &pin)
                 QSettings settings;
                 settings.setValue(RemovalPendingKey, result.value(QStringLiteral("linkedDevicesRemain")).toBool());
                 settings.sync();
-                {
-                    QWriteLocker locker(&m_coreLock);
-                    threesea_core_stop(m_core);
-                    m_core = nullptr;
-                }
+                stopCore();
                 m_discardCoreMessages = true;
                 // After everything the old core has posted.
                 QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
             });
 }
 
+void ThreeseBackend::retryDataRemoval()
+{
+    if (!dataRemovalStuck()) {
+        return;
+    }
+    m_state = QStringLiteral("removing");
+    emit stateChanged();
+    QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+}
+
+void ThreeseBackend::stopCore()
+{
+    QWriteLocker locker(&m_coreLock);
+    if (m_core) {
+        // Blocks until the core thread has stopped; no callbacks afterwards.
+        threesea_core_stop(m_core);
+        m_core = nullptr;
+    }
+}
+
 void ThreeseBackend::finishDataRemoval()
 {
+    // A new core that died on its start, when trying again.
+    stopCore();
     m_discardCoreMessages = false;
     // Listeners close what still shows or plays something of the ID.
-    emit dataRemoved(QSettings().value(RemovalPendingKey).toBool());
+    if (!m_dataRemovedSent) {
+        m_dataRemovedSent = true;
+        emit dataRemoved(QSettings().value(RemovalPendingKey).toBool());
+    }
 
     m_unreadTimer.stop();
     m_callbacks.clear();
@@ -429,7 +450,7 @@ void ThreeseBackend::finishDataRemoval()
     emit notificationSettingsChanged();
     emit dataEncryptionChanged();
     if (!removed) {
-        // The new key couldn't open what stayed. The next start tries again.
+        // A new key couldn't open what stayed. The user can try again, or the next start does.
         fail(QStringLiteral("removing the stored data"));
         return;
     }
@@ -440,13 +461,6 @@ void ThreeseBackend::finishDataRemoval()
 
 void ThreeseBackend::startCore(QByteArray key)
 {
-    if (m_removingData) {
-        // The old file and the old key are gone: nothing left to finish after a crash.
-        QSettings settings;
-        settings.remove(RemovalPendingKey);
-        settings.sync();
-        m_removingData = false;
-    }
     m_dbKey = key;
     QDir().mkpath(dataDir());
     // In-app captures left behind (e.g. the app was closed before sending): never kept.
@@ -467,6 +481,11 @@ void ThreeseBackend::fail(const QString &reason)
     qWarning("threesea: startup failed: %s", qPrintable(reason)); // log-ok: the app's own codes and core error kinds
     m_state = QStringLiteral("error");
     m_errorText = reason;
+    if (m_removingData) {
+        // The settings are back at their defaults, so the process would stay when the window
+        // closes and no new start could ever finish this. It must be able to end.
+        QGuiApplication::setQuitOnLastWindowClosed(true);
+    }
     emit stateChanged();
 }
 
@@ -1057,6 +1076,15 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
     if (message.contains(QStringLiteral("event"))) {
         const QString name = message.value(QStringLiteral("event")).toString();
         if (name == QLatin1String("started")) {
+            if (m_removingData) {
+                // New database, new key, a core running on them: nothing left to finish.
+                QSettings settings;
+                settings.remove(RemovalPendingKey);
+                settings.sync();
+                m_removingData = false;
+                m_dataRemovedSent = false;
+                QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+            }
             refresh();
         } else if (name == QLatin1String("fatal")) {
             fail(message.value(QStringLiteral("kind")).toString());
