@@ -355,6 +355,7 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
     request.insert(QStringLiteral("rendering"), asPhoto ? QStringLiteral("media") : QStringLiteral("file"));
     // Picker results are file:// URLs.
     const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_tempSources.insert(id, localPath);
     auto *preparer = new FilePreparer(localPath, request);
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
     QThreadPool::globalInstance()->start(preparer);
@@ -403,6 +404,15 @@ QString ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int r
         return QString();
     }
     return out;
+}
+
+void ThreeseBackend::removeTempSources(quint64 id)
+{
+    const QStringList paths = m_tempSources.values(id);
+    m_tempSources.remove(id);
+    for (const QString &path : paths) {
+        removeCapture(path);
+    }
 }
 
 void ThreeseBackend::removeCapture(const QString &path) const
@@ -529,6 +539,7 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
         request.insert(QStringLiteral("duration"), seconds);
     }
     const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_tempSources.insert(id, localPath);
     // Where a scaled-down copy may go (Settings → Media & storage → Video size). Nothing is
     // written unless the video is really scaled; the file goes once the core has read it.
     const QString scratch = captureFile(QStringLiteral("mp4"));
@@ -704,10 +715,7 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
     if (!error.isEmpty()) {
         const quint64 id = request.value(QStringLiteral("id")).toULongLong();
         // Nothing was sent, so nothing will answer and clean up after it.
-        const QString temp = m_tempSources.take(id);
-        if (!temp.isEmpty()) {
-            removeCapture(temp);
-        }
+        removeTempSources(id);
         QJSValue callback = m_callbacks.take(id);
         if (callback.isCallable()) {
             callback.call(QJSValueList() << false << QJSValue() << QStringLiteral("internal") << error);
@@ -715,6 +723,7 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
         return;
     }
     if (!m_core) {
+        removeTempSources(request.value(QStringLiteral("id")).toULongLong());
         return;
     }
     QByteArray json = QJsonDocument(QJsonObject::fromVariantMap(request)).toJson(QJsonDocument::Compact);
@@ -949,11 +958,8 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         m_contacts->update(result.value(QStringLiteral("contacts")).toArray().toVariantList());
     }
 
-    // A scaled-down video the core has now read into its own store.
-    const QString temp = m_tempSources.take(id);
-    if (!temp.isEmpty()) {
-        removeCapture(temp);
-    }
+    // What the core has now read into its own store.
+    removeTempSources(id);
 
     const NativeCallback native = m_nativeCallbacks.take(id);
     if (native) {

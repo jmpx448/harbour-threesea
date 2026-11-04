@@ -361,6 +361,7 @@ private:
     void sendSquarePicture(const QString &path, QVariantMap request, const QJSValue &callback,
                            bool safeCopy = false);
     void fail(const QString &reason);
+    void removeTempSources(quint64 id);
     QString startConfigJson() const;
 
     QJSEngine *m_engine;
@@ -374,8 +375,10 @@ private:
     QTimer m_unreadTimer;
     quint64 m_nextId = 1;
     QHash<quint64, QJSValue> m_callbacks;
-    // Scaled-down videos waiting for their send to finish (id -> file in the capture cache).
-    QHash<quint64, QString> m_tempSources;
+    // What a send is reading from (id -> files); once it has finished, those in the capture cache
+    // go: the capture, and a video's scaled-down copy. Here, not in the chat page's callback: that
+    // runs in nothing once the page has gone, and the plain file would stay.
+    QMultiHash<quint64, QString> m_tempSources;
     QHash<quint64, NativeCallback> m_nativeCallbacks;
     // The chats' own tones (from the core, while it runs): the notifications ask for them at once.
     QVariantMap m_chatTones;

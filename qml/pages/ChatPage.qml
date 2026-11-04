@@ -775,7 +775,7 @@ Page {
         if (!sendingQueue) sendNext()
     }
     function sendNow(file) {
-        backend.sendFile(identity, file.path, file.photo, file.caption, function() { backend.removeCapture(file.path) })
+        backend.sendFile(identity, file.path, file.photo, file.caption)
     }
     function sendNext() {
         if (sendQueue.length === 0) {
@@ -791,8 +791,6 @@ Page {
             return
         }
         backend.sendFile(identity, file.path, file.photo, file.caption, function(ok, result, kind, message) {
-            // An in-app capture is in the encrypted store now (or failed): no copy stays.
-            backend.removeCapture(file.path)
             if (ok) {
                 page.addMessage(result)
             } else {
@@ -1164,6 +1162,9 @@ Page {
         // Files still waiting to be sent go to the core at once; a video's thumbnail is made here,
         // so a waiting video goes as a file.
         for (var i = 0; i < sendQueue.length; ++i) sendNow(sendQueue[i])
+        if (videoPreparer.path.length > 0) {
+            sendNow({ path: videoPreparer.path, photo: false, caption: videoPreparer.caption })
+        }
         saveDraft()
         stopTyping()
         if (window.openChat === identity) window.openChat = ""
@@ -2329,7 +2330,6 @@ Page {
                 }
             }
             var sent = function(ok, result, kind, message) {
-                backend.removeCapture(path)
                 done(ok, result, kind, message)
                 page.sendNext()
             }
