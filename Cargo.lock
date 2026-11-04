@@ -2285,11 +2285,13 @@ version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "blake2",
+ "bytes",
  "crypto_secretbox",
  "data-encoding",
  "flate2",
  "futures-util",
  "hmac 0.12.1",
+ "http-body",
  "image",
  "libthreema",
  "opus-pure",

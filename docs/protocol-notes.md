@@ -304,6 +304,18 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   rules: `shouldPersistUploadForMessage` and `shouldMarkAsDone` in `MessageServiceImpl.java`. One
   deviation: without multi-device we send no `done` for our own 1:1 file fetched again after a
   clean-up (Android does), as its recipient may not have it yet.
+- Time limits as on Android: 30 s to connect and 100 s without anything moving, no limit on the
+  whole transfer (`BlobUploader.kt`, `BlobLoader.kt`: connect and read timeouts only). reqwest's
+  `TCP_USER_TIMEOUT` of 30 s is raised to 120 s, or any blackout that long would end the transfer.
+- An upload's progress is seen by the body being taken piece by piece; once all of it is taken,
+  300 s for the answer. Taken means into the system's send buffer, not sent. **So uploads have a
+  floor of about 75 to 85 kbit/s:** a probe on loopback saw 943 KB read between two takes (100 s:
+  75 kbit/s) and 3.1 MB taken but unread when the last piece was (300 s: 83 kbit/s). Below that
+  an upload can fail however steadily it moves; the real figures follow the phone's buffer sizes.
+  reqwest offers no way to set `SO_SNDBUF`, so we leave it.
+- A body sent in pieces can't be sent twice: reqwest hands a 307 or 308 back instead of following
+  it, which then waits for a tap, and an HTTP/2 refused stream, which it would otherwise send again
+  by itself, fails like a network error and costs a try and a pause.
 - Libre needs no auth token (only OnPrem does).
 - Sailjail: the pickers (`Sailfish.Pickers`) need `MediaIndexing` (Tracker) besides Pictures,
   Videos, Music, Documents, Downloads; without it the picker pages stay empty.

@@ -71,7 +71,10 @@ pub async fn slot_if_wanted(
 
 const UPLOAD_URL: &str = "https://ds-blobp-upload.threema.ch/upload";
 const MULTIPART_BOUNDARY: &str = "---------------------------Boundary_Line";
-const BLOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(100);
+/// How long a blob's transfer may go without moving, as Android's read timeout. The whole may take
+/// as long as the link needs.
+const BLOB_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(100);
+const DONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Nonce of the file blob.
 pub const FILE_NONCE: [u8; 24] = {
@@ -458,13 +461,13 @@ pub async fn download(
     let url =
         mirror_url(&HEXLOWER.encode(&blob_id.0), scope).unwrap_or_else(|| download_url(blob_id));
     let request = HttpsRequest {
-        timeout: BLOB_TIMEOUT,
+        timeout: BLOB_STALL_LIMIT,
         url,
         method: HttpsMethod::Get,
         headers: Vec::new(),
         body: Vec::new(),
     };
-    let response = https.send_limited(request, limit).await.map_err(|error| {
+    let response = https.transfer(request, limit).await.map_err(|error| {
         if crate::https::is_too_large(&error) {
             MediaError::TooLarge
         } else {
@@ -484,7 +487,7 @@ pub async fn mark_done(https: &HttpsClient, blob_id: &BlobId, scope: BlobScope) 
         .unwrap_or_else(|| format!("{}/done", download_url(blob_id)));
     let result = https
         .send(HttpsRequest {
-            timeout: BLOB_TIMEOUT,
+            timeout: DONE_TIMEOUT,
             url,
             method: HttpsMethod::Post,
             headers: Vec::new(),
@@ -534,20 +537,23 @@ async fn upload_to(
     body.extend_from_slice(data);
     body.extend_from_slice(format!("\r\n--{MULTIPART_BOUNDARY}--\r\n").as_bytes());
     let response = https
-        .send(HttpsRequest {
-            timeout: BLOB_TIMEOUT,
-            // With multi-device through the mirror (public: contacts fetch it too).
-            url: mirror_url("upload", scope).map_or_else(
-                || format!("{UPLOAD_URL}?persist={}", u8::from(persist)),
-                |url| format!("{url}&persist={}", u8::from(persist)),
-            ),
-            method: HttpsMethod::Post,
-            headers: vec![HttpsHeader {
-                name: "content-type".into(),
-                value: format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
-            }],
-            body,
-        })
+        .transfer(
+            HttpsRequest {
+                timeout: BLOB_STALL_LIMIT,
+                // With multi-device through the mirror (public: contacts fetch it too).
+                url: mirror_url("upload", scope).map_or_else(
+                    || format!("{UPLOAD_URL}?persist={}", u8::from(persist)),
+                    |url| format!("{url}&persist={}", u8::from(persist)),
+                ),
+                method: HttpsMethod::Post,
+                headers: vec![HttpsHeader {
+                    name: "content-type".into(),
+                    value: format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
+                }],
+                body,
+            },
+            crate::https::MAX_RESPONSE,
+        )
         .await
         .map_err(network)?;
     if response.status != 200 {

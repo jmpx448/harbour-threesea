@@ -68,7 +68,7 @@ const PINS: &[(&str, &[&str])] = &[
 ];
 
 /// The largest response body read: an encrypted blob of the largest size, with room to spare.
-const MAX_RESPONSE: usize = crate::media::MAX_BLOB_SIZE + 64 * 1024;
+pub(crate) const MAX_RESPONSE: usize = crate::media::MAX_BLOB_SIZE + 64 * 1024;
 
 /// Redirects followed for one request (each to a Threema host).
 const MAX_REDIRECTS: usize = 5;
@@ -359,6 +359,138 @@ impl LimitedBody {
     }
 }
 
+/// Connecting to a server (name lookup, TCP, TLS), whatever the request may take after that.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long data sent may go unacknowledged before the system gives the connection up. reqwest's
+/// 30 s would end an upload, to start again in full, at the first blackout of that length, so it
+/// is longer here than a blob's stall limit, which is what decides.
+const TCP_USER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How much of a transfer's body is handed over at a time. Taking the next piece says the connection
+/// took the last one, into the system's send buffer: that it has left the phone is more than we can
+/// see, so a very slow link can fail a stall limit (docs/protocol-notes.md, "Blob server").
+const BODY_PIECE: usize = 64 * 1024;
+
+/// How long the answer to a body may take once the connection took all of it. Longer than a stall:
+/// the system's send buffer still has to go out over what may be a slow link, and the server stores
+/// the blob before it answers.
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// By when a transfer has to have moved again.
+#[derive(Clone)]
+struct Progress(Arc<std::sync::Mutex<tokio::time::Instant>>);
+
+impl Progress {
+    fn new(within: std::time::Duration) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(
+            tokio::time::Instant::now() + within,
+        )))
+    }
+
+    fn moved(&self, within: std::time::Duration) {
+        if let Ok(mut deadline) = self.0.lock() {
+            *deadline = tokio::time::Instant::now() + within;
+        }
+    }
+
+    fn deadline(&self) -> tokio::time::Instant {
+        self.0
+            .lock()
+            .map_or_else(|_| tokio::time::Instant::now(), |deadline| *deadline)
+    }
+}
+
+/// A request body that reports each piece it hands over. Its exact size is known, so it goes out
+/// with a `content-length` as any other. It can be sent only once: reqwest hands a 307 or 308
+/// back as the response instead of following it, and doesn't send it again by itself on an HTTP/2
+/// refused stream, so that one fails as a network error does.
+struct ProgressBody {
+    rest: bytes::Bytes,
+    progress: Progress,
+    stall: std::time::Duration,
+    answer_wait: std::time::Duration,
+}
+
+impl http_body::Body for ProgressBody {
+    type Data = bytes::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.rest.is_empty() {
+            return std::task::Poll::Ready(None);
+        }
+        let piece = this.rest.split_to(BODY_PIECE.min(this.rest.len()));
+        this.progress.moved(if this.rest.is_empty() {
+            this.answer_wait
+        } else {
+            this.stall
+        });
+        std::task::Poll::Ready(Some(Ok(http_body::Frame::data(piece))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.rest.is_empty()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.rest.len() as u64)
+    }
+}
+
+/// Run a request for as long as it keeps moving: it ends with a timeout once nothing went out or
+/// came in for `stall` (`answer_wait`, not shorter, once the body is out), however far it got and
+/// however long it took so far.
+async fn until_stalled(
+    builder: reqwest::RequestBuilder,
+    body: Vec<u8>,
+    limit: usize,
+    stall: std::time::Duration,
+    answer_wait: std::time::Duration,
+) -> HttpsResult {
+    let progress = Progress::new(stall);
+    let builder = if body.is_empty() {
+        builder
+    } else {
+        builder.body(reqwest::Body::wrap(ProgressBody {
+            rest: body.into(),
+            progress: progress.clone(),
+            stall,
+            answer_wait,
+        }))
+    };
+    let moved = progress.clone();
+    let exchange = async move {
+        let mut response = builder.send().await.map_err(map_error)?;
+        moved.moved(stall);
+        let status = response.status().as_u16();
+        let mut body = LimitedBody::new(response.content_length(), limit)?;
+        while let Some(chunk) = response.chunk().await.map_err(map_error)? {
+            moved.moved(stall);
+            body.push(&chunk)?;
+        }
+        Ok(HttpsResponse {
+            status,
+            body: body.bytes,
+        })
+    };
+    tokio::pin!(exchange);
+    loop {
+        tokio::select! {
+            result = &mut exchange => return result,
+            () = tokio::time::sleep_until(progress.deadline()) => {
+                if progress.deadline() <= tokio::time::Instant::now() {
+                    return Err(HttpsError::Timeout("no progress".into()));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HttpsClient {
     client: reqwest::Client,
@@ -375,6 +507,8 @@ impl HttpsClient {
             .tls_backend_preconfigured(tls)
             .user_agent(user_agent())
             .https_only(true)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .tcp_user_timeout(TCP_USER_TIMEOUT)
             // Stopping hands the redirect back as the response: an unexpected status for callers.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
@@ -397,28 +531,10 @@ impl HttpsClient {
     /// Like [`Self::send`], refusing an answer of more than `limit` bytes while it comes in; see
     /// [`is_too_large`].
     pub async fn send_limited(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
-        let method = match request.method {
-            HttpsMethod::Delete => reqwest::Method::DELETE,
-            HttpsMethod::Get => reqwest::Method::GET,
-            HttpsMethod::Post => reqwest::Method::POST,
-            HttpsMethod::Put => reqwest::Method::PUT,
-        };
-        let url = server_url(&request.url);
-        if !is_threema_url(&url) {
-            return Err(HttpsError::InvalidRequest("not a Threema host".into()));
-        }
-        let mut builder = self
-            .client
-            .request(method, url.as_ref())
+        let builder = self
+            .builder(request.method, &request.url, request.headers)?
             .timeout(request.timeout)
             .body(request.body);
-        for header in request.headers {
-            // We send our own user agent instead of libthreema's.
-            if header.name.eq_ignore_ascii_case("user-agent") {
-                continue;
-            }
-            builder = builder.header(header.name, header.value);
-        }
         let mut response = builder.send().await.map_err(map_error)?;
         let status = response.status().as_u16();
         let mut body = LimitedBody::new(response.content_length(), limit)?;
@@ -429,6 +545,40 @@ impl HttpsClient {
             status,
             body: body.bytes,
         })
+    }
+
+    /// Like [`Self::send_limited`], for a transfer that takes as long as the link needs:
+    /// `request.timeout` is how long nothing may move, not how long the whole may take.
+    pub async fn transfer(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
+        let builder = self.builder(request.method, &request.url, request.headers)?;
+        until_stalled(builder, request.body, limit, request.timeout, ANSWER_WAIT).await
+    }
+
+    fn builder(
+        &self,
+        method: HttpsMethod,
+        url: &str,
+        headers: Vec<libthreema::https::HttpsHeader>,
+    ) -> Result<reqwest::RequestBuilder, HttpsError> {
+        let method = match method {
+            HttpsMethod::Delete => reqwest::Method::DELETE,
+            HttpsMethod::Get => reqwest::Method::GET,
+            HttpsMethod::Post => reqwest::Method::POST,
+            HttpsMethod::Put => reqwest::Method::PUT,
+        };
+        let url = server_url(url);
+        if !is_threema_url(&url) {
+            return Err(HttpsError::InvalidRequest("not a Threema host".into()));
+        }
+        let mut builder = self.client.request(method, url.as_ref());
+        for header in headers {
+            // We send our own user agent instead of libthreema's.
+            if header.name.eq_ignore_ascii_case("user-agent") {
+                continue;
+            }
+            builder = builder.header(header.name, header.value);
+        }
+        Ok(builder)
     }
 
     /// POST a JSON body and return the response (for directory endpoints libthreema lacks).
@@ -504,6 +654,163 @@ mod tests {
         let mut body = LimitedBody::new(Some(1), 10).unwrap();
         assert!(is_too_large(&body.push(&[0; 11]).unwrap_err()));
         assert!(!is_too_large(&HttpsError::InvalidResponse("other".into())));
+    }
+
+    /// A local server without TLS, as the pinned client reaches none: the limits are the same.
+    async fn serve<F, Fut>(handle: F) -> (reqwest::RequestBuilder, reqwest::RequestBuilder)
+    where
+        F: FnOnce(tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle(stream).await;
+        });
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls_config().unwrap())
+            .build()
+            .unwrap();
+        (client.get(&url), client.post(&url))
+    }
+
+    /// The request's head; the content that came with it stays in `rest`.
+    async fn read_head(stream: &mut tokio::net::TcpStream, rest: &mut Vec<u8>) -> String {
+        use tokio::io::AsyncReadExt as _;
+        loop {
+            if let Some(end) = rest.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&rest[..end]).to_lowercase();
+                rest.drain(..end + 4);
+                return head;
+            }
+            let mut piece = [0; 4096];
+            let read = stream.read(&mut piece).await.unwrap();
+            assert_ne!(read, 0);
+            rest.extend_from_slice(&piece[..read]);
+        }
+    }
+
+    async fn read_body(stream: &mut tokio::net::TcpStream, mut got: usize, length: usize) {
+        use tokio::io::AsyncReadExt as _;
+        let mut piece = vec![0; 1024 * 1024];
+        while got < length {
+            let read = stream.read(&mut piece).await.unwrap();
+            assert_ne!(read, 0);
+            got += read;
+        }
+    }
+
+    const SECOND: std::time::Duration = std::time::Duration::from_secs(1);
+    const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+    #[tokio::test]
+    async fn a_download_may_take_longer_than_its_stall_limit() {
+        use tokio::io::AsyncWriteExt as _;
+        let (get, _) = serve(|mut stream| async move {
+            read_head(&mut stream, &mut Vec::new()).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..6 {
+                stream.write_all(b"x").await.unwrap();
+                tokio::time::sleep(SECOND / 2).await;
+            }
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let response = until_stalled(get, Vec::new(), 100, 2 * SECOND, SECOND)
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"xxxxxx");
+        assert!(started.elapsed() > 2 * SECOND);
+    }
+
+    #[tokio::test]
+    async fn a_download_that_stops_moving_ends() {
+        use tokio::io::AsyncWriteExt as _;
+        let (get, _) = serve(|mut stream| async move {
+            read_head(&mut stream, &mut Vec::new()).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nx")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let result = until_stalled(get, Vec::new(), 100, SECOND / 2, SECOND).await;
+        assert!(matches!(result, Err(HttpsError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn an_upload_may_take_longer_than_its_stall_limit() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        const LENGTH: usize = 8 * 1024 * 1024;
+        let (_, post) = serve(|mut stream| async move {
+            let mut rest = Vec::new();
+            let head = read_head(&mut stream, &mut rest).await;
+            assert!(
+                head.contains(&format!("content-length: {LENGTH}")),
+                "{head}"
+            );
+            let (mut got, mut piece) = (rest.len(), vec![0; 1024 * 1024]);
+            while got < LENGTH {
+                tokio::time::sleep(SECOND / 2).await;
+                let read = stream.read(&mut piece).await.unwrap();
+                assert_ne!(read, 0);
+                got += read;
+            }
+            stream.write_all(OK).await.unwrap();
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let response = until_stalled(post, vec![1; LENGTH], 100, 2 * SECOND, 30 * SECOND)
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"ok");
+        assert!(started.elapsed() > 2 * SECOND);
+    }
+
+    #[tokio::test]
+    async fn an_upload_nobody_takes_ends() {
+        let (_, post) = serve(|mut stream| async move {
+            read_head(&mut stream, &mut Vec::new()).await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        // More than the system's buffers on both sides take in.
+        let body = vec![1; 64 * 1024 * 1024];
+        let result = until_stalled(post, body, 100, SECOND, 300 * SECOND);
+        let result = tokio::time::timeout(60 * SECOND, result).await.unwrap();
+        assert!(matches!(result, Err(HttpsError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn the_answer_to_an_upload_has_its_own_limit() {
+        use tokio::io::AsyncWriteExt as _;
+        const LENGTH: usize = 1024;
+        let (_, post) = serve(|mut stream| async move {
+            let mut rest = Vec::new();
+            read_head(&mut stream, &mut rest).await;
+            read_body(&mut stream, rest.len(), LENGTH).await;
+            tokio::time::sleep(2 * SECOND).await;
+            stream.write_all(OK).await.unwrap();
+        })
+        .await;
+        let response = until_stalled(post, vec![1; LENGTH], 100, SECOND, 30 * SECOND).await;
+        assert_eq!(response.unwrap().status, 200);
+
+        let (_, post) = serve(|mut stream| async move {
+            let mut rest = Vec::new();
+            read_head(&mut stream, &mut rest).await;
+            read_body(&mut stream, rest.len(), LENGTH).await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let result = until_stalled(post, vec![1; LENGTH], 100, SECOND, 2 * SECOND);
+        let result = tokio::time::timeout(10 * SECOND, result).await.unwrap();
+        assert!(matches!(result, Err(HttpsError::Timeout(_))));
     }
 
     #[test]

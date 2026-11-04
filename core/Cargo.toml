@@ -35,6 +35,10 @@ libthreema = { path = "../third_party/libthreema/lib" }
 # with the ring provider (no system OpenSSL on the network path), our own verifier does pinning.
 tokio = { version = "1.52", default-features = false, features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+# Blob uploads report their progress through a request body of our own (https::ProgressBody);
+# both are in the tree through reqwest already.
+http-body = "=1.1.0"
+bytes = "=1.12.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
