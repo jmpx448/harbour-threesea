@@ -252,16 +252,21 @@ impl Store {
         let mut statement = self.conn.prepare(
             "SELECT id, conversation, message_id, created_at, kind, body FROM outbox ORDER BY id",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(OutboxEntry {
-                id: row.get(0)?,
-                conversation: row.get(1)?,
-                message_id: row.get::<_, i64>(2)?.cast_unsigned(),
-                created_at: row.get(3)?,
-                kind: row.get(4)?,
-                body: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or(Value::Null),
-            })
-        })?;
+        let rows = statement.query_map([], outbox_entry)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A conversation's outbox entries queued no later than `created_at`, oldest first.
+    pub fn outbox_until(
+        &self,
+        conversation: &str,
+        created_at: i64,
+    ) -> Result<Vec<OutboxEntry>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, conversation, message_id, created_at, kind, body FROM outbox
+                 WHERE conversation = ?1 AND created_at <= ?2 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![conversation, created_at], outbox_entry)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -273,6 +278,17 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+fn outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
+    Ok(OutboxEntry {
+        id: row.get(0)?,
+        conversation: row.get(1)?,
+        message_id: row.get::<_, i64>(2)?.cast_unsigned(),
+        created_at: row.get(3)?,
+        kind: row.get(4)?,
+        body: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or(Value::Null),
+    })
 }
 
 #[cfg(test)]

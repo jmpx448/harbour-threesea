@@ -1002,7 +1002,9 @@ impl<'a> Session<'a> {
         self.handle_instruction(instruction).await
     }
 
-    /// Send every pending outgoing message from the store, then the outbox.
+    /// Send every pending outgoing message from the store, then the outbox. In a group the user's
+    /// order holds across the two: members discard a text for a group whose setup is still to
+    /// come, and a text after our leave. So what was queued before a group message goes first.
     async fn send_pending(&mut self) -> Result<(), ConnectionError> {
         for message in self
             .setup
@@ -1011,6 +1013,16 @@ impl<'a> Session<'a> {
             .map_err(protocol_error)?
         {
             let group = crate::groups::parse_key(&message.conversation);
+            if group.is_some() {
+                for entry in self
+                    .setup
+                    .store
+                    .outbox_until(&message.conversation, message.created_at)
+                    .map_err(protocol_error)?
+                {
+                    self.send_outbox_entry(entry).await?;
+                }
+            }
             if group.is_none()
                 && self
                     .awaiting_ack
@@ -1356,75 +1368,82 @@ impl<'a> Session<'a> {
     /// acknowledged it (for every receiver of a group), or if unsendable.
     async fn send_outbox(&mut self) -> Result<(), ConnectionError> {
         for entry in self.setup.store.outbox().map_err(protocol_error)? {
-            if let Some(group) = crate::groups::parse_key(&entry.conversation) {
-                let Some(body) = outbox_group_body(&entry) else {
-                    tracing::warn!(kind = entry.kind, "dropping unsendable group outbox entry");
-                    self.setup
-                        .store
-                        .outbox_remove(&entry.conversation, entry.message_id)
-                        .map_err(protocol_error)?;
-                    continue;
-                };
-                if self
-                    .send_to_group(
-                        &entry.conversation,
-                        group,
-                        entry.message_id,
-                        entry.created_at,
-                        &body,
-                    )
-                    .await?
-                {
-                    self.setup
-                        .store
-                        .outbox_remove(&entry.conversation, entry.message_id)
-                        .map_err(protocol_error)?;
-                }
-                continue;
-            }
-            if self
-                .awaiting_ack
-                .iter()
-                .any(|(to, id)| *to == entry.conversation && *id == entry.message_id)
-            {
-                continue;
-            }
-            let encoded = match outbox_body(&entry) {
-                Some(body)
-                    if self
-                        .may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))? =>
-                {
-                    self.reflect_outgoing(
-                        &entry.conversation,
-                        entry.message_id,
-                        entry.created_at,
-                        &Outgoing::Contact(body.clone()),
-                    )
-                    .await?;
-                    self.encode(
-                        &entry.conversation,
-                        entry.message_id,
-                        entry.created_at,
-                        Outgoing::Contact(body),
-                    )
-                    .await?
-                }
-                _ => None,
+            self.send_outbox_entry(entry).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_outbox_entry(
+        &mut self,
+        entry: reactions::OutboxEntry,
+    ) -> Result<(), ConnectionError> {
+        if let Some(group) = crate::groups::parse_key(&entry.conversation) {
+            let Some(body) = outbox_group_body(&entry) else {
+                tracing::warn!(kind = entry.kind, "dropping unsendable group outbox entry");
+                self.setup
+                    .store
+                    .outbox_remove(&entry.conversation, entry.message_id)
+                    .map_err(protocol_error)?;
+                return Ok(());
             };
-            if let Some(payloads) = encoded {
-                for payload in payloads {
-                    self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
-                        .await?;
-                }
-                self.awaiting_ack
-                    .push((entry.conversation.clone(), entry.message_id));
-            } else {
-                tracing::warn!(kind = entry.kind, "dropping unsendable outbox entry");
+            if self
+                .send_to_group(
+                    &entry.conversation,
+                    group,
+                    entry.message_id,
+                    entry.created_at,
+                    &body,
+                )
+                .await?
+            {
                 self.setup
                     .store
                     .outbox_remove(&entry.conversation, entry.message_id)
                     .map_err(protocol_error)?;
             }
+            return Ok(());
+        }
+        if self
+            .awaiting_ack
+            .iter()
+            .any(|(to, id)| *to == entry.conversation && *id == entry.message_id)
+        {
+            return Ok(());
+        }
+        let encoded = match outbox_body(&entry) {
+            Some(body)
+                if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))? =>
+            {
+                self.reflect_outgoing(
+                    &entry.conversation,
+                    entry.message_id,
+                    entry.created_at,
+                    &Outgoing::Contact(body.clone()),
+                )
+                .await?;
+                self.encode(
+                    &entry.conversation,
+                    entry.message_id,
+                    entry.created_at,
+                    Outgoing::Contact(body),
+                )
+                .await?
+            }
+            _ => None,
+        };
+        if let Some(payloads) = encoded {
+            for payload in payloads {
+                self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
+                    .await?;
+            }
+            self.awaiting_ack
+                .push((entry.conversation.clone(), entry.message_id));
+        } else {
+            tracing::warn!(kind = entry.kind, "dropping unsendable outbox entry");
+            self.setup
+                .store
+                .outbox_remove(&entry.conversation, entry.message_id)
+                .map_err(protocol_error)?;
         }
         Ok(())
     }
@@ -4064,6 +4083,79 @@ mod sync_order_tests {
             tx,
             awaiting_ack: Vec::new(),
         }
+    }
+
+    /// What `send_pending` puts before `message`.
+    fn sent_before(app: &App, message: &Message) -> Vec<String> {
+        app.store
+            .outbox_until(&message.conversation, message.created_at)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect()
+    }
+
+    /// Two steps of the user: the second one's timestamp is later.
+    fn next_step() {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_group_created_while_disconnected_goes_out_before_its_first_text() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        let group = app.create_group("Crew", &[CREATOR.to_owned()]).unwrap();
+        let key = group["key"].as_str().unwrap().to_owned();
+        next_step();
+        app.send_text(&key, "first", None).unwrap();
+        let pending = app.store.pending_outgoing().unwrap();
+        let text = pending.iter().find(|m| m.kind == "text").unwrap();
+        assert_eq!(
+            sent_before(&app, text),
+            vec![
+                crate::groups::OUTBOX_GROUP_SETUP,
+                crate::groups::OUTBOX_GROUP_NAME,
+                crate::groups::OUTBOX_GROUP_DELETE_PICTURE,
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_text_written_before_leaving_goes_out_before_the_leave() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: CREATOR.parse().unwrap(),
+            group_id: 7,
+        };
+        let key = crate::groups::key(&identity);
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: key.clone(),
+                identity,
+                name: "Crew".into(),
+                members: vec![CREATOR.into()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        app.send_text(&key, "bye", None).unwrap();
+        next_step();
+        app.leave_group(&key).unwrap();
+        let pending = app.store.pending_outgoing().unwrap();
+        let text = pending.iter().find(|m| m.kind == "text").unwrap();
+        assert!(sent_before(&app, text).is_empty());
+        // The leave is still there for the rest of the round.
+        assert_eq!(
+            app.store.outbox().unwrap()[0].kind,
+            crate::groups::OUTBOX_GROUP_LEAVE
+        );
     }
 
     /// There is no mediator here: this shows the reflection is tried within the setup's own step,

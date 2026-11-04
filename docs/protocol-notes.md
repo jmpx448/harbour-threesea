@@ -362,6 +362,8 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - A group message from someone with no contact row who is a member of a group we are in isn't
   discarded: libthreema just looked up their key to decrypt it, so it creates the contact at level
   _group_ (or keeps the message unacknowledged if that lookup failed). Anyone else is discarded.
+- Queued while offline, a group's messages and control entries go out in the order the user made
+  them (by `created_at`): the setup before the first text, a text before our leave.
 - Creator: create (setup + name + delete-picture to all), rename, change members (setup to all
   old and new, name/picture to added), dissolve (empty setup). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.
