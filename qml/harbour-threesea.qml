@@ -26,6 +26,9 @@ ApplicationWindow {
     property string shownState: "starting"
     // Identity of the chat currently open (no notification for it while the app is active).
     property string openChat: ""
+    // Where the reader stopped in each chat, for this session (chat -> the message at the top of
+    // the view). Never a private chat's, and gone with the lock.
+    property var readingPlaces: ({})
     // The core's app settings (readReceipts, incognitoKeyboard, disableScreenshots…); settings
     // pages update it after changing one.
     property var appSettings: ({})
@@ -391,6 +394,7 @@ ApplicationWindow {
     // (phone in the pocket, screen locked) plays to its end, without the name; nothing follows it.
     function lockNow(letVoiceFinish) {
         backend.call("lock")
+        readingPlaces = {}
         closePrivate()
         closePinPage()
         if (lockInfo && lockInfo.lock && lockInfo.lock.appLock) {
@@ -457,12 +461,15 @@ ApplicationWindow {
             return
         }
         if (openChat !== identity) {
-            pageStack.push(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity },
+            pageStack.push(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity, openAtNewest: !!text },
                            PageStackAction.Immediate)
         }
         if (text) {
             var chat = pageStack.find(function(page) { return page.identity === identity && page.inputField })
-            if (chat) chat.setInput(text)
+            if (chat) {
+                chat.setInput(text)
+                chat.showInput()
+            }
         }
         activate()
     }
@@ -1118,7 +1125,10 @@ ApplicationWindow {
                 backend.refreshUnread()
             } else if (name === "privateChanged") {
                 // Marked here, on another device or by a restore: its text leaves Events too.
-                if (data.private) window.clearNotification(data.identity)
+                if (data.private) {
+                    window.clearNotification(data.identity)
+                    delete window.readingPlaces[data.identity]
+                }
             } else if (name === "serverMessage") {
                 Notices.show(data.message, Notice.Long, Notice.Center)
             } else if (name === "deviceRemovalFailed") {

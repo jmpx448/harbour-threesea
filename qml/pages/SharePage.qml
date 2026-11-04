@@ -55,12 +55,12 @@ Page {
             // Back to where the selection started, then into the target chat.
             var chats = pageStack.find(function(p) { return p.objectName === "conversations" })
             if (chats) pageStack.pop(chats, PageStackAction.Immediate)
-            pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: identity })
+            pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: identity, openAtNewest: true })
             return
         }
         // Waiting above the input, like picked files: sent in order with the next send.
         var chat = pageStack.replaceAbove(pageStack.previousPage(page), Qt.resolvedUrl("ChatPage.qml"),
-                                          { identity: identity })
+                                          { identity: identity, openAtNewest: true })
         chat.attachAll(files)
         if (text.length > 0 && chat.inputField) chat.setInput(text)
     }

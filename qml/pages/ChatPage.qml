@@ -19,6 +19,9 @@ Page {
     property string identity
     // Open at this message (local id), e.g. from search: a window around it is loaded.
     property int focusMessage: -1
+    // Something comes with the opening (a forward, shared files, a link's text): it goes on at
+    // the input, not at the place the reader left.
+    property bool openAtNewest: false
     objectName: "chat"
 
     // Selecting messages: the chat stays as it is, taps select bubbles, a panel at the bottom
@@ -208,6 +211,12 @@ Page {
         page.loadingOlder = true
         page.loadingNewer = true
         var generation = page.loadGeneration
+        // Coming back to a chat left further back in this session: at that place.
+        var place = !page.shown && focusMessage < 0 && !openAtNewest ? window.readingPlaces[identity] : undefined
+        if (place !== undefined) {
+            page.focusMode = ListView.End
+            focusMessage = place
+        }
         // A screenful and a bit: opening stays fast, scrolling back pages the rest in. With the
         // target at the top of the view, the rows under it have to fill a tall screen as well:
         // short of that the view stops at the window's end and the next page moves the target.
@@ -219,6 +228,14 @@ Page {
             page.loadingNewer = false
             if (!ok) {
                 if (kind === "locked" && !page.shown) askPinLater.start()
+                return
+            }
+            // Something new goes before the place. The answer is the only one that says so:
+            // opening marks it read.
+            if (place !== undefined && result.firstUnread !== null && result.firstUnread !== undefined) {
+                page.unreadMarkerId = result.firstUnread
+                focusMessage = result.firstUnread
+                page.load()
                 return
             }
             var firstLoad = !page.shown
@@ -244,7 +261,7 @@ Page {
                 // Open where the new messages start (their line at the top of the view).
                 page.showLoadedMessage(page.unreadMarkerId, ListView.End)
             } else {
-                // The newest message and the input, as the chat always opens.
+                // The newest message and the input.
                 listView.positionViewAtBeginning()
             }
             page.settling = false
@@ -454,6 +471,26 @@ Page {
         messages.truncate(windowSize)
         olderExhausted = false
         stickyIndex = -1
+    }
+
+    // Text handed to this page while it stands further back: the input has to be in view.
+    function showInput() {
+        if (!newerExhausted) page.load()
+        else listView.positionViewAtBeginning()
+    }
+
+    // Marked private while this page is open (isPrivate says how it opened).
+    property bool markedPrivate: false
+    // Where the reader is, for coming back to this chat. Nothing for a private chat, or behind
+    // the lock; nothing either at the newest end, where a chat opens anyway.
+    function rememberPlace() {
+        if (!shown) return
+        var index = listView.indexAt(listView.width / 2, listView.contentY + Theme.paddingSmall)
+        if (isPrivate || markedPrivate || window.locked || index < 0 || (newerExhausted && atNewest())) {
+            delete window.readingPlaces[identity]
+        } else {
+            window.readingPlaces[identity] = messages.get(index).id
+        }
     }
 
     // Whether it is in the window.
@@ -1559,6 +1596,7 @@ Page {
         if (status === PageStatus.Deactivating) {
             stopTyping()
             saveDraft()
+            rememberPlace()
         }
         // Whatever comes on top, it isn't this chat any more: nothing here shows the microphone
         // is on, and nothing there could say where the recording would go. Nobody asked for that
@@ -1618,6 +1656,8 @@ Page {
                 typingTimeout.restart()
             } else if (name === "contactsChanged" || name === "groupsChanged") {
                 page.loadContact()
+            } else if (name === "privateChanged" && data.identity === page.identity) {
+                page.markedPrivate = data.private
             } else if (name === "chatsChanged") {
                 // Bulk changes (a backup import), also a small action in Threema Web: reload the
                 // whole page instead of patching, with the reader where they are.
