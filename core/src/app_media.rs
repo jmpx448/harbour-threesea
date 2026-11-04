@@ -983,6 +983,10 @@ impl App {
             CoreEvent::DownloadContactPicture(identity) => {
                 self.download_contact_picture(identity.clone());
             }
+            CoreEvent::AnnounceGroupCall {
+                conversation,
+                receivers,
+            } => self.announce_running_group_call(conversation, receivers.clone()),
             CoreEvent::GroupCallStart {
                 conversation,
                 start,

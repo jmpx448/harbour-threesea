@@ -135,6 +135,49 @@ impl Context {
     /// The _Group Call Refresh Steps_: peek every running call of the group, drop the ended ones,
     /// and tell the UI which one runs (the most recently started).
     async fn refresh(&self, conversation: &str) -> Option<(RunningCall, u64, u32)> {
+        let (chosen, state) = self.chosen(conversation).await;
+        let _ = self.events.send(CoreEvent::Call(json!({
+            "event": "groupCall",
+            "conversation": conversation,
+            "call": chosen.as_ref().map(|(call, started_at, max)| json!({
+                "callId": data_encoding::HEXLOWER.encode(&call.call_id),
+                "startedAt": started_at,
+                "maxParticipants": max,
+                "participants": state.iter().flatten().map(|(identity, nickname)| json!({
+                    "identity": identity,
+                    "name": self.participant_name(identity, nickname),
+                })).collect::<Vec<_>>(),
+            })),
+        })));
+        chosen
+    }
+
+    /// Those people just got the group's state from us: if a call runs, it goes to them as well
+    /// (_Active Group Update_ and _State Resync Steps_). Goes by a fresh look at the calls rather
+    /// than the last one's result, with nothing for the UI to hear of: this can come from outside
+    /// while the app is locked, for a private group too.
+    async fn announce_to(&self, conversation: &str, receivers: &[String]) {
+        let (Some((call, started_at, _)), _) = self.chosen(conversation).await else {
+            return;
+        };
+        match queue_call_start(&self.store, &call, started_at, receivers) {
+            Ok(true) => {
+                let _ = self.events.send(CoreEvent::OutboxChanged);
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "repeating a group call's start failed"),
+        }
+    }
+
+    /// The _Group Call Refresh Steps_ without telling anyone: the running call, the most recently
+    /// started, with who is in it.
+    async fn chosen(
+        &self,
+        conversation: &str,
+    ) -> (
+        Option<(RunningCall, u64, u32)>,
+        Option<Vec<(String, String)>>,
+    ) {
         let calls = self.store.group_calls(conversation).unwrap_or_default();
         let mut chosen: Option<(RunningCall, u64, u32)> = None;
         let mut state: Option<Vec<(String, String)>> = None;
@@ -181,20 +224,7 @@ impl Context {
             participants_max = chosen.as_ref().map(|(_, _, max)| *max),
             "group call refresh"
         );
-        let _ = self.events.send(CoreEvent::Call(json!({
-            "event": "groupCall",
-            "conversation": conversation,
-            "call": chosen.as_ref().map(|(call, started_at, max)| json!({
-                "callId": data_encoding::HEXLOWER.encode(&call.call_id),
-                "startedAt": started_at,
-                "maxParticipants": max,
-                "participants": state.iter().flatten().map(|(identity, nickname)| json!({
-                    "identity": identity,
-                    "name": self.participant_name(identity, nickname),
-                })).collect::<Vec<_>>(),
-            })),
-        })));
-        chosen
+        (chosen, state)
     }
 
     /// Peek, with one token refresh after a 401.
@@ -220,6 +250,50 @@ impl Context {
 }
 
 /// How the UI names a participant: like a contact, else `~nickname`, else the ID.
+/// Of `members`, those who can take part in a group call.
+fn call_receivers(store: &Store, members: impl IntoIterator<Item = String>) -> Vec<String> {
+    members
+        .into_iter()
+        .filter(|member| {
+            store.contact(member).ok().flatten().is_some_and(|contact| {
+                contact.feature_mask.0 & libthreema::common::FeatureMask::GROUP_CALL_SUPPORT != 0
+            })
+        })
+        .collect()
+}
+
+/// Queue a running call's start for `receivers`, those of them still in the group and able to take
+/// part. Returns whether anything was queued.
+fn queue_call_start(
+    store: &Store,
+    call: &RunningCall,
+    started_at: u64,
+    receivers: &[String],
+) -> Result<bool, crate::store::StoreError> {
+    let Some(group) = store.group(&call.conversation)?.filter(|group| !group.left) else {
+        return Ok(false);
+    };
+    let receivers = call_receivers(
+        store,
+        receivers
+            .iter()
+            .filter(|receiver| group.members.contains(receiver))
+            .cloned(),
+    );
+    store.group_outbox_add(
+        &call.conversation,
+        &receivers,
+        crate::groups::OUTBOX_GROUP_CALL_START,
+        &json!({
+            "gck": HEXLOWER.encode(&call.gck),
+            "url": call.sfu_base_url,
+            "version": call.protocol_version,
+            "startedAt": i64::try_from(started_at).unwrap_or(i64::MAX),
+        }),
+    )?;
+    Ok(!receivers.is_empty())
+}
+
 fn participant_name(store: &Store, identity: &str, nickname: &str) -> String {
     match store.contact(identity).ok().flatten() {
         Some(contact) => crate::contacts::display_name(&contact),
@@ -478,6 +552,25 @@ impl App {
         tokio::task::spawn_local(async move { context.on_start(conversation, start).await });
     }
 
+    /// Those people just got the group's state from us; see [`Context::announce_to`]. Nothing
+    /// to do, and nobody to ask, if we know of no call.
+    pub(crate) fn announce_running_group_call(&self, conversation: &str, receivers: Vec<String>) {
+        if !self.group_calls_wanted()
+            || self
+                .store
+                .group_calls(conversation)
+                .unwrap_or_default()
+                .is_empty()
+        {
+            return;
+        }
+        let context = self.group_call_context();
+        let conversation = conversation.to_owned();
+        tokio::task::spawn_local(async move {
+            context.announce_to(&conversation, &receivers).await;
+        });
+    }
+
     /// `groupCallRefresh {conversation}`: peek the group's calls now (the chat shows a running
     /// call); answers with the `groupCall` event.
     pub(crate) fn group_call_refresh(&self, conversation: &str) -> Value {
@@ -647,20 +740,10 @@ impl App {
             .group(&call.conversation)?
             .map(|group| group.members)
             .unwrap_or_default();
-        let receivers: Vec<String> = members
-            .into_iter()
-            .filter(|member| *member != user)
-            .filter(|member| {
-                self.store
-                    .contact(member)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|contact| {
-                        contact.feature_mask.0 & libthreema::common::FeatureMask::GROUP_CALL_SUPPORT
-                            != 0
-                    })
-            })
-            .collect();
+        let receivers = call_receivers(
+            &self.store,
+            members.into_iter().filter(|member| *member != user),
+        );
         tracing::info!(receivers = receivers.len(), "group call started");
         self.store.group_outbox_add(
             &call.conversation,
@@ -1194,6 +1277,62 @@ mod app_tests {
         assert_eq!(app.group_info(&key).unwrap()["private"], false);
         app.store.set_private(&key, true).unwrap();
         assert_eq!(app.group_info(&key).unwrap()["private"], true);
+    }
+
+    #[test]
+    fn a_running_call_is_repeated_to_the_new_people_who_can_join_it() {
+        let (_dir, app) = app(true);
+        let mut able = crate::contacts::test_contact("AAAAAAAA");
+        able.feature_mask =
+            libthreema::common::FeatureMask(libthreema::common::FeatureMask::GROUP_CALL_SUPPORT);
+        app.store.upsert_contact(&able).unwrap();
+        let mut unable = crate::contacts::test_contact("BBBBBBBB");
+        unable.feature_mask = libthreema::common::FeatureMask(0);
+        app.store.upsert_contact(&unable).unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "CCCCCCCC".parse().unwrap(),
+            group_id: 7,
+        };
+        let mut group = crate::groups::Group {
+            key: crate::groups::key(&identity),
+            identity,
+            name: String::new(),
+            members: vec!["AAAAAAAA".into(), "BBBBBBBB".into()],
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        let call = RunningCall {
+            call_id: [1; 32],
+            conversation: group.key.clone(),
+            gck: [2; 32],
+            sfu_base_url: "https://sfu.example".into(),
+            protocol_version: group_calls::PROTOCOL_VERSION,
+            received_at: 1,
+            failed: 0,
+        };
+        // "AAAAAAAA" can join; "BBBBBBBB" can't; "EEEEEEEE" isn't in the group.
+        let asked = ["AAAAAAAA".into(), "BBBBBBBB".into(), "EEEEEEEE".into()];
+        assert!(queue_call_start(&app.store, &call, 1234, &asked).unwrap());
+        let entries = app.store.outbox().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, crate::groups::OUTBOX_GROUP_CALL_START);
+        assert_eq!(entries[0].body["startedAt"], json!(1234));
+        assert_eq!(
+            app.store
+                .pending_receivers(&group.key, entries[0].message_id)
+                .unwrap(),
+            vec!["AAAAAAAA"]
+        );
+
+        // Nobody to tell, and not for a group we left.
+        assert!(!queue_call_start(&app.store, &call, 1234, &["BBBBBBBB".into()]).unwrap());
+        group.left = true;
+        app.store.upsert_group(&group).unwrap();
+        assert!(!queue_call_start(&app.store, &call, 1234, &["AAAAAAAA".into()]).unwrap());
+        assert_eq!(app.store.outbox().unwrap().len(), 1);
     }
 
     #[test]

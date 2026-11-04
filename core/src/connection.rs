@@ -470,6 +470,8 @@ struct Requeued {
     resending: bool,
     /// The messages put back in the queue, for the UI.
     changed: Vec<Message>,
+    /// The group whose state goes out to the peer instead.
+    state_of: Option<String>,
 }
 
 /// Put a rejected message back in the queue, if it is ours to send again (only the store, no
@@ -495,6 +497,9 @@ fn requeue_rejected(
             send: rejected.send,
             resending: rejected.resending,
             changed: Vec::new(),
+            state_of: rejected
+                .state_sent
+                .then(|| crate::groups::key(&group_identity)),
         });
     }
     let in_group = store.requeue_group_receiver(peer, message_id)?;
@@ -504,6 +509,7 @@ fn requeue_rejected(
         send: resending,
         resending,
         changed,
+        state_of: None,
     })
 }
 
@@ -1391,7 +1397,7 @@ impl<'a> Session<'a> {
                     &entry.conversation,
                     group,
                     entry.message_id,
-                    entry.created_at,
+                    outbox_sent_as_of(&entry),
                     &body,
                 )
                 .await?
@@ -1834,6 +1840,12 @@ impl<'a> Session<'a> {
                             self.emit(CoreEvent::MessagesChanged(core::mem::take(
                                 &mut requeued.changed,
                             )));
+                        }
+                        if let Some(conversation) = requeued.state_of.take() {
+                            self.emit(CoreEvent::AnnounceGroupCall {
+                                conversation,
+                                receivers: vec![peer.clone()],
+                            });
                         }
                     }
                 }
@@ -3215,6 +3227,13 @@ fn to_group_body(body: ContactMessageBody) -> Option<GroupMessageBody> {
     })
 }
 
+/// A group outbox entry's timestamp on the wire: when it was queued, or for a repeat of a call's
+/// start the call's own start (csp.struct.yml). `created_at` stays when it was queued, as the
+/// order of what we send goes by that.
+fn outbox_sent_as_of(entry: &reactions::OutboxEntry) -> i64 {
+    entry.body["startedAt"].as_i64().unwrap_or(entry.created_at)
+}
+
 /// The body of a group outbox entry (control messages, or a reaction/edit/deletion).
 fn outbox_group_body(entry: &reactions::OutboxEntry) -> Option<GroupMessageBody> {
     use crate::groups::{
@@ -4083,6 +4102,23 @@ mod sync_order_tests {
             tx,
             awaiting_ack: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_repeated_call_start_says_when_the_call_started() {
+        let entry = |body: serde_json::Value| reactions::OutboxEntry {
+            id: 1,
+            conversation: "g:ABCD1234:0000000000000001".into(),
+            message_id: 1,
+            created_at: 500,
+            kind: crate::groups::OUTBOX_GROUP_CALL_START.into(),
+            body,
+        };
+        assert_eq!(
+            outbox_sent_as_of(&entry(serde_json::json!({"startedAt": 100}))),
+            100
+        );
+        assert_eq!(outbox_sent_as_of(&entry(serde_json::json!({}))), 500);
     }
 
     /// What `send_pending` puts before `message`.

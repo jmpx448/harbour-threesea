@@ -269,6 +269,9 @@ impl App {
             )?;
         }
         self.tell_connection(ToConnection::SendPending);
+        if !added.is_empty() {
+            self.announce_running_group_call(key, added);
+        }
         self.group_info(key)
     }
 

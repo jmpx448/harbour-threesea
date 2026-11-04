@@ -97,7 +97,8 @@ pub const OUTBOX_GROUP_LEAVE: &str = "groupLeave";
 pub const OUTBOX_GROUP_SYNC_REQUEST: &str = "groupSyncRequest";
 pub const OUTBOX_GROUP_DELETE_PICTURE: &str = "groupDeleteProfilePicture";
 pub const OUTBOX_GROUP_SET_PICTURE: &str = "groupSetProfilePicture"; // {blob, key, size}
-pub const OUTBOX_GROUP_CALL_START: &str = "groupCallStart"; // {gck (hex), url, version}
+// {gck (hex), url, version, startedAt (ms, a repeat to someone new: when the call started)}
+pub const OUTBOX_GROUP_CALL_START: &str = "groupCallStart";
 
 /// A group picture on the blob server (persisted), as sent in `set-profile-picture`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,6 +829,8 @@ pub struct GroupOutcome {
     pub download_picture: Option<String>,
     /// The group's picture was deleted: its file goes too (group key).
     pub remove_picture: Option<String>,
+    /// Who just got the group's state from us: a running call is for them to hear of too.
+    pub state_sent_to: Vec<String>,
     /// A group call was announced (checked and stored by the app).
     pub call_start: Option<libthreema::model::message::GroupCallStartMessage>,
     /// What the other devices of the group have to be told.
@@ -1009,6 +1012,7 @@ fn receive_steps(
                 )?;
             } else {
                 send_state(store, &group, &receivers)?;
+                outcome.state_sent_to = receivers;
             }
             outcome.send = true;
             return Ok(outcome);
@@ -1200,6 +1204,8 @@ pub struct GroupReject {
     pub send: bool,
     /// The rejected message goes out again.
     pub resending: bool,
+    /// `peer` is getting the group's state.
+    pub state_sent: bool,
 }
 
 /// `peer` rejected `message_id` in the group `identity` (`Reject` in csp-e2e-fs.proto): the
@@ -1233,6 +1239,7 @@ pub fn message_rejected(
         return Ok(GroupReject {
             send: outcome.send,
             resending: false,
+            state_sent: false,
         });
     };
     match store.group_message_is_ours(&key, message_id)? {
@@ -1241,6 +1248,7 @@ pub fn message_rejected(
             Ok(GroupReject {
                 send: resending,
                 resending,
+                state_sent: false,
             })
         }
         // Someone else's: not for us to send.
@@ -1250,6 +1258,7 @@ pub fn message_rejected(
             Ok(GroupReject {
                 send: true,
                 resending: false,
+                state_sent: true,
             })
         }
         None => Ok(GroupReject::default()),
@@ -2859,6 +2868,7 @@ mod tests {
             GroupReject {
                 send: true,
                 resending: true,
+                state_sent: false,
             }
         );
         assert_eq!(
@@ -2876,6 +2886,7 @@ mod tests {
             GroupReject {
                 send: true,
                 resending: false,
+                state_sent: true,
             }
         );
         let kinds: Vec<_> = outbox_kinds(&store).into_iter().map(|(k, _)| k).collect();
@@ -2935,6 +2946,7 @@ mod tests {
             GroupReject {
                 send: true,
                 resending: false,
+                state_sent: false,
             }
         );
         assert!(
@@ -2956,11 +2968,36 @@ mod tests {
             GroupReject {
                 send: true,
                 resending: false,
+                state_sent: false,
             }
         );
         let (_dir, store) = self::store();
         assert_eq!(rejected(&store, BOB, BLOCKED, 1), GroupReject::default());
         assert!(outbox_kinds(&store).is_empty());
+    }
+
+    #[test]
+    fn who_gets_a_groups_state_is_said_for_the_running_call() {
+        let (_dir, store) = store();
+        let group = own_group(USER, &[BOB]);
+        store.upsert_group(&group).unwrap();
+        let answered = run(
+            &store,
+            BOB,
+            USER,
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+        );
+        assert_eq!(answered.state_sent_to, vec![BOB]);
+
+        // An empty setup, for someone not in it, isn't the group's state.
+        let not_a_member = run(
+            &store,
+            "STRANGER",
+            USER,
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+        );
+        assert!(not_a_member.send);
+        assert!(not_a_member.state_sent_to.is_empty());
     }
 
     #[test]

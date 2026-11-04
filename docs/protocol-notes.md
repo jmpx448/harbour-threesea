@@ -369,7 +369,10 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   the sync request brings the group back. All else queued for the group goes.
 - Creator: create (setup + name + delete-picture to all), rename, change members (setup to those
   in the group, an empty setup to those removed, name/picture to added; the blob is persisted, so
-  the same descriptor serves), dissolve (empty setup). Members: leave (`group-leave` to
+  the same descriptor serves), dissolve (empty setup). A running call's start is repeated, with
+  its `started_at` as `created-at`, to new members and to whoever gets the state on a sync request
+  or a Reject, after a fresh peek rather than the spec's "most recent refresh" (no event for the
+  UI: it can come while locked). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.
 - Threema Desktop refuses to link at all over a group naming someone it has no contact for
   (`dom/backend/join.ts`), and asserts the same on `GroupSync`. So no group data names a member

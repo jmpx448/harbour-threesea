@@ -90,6 +90,11 @@ pub enum CoreEvent {
     /// A call event for the UI (its JSON as it is, app_calls.rs).
     Call(Value),
     /// Internal: a group call was announced in a group (app_group_calls.rs).
+    /// Internal: these people just got a group's state from us: if a call runs, they hear of it.
+    AnnounceGroupCall {
+        conversation: String,
+        receivers: Vec<String>,
+    },
     GroupCallStart {
         conversation: String,
         start: libthreema::model::message::GroupCallStartMessage,
@@ -206,6 +211,7 @@ impl CoreEvent {
             | Self::DownloadContactPicture(_)
             | Self::SyncPicture { .. }
             | Self::CallSignal { .. }
+            | Self::AnnounceGroupCall { .. }
             | Self::GroupCallStart { .. }
             | Self::WebSessionResume(_) => json!({"event": "internal"}),
         }
@@ -647,6 +653,12 @@ impl ConversationProvider for StoreConversations {
                 }
                 if outcome.groups_changed {
                     events.push(CoreEvent::GroupsChanged);
+                }
+                if !outcome.state_sent_to.is_empty() {
+                    events.push(CoreEvent::AnnounceGroupCall {
+                        conversation: crate::groups::key(&group_identity),
+                        receivers: outcome.state_sent_to,
+                    });
                 }
                 if !outcome.unknown_members.is_empty() {
                     events.push(CoreEvent::UnknownMembers(outcome.unknown_members));
