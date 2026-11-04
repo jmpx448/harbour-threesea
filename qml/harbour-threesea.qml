@@ -818,6 +818,7 @@ ApplicationWindow {
         var existing = notificationQuery.notifications()
         for (var i = 0; i < existing.length; ++i) takeOver(existing[i])
         dbus.retainTokens(Object.keys(notifications))
+        if (backend.state === "locked") hideNotifications()
     }
     function takeOver(n) {
         var actions = n.remoteActions || []
@@ -993,7 +994,8 @@ ApplicationWindow {
             if (closeNotification(key)) dbus.releaseToken(key)
         })
         var replyWaiting = NotificationActions.replyWaiting()
-        if (added > 0 || replyWaiting) showAppLocked(added, replyWaiting)
+        // For the stored data's lock lockedNotification() tells about the reply.
+        if (added > 0 || (replyWaiting && backend.state !== "locked")) showAppLocked(added, replyWaiting)
     }
 
     // The messages that came before the first look at the lock; until then it is not known what
@@ -1339,6 +1341,9 @@ ApplicationWindow {
     Connections {
         target: backend
         onStateChanged: {
+            // A last run's notifications, after a crash or a restart: their names and words stay
+            // behind the passphrase too. They would otherwise last until it is entered.
+            if (backend.state === "locked") window.hideNotifications()
             window.showStatePage()
             window.syncAddressBook(false)
             if (backend.state === "ready") window.clearNotification("license")

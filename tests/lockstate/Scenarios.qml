@@ -1060,6 +1060,26 @@ QtObject {
                 check("still there", window.notifications[chat].body, "the words")
             }, 0],
         ],
+        // A last run's notifications don't wait for the passphrase to go.
+        passphraseHidesTakenOver: [
+            [function() {
+                root.kept = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { summary: \"A Contact\"; body: \"the words\"; itemCount: 2 }", root)
+                root.kept.remoteActions = [{ name: "default", displayName: "", service: "s", path: "/", iface: "i",
+                                             method: "openChat", arguments: [chat] }]
+                window.takeOver(root.kept)
+                check("taken over", window.notifications[chat] === root.kept, true)
+                backend.state = "locked"
+            }, 100],
+            [function() {
+                check("its text is gone", window.notifications[chat], undefined)
+                checkAppLocked(2)
+                check("its token's grace", fakes.dbus.released.indexOf(chat) >= 0, true)
+                backend.unlockedAtStart = true
+                backend.results["lockStatus"] = { lock: null }
+                backend.state = "ready"
+            }, 200],
+            [function() { check("over with the passphrase", window.notifications["appLocked"], undefined) }, 0],
+        ],
         // Before the first look at the lock nothing is known: these wait for the answer.
         messagesWaitForTheLockAnswer: [
             [function() {

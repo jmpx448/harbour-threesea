@@ -135,3 +135,6 @@ core: the core has no app lock state of its own, its `unlocked` flag is the priv
 A reply's token lives for 12 hours after its notification closed (a phone can stay locked that long
 with a reply typed), and a reply coming later or without a token gets "Your reply was not sent",
 without its words or chat, as any process on the session bus can make that call.
+
+The same when the stored data's lock shows at a start: the last run's notifications go at once. Until
+the app starts nothing can take them away; that is the limit after a crash or a restart of the phone.

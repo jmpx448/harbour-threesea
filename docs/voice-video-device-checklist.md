@@ -367,6 +367,10 @@ Notifications:
      Expect: the chat's text is gone within about 30 seconds.
    - Keep running off, app lock on: close the window with a notification showing.
      Expect: its text is gone from Events too.
+   - "Encrypt stored data" on, a notification showing: `pkill -9 harbour-threesea`, then start it.
+     Expect: before the passphrase, name and text are gone from Events; "Threesea is locked" stands
+     for them. After a restart of the phone nothing can do this until the app is started, so the
+     last text stays until then.
    - Type a reply in a notification on the lock screen, let the app lock's grace time pass before
      unlocking the phone.
      Expect: "Threesea is locked" says that the reply waits; it goes out after the PIN.
