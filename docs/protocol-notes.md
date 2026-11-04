@@ -216,6 +216,11 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - The blob server answers **403 unless the user agent contains "Threema"**. We send `Threesea/<version> (Threema compatible; Sailfish OS)`.
 - Upload `POST https://ds-blobp-upload.threema.ch/upload?persist=0`, multipart field `blob`
   (`blob.bin`, `application/octet-stream`), answer: blob id in hex. Done: `POST …/{id}/done`.
+- A group's file goes up with `persist=1`, and without multi-device nobody sends `done` for it:
+  the other members still need it. 1:1: `persist=0`, `done` by the recipient once fetched. Android's
+  rules: `shouldPersistUploadForMessage` and `shouldMarkAsDone` in `MessageServiceImpl.java`. One
+  deviation: without multi-device we send no `done` for our own 1:1 file fetched again after a
+  clean-up (Android does), as its recipient may not have it yet.
 - Libre needs no auth token (only OnPrem does).
 - Sailjail: the pickers (`Sailfish.Pickers`) need `MediaIndexing` (Tracker) besides Pictures,
   Videos, Music, Documents, Downloads; without it the picker pages stay empty.

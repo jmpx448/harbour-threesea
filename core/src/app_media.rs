@@ -304,14 +304,21 @@ fn same_file(store: &Store, message: i64, key: &[u8; 32]) -> bool {
     matches!(store.file_keys(message), Ok(Some(keys)) if *keys.key == *key)
 }
 
-/// Android's scopes for `done`: in public scope only for incoming 1:1 messages (group members and
-/// the other devices still need it).
-fn done_scope(outgoing: bool, group: bool) -> media::BlobScope {
-    if !outgoing && !group {
+/// `done` on the blob server says nobody needs this blob any more, so it may be dropped. Only an
+/// incoming 1:1 message's blob is done for good. Without multi-device nothing else gets one: a
+/// group's blob is still needed by the other members (Android's `shouldMarkAsDone`), and neither
+/// is our own 1:1 message's ours to drop when a cleaned-up file is fetched again, since its
+/// recipient may not have it yet (there Android does send one). With multi-device the mirror keeps
+/// the blob for the other devices (`Local`).
+fn done_scope(outgoing: bool, group: bool, multi_device: bool) -> Option<media::BlobScope> {
+    if !multi_device && (group || outgoing) {
+        return None;
+    }
+    Some(if !outgoing && !group {
         media::BlobScope::Public
     } else {
         media::BlobScope::Local
-    }
+    })
 }
 
 /// One part to fetch: what the task needs, read before it starts.
@@ -321,7 +328,7 @@ struct Download {
     key: Zeroizing<[u8; 32]>,
     blob_id: libthreema::common::BlobId,
     scope: media::BlobScope,
-    done_scope: media::BlobScope,
+    done_scope: Option<media::BlobScope>,
     save_to: Option<std::path::PathBuf>,
 }
 
@@ -405,8 +412,8 @@ async fn download(
         let fetched = media::download(&https, &job.blob_id, job.scope, limit).await;
         job.finish(&store, &media, &events, fetched)
     };
-    if stored {
-        media::mark_done(&https, &job.blob_id, job.done_scope).await;
+    if stored && let Some(scope) = job.done_scope {
+        media::mark_done(&https, &job.blob_id, scope).await;
     }
 }
 
@@ -449,17 +456,22 @@ fn auto_save(store: &Store, message: i64, data: &[u8], pictures: &std::path::Pat
     }
 }
 
-/// Where a message's blob goes: a notes group (a group whose only member is us) is read by our
-/// own devices alone, so its blob stays on the device group's mirror, as Android does
-/// (`isNotesGroup ? BlobScope.Local : BlobScope.Public`). Without multi-device there is no
-/// mirror and both go to the usual blob server.
-fn upload_scope(store: &Store, message: i64) -> media::BlobScope {
-    match store.message(message).ok().flatten() {
-        Some(message) => match store.group(&message.conversation) {
-            Ok(Some(group)) if group.members.is_empty() && !group.left => media::BlobScope::Local,
-            _ => media::BlobScope::Public,
-        },
-        None => media::BlobScope::Public,
+/// Where a message's blob goes, and whether it stays after a download (`persist`), by Android's
+/// `shouldPersistUploadForMessage`. A group's stays, since every member fetches it. A notes group
+/// (a group whose only member is us) is read by our own devices alone, so its blob stays on the
+/// device group's mirror (`isNotesGroup ? BlobScope.Local : BlobScope.Public`); without
+/// multi-device there is no mirror and it goes to the usual blob server. A list's copy isn't
+/// uploaded: each member gets a 1:1 message with a blob of its own.
+fn upload_target(store: &Store, message: i64) -> (media::BlobScope, bool) {
+    let group = store
+        .message(message)
+        .ok()
+        .flatten()
+        .and_then(|message| store.group(&message.conversation).ok().flatten());
+    match group {
+        Some(group) if group.members.is_empty() && !group.left => (media::BlobScope::Local, false),
+        Some(_) => (media::BlobScope::Public, true),
+        None => (media::BlobScope::Public, false),
     }
 }
 
@@ -480,7 +492,7 @@ async fn upload(
         return;
     };
     changed(store.set_upload_state(message, STATE_LOADING));
-    let scope = upload_scope(&store, message);
+    let (scope, persist) = upload_target(&store, message);
     let result = async {
         let file = media
             .read(message, MediaPart::File)?
@@ -489,7 +501,7 @@ async fn upload(
             media::upload_scoped(
                 &https,
                 &media::encrypt_blob(&keys.key, MediaPart::File, &file),
-                false,
+                persist,
                 scope,
             )
             .await?,
@@ -502,7 +514,7 @@ async fn upload(
                 media::upload_scoped(
                     &https,
                     &media::encrypt_blob(&keys.key, MediaPart::Thumbnail, &thumbnail),
-                    false,
+                    persist,
                     scope,
                 )
                 .await?,
@@ -954,7 +966,7 @@ impl App {
             } else {
                 media::BlobScope::Public
             },
-            done_scope: done_scope(outgoing, group),
+            done_scope: done_scope(outgoing, group, media::mirror_active()),
             save_to,
         })
     }
@@ -1385,7 +1397,7 @@ mod tests {
             },
             key: keys.key,
             scope: media::BlobScope::Public,
-            done_scope: media::BlobScope::Public,
+            done_scope: None,
             save_to: None,
         }
     }
@@ -1692,9 +1704,37 @@ mod tests {
             .unwrap();
         let contact = store.insert_outgoing("ABCD1234", 3, "file", &body).unwrap();
 
-        assert_eq!(upload_scope(&store, own.id), media::BlobScope::Local);
-        assert_eq!(upload_scope(&store, theirs.id), media::BlobScope::Public);
-        assert_eq!(upload_scope(&store, contact.id), media::BlobScope::Public);
+        assert_eq!(
+            upload_target(&store, own.id),
+            (media::BlobScope::Local, false)
+        );
+        // Every member fetches a group's blob, and a 1:1 message's is done once fetched.
+        assert_eq!(
+            upload_target(&store, theirs.id),
+            (media::BlobScope::Public, true)
+        );
+        assert_eq!(
+            upload_target(&store, contact.id),
+            (media::BlobScope::Public, false)
+        );
+    }
+
+    /// `done` lets the server drop a blob: without multi-device only for one we received 1:1, not
+    /// for a group's, which the other members still need, nor for our own, which its recipient may
+    /// still need when we fetch it again after a clean-up.
+    #[test]
+    fn only_a_received_one_to_one_blob_is_done_for_good() {
+        use media::BlobScope::{Local, Public};
+        // Without multi-device.
+        assert_eq!(done_scope(false, false, false), Some(Public));
+        assert_eq!(done_scope(true, false, false), None);
+        assert_eq!(done_scope(false, true, false), None);
+        assert_eq!(done_scope(true, true, false), None);
+        // With it: the mirror keeps the blob for the other devices.
+        assert_eq!(done_scope(false, false, true), Some(Public));
+        assert_eq!(done_scope(true, false, true), Some(Local));
+        assert_eq!(done_scope(false, true, true), Some(Local));
+        assert_eq!(done_scope(true, true, true), Some(Local));
     }
 
     /// A picture we sent from another device (Threema Desktop): the reflection carries the blob,

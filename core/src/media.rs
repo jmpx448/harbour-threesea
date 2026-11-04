@@ -3,9 +3,10 @@
 //! keys of file messages.
 //!
 //! - Blob server (as `BlobUploader`/`BlobLoader` on Android, without multi-device mirror):
-//!   upload `POST https://ds-blobp-upload.threema.ch/upload?persist=0` (multipart field `blob`,
-//!   answer: blob id in hex), download `GET https://ds-blobp-{first byte hex}.threema.ch/{id}`,
-//!   then `POST …/{id}/done` (1:1 only) so the server can delete it.
+//!   upload `POST https://ds-blobp-upload.threema.ch/upload?persist=0` (`1` for a group's files;
+//!   multipart field `blob`, answer: blob id in hex), download
+//!   `GET https://ds-blobp-{first byte hex}.threema.ch/{id}`, then `POST …/{id}/done` (received
+//!   1:1 messages only) so the server can delete it.
 //! - Blobs are encrypted with the message's random key: XSalsa20-Poly1305, nonce `00..01` for the
 //!   file and `00..02` for the thumbnail.
 //! - On the device every file is stored encrypted (CLAUDE.md §7: nothing readable at rest), with
@@ -390,6 +391,11 @@ pub fn set_mirror(device_group: Option<(&libthreema::common::keys::DeviceGroupKe
     }
 }
 
+/// Is multi-device on, so that blobs go through the device group's mirror?
+pub fn mirror_active() -> bool {
+    MIRROR.read().is_ok_and(|mirror| mirror.is_some())
+}
+
 /// The device group whose mirror is in use.
 #[cfg(test)]
 pub(crate) fn mirror_device_group() -> Option<[u8; 32]> {
@@ -471,7 +477,7 @@ pub async fn mark_done(https: &HttpsClient, blob_id: &BlobId, scope: BlobScope) 
 }
 
 /// Upload an (encrypted) blob; with multi-device, to the mirror in `scope` (sync pictures:
-/// local, only the device group fetches them).
+/// local, only the device group fetches them). `persist` as in [`upload`].
 pub async fn upload_scoped(
     https: &HttpsClient,
     data: &[u8],
@@ -483,7 +489,7 @@ pub async fn upload_scoped(
 
 /// Upload an (encrypted) blob; returns its id.
 /// `persist`: keep the blob after downloads (group pictures, which every member downloads and
-/// which are re-sent on group syncs); messages' blobs are removed once fetched.
+/// which are re-sent on group syncs); a 1:1 message's blob is removed once fetched.
 pub async fn upload(https: &HttpsClient, data: &[u8], persist: bool) -> Result<BlobId, MediaError> {
     upload_to(https, data, persist, BlobScope::Public).await
 }
