@@ -153,7 +153,6 @@ Page {
                 result.memberNames = names.join(", ")
                 result.reactions = true
                 result.canEdit = true
-                result.canDelete = true
                 page.contact = result
             })
         } else if (isList) {
@@ -2597,6 +2596,7 @@ Page {
                 anyReaction: page.contact.reactions !== false
                 senderName: page.isGroup && !model.outgoing && model.sender ? page.memberName(model.sender) : ""
                 canEdit: page.contact.canEdit === true
+                noAgeLimit: page.contact.isNotes === true
                 canQuote: !page.isList && !page.attachment
                 selectionMode: page.selecting
                 selected: page.selected[model.id] === true

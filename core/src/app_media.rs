@@ -561,7 +561,7 @@ fn upload_target(store: &Store, message: i64) -> (media::BlobScope, bool) {
         .flatten()
         .and_then(|message| store.group(&message.conversation).ok().flatten());
     match group {
-        Some(group) if group.members.is_empty() && !group.left => (media::BlobScope::Local, false),
+        Some(group) if group.is_notes() => (media::BlobScope::Local, false),
         Some(_) => (media::BlobScope::Public, true),
         None => (media::BlobScope::Public, false),
     }

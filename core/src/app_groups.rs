@@ -116,6 +116,8 @@ impl App {
         let mut value = self.group_json(&group)?;
         value["title"] = json!(self.group_title(&group));
         value["private"] = json!(self.store.is_private(key)?);
+        // A note deleted "for everyone" would only differ from a plain delete on linked devices.
+        value["canDelete"] = json!(!group.is_notes() || self.store.multi_device()?.is_some());
         Ok(value)
     }
 

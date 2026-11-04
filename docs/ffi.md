@@ -232,7 +232,7 @@ QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, k
 
 | Command | Arguments | Result / notes |
 |---|---|---|
-| `groups` / `group` | – / `key` (group conversation key `g:<creator>:<hex>`) | group JSON list / one group (title, members with names and `pictureVersion`, creator, left; the single group also `private`) |
+| `groups` / `group` | – / `key` (group conversation key `g:<creator>:<hex>`) | group JSON list / one group (title, members with names and `pictureVersion`, creator, left, isNotes; the single group also `private`, and `canDelete`: deleting for everyone means something, which in a notes group takes linked devices) |
 | `createGroup` | `name`, `members` (IDs) | the new group; we are its creator |
 | `renameGroup` / `setGroupMembers` / `leaveGroup` | `key` and `name` / `members` / – | the changed group; only the creator renames or changes members; the creator leaving disbands it |
 | `setGroupPicture` / `removeGroupPicture` | `key`; attachment 0: JPEG | the changed group (creator only) |

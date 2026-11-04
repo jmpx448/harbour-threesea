@@ -280,6 +280,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   `edited_at` = deletion time). It has nothing left to send: a later Reject of it changes nothing.
   Messages nobody received yet (pending/failed) are simply changed or removed without telling the peer.
 - "Delete" on its own removes a message from this device only (any message).
+- Notes groups (a group of one, not left): every feature counts as supported, no age limit, and
+  reactions, edits, deletions and votes still go through the outbox so that linked devices hear of
+  them; the receiver list is just empty. "Delete for everyone" is offered only with linked devices.
 - Editing must not trigger typing indicators.
 
 ## Blob server

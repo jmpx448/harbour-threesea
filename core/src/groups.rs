@@ -192,6 +192,12 @@ impl Group {
             .collect()
     }
 
+    /// A notes group: Threema's group of one, read by our own devices alone (`members` never holds
+    /// us). Android's `isNotesGroup`.
+    pub fn is_notes(&self) -> bool {
+        self.members.is_empty() && !self.left
+    }
+
     pub fn to_json(&self, user: &str, display_name: impl Fn(&str) -> String) -> Value {
         let creator = self.identity.creator_identity.to_string();
         json!({
@@ -200,6 +206,7 @@ impl Group {
             "creator": creator,
             "isCreator": creator == user,
             "left": self.left,
+            "isNotes": self.is_notes(),
             "members": self.members.iter().map(|m| json!({
                 "identity": m,
                 "displayName": display_name(m),

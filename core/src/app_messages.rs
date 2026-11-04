@@ -29,7 +29,13 @@ pub(crate) enum Conversation {
 }
 
 impl Conversation {
-    /// Whether the receiver(s) support a feature: the contact, or any group member.
+    /// A notes group, where everything goes to our own devices only.
+    fn is_notes(&self) -> bool {
+        matches!(self, Self::Group(group) if group.is_notes())
+    }
+
+    /// Whether the receiver(s) support a feature: the contact, or any group member. A notes group
+    /// has no one who could lack it (Android's `GroupMessageReceiver`).
     pub(crate) fn supports(
         &self,
         store: &crate::store::Store,
@@ -37,6 +43,7 @@ impl Conversation {
     ) -> Result<bool, ApiError> {
         Ok(match self {
             Self::Contact(contact) => contact.feature_mask.0 & feature != 0,
+            Self::Group(group) if group.is_notes() => true,
             Self::Group(group) => {
                 let mut any = false;
                 for member in &group.members {
@@ -432,6 +439,11 @@ impl App {
     ) -> Result<(), ApiError> {
         match conversation {
             Conversation::Contact(_) => {
+                self.store
+                    .outbox_add(key, MessageId::random().0, kind, body)?;
+            }
+            // No receivers, but our other devices hear of it when it is "sent" (`send_to_group`).
+            Conversation::Group(group) if group.is_notes() => {
                 self.store
                     .outbox_add(key, MessageId::random().0, kind, body)?;
             }
@@ -1071,7 +1083,8 @@ impl App {
         Ok((id, contact, message))
     }
 
-    /// The 1:1 edit submit steps. A message nobody has received yet is just changed.
+    /// The edit submit steps. A message nobody has received yet is just changed. Notes have no age
+    /// limit, here and in `delete_message` (Android's `canBeEdited`, `canDeleteRemotely`).
     pub(crate) fn edit_message(
         &mut self,
         identity: &str,
@@ -1099,7 +1112,7 @@ impl App {
             if !contact.supports(&self.store, FeatureMask::EDIT_MESSAGE_SUPPORT)? {
                 return Err(ApiError::NotSupportedByContact);
             }
-            if now_ms() - message.created_at > EDIT_DELETE_MAX_AGE_MS {
+            if !contact.is_notes() && now_ms() - message.created_at > EDIT_DELETE_MAX_AGE_MS {
                 return Err(ApiError::MessageTooOld);
             }
             self.queue(
@@ -1153,7 +1166,7 @@ impl App {
         if !contact.supports(&self.store, FeatureMask::DELETE_MESSAGE_SUPPORT)? {
             return Err(ApiError::NotSupportedByContact);
         }
-        if now_ms() - message.created_at > EDIT_DELETE_MAX_AGE_MS {
+        if !contact.is_notes() && now_ms() - message.created_at > EDIT_DELETE_MAX_AGE_MS {
             return Err(ApiError::MessageTooOld);
         }
         self.queue(
@@ -1441,6 +1454,35 @@ mod tests {
         app
     }
 
+    fn notes_group(app: &App) -> String {
+        let group = crate::groups::Group {
+            key: "g:ECHOECHO:0000000000000001".into(),
+            identity: libthreema::common::GroupIdentity {
+                creator_identity: "ECHOECHO".parse().unwrap(),
+                group_id: 1,
+            },
+            name: "Notes".into(),
+            members: Vec::new(),
+            left: false,
+            created_at: 0,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        group.key
+    }
+
+    /// As old as `age_ms`.
+    fn make_old(app: &App, id: i64, age_ms: i64) {
+        app.store
+            .conn
+            .execute(
+                "UPDATE messages SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, now_ms() - age_ms],
+            )
+            .unwrap();
+    }
+
     fn sent_message(app: &App, conversation: &str, message_id: u64, body: &str) -> Message {
         let stored = app
             .store
@@ -1466,5 +1508,73 @@ mod tests {
         assert_eq!(outbox[0].body["text"], "No");
         let edited = app.store.message(stored.id).unwrap().unwrap();
         assert_eq!(edited.body, crate::messages::with_quote(Some(5), "No"));
+    }
+
+    /// In a notes group nobody can lack a feature and nothing gets too old: a heart, an edit of a
+    /// note from long ago and its deletion all work, and each goes into the outbox for the linked
+    /// devices although there are no receivers.
+    #[test]
+    fn a_notes_group_supports_everything_at_any_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let key = notes_group(&app);
+        let note = sent_message(&app, &key, 7, "old note");
+        make_old(&app, note.id, 2 * EDIT_DELETE_MAX_AGE_MS);
+        let id = format!("{:x}", 7);
+
+        app.react(&key, &id, "\u{2764}\u{fe0f}", true).unwrap();
+        app.edit_message(&key, &id, "new note").unwrap();
+        let edited = app.store.message(note.id).unwrap().unwrap();
+        assert_eq!(edited.body, "new note");
+        assert!(edited.edited_at.is_some());
+
+        app.delete_message(&key, &id, true, true).unwrap();
+        assert_eq!(app.store.message(note.id).unwrap().unwrap().kind, "deleted");
+
+        let outbox = app.store.outbox().unwrap();
+        let kinds: Vec<&str> = outbox.iter().map(|entry| entry.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                reactions::OUTBOX_REACTION,
+                reactions::OUTBOX_EDIT,
+                reactions::OUTBOX_DELETE
+            ]
+        );
+        for entry in &outbox {
+            assert!(
+                app.store
+                    .pending_receivers(&key, entry.message_id)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    /// Only the notes group goes without the limit: an ordinary group's old message stays too old,
+    /// and a group we left supports nothing.
+    #[test]
+    fn other_groups_keep_their_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), FeatureMask::EDIT_MESSAGE_SUPPORT);
+        let key = notes_group(&app);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        group.members = vec![PEER.to_owned()];
+        app.store.upsert_group(&group).unwrap();
+        let old = sent_message(&app, &key, 7, "old");
+        make_old(&app, old.id, 2 * EDIT_DELETE_MAX_AGE_MS);
+        assert!(matches!(
+            app.edit_message(&key, &format!("{:x}", 7), "new"),
+            Err(ApiError::MessageTooOld)
+        ));
+
+        group.members = Vec::new();
+        group.left = true;
+        app.store.upsert_group(&group).unwrap();
+        assert!(!group.is_notes());
+        assert!(matches!(
+            Conversation::Group(group).supports(&app.store, FeatureMask::EDIT_MESSAGE_SUPPORT),
+            Ok(false)
+        ));
     }
 }

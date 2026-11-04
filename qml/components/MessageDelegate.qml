@@ -27,6 +27,8 @@ ListItem {
 
     // The contact understands edits / deletions for everyone.
     property bool canEdit: false
+    // Notes (a notes group): edited and deleted at any age, as on Android.
+    property bool noAgeLimit: false
     property bool canDelete: false
     // Distribution lists: the quoted message would not be in the receivers' chats.
     property bool canQuote: true
@@ -85,7 +87,7 @@ ListItem {
     readonly property bool isEdited: (model.kind === "text" || isFile) && !!model.editedAt
     // Ours, sent and young enough; never-sent messages are simply changed or removed.
     readonly property bool unsent: outgoing && (model.state === 0 || model.state === 4)
-    readonly property bool recent: Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
+    readonly property bool recent: noAgeLimit || Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
 
     // Inner Repeaters have their own `model`.
     readonly property var reactions: model.reactions

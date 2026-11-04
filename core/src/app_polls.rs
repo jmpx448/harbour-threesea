@@ -96,6 +96,10 @@ impl App {
                 }
             }
             Conversation::List(_) => return Err(ApiError::NotSupportedByContact),
+            // No receivers, but our other devices hear of it, like any other change to a note.
+            Conversation::Group(group) if group.is_notes() => {
+                self.queue(&key, &conversation, OUTBOX_POLL_VOTE, &body)?;
+            }
             Conversation::Group(group) => {
                 let receivers: Vec<String> = if state["announce"] == true {
                     group.members.clone()
