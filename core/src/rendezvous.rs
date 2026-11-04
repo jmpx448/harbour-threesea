@@ -28,6 +28,11 @@ const JOIN_PREFIX: &str = "threema://device-group/join#";
 const CHUNK: usize = 1024 * 1024;
 /// Time for the other device to answer on the relay.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time for one chunk to leave: a relay that stopped reading doesn't hold us up for ever. (One
+/// chunk, not one message: how long a message may take depends on its size.)
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Time for the goodbye on the relay.
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LinkError {
@@ -122,7 +127,9 @@ impl RendezvousLink {
             .try_into()
             .map_err(|_| LinkError::NotJoinCode)?;
         let pid = path.path_id;
-        let socket = Datagrams::connect(&path.url).await?;
+        let socket = timeout(CONNECT_TIMEOUT, Datagrams::connect(&path.url))
+            .await
+            .map_err(|_| LinkError::Timeout)??;
         let (protocol, initial) =
             RendezvousProtocol::new_as_rrd(true, RendezvousAuthenticationKey(ak), &[pid]);
         let mut link = Self {
@@ -146,7 +153,9 @@ impl RendezvousLink {
         bytes.extend_from_slice(&header);
         bytes.extend_from_slice(payload);
         for chunk in bytes.chunks(CHUNK) {
-            self.socket.send(chunk.to_vec()).await?;
+            timeout(WRITE_TIMEOUT, self.socket.send(chunk.to_vec()))
+                .await
+                .map_err(|_| LinkError::Timeout)??;
         }
         Ok(())
     }
@@ -217,7 +226,7 @@ impl RendezvousLink {
     }
 
     pub async fn close(self) {
-        self.socket.close().await;
+        let _ = timeout(CLOSE_TIMEOUT, self.socket.close()).await;
     }
 }
 

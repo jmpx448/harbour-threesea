@@ -94,6 +94,12 @@ function text(kind, message) {
     case "linkFailed":
         //% "Linking didn't work. Check the connection on both devices and try again."
         return qsTrId("threesea-la-error-link-failed")
+    case "linkRemoved":
+        //% "Linking didn't finish, so the devices in the device group were removed again. The computer had already received your ID. Close Threema for Desktop, open it again and scan its new code."
+        return qsTrId("threesea-la-error-link-removed")
+    case "linkUncertain":
+        //% "Linking didn't finish, but the computer received your ID and may be linked anyway. Linked devices shows what is linked once you are online, and you can remove it there."
+        return qsTrId("threesea-la-error-link-uncertain")
     case "groupCallFull":
         //% "This group call is full."
         return qsTrId("threesea-la-error-group-call-full")

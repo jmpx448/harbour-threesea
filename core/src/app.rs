@@ -1003,6 +1003,12 @@ pub enum ApiError {
     /// Linking failed on the way (network, the other device).
     #[error("linking failed: {0}")]
     LinkFailed(String),
+    /// Linking failed with the ID already handed over; the device group was removed again.
+    #[error("linking failed after the handover; the device group was removed")]
+    LinkRemoved,
+    /// Linking failed with the ID already handed over, and the new device may be in the group.
+    #[error("linking failed after the handover; the new device may be linked")]
+    LinkUncertain,
     /// Only GIFs can be favourite GIFs.
     #[error("not a GIF")]
     NotGif,
@@ -1094,6 +1100,8 @@ impl ApiError {
             Self::LinkWebCode => "linkWebCode",
             Self::LinkVersion => "linkVersion",
             Self::LinkFailed(_) => "linkFailed",
+            Self::LinkRemoved => "linkRemoved",
+            Self::LinkUncertain => "linkUncertain",
             Self::GroupNotFound => "groupNotFound",
             Self::QrInvalid => "qrInvalid",
             Self::LinkInvalid => "linkInvalid",

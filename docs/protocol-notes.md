@@ -423,3 +423,14 @@ returns `verificationId`; `{verificationId, code}` to `link_mobileno` confirms,
 `link_mobileno_call` has the code read out by phone. Numbers are E.164 without `+`, and the user must
 enter them with their country code; the dialog shows the result first (ADR 0016).
 These are the only requests that send a plain address/number (CLAUDE.md §7.4 exception).
+
+## Linking and removing devices: what counts as done (ADR 0017)
+
+- Removing: inside a `DROP_DEVICE` transaction read the devices (`GetDevicesInfo`), drop only those
+  listed, each confirmed by its `DropDeviceAck`. If no other device remains, drop this one last; the
+  mediator may answer with close code 4113 instead of an ack, which counts as done. Nothing to
+  commit then: the connection is gone anyway. Empty id list = Android's "deactivate if alone".
+- Joining: `Registered` means the new device has all data and is registered on the mediator, so
+  the list has it from then on. Limits: 90 s to begin the transaction, 5 minutes for the transfer
+  (60 s per 1 MiB chunk), 3 minutes for `Registered`, 5 s to close the link, 30 s for the commit.
+  A commit failing after `Registered` restarts the connection, which releases the lock.

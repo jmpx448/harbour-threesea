@@ -9,7 +9,9 @@ use tokio::{sync::oneshot, time::timeout};
 
 use crate::{
     app::{ApiError, App},
-    connection::{DeviceGroupError, DropOutcome, LinkedDevice, ToConnection},
+    connection::{
+        DeviceGroupError, DropOutcome, JOIN_REPLY_LIMIT, JoinOutcome, LinkedDevice, ToConnection,
+    },
     multidevice::{Properties, SETTING_FS_TERMINATE},
 };
 
@@ -416,10 +418,6 @@ impl App {
     }
 
     /// `confirmLinking`: like Android's device linking part one (activation) and two (data).
-    /// If the join fails and multi-device was activated just for it (no other device ever
-    /// joined), the activation is rolled back: without that, a failed first linking left the
-    /// phone alone behind the mediator — offline for good when the mediator connection was
-    /// the problem (user report 2026-10-28).
     pub(crate) async fn confirm_linking(&mut self) -> Result<Value, ApiError> {
         let link = self
             .pending_link
@@ -434,22 +432,61 @@ impl App {
             reply,
         });
         // Not forever: the core handles nothing else meanwhile (deep audit 2026-10-27, P01).
-        // Above the connection's own bounds (3 minutes for the new device's registration), so
-        // this never gives up while the transfer can still succeed.
-        let result = match tokio::time::timeout(std::time::Duration::from_secs(200), answer).await {
-            Err(_) => Err(ApiError::LinkFailed("timeout".into())),
-            Ok(Err(_)) => Err(ApiError::LinkFailed("connection gone".into())),
-            Ok(Ok(Err(error))) => Err(ApiError::LinkFailed(error)),
-            Ok(Ok(Ok(()))) => Ok(()),
-        };
-        if let Err(error) = result {
-            if !was_active {
-                tracing::warn!("linking failed; leaving the new device group again");
-                self.leave_device_group_locally().await;
+        // The connection answers within this limit; if it doesn't, all that is known is that
+        // it may still be working on the join, so nothing is rolled back.
+        let outcome = match timeout(JOIN_REPLY_LIMIT, answer).await {
+            Err(_) => {
+                tracing::warn!("no answer on the device join");
+                return Err(ApiError::LinkUncertain);
             }
-            return Err(error);
+            Ok(Err(_)) => JoinOutcome::FailedBeforeHandover("connection gone".into()),
+            Ok(Ok(outcome)) => outcome,
+        };
+        self.finish_linking(outcome, was_active).await
+    }
+
+    /// What the join's end means for this device. Before the handover, a group that exists only
+    /// for this join is simply left: nobody else ever had it (without that, a failed first
+    /// linking left the phone alone behind the mediator, offline for good when the mediator
+    /// connection was the problem: user report 2026-10-28). After it, the new device may have
+    /// the ID and be in the group, so this device stays in charge until the mediator has
+    /// removed what is there; a device group that was there before is the user's to manage.
+    async fn finish_linking(
+        &mut self,
+        outcome: JoinOutcome,
+        was_active: bool,
+    ) -> Result<Value, ApiError> {
+        match outcome {
+            JoinOutcome::Joined => Ok(match self.linked_devices().await {
+                Ok(devices) => devices,
+                // The new device is in. The list is shown when it can be fetched again.
+                Err(error) => {
+                    tracing::warn!(kind = error.kind(), "linked devices not read after linking");
+                    json!({ "devices": [], "active": true })
+                }
+            }),
+            JoinOutcome::FailedBeforeHandover(reason) => {
+                if !was_active {
+                    tracing::warn!("linking failed; leaving the new device group again");
+                    self.leave_device_group_locally().await;
+                }
+                Err(ApiError::LinkFailed(reason))
+            }
+            JoinOutcome::FailedAfterHandover(_) if was_active => Err(ApiError::LinkUncertain),
+            JoinOutcome::FailedAfterHandover(_) => match self.drop_from_group(None).await {
+                Ok(dropped) if dropped.left_group => Err(ApiError::LinkRemoved),
+                Ok(_) => Err(ApiError::LinkUncertain),
+                // Still in the group: Linked devices tells, and can remove it once online; if
+                // nothing else is in it, the regular check ends multi-device.
+                Err(error) => {
+                    tracing::warn!(
+                        kind = error.kind(),
+                        "device group not removed after linking"
+                    );
+                    Err(ApiError::LinkUncertain)
+                }
+            },
         }
-        self.linked_devices().await
     }
 
     /// After a command that changed something other devices keep too: reflect it.
@@ -975,5 +1012,98 @@ mod tests {
         ));
         app.check_device_group();
         assert!(rx.try_recv().is_err(), "not again so soon");
+    }
+
+    fn before_handover() -> JoinOutcome {
+        JoinOutcome::FailedBeforeHandover("not connected".into())
+    }
+
+    fn after_handover() -> JoinOutcome {
+        JoinOutcome::FailedAfterHandover("connection timed out".into())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_first_linking_failing_before_the_handover_rolls_back() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let error = app
+            .finish_linking(before_handover(), false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "linkFailed");
+        assert!(app.store.multi_device().unwrap().is_none());
+        assert!(matches!(rx.try_recv(), Ok(ToConnection::Reconnect)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn another_failing_before_the_handover_leaves_the_group_alone() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let error = app
+            .finish_linking(before_handover(), true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "linkFailed");
+        assert!(app.store.multi_device().unwrap().is_some());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn after_the_handover_the_new_device_is_removed_first() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let store = std::rc::Rc::clone(&app.store);
+        let connection = async {
+            let Some(ToConnection::DropDevices { ids, reply }) = rx.recv().await else {
+                panic!("expected a drop");
+            };
+            assert!(ids.is_none(), "whatever is in the group by now");
+            store.set_multi_device(None).unwrap();
+            let _ = reply.send(Ok(DropOutcome {
+                remaining: Vec::new(),
+                left_group: true,
+            }));
+        };
+        let (result, ()) = tokio::join!(app.finish_linking(after_handover(), false), connection);
+        assert_eq!(result.unwrap_err().kind(), "linkRemoved");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn after_the_handover_this_device_stays_in_charge_if_removing_fails() {
+        let (_dir, mut app) = app();
+        let rx = in_a_group(&mut app);
+        tokio::spawn(offline(rx));
+        let error = app
+            .finish_linking(after_handover(), false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "linkUncertain");
+        assert!(
+            app.store.multi_device().unwrap().is_some(),
+            "a new device may be in the group, and only a member can remove it"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn after_the_handover_an_existing_group_keeps_its_devices() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let error = app
+            .finish_linking(after_handover(), true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "linkUncertain");
+        assert!(app.store.multi_device().unwrap().is_some());
+        assert!(rx.try_recv().is_err(), "the other devices stay");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_join_that_worked_stays_one_when_the_connection_then_drops() {
+        let (_dir, mut app) = app();
+        let rx = in_a_group(&mut app);
+        tokio::spawn(offline(rx));
+        let result = app.finish_linking(JoinOutcome::Joined, false).await;
+        assert_eq!(result.unwrap()["active"], true);
+        assert!(app.store.multi_device().unwrap().is_some());
     }
 }

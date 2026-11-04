@@ -92,6 +92,25 @@ const TYPING_MAX_AGE: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a transaction may take to begin, other devices' transactions included.
 const TRANSACTION_BEGIN_LIMIT: Duration = Duration::from_secs(90);
+/// How long the mediator gets for one answer.
+const D2M_REPLY_LIMIT: Duration = Duration::from_secs(30);
+/// How long the data for a new device may take to go over the relay: its pictures can be many
+/// and the uplink slow (each chunk also has a limit of its own, `rendezvous::WRITE_TIMEOUT`).
+const JOIN_TRANSFER_LIMIT: Duration = Duration::from_secs(300);
+/// How long the new device may take to register after it has all the data.
+const JOIN_REGISTER_LIMIT: Duration = Duration::from_secs(180);
+/// How long the core waits for the connection's answer on a join: everything the connection
+/// may spend on it, its first connection through the mediator and a minute to spare. Only a
+/// connection that no longer works gets here: the join itself always answers within this.
+pub(crate) const JOIN_REPLY_LIMIT: Duration = Duration::from_secs(
+    CONNECT_TIMEOUT.as_secs()
+        + TRANSACTION_BEGIN_LIMIT.as_secs()
+        + JOIN_TRANSFER_LIMIT.as_secs()
+        + JOIN_REGISTER_LIMIT.as_secs()
+        + crate::rendezvous::CLOSE_TIMEOUT.as_secs()
+        + D2M_REPLY_LIMIT.as_secs()
+        + 60,
+);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// How long we stay away when a server told us not to come back by ourselves.
 const HOLD_OFF: Duration = Duration::from_secs(600);
@@ -141,7 +160,7 @@ pub enum ToConnection {
     /// NEW_DEVICE_SYNC transaction (device join, ADR 0011).
     NewDeviceSync {
         link: Box<crate::rendezvous::RendezvousLink>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<JoinOutcome>,
     },
     /// Multi-device: a sync envelope (contact, group, profile, settings changed here) for the
     /// other devices, inside a transaction of its scope (Android's `Reflect*SyncTask`).
@@ -181,6 +200,31 @@ impl From<ConnectionError> for DeviceGroupError {
             | ConnectionError::Stopped
             | ConnectionError::Reconnect => Self::NotConnected,
             other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
+/// How a device join ended. What matters after a failure is whether the identity has left this
+/// device: until then nothing happened that needs undoing on the mediator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinOutcome {
+    /// The new device has registered.
+    Joined,
+    /// Failed before the essential data went out.
+    FailedBeforeHandover(String),
+    /// Failed with the essential data out (or on its way): the new device may have the ID and
+    /// may be in the group, or get there yet.
+    FailedAfterHandover(String),
+}
+
+impl JoinOutcome {
+    /// `registered` is all that decides success: a commit that fails afterwards only releases
+    /// the lock late, and the new device is in the group either way.
+    fn from_steps(handed_over: bool, registered: Result<(), String>) -> Self {
+        match registered {
+            Ok(()) => Self::Joined,
+            Err(reason) if handed_over => Self::FailedAfterHandover(reason),
+            Err(reason) => Self::FailedBeforeHandover(reason),
         }
     }
 }
@@ -414,7 +458,8 @@ pub async fn run(
                         // The mediator connection after activating multi-device did not come
                         // up: the join cannot run (the UI rolls the activation back).
                         tracing::warn!("device join failed: not connected");
-                        let _ = reply.send(Err("not connected".into()));
+                        let reason = DeviceGroupError::NotConnected.to_string();
+                        let _ = reply.send(JoinOutcome::FailedBeforeHandover(reason));
                     }
                     Some(_) => {}, // queued in the store, sent after connecting
                 },
@@ -1883,14 +1928,14 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Read until a mediator payload `wanted` arrives (30 s at most); everything else is kept:
+    /// Read until a mediator payload `wanted` arrives (`D2M_REPLY_LIMIT` at most); everything else is kept:
     /// CSP bytes go to libthreema, other mediator payloads to the queue.
     async fn await_d2m(
         &mut self,
         wanted: impl Fn(&D2mIncoming) -> bool,
     ) -> Result<D2mIncoming, ConnectionError> {
         let mut buffer = vec![0_u8; 8192];
-        timeout(Duration::from_secs(30), async {
+        timeout(D2M_REPLY_LIMIT, async {
             loop {
                 match self.read_inbound(&mut buffer).await? {
                     Inbound::Csp(bytes) => {
@@ -2033,22 +2078,32 @@ impl<'a> Session<'a> {
     /// The device join's data transfer (md-d2d-join.proto, Android's `DeviceLinkingPartTwoTask`):
     /// while the transaction is held nothing incoming is processed (CSP bytes and mediator
     /// payloads wait), then commit. A failure on the link still commits, which releases the lock.
+    /// Every step has a limit (`JOIN_REPLY_LIMIT` is their sum). The second result: start a new
+    /// connection, because a lock may still be held here.
     async fn new_device_sync(
         &mut self,
         mut link: crate::rendezvous::RendezvousLink,
-    ) -> Result<(), ConnectionError> {
+    ) -> (JoinOutcome, bool) {
         use libthreema::protobuf::d2d::transaction_scope::Scope;
         let Some(dgk) = self
             .multi_device
             .as_ref()
             .and_then(crate::multidevice::Properties::dgk)
         else {
-            return Err(ConnectionError::Protocol(
-                "multi-device is not active".into(),
-            ));
+            link.close().await;
+            let reason = "multi-device is not active".to_owned();
+            return (JoinOutcome::FailedBeforeHandover(reason), false);
         };
-        self.begin_transaction(Scope::NewDeviceSync).await?;
-        let transfer = async {
+        if let Err(error) = self.begin_transaction(Scope::NewDeviceSync).await {
+            link.close().await;
+            let restart = matches!(error, ConnectionError::Timeout);
+            return (
+                JoinOutcome::FailedBeforeHandover(error.to_string()),
+                restart,
+            );
+        }
+        let mut handed_over = false;
+        let transfer = timeout(JOIN_TRANSFER_LIMIT, async {
             link.send(crate::join::begin_message()).await?;
             let data = crate::join::collect(&self.setup.store, &self.setup.media, &dgk)
                 .map_err(|e| crate::rendezvous::LinkError::Protocol(e.to_string()))?;
@@ -2059,27 +2114,35 @@ impl<'a> Session<'a> {
             // Moved, not copied: the link encrypts this buffer in place (with room for the tag,
             // see join::collect), and a plain copy would hold the ID's private key.
             let mut essential_data = data.essential_data;
+            // From the first byte on: part of it may arrive, and nothing here can tell how much.
+            handed_over = true;
             link.send(std::mem::take(&mut *essential_data)).await?;
             Ok::<_, crate::rendezvous::LinkError>(())
-        }
+        })
         .await;
-        let result = match transfer {
-            Ok(()) => self.await_registered(&mut link).await,
-            Err(error) => Err(ConnectionError::Protocol(error.to_string())),
+        let registered = match transfer {
+            Ok(Ok(())) => self.await_registered(&mut link).await,
+            Ok(Err(error)) => Err(ConnectionError::Protocol(error.to_string())),
+            Err(_) => Err(ConnectionError::Timeout),
         };
         // ND may close now or keep it open for the history exchange (not supported: we close).
         link.close().await;
-        self.commit_transaction().await?;
-        result
+        let commit = self.commit_transaction().await;
+        if let Err(error) = &commit {
+            tracing::warn!(%error, "committing the device join failed");
+        }
+        let outcome = JoinOutcome::from_steps(handed_over, registered.map_err(|e| e.to_string()));
+        (outcome, commit.is_err())
     }
 
-    /// Wait (3 minutes at most) for the new device's `Registered`, keeping the mediator read.
+    /// Wait (`JOIN_REGISTER_LIMIT` at most) for the new device's `Registered`, keeping the
+    /// mediator read.
     async fn await_registered(
         &mut self,
         link: &mut crate::rendezvous::RendezvousLink,
     ) -> Result<(), ConnectionError> {
         let mut buffer = vec![0_u8; 8192];
-        timeout(Duration::from_secs(180), async {
+        timeout(JOIN_REGISTER_LIMIT, async {
             loop {
                 tokio::select! {
                     data = link.receive() => {
@@ -2226,11 +2289,17 @@ impl<'a> Session<'a> {
                     },
                     Some(ToConnection::Reconnect) => return Err(ConnectionError::Reconnect),
                     Some(ToConnection::NewDeviceSync { link, reply }) => {
-                        let result = self.new_device_sync(*link).await;
-                        if let Err(error) = &result {
-                            tracing::warn!(%error, "device join failed");
+                        let (outcome, restart) = self.new_device_sync(*link).await;
+                        if let JoinOutcome::FailedBeforeHandover(reason)
+                        | JoinOutcome::FailedAfterHandover(reason) = &outcome
+                        {
+                            // log-ok: our own connection errors and the mediator's text
+                            tracing::warn!(%reason, "device join failed");
                         }
-                        let _ = reply.send(result.map_err(|error| error.to_string()));
+                        let _ = reply.send(outcome);
+                        if restart {
+                            return Err(ConnectionError::Reconnect);
+                        }
                     },
                     Some(ToConnection::ReflectSync) => self.reflect_queued_syncs().await?,
                     Some(ToConnection::CallSignal { peer, signal }) => {
@@ -2812,5 +2881,41 @@ mod drop_plan_tests {
     #[test]
     fn this_device_alone_may_leave_while_others_stay() {
         assert_eq!(plan_drop(Some(&[OWN]), &[DESKTOP], OWN), (Vec::new(), true));
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::*;
+
+    #[test]
+    fn a_registered_device_counts_whatever_the_commit_does() {
+        assert_eq!(
+            JoinOutcome::from_steps(true, Ok(())),
+            JoinOutcome::Joined,
+            "the commit isn't part of the verdict"
+        );
+    }
+
+    #[test]
+    fn a_failure_says_whether_the_identity_left_this_device() {
+        assert_eq!(
+            JoinOutcome::from_steps(false, Err("x".into())),
+            JoinOutcome::FailedBeforeHandover("x".into())
+        );
+        assert_eq!(
+            JoinOutcome::from_steps(true, Err("x".into())),
+            JoinOutcome::FailedAfterHandover("x".into())
+        );
+    }
+
+    #[test]
+    fn the_core_waits_longer_than_the_join_can_take() {
+        let steps = TRANSACTION_BEGIN_LIMIT
+            + JOIN_TRANSFER_LIMIT
+            + JOIN_REGISTER_LIMIT
+            + crate::rendezvous::CLOSE_TIMEOUT
+            + D2M_REPLY_LIMIT;
+        assert!(JOIN_REPLY_LIMIT > steps + CONNECT_TIMEOUT);
     }
 }
