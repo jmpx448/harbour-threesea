@@ -476,6 +476,17 @@ pub(crate) fn hex_bytes(hex: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// The directory's match answer names another key than the stored one for this contact. "Verified
+/// by the server" doesn't hold any more (Android's `SynchronizeAndroidContactsUseCase`); a contact
+/// verified in person stays as it is. Returns whether the level changed.
+pub fn distrust_changed_key(c: &mut ContactInit) -> bool {
+    if c.verification_level == pc::VerificationLevel::ServerVerified {
+        c.verification_level = pc::VerificationLevel::Unverified;
+        return true;
+    }
+    false
+}
+
 /// A stored contact as a Threema Safe entry (`ThreemaSafeServiceImpl` backup writer).
 pub fn to_backup(c: &Contact) -> backup::Contact {
     let verification = match c.verification_level {
@@ -682,6 +693,18 @@ mod tests {
         let mut other = contact_init(&entry("ABCD1234")).unwrap();
         assert!(pin_predefined(&config, &mut other));
         assert_eq!(other.verification_level, pc::VerificationLevel::Unverified);
+    }
+
+    #[test]
+    fn a_changed_key_takes_the_servers_verification_only() {
+        let mut c = contact_init(&entry("ABCD1234")).unwrap();
+        c.verification_level = pc::VerificationLevel::ServerVerified;
+        assert!(distrust_changed_key(&mut c));
+        assert_eq!(c.verification_level, pc::VerificationLevel::Unverified);
+        assert!(!distrust_changed_key(&mut c), "nothing more to take");
+        c.verification_level = pc::VerificationLevel::FullyVerified;
+        assert!(!distrust_changed_key(&mut c));
+        assert_eq!(c.verification_level, pc::VerificationLevel::FullyVerified);
     }
 
     #[test]

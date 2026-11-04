@@ -1013,6 +1013,9 @@ impl App {
             };
             if contacts::hex_bytes(&contact.public_key.to_string()).as_slice() != hit.public_key {
                 tracing::warn!("address book match with a different public key, skipped");
+                if contacts::distrust_changed_key(&mut contact) {
+                    self.store.upsert_contact(&contact)?;
+                }
                 continue;
             }
             matched += 1;
