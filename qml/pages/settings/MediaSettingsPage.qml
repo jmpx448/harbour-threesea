@@ -85,6 +85,22 @@ Page {
         backend.call("setMediaSettings", args, function(ok, result) { if (ok) page.media = result })
     }
 
+    // A shorter period deletes history for good at the next maintenance, so it gets a remorse;
+    // what deletes nothing more applies at once and calls off a shorter one still counting down.
+    // The box keeps showing the applied value until then (ChoiceBox).
+    function chooseKeepDays(days) {
+        var current = page.media.autoDeleteDays || 0
+        if (days > 0 && (current === 0 || days < current)) {
+            //% "Deleting older messages"
+            keepRemorse.execute(qsTrId("threesea-la-keep-messages-remorse"), function() {
+                page.set({ autoDeleteDays: days })
+            })
+        } else {
+            if (keepRemorse.active) keepRemorse.cancel()
+            page.set({ autoDeleteDays: days })
+        }
+    }
+
     function kindsText(list) {
         if (!list || list.length === 0) {
             //% "Nothing"
@@ -107,6 +123,8 @@ Page {
     }
 
     Component.onCompleted: load()
+
+    RemorsePopup { id: keepRemorse }
 
     BusyLabel {
         running: page.cleaning
@@ -216,7 +234,7 @@ Page {
                 choice: Math.max(0, page.keepDays.indexOf(page.media.autoDeleteDays || 0))
                 //% "Older messages are deleted by themselves, with their media. Starred messages, open polls and messages still on their way stay."
                 description: qsTrId("threesea-la-keep-messages-description")
-                onChosen: page.set({ autoDeleteDays: page.keepDays[index] })
+                onChosen: page.chooseKeepDays(page.keepDays[index])
             }
 
             SettingsButton {
