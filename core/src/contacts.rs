@@ -317,11 +317,14 @@ fn contact_init(entry: &FetchedIdentity) -> Option<ContactInit> {
     })
 }
 
+/// `state` in a directory answer: revoked. Android's `ValidContactsLookupSteps` takes it as invalid.
+const DIRECTORY_STATE_INVALID: u8 = 2;
+
 /// What the directory's answer says about `id`.
 fn lookup_result(config: &Config, fetched: &[FetchedIdentity], id: &str) -> Lookup {
     let found = fetched
         .iter()
-        .find(|f| f.identity == id)
+        .find(|f| f.identity == id && f.state != DIRECTORY_STATE_INVALID)
         .and_then(contact_init);
     let Some(mut contact) = found else {
         return Lookup::Invalid;
@@ -814,6 +817,33 @@ mod tests {
         c.first_name = Some("Eve".into());
         c.last_name = Some("Echo".into());
         assert_eq!(display_name(&c), "Eve Echo");
+    }
+
+    #[test]
+    fn an_id_the_directory_says_is_revoked_is_invalid() {
+        let answer = |state: u8| {
+            let body = format!(
+                r#"{{"identities":[{{"identity":"ABCD1234","publicKey":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=","state":{state}}}]}}"#
+            );
+            parse_fetch_bulk(Ok(libthreema::https::HttpsResponse {
+                status: 200,
+                body: body.into_bytes(),
+            }))
+            .unwrap()
+        };
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        assert!(matches!(
+            lookup_result(&config, &answer(0), "ABCD1234"),
+            Lookup::Found(_)
+        ));
+        assert!(matches!(
+            lookup_result(&config, &answer(1), "ABCD1234"),
+            Lookup::Found(_)
+        ));
+        assert!(matches!(
+            lookup_result(&config, &answer(2), "ABCD1234"),
+            Lookup::Invalid
+        ));
     }
 
     #[test]
