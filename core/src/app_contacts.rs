@@ -450,7 +450,7 @@ impl App {
             // Known from a group or deleted before: make it a regular contact again.
             existing.acquaintance_level = pc::AcquaintanceLevel::Direct;
             self.store.upsert_contact(&existing)?;
-            return Ok(contacts::to_json(&existing));
+            return Ok(self.contact_value(&existing));
         }
         let mut found =
             contacts::lookup(&self.https, &self.config, std::slice::from_ref(&id)).await?;
@@ -461,7 +461,7 @@ impl App {
         contact.acquaintance_level = pc::AcquaintanceLevel::Direct;
         self.store.upsert_contact(&contact)?;
         tracing::info!("contact added");
-        Ok(contacts::to_json(&contact))
+        Ok(self.contact_value(&contact))
     }
 
     pub(crate) fn update_contact(
@@ -479,7 +479,7 @@ impl App {
         contact.last_name = clean(last_name);
         contact.sync_state = pc::SyncState::Custom;
         self.store.upsert_contact(&contact)?;
-        Ok(contacts::to_json(&contact))
+        Ok(self.contact_value(&contact))
     }
 
     pub(crate) fn set_contact_policies(
@@ -1383,6 +1383,41 @@ mod contact_policy_tests {
         )
         .await;
         assert!(app.store.contact("CCCCCCCC").unwrap().is_none());
+    }
+
+    /// The contact page shows what the reply holds until something else reloads it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn changing_a_name_answers_with_the_whole_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.store.set_pinned("BBBBBBBB", true).unwrap();
+        app.store.set_contact_picture("BBBBBBBB", Some(5)).unwrap();
+        app.store
+            .set_chat_notifications(
+                "BBBBBBBB",
+                Some((crate::chat_notifications::Policy::Never, None)),
+            )
+            .unwrap();
+        call(
+            &mut app,
+            json!({"cmd": "setBlocked", "identity": "BBBBBBBB", "blocked": true}),
+        )
+        .await;
+
+        let reply = call(
+            &mut app,
+            json!({"cmd": "updateContact", "identity": "BBBBBBBB", "firstName": "Anna"}),
+        )
+        .await;
+        let contact = &reply["result"];
+        assert_eq!(contact["firstName"], "Anna");
+        assert_eq!(contact["pinned"], true);
+        assert_eq!(contact["blocked"], true);
+        assert!(contact["pictureVersion"].as_i64().unwrap() > 0);
+        assert_eq!(contact["notifications"]["policy"], "never");
     }
 
     #[tokio::test(flavor = "current_thread")]
