@@ -483,11 +483,101 @@ async fn upload(
     }
 }
 
+/// How long files may take to arrive once their chat is hidden.
+const WRITE_PASS_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Files of private chats on their way to the core when those chats were hidden: the UI prepares
+/// a file on another thread, so what a chat being left hands over arrives after the lock. A pass
+/// lets exactly those be stored and sent. It opens nothing: the chats are hidden from the lock
+/// on, every other command answers `locked`, and the answer to such a file says nothing of the
+/// chat (ADR 0009).
+#[derive(Debug)]
+pub(crate) struct WritePass {
+    /// By chat: how many files may still come.
+    pub(crate) files: std::collections::HashMap<String, u32>,
+    pub(crate) expires: std::time::Instant,
+}
+
 impl App {
+    /// A `lock` naming files on their way: those of hidden private chats get a pass, which replaces
+    /// any earlier one. A list has none: its members' copies are made by reading its own back.
+    pub(crate) fn grant_write_pass(&mut self, files: std::collections::HashMap<String, u32>) {
+        let files: std::collections::HashMap<String, u32> = files
+            .into_iter()
+            .filter_map(|(identity, count)| {
+                let (key, conversation) = self.conversation(&identity).ok()?;
+                let hidden = self.store.is_private(&key).unwrap_or(false);
+                (count > 0 && hidden && !matches!(conversation, Conversation::List(_)))
+                    .then_some((key, count))
+            })
+            .collect();
+        self.write_pass = (!files.is_empty()).then(|| WritePass {
+            files,
+            expires: std::time::Instant::now() + WRITE_PASS_LIFETIME,
+        });
+    }
+
+    /// Whether a file for `identity` comes under the pass, which then counts it. A chat that isn't
+    /// hidden needs none.
+    pub(crate) fn take_write_pass(&mut self, identity: &str) -> bool {
+        let Some(pass) = &self.write_pass else {
+            return false;
+        };
+        if std::time::Instant::now() >= pass.expires {
+            self.write_pass = None;
+            return false;
+        }
+        let Ok((key, _)) = self.conversation(identity) else {
+            return false;
+        };
+        if self.unlocked || !self.store.is_private(&key).unwrap_or(false) {
+            return false;
+        }
+        let Some(pass) = &mut self.write_pass else {
+            return false;
+        };
+        let Some(count) = pass.files.get_mut(&key) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            pass.files.remove(&key);
+        }
+        true
+    }
+
+    /// A file of a hidden private chat, under the pass: stored and sent, and all the answer tells
+    /// is what is wrong with what was sent. Anything about the chat reads as the lock.
+    pub(crate) fn send_file_under_pass(&mut self, file: OutgoingFile) -> Result<Value, ApiError> {
+        let (key, conversation) = self.conversation(&file.identity)?;
+        match self.store_outgoing_file(key, conversation, file) {
+            Ok(message) => {
+                if let Some(id) = message["id"].as_i64() {
+                    self.media.hide(id);
+                }
+                Ok(json!({}))
+            }
+            Err(error @ (ApiError::MessageTooLong | ApiError::FileTooLarge)) => Err(error),
+            Err(error) => {
+                tracing::warn!(kind = error.kind(), "file under a write pass refused");
+                Err(ApiError::Locked)
+            }
+        }
+    }
+
     /// `sendFile`: store the file encrypted, show it right away, upload in the background; the
     /// message is sent once the upload is done.
     pub(crate) fn send_file(&mut self, file: OutgoingFile) -> Result<Value, ApiError> {
         let (identity, conversation) = self.readable_conversation(&file.identity)?;
+        self.store_outgoing_file(identity, conversation, file)
+    }
+
+    fn store_outgoing_file(
+        &mut self,
+        identity: String,
+        conversation: Conversation,
+        file: OutgoingFile,
+    ) -> Result<Value, ApiError> {
         conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
         let mut attachments = std::mem::take(&mut self.attachments).into_iter();
         let mut data = attachments.next().unwrap_or_default();

@@ -294,7 +294,12 @@ pub enum Command {
         private_chats: bool,
     },
     /// Lock again (grace time over, private chats left).
-    Lock,
+    /// Hide the private chats. `pendingFiles` (`{chat: count}`): files already on their way to
+    /// this core from a chat being left, which `sendFile` still takes ([`crate::app_media::WritePass`]).
+    Lock {
+        #[serde(default)]
+        pending_files: Option<std::collections::HashMap<String, u32>>,
+    },
     /// Mark a chat private or not (needs a lock; unmarking needs the app unlocked).
     SetPrivate {
         identity: String,
@@ -1201,6 +1206,8 @@ pub struct App {
     /// Media downloads report their progress here (into the core loop).
     pub(crate) media_events: tokio::sync::mpsc::UnboundedSender<crate::providers::CoreEvent>,
     media_events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>>,
+    /// Files of hidden private chats still on their way to the core.
+    pub(crate) write_pass: Option<crate::app_media::WritePass>,
     /// Binary attachments of the request being handled (e.g. `sendFile`: file, thumbnail).
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
     /// Contacts the request being handled made direct, for the other devices.
@@ -1287,6 +1294,7 @@ impl App {
             media,
             media_events,
             media_events_rx: Some(media_events_rx),
+            write_pass: None,
             attachments: Vec::new(),
             made_direct: std::cell::RefCell::default(),
             pending_link: None,
@@ -1608,15 +1616,19 @@ impl App {
                     return Err(ApiError::LockNeeded);
                 }
                 self.check_lock(Some(&pin))?;
+                self.write_pass = None;
                 if private_chats {
                     self.unlocked = true;
                     self.update_media_gate();
                 }
                 self.lock_status()
             }
-            Command::Lock => {
+            Command::Lock { pending_files } => {
                 self.unlocked = false;
                 self.update_media_gate();
+                if let Some(files) = pending_files {
+                    self.grant_write_pass(files);
+                }
                 self.lock_status()
             }
             Command::SetPrivate { identity, private } => self.set_private(&identity, private),
@@ -1820,18 +1832,26 @@ impl App {
                 height,
                 duration,
                 encode,
-            } => self.send_file(crate::app_media::OutgoingFile {
-                identity,
-                path,
-                name,
-                media_type,
-                caption,
-                rendering,
-                width,
-                height,
-                duration,
-                encode,
-            }),
+            } => {
+                let file = crate::app_media::OutgoingFile {
+                    identity,
+                    path,
+                    name,
+                    media_type,
+                    caption,
+                    rendering,
+                    width,
+                    height,
+                    duration,
+                    encode,
+                };
+                // Only this command: nothing else that ends in sending a file uses a pass.
+                if self.take_write_pass(&file.identity) {
+                    self.send_file_under_pass(file)
+                } else {
+                    self.send_file(file)
+                }
+            }
             Command::RetryUpload { message } => self.retry_upload(message),
             Command::SaveFile { message, directory } => self.save_file(message, &directory),
             Command::EditMessage {
@@ -3093,6 +3113,191 @@ mod tests {
         let reply = send(&mut app, "a caption");
         assert_eq!(reply["ok"], true, "{reply}");
         assert_eq!(stored_draft(&mut app)["text"], serde_json::Value::Null);
+    }
+
+    /// Private chats ABCD1234 (with a message) and EFGH5678, a plain chat IJKL9012, hidden with a
+    /// pass for `files` files of ABCD1234.
+    fn app_with_write_pass(files: u32) -> (tempfile::TempDir, App) {
+        let (dir, mut app) = app();
+        let set = json!({"id": 1, "cmd": "setLock", "enabled": true, "pin": "2468"});
+        assert_eq!(call(&mut app, set)["ok"], true);
+        for id in ["ABCD1234", "EFGH5678", "IJKL9012"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+            app.store
+                .insert_incoming(id, 1, "text", "secret words", 1)
+                .unwrap();
+        }
+        app.store.set_private("ABCD1234", true).unwrap();
+        app.store.set_private("EFGH5678", true).unwrap();
+        let lock = json!({"id": 2, "cmd": "lock", "pendingFiles": {"ABCD1234": files}});
+        let reply = call(&mut app, lock);
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(!app.unlocked, "the lock takes effect at once");
+        (dir, app)
+    }
+
+    fn send_file(app: &mut App, identity: &str, caption: &str) -> serde_json::Value {
+        let request = json!({"id": 3, "cmd": "sendFile", "identity": identity,
+                             "rendering": "file", "mediaType": "text/plain",
+                             "name": "a.txt", "caption": caption})
+        .to_string();
+        let local = tokio::task::LocalSet::new();
+        let reply = rt()
+            .block_on(local.run_until(app.handle_with(&request, vec![vec![1_u8, 2, 3].into()])));
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    fn stored_messages(app: &App, identity: &str) -> usize {
+        app.store.conversation_messages(identity, 10).unwrap().len()
+    }
+
+    /// With a pass running nothing but the counted files gets through: the chat is hidden from
+    /// the moment of the lock, for listing, reading and every other way of writing.
+    #[test]
+    fn a_write_pass_opens_nothing() {
+        let (_dir, mut app) = app_with_write_pass(5);
+        let message = app.store.conversation_messages("ABCD1234", 1).unwrap()[0].id;
+        let plain = app.store.conversation_messages("IJKL9012", 1).unwrap()[0].id;
+        for request in [
+            json!({"cmd": "conversations", "private": true}),
+            json!({"cmd": "messages", "identity": "ABCD1234", "limit": 10}),
+            json!({"cmd": "message", "message": message}),
+            json!({"cmd": "draft", "identity": "ABCD1234"}),
+            json!({"cmd": "setDraft", "identity": "ABCD1234", "text": "x"}),
+            json!({"cmd": "quotedMessage", "identity": "ABCD1234", "messageId": "0000000000000001"}),
+            json!({"cmd": "markRead", "identity": "ABCD1234"}),
+            json!({"cmd": "sendText", "identity": "ABCD1234", "text": "x"}),
+            json!({"cmd": "forwardMessage", "message": plain, "identity": "ABCD1234"}),
+            json!({"cmd": "forwardMessage", "message": message, "identity": "IJKL9012"}),
+            json!({"cmd": "deleteConversation", "identity": "ABCD1234"}),
+        ] {
+            let mut request = request;
+            request["id"] = 4.into();
+            let reply = call(&mut app, request.clone());
+            assert_eq!(reply["error"]["kind"], "locked", "{request}: {reply}");
+            assert!(!reply.to_string().contains("secret words"), "{reply}");
+        }
+        // The chat list doesn't show it, and nothing used up the pass.
+        let list = app.conversations_json(false, false).unwrap();
+        let chats = list["conversations"].as_array().unwrap();
+        assert!(chats.iter().all(|chat| chat["identity"] != "ABCD1234"));
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 5);
+    }
+
+    /// Exactly the counted files, to exactly that chat; the answer says nothing of the chat, and
+    /// the file is as hidden as the rest of it.
+    #[test]
+    fn a_write_pass_takes_only_the_counted_files() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        for caption in ["first", "second"] {
+            let reply = send_file(&mut app, "ABCD1234", caption);
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["result"], json!({}), "the answer tells nothing");
+        }
+        assert_eq!(stored_messages(&app, "ABCD1234"), 3);
+        let newest = app.store.conversation_messages("ABCD1234", 1).unwrap()[0].id;
+        assert!(!app.media.shown(newest), "its media stay hidden");
+        assert_eq!(
+            send_file(&mut app, "ABCD1234", "third")["error"]["kind"],
+            "locked"
+        );
+        assert_eq!(stored_messages(&app, "ABCD1234"), 3);
+        assert!(app.write_pass.as_ref().unwrap().files.is_empty());
+        assert!(!app.unlocked);
+    }
+
+    #[test]
+    fn a_write_pass_is_for_one_chat() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        let reply = send_file(&mut app, "EFGH5678", "elsewhere");
+        assert_eq!(reply["error"]["kind"], "locked");
+        assert_eq!(stored_messages(&app, "EFGH5678"), 1);
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 2);
+        // A chat that isn't hidden sends as ever, and takes nothing from the pass.
+        let reply = send_file(&mut app, "IJKL9012", "plain");
+        assert!(reply["result"]["id"].is_i64(), "{reply}");
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 2);
+    }
+
+    /// A refused file uses up its place: it was that file the pass was for. It says only what is
+    /// wrong with what was sent.
+    #[test]
+    fn a_write_pass_is_used_up_by_a_refused_file() {
+        let (_dir, mut app) = app_with_write_pass(1);
+        let reply = send_file(&mut app, "ABCD1234", &"x".repeat(6001));
+        assert_eq!(reply["error"]["kind"], "messageTooLong");
+        assert_eq!(
+            send_file(&mut app, "ABCD1234", "again")["error"]["kind"],
+            "locked"
+        );
+    }
+
+    #[test]
+    fn a_write_pass_expires() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        assert_eq!(send_file(&mut app, "ABCD1234", "in time")["ok"], true);
+        app.write_pass.as_mut().unwrap().expires = std::time::Instant::now();
+        let reply = send_file(&mut app, "ABCD1234", "too late");
+        assert_eq!(reply["error"]["kind"], "locked");
+        assert!(app.write_pass.is_none());
+    }
+
+    #[test]
+    fn unlocking_or_removing_the_data_clears_a_write_pass() {
+        let unlock = |app: &mut App, private: bool| {
+            let unlock = json!({"id": 5, "cmd": "unlock", "pin": "2468", "privateChats": private});
+            assert_eq!(call(app, unlock)["ok"], true);
+        };
+        for private in [false, true] {
+            let (_dir, mut app) = app_with_write_pass(2);
+            unlock(&mut app, private);
+            assert!(app.write_pass.is_none(), "{private}");
+            call(&mut app, json!({"id": 6, "cmd": "lock"}));
+            assert_eq!(
+                send_file(&mut app, "ABCD1234", "x")["error"]["kind"],
+                "locked"
+            );
+        }
+        // A wrong PIN clears nothing.
+        let (_dir, mut app) = app_with_write_pass(2);
+        let wrong = json!({"id": 5, "cmd": "unlock", "pin": "1111", "privateChats": true});
+        assert_eq!(call(&mut app, wrong)["ok"], false);
+        assert!(app.write_pass.is_some());
+        rt().block_on(app.delete_all_data()).unwrap();
+        assert!(app.write_pass.is_none());
+    }
+
+    #[test]
+    fn a_lock_without_files_takes_no_pass_away() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        call(&mut app, json!({"id": 6, "cmd": "lock"}));
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 2);
+    }
+
+    /// A lock without files gives no pass; there is none for a chat that isn't hidden, or for a
+    /// list, whose members' copies would have to read the hidden one.
+    #[test]
+    fn a_write_pass_is_given_only_for_hidden_chats_with_files() {
+        let (_dir, mut app) = app();
+        call(&mut app, json!({"id": 6, "cmd": "lock"}));
+        assert!(app.write_pass.is_none());
+        for id in ["ABCD1234", "IJKL9012"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        let key = app
+            .store
+            .create_distribution_list("A list", vec!["ABCD1234".into()])
+            .unwrap()
+            .key;
+        app.store.set_private(&key, true).unwrap();
+        let lock = json!({"id": 8, "cmd": "lock",
+                          "pendingFiles": {"IJKL9012": 1, key.as_str(): 1, "ZZZZZZZZ": 1}});
+        assert_eq!(call(&mut app, lock)["ok"], true);
+        assert!(app.write_pass.is_none());
     }
 
     /// A deleted chat takes its draft along: nothing comes back when it is opened again.

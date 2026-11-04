@@ -273,6 +273,9 @@ public:
     Q_INVOKABLE void setProfilePicture(const QString &path, const QJSValue &callback = QJSValue());
 
     // Calls `callback(ok, result, errorKind, errorMessage)` when the core replies.
+    // `lock` (private chats hidden again, at once) from a chat being left, naming the files still
+    // being prepared: they reach the core after the lock, which takes just those (`pendingFiles`).
+    Q_INVOKABLE void lockWithFilesOnTheirWay();
     Q_INVOKABLE void call(const QString &command, const QVariantMap &args = QVariantMap(),
                           const QJSValue &callback = QJSValue());
     // The same for C++ callers (e.g. CallManager): `done(ok, result, errorKind)`.
@@ -398,6 +401,8 @@ private:
     // go: the capture, and a video's scaled-down copy. Here, not in the chat page's callback: that
     // runs in nothing once the page has gone, and the plain file would stay.
     QMultiHash<quint64, QString> m_tempSources;
+    // Files with a FilePreparer running, by request: the chat each is for.
+    QHash<quint64, QString> m_filesPreparing;
     QHash<quint64, NativeCallback> m_nativeCallbacks;
     // The chats' own tones (from the core, while it runs): the notifications ask for them at once.
     QVariantMap m_chatTones;

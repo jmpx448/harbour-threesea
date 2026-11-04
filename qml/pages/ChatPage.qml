@@ -824,7 +824,8 @@ Page {
     function fileAnswered(file, ok, result, kind, message) {
         if (ok) {
             if (file.caption.length > 0 && savedDraft === file.draft) savedDraft = noDraft
-            page.addMessage(result)
+            // Nothing to show for a file that went while its chat was hidden.
+            if (result.id !== undefined) page.addMessage(result)
             draftSaver.restart()
             return ""
         }
@@ -1313,8 +1314,11 @@ Page {
         // at once (user question 2026-10-30). No collection run: that would cost a moment
         // exactly while the chat is closing, and the app has an idle one anyway.
         messages.clear()
-        // Leaving a private chat hides the private chats again (unless their list is underneath).
-        if (isPrivate && !pageStack.find(function(p) { return p.objectName === "private" })) backend.call("lock")
+        // Leaving a private chat hides the private chats again, at once (unless their list is
+        // underneath); the core still takes the files above, which are on their way to it.
+        if (isPrivate && !pageStack.find(function(p) { return p.objectName === "private" })) {
+            backend.lockWithFilesOnTheirWay()
+        }
     }
     onStatusChanged: {
         if (status === PageStatus.Deactivating) {

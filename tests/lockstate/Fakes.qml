@@ -46,6 +46,7 @@ QtObject {
             lastArgs[cmd] = args
             waiting.push({ cmd: cmd, callback: callback })
         }
+        function lockWithFilesOnTheirWay() { call("lock") }
         function hold(cmd) { held[cmd] = true }
         function release(cmd) { held[cmd] = false }
         function refreshContacts() { }

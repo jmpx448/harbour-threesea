@@ -18,8 +18,9 @@ Page {
     property int archivedCount: 0
     property int privateCount: 0
 
-    // Leaving the private chats hides them again.
-    Component.onDestruction: if (privateList) backend.call("lock")
+    // Leaving the private chats hides them again; the core still takes the files a chat of theirs
+    // left on their way to it.
+    Component.onDestruction: if (privateList) backend.lockWithFilesOnTheirWay()
 
     // The remorse callback for a chat command. Made here: it runs after the context menu, and with
     // it the menu's scope, is gone.

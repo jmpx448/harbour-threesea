@@ -113,3 +113,10 @@ device without one (`identityExists`), so those commands can't replace an ID aro
 A mark from anywhere (the UI, a linked device, a restore) goes out as `CoreEvent::PrivateChanged`:
 the media readers follow at once, the chat's notification closes, a connected browser loses the
 group or list.
+
+Leaving a private chat hides the private chats at once, and that holds with files still being
+prepared, which reach the core only after the lock. The lock names them (`pendingFiles`) and they
+alone may still be stored and sent, for 60 s, counted per chat: a write-only pass, which opens
+nothing else, answers `{}` and is cleared by an unlock or deleting the data. What comes after it is
+refused as locked, and the UI says so. A private distribution list gets no pass, as its members'
+copies are made by reading its own back.

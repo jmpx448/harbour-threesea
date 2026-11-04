@@ -211,6 +211,7 @@ impl App {
         self.media.remove_all();
         // The next identity starts locked; its private marks wait for its own PIN.
         self.unlocked = false;
+        self.write_pass = None;
         self.update_media_gate();
         // Credentials and links belong to the deleted identity, and the empty store switches
         // off what was read from it into process-wide state.

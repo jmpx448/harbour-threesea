@@ -515,6 +515,7 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
     // Picker results are file:// URLs.
     const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
     m_tempSources.insert(id, localPath);
+    m_filesPreparing.insert(id, identity);
     auto *preparer = new FilePreparer(localPath, request);
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
     QThreadPool::globalInstance()->start(preparer);
@@ -580,6 +581,19 @@ void ThreeseBackend::removeTempSources(quint64 id, const QJSValue &callbackAnswe
             removeCapture(path);
         }
     }
+}
+
+void ThreeseBackend::lockWithFilesOnTheirWay()
+{
+    QVariantMap args;
+    if (!m_filesPreparing.isEmpty()) {
+        QVariantMap files;
+        for (const QString &identity : m_filesPreparing) {
+            files.insert(identity, files.value(identity).toInt() + 1);
+        }
+        args.insert(QStringLiteral("pendingFiles"), files);
+    }
+    call(QStringLiteral("lock"), args);
 }
 
 void ThreeseBackend::removeCapture(const QString &path) const
@@ -711,6 +725,7 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
     // written unless the video is really scaled; the file goes once the core has read it.
     const QString scratch = captureFile(QStringLiteral("mp4"));
     m_tempSources.insert(id, scratch);
+    m_filesPreparing.insert(id, identity);
     auto *preparer = new FilePreparer(localPath, request, scratch);
     preparer->setVideoFrame(frame.value<QImage>());
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
@@ -890,6 +905,7 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
                                   const QString &error)
 {
     const quint64 id = request.value(QStringLiteral("id")).toULongLong();
+    m_filesPreparing.remove(id);
     if (id < m_firstLiveId) {
         return;
     }
