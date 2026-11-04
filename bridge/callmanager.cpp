@@ -174,6 +174,7 @@ void CallManager::start(const QString &identity, bool video)
     if (!m_engine || (m_state != QLatin1String("idle") && m_state != QLatin1String("ended"))) {
         return;
     }
+    emit aboutToTakeMicrophone();
     m_endedTimer.stop();
     m_identity = identity;
     m_outgoing = true;
@@ -194,6 +195,7 @@ void CallManager::accept()
     if (m_state != QLatin1String("incoming")) {
         return;
     }
+    emit aboutToTakeMicrophone();
     m_ringTimer.stop();
     setState(QStringLiteral("connecting"));
 #ifdef THREESEA_FULL
@@ -226,6 +228,18 @@ void CallManager::hangUp()
         return;
     }
     m_backend->request(QStringLiteral("callHangUp"), QVariantMap());
+}
+
+void CallManager::endCallWithMicrophone()
+{
+    if (m_state == QLatin1String("incoming")) {
+        return;
+    }
+    hangUp();
+#ifdef THREESEA_FULL
+    // At once, not when the core's answer comes: nothing may reach this call from now on.
+    m_engine->stop();
+#endif
 }
 
 void CallManager::end(const QString &result)

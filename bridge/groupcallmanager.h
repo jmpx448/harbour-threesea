@@ -60,6 +60,8 @@ public:
 
 signals:
     void stateChanged();
+    // About to take the microphone: the other kind of call has to let go of it first.
+    void aboutToTakeMicrophone();
     void participantsChanged();
     void mutedChanged();
     void cameraChanged();

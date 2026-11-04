@@ -61,9 +61,14 @@ public:
     Q_INVOKABLE void accept();
     Q_INVOKABLE void reject();
     Q_INVOKABLE void hangUp();
+    // The microphone goes to someone else (a group call) or the window closed: end a call that
+    // has it or is about to. An incoming call that only rings keeps ringing.
+    void endCallWithMicrophone();
 
 signals:
     void stateChanged();
+    // About to take the microphone: the other kind of call has to let go of it first.
+    void aboutToTakeMicrophone();
     void mutedChanged();
     void remoteChanged();
     void cameraChanged();

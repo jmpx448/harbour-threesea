@@ -57,6 +57,7 @@ void GroupCallManager::join(const QString &conversation, bool create)
         return;
     }
 #ifdef THREESEA_FULL
+    emit aboutToTakeMicrophone();
     m_conversation = conversation;
     m_error.clear();
     m_participants.clear();

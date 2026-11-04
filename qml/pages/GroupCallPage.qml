@@ -40,6 +40,11 @@ Page {
         if (connected) joinedAt = Date.now()
     }
 
+    // The call ended while another page was on top (a 1:1 call takes the microphone over).
+    onStatusChanged: {
+        if (status === PageStatus.Active && groupCalls.state === "idle") pageStack.pop()
+    }
+
     Connections {
         target: groupCalls
         onStateChanged: {

@@ -68,7 +68,8 @@ Page {
     }
 
     // Over: back to what is underneath, as soon as this page is in view. The call can have ended
-    // behind the lock page, whose own pop is still going on when this page comes into view.
+    // behind the lock page, whose own pop is still going on when this page comes into view, or
+    // behind a group call's page (a group call takes the microphone over).
     Timer {
         running: page.state === "idle" && page.status === PageStatus.Active
         interval: 100

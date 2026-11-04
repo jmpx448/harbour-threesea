@@ -192,7 +192,13 @@ int main(int argc, char *argv[])
 
     CallManager *calls = new CallManager(backend, view->engine());
     view->rootContext()->setContextProperty(QStringLiteral("calls"), calls);
-    view->rootContext()->setContextProperty(QStringLiteral("groupCalls"), new GroupCallManager(backend, view->engine()));
+    GroupCallManager *groupCalls = new GroupCallManager(backend, view->engine());
+    view->rootContext()->setContextProperty(QStringLiteral("groupCalls"), groupCalls);
+    // One call has the microphone (like Android): both pipelines would capture it, and a group
+    // would hear the private call. Here, not in the pages' buttons: the cover and a notification
+    // get past those.
+    QObject::connect(calls, &CallManager::aboutToTakeMicrophone, groupCalls, &GroupCallManager::leave);
+    QObject::connect(groupCalls, &GroupCallManager::aboutToTakeMicrophone, calls, &CallManager::endCallWithMicrophone);
     // An incoming call brings the window up (also when it was closed, the Full flavour's background run).
     QObject::connect(calls, &CallManager::incoming, view.data(), [&view]() {
         view->showFullScreen();
