@@ -17,6 +17,7 @@
 #include "dtlscertificate.h"
 #include "vp8filter.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QImage>
 #include <QTransform>
@@ -761,6 +762,9 @@ void GroupCallEngine::stop()
     gst_object_unref(m_pipeline);
     m_webrtc = nullptr;
     m_pipeline = nullptr;
+    // The pipeline's threads are gone. What they queued belongs to this call: an error or a
+    // description must not reach the next one.
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
     QMutexLocker locker(&m_framesLock);
     m_pendingFrames.clear();
 }

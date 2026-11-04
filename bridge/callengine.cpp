@@ -12,6 +12,7 @@
 #include "vp8filter.h"
 #include "aec/echocanceller.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QImage>
 #include <QRegularExpression>
@@ -351,6 +352,9 @@ void CallEngine::stop()
     m_pendingCandidates.clear();
     m_mids.clear();
     m_remoteFingerprint.clear();
+    // The pipeline's threads are gone. What they queued belongs to this call: an offer or error
+    // must not reach the next one, nor the manager after the user hung up.
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
     m_remoteFramePending = false;
 }
 
@@ -376,6 +380,10 @@ void CallEngine::descriptionCreated(GstPromise *promise, const char *field, cons
     gst_promise_unref(promise);
     if (!description) {
         QMetaObject::invokeMethod(this, "onError", Qt::QueuedConnection, Q_ARG(QString, type));
+        return;
+    }
+    if (!m_webrtc) {
+        gst_webrtc_session_description_free(description);
         return;
     }
     g_signal_emit_by_name(m_webrtc, "set-local-description", description, nullptr);
