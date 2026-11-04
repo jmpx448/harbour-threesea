@@ -83,8 +83,11 @@ impl App {
         if let Some(members) = json["members"].as_array_mut() {
             for member in members {
                 let identity = member["identity"].as_str().unwrap_or_default().to_owned();
-                member["pictureVersion"] =
-                    json!(self.store.contact_picture_version(&identity).unwrap_or(0));
+                member["pictureVersion"] = json!(
+                    self.store
+                        .shown_contact_picture_version(&identity)
+                        .unwrap_or(0)
+                );
             }
         }
         json["notifications"] = self.store.chat_notifications_json(&group.key);
@@ -589,11 +592,7 @@ impl App {
     /// contact descriptors past their backoff, and group pictures that never made it onto the
     /// device (their descriptor lives in `groups.picture`; version 0 means not stored yet).
     pub(crate) fn resume_picture_downloads(&self) {
-        // Contacts' pictures only while they are wanted (Android's "Receive profile pictures",
-        // which also stops ones that were still pending); groups' pictures are not affected.
-        if self.store.receive_pictures().unwrap_or(true)
-            && let Ok(due) = self.store.due_picture_downloads()
-        {
+        if let Ok(due) = self.store.due_picture_downloads() {
             for identity in due {
                 self.download_contact_picture(identity);
             }

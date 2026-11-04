@@ -1483,3 +1483,57 @@ fn web_refused_license_keeps_only_stored_pairings() {
     assert!(app.store.web_session(stored).unwrap().is_some());
     assert!(app.store.web_session(never_stored).unwrap().is_none());
 }
+
+/// "Show profile pictures" holds for the browser too.
+#[tokio::test(flavor = "current_thread")]
+async fn web_gets_no_contact_picture_while_they_are_not_shown() {
+    let (_dir, mut app) = fixture();
+    let (mut rx, task) = app.web_test_session(1);
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 8))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    app.store
+        .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+        .unwrap();
+    app.media
+        .write_picture(
+            &crate::profile_pictures::contact_picture_name("BBBBBBBB"),
+            &png,
+        )
+        .unwrap();
+    let request = arp::message(
+        "request",
+        "avatar",
+        Some(arp::map(vec![
+            ("type", "contact".into()),
+            ("id", "BBBBBBBB".into()),
+        ])),
+        None,
+    );
+    let picture_sent = async |app: &mut App, rx: &mut UnboundedReceiver<ToWeb>| {
+        while rx.try_recv().is_ok() {}
+        app.on_web_event((
+            task,
+            FromWeb::Message {
+                session: 1,
+                message: request.clone(),
+            },
+        ))
+        .await;
+        let mut sent = false;
+        while let Ok(reply) = rx.try_recv() {
+            if let ToWeb::Send(wire) = reply
+                && crate::web::saltyrtc::field(&wire, "subType")
+                    .is_some_and(|sub| sub.as_str() == Some("avatar"))
+            {
+                sent =
+                    crate::web::saltyrtc::field(&wire, "data").is_some_and(|data| !data.is_nil());
+            }
+        }
+        sent
+    };
+    assert!(picture_sent(&mut app, &mut rx).await);
+    app.set_app_setting("showProfilePictures", false).unwrap();
+    assert!(!picture_sent(&mut app, &mut rx).await);
+}

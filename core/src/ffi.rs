@@ -202,7 +202,7 @@ pub unsafe extern "C" fn threesea_picture_read(
     let Ok(name) = name.to_str() else {
         return std::ptr::null_mut();
     };
-    match core.0.media().read_picture(name) {
+    match core.0.media().read_picture_for_ui(name) {
         Ok(Some(data)) => {
             let boxed: Box<[u8]> = data.to_vec().into_boxed_slice();
             // SAFETY: caller contract.

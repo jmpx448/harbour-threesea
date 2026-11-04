@@ -1437,6 +1437,7 @@ impl App {
             identity_removed: false,
         };
         app.apply_display_settings()?;
+        app.apply_picture_gate();
         app.apply_network_settings()?;
         app.apply_multi_device();
         Ok(app)

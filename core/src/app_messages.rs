@@ -583,7 +583,7 @@ impl App {
         let hidden = self.store.private_chats()?;
         let marked_unread = self.store.marked_unread_chats()?;
         let muted = self.store.muted_chats()?;
-        let picture_versions = self.store.contact_picture_versions()?;
+        let picture_versions = self.store.shown_contact_picture_versions()?;
         let contacts: std::collections::HashMap<String, _> = self
             .store
             .contacts()?

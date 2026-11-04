@@ -1026,7 +1026,7 @@ impl App {
 
     /// `groupCallParticipants {participants: [{id, microphoneMid, cameraMid, identity, nickname,
     /// name, pictureVersion, microphone, camera, authenticated}]}`.
-    fn emit_group_call_participants(&self) {
+    pub(crate) fn emit_group_call_participants(&self) {
         let Some(call) = self.group_call.as_ref() else {
             return;
         };
@@ -1045,7 +1045,7 @@ impl App {
                     "nickname": identity.map(|(_, nickname)| nickname),
                     "name": identity.map(|(identity, nickname)| participant_name(&self.store, identity, nickname)),
                     "pictureVersion": identity
-                        .and_then(|(identity, _)| self.store.contact_picture_version(identity).ok())
+                        .and_then(|(identity, _)| self.store.shown_contact_picture_version(identity).ok())
                         .unwrap_or(0),
                     "microphone": call.their_microphones.get(id).copied().unwrap_or(false),
                     "camera": call.their_cameras.get(id).copied().unwrap_or(false),
@@ -1186,6 +1186,35 @@ mod app_tests {
 
         assert!(app.group_call.is_none());
         assert!(app.sfu.borrow().0.is_none());
+    }
+
+    /// The tiles of a running call follow "Show profile pictures" at once.
+    #[test]
+    fn a_running_call_follows_the_picture_setting() {
+        let (_dir, mut app) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.store.set_contact_picture("BBBBBBBB", Some(5)).unwrap();
+        let mut call = super::tests::call();
+        call.participants = vec![2];
+        call.peers
+            .insert(2, Peer::authenticated_for_test(2, "BBBBBBBB"));
+        app.group_call = Some(call);
+        let mut shown = |app: &mut App, value: bool| -> i64 {
+            app.set_app_setting("showProfilePictures", value).unwrap();
+            let mut version = None;
+            while let Ok(event) = events.try_recv() {
+                let event = event.to_json(&app.store, true);
+                if event["event"] == "groupCallParticipants" {
+                    version = event["participants"][0]["pictureVersion"].as_i64();
+                }
+            }
+            version.expect("the call heard of it")
+        };
+        assert_eq!(shown(&mut app, false), 0);
+        assert!(shown(&mut app, true) > 0);
     }
 
     /// In a call, at the point where the SFU's Hello arrives with `others` participants: what

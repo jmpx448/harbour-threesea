@@ -15,7 +15,7 @@ small and debuggable; secrets inside messages are wiped on both sides after use.
 | `threesea_data_remove(data_dir)` | With the core stopped: removes everything in the data directory (database, media, logs), the last step of removing the ID (ADR 0018). False if something stayed. |
 | `threesea_core_version()` / `threesea_string_free()` | Version string. |
 | `threesea_core_send_data(core, request_json, data, len, thumbnail, len)` | A request with binary attachments (`sendFile`, pictures); never blocks. |
-| `threesea_media_read(core, message, thumbnail, &len)` / `threesea_picture_read(core, name, &len)` | Decrypted media for the UI's image providers (other threads). NULL while the message's private chat is hidden (ADR 0009). |
+| `threesea_media_read(core, message, thumbnail, &len)` / `threesea_picture_read(core, name, &len)` | Decrypted media for the UI's image providers (other threads). NULL while the message's private chat is hidden (ADR 0009); of a contact's picture also while "Show profile pictures" is off (their `pictureVersion` is 0 then, too). |
 | `threesea_voice_decode(core, message, &len)` | Opus voice message → 16-bit PCM (no platform decoder); NULL as above. |
 | `threesea_buffer_free(buffer, len)` | Wipes and frees a buffer from the readers above or the key functions. |
 | `threesea_qr_decode(grey, width, height)` | First QR code in a grey image (camera scanning); no core needed. |
@@ -111,7 +111,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setNickname` | `nickname` (≤ 32 bytes) | profile |
 
 | `settings` | – | Safe `settings` object (`readReceipts`, `sendTyping`, `blockUnknown`, …) |
-| `setSetting` | `name` (`readReceipts`\|`sendTyping`\|`blockUnknown`\|`videoCalls`\|`groupCalls`\|`receiveProfilePictures`\|…), `value` | settings |
+| `setSetting` | `name` (`readReceipts`\|`sendTyping`\|`blockUnknown`\|`videoCalls`\|`groupCalls`\|`showProfilePictures`\|…), `value` | settings |
 | `deleteAllData` | `pin` | `{linkedDevicesRemain}` (true: this phone could not get through to the server in time, linked devices keep the ID); stops backups, calls, browsers and the connection, leaves the device group, marks the removal, then wipes the store in one transaction, media and logs (ADR 0018). A refused PIN is the only error, and nothing has happened then; a store that refuses to empty doesn't stop the removal. The UI goes through `backend.removeAllData(pin)`, which checks the PIN with `unlock` first, ends calls and players, and afterwards replaces the database and its key (Safe copy on the server stays) |
 
 | `conversations` | optional `archived` (the archive instead), `private` (the private chats; error `locked` unless unlocked) | `{conversations: [{identity, displayName, verification, unread, lastMessage}]}` newest first |

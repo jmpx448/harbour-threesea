@@ -117,7 +117,7 @@ impl App {
         json["videoCalls"] = json!(self.video_calls_setting()?);
         json["videoQuality"] = json!(self.video_quality_setting()?);
         json["groupCalls"] = json!(self.group_calls_setting()?);
-        json["receiveProfilePictures"] = json!(self.store.receive_pictures()?);
+        json["showProfilePictures"] = json!(self.store.pictures_shown()?);
         Ok(json)
     }
 
@@ -155,11 +155,20 @@ impl App {
                 .set_setting(keys::VIDEO_CALLS, if value { "1" } else { "0" })?;
             return self.settings_json();
         }
-        if name == "receiveProfilePictures" {
+        if name == "showProfilePictures" {
             self.store.set_setting(
-                crate::profile_pictures::SETTING_RECEIVE,
+                crate::profile_pictures::SETTING_SHOW,
                 if value { "1" } else { "0" },
             )?;
+            self.apply_picture_gate();
+            // Every list and page with a contact's picture, all at once, and a running call.
+            for event in [
+                crate::providers::CoreEvent::ContactsChanged,
+                crate::providers::CoreEvent::GroupsChanged,
+            ] {
+                let _ = self.media_events.send(event);
+            }
+            self.emit_group_call_participants();
             return self.settings_json();
         }
         if name == "groupCalls" {
@@ -229,6 +238,7 @@ impl App {
         self.last_import_attempt = None;
         self.apply_multi_device();
         contacts::LAST_NAME_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.apply_picture_gate();
         tracing::info!("all local data deleted");
         // Last: anything logged after this would be the first line of the next identity's log.
         crate::runtime::log_clear(&self.data_dir);
@@ -297,6 +307,12 @@ impl App {
         self.display_settings_json()
     }
 
+    /// Whether the UI's picture readers hand out contacts' pictures (start, change, removal).
+    pub(crate) fn apply_picture_gate(&self) {
+        self.media
+            .set_contact_pictures_shown(self.store.pictures_shown().unwrap_or(true));
+    }
+
     /// Load the name order into [`contacts::LAST_NAME_FIRST`] (start, change).
     pub(crate) fn apply_display_settings(&self) -> Result<(), ApiError> {
         let on = self.store.setting(keys::LAST_NAME_FIRST)?.as_deref() == Some("1");
@@ -318,7 +334,7 @@ impl App {
         let mut value = contacts::to_json(contact);
         value["pictureVersion"] = json!(
             self.store
-                .contact_picture_version(&contact.identity.to_string())
+                .shown_contact_picture_version(&contact.identity.to_string())
                 .unwrap_or(0)
         );
         // Only while sharing with selected contacts (null otherwise): on the allow list?
@@ -1845,6 +1861,113 @@ mod contact_policy_tests {
                 ("😀 Party", "#"),
             ]
         );
+    }
+
+    /// One gate for showing a contact's picture, for whichever way it reached the device: the
+    /// lists, the pages and the UI's reader, while the core keeps it. Our own and groups' stay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn profile_pictures_off_hides_them_everywhere_and_keeps_them() {
+        use crate::profile_pictures::{OWN_PICTURE, contact_picture_name};
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        app.store.upsert_contact(&contact).unwrap();
+        app.store
+            .insert_incoming("BBBBBBBB", 7, "text", "hello", 1000)
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "BBBBBBBB".parse().unwrap(),
+            group_id: 0x1234,
+        };
+        let group = crate::groups::Group {
+            key: crate::groups::key(&identity),
+            identity,
+            name: "Crew".into(),
+            members: vec!["BBBBBBBB".into()],
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let name = contact_picture_name("BBBBBBBB");
+        // As a picture synced from another device or one sent by the contact ends up.
+        app.media.write_picture(&name, b"theirs").unwrap();
+        app.media.write_picture(OWN_PICTURE, b"ours").unwrap();
+        app.media.write_picture(&group.key, b"the group's").unwrap();
+        app.store.set_contact_picture("BBBBBBBB", Some(5)).unwrap();
+
+        let versions = |app: &App| -> Vec<i64> {
+            let contact = app.contact_json("BBBBBBBB").unwrap();
+            let list = app.contacts_json().unwrap();
+            let chats = app.conversations_json(false, false).unwrap();
+            let chat = chats["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|chat| chat["identity"] == "BBBBBBBB")
+                .unwrap()
+                .clone();
+            let members = app.group_json(&group).unwrap();
+            [
+                &contact["pictureVersion"],
+                &list["contacts"][0]["pictureVersion"],
+                &chat["pictureVersion"],
+                &members["members"][0]["pictureVersion"],
+            ]
+            .iter()
+            .map(|version| version.as_i64().unwrap())
+            .collect()
+        };
+        assert!(versions(&app).iter().all(|version| *version > 0));
+        assert!(app.media.read_picture_for_ui(&name).unwrap().is_some());
+
+        let off = json!({"cmd": "setSetting", "name": "showProfilePictures", "value": false});
+        let reply = call(&mut app, off).await;
+        assert_eq!(reply["result"]["showProfilePictures"], false);
+
+        assert_eq!(versions(&app), [0, 0, 0, 0]);
+        assert!(app.media.read_picture_for_ui(&name).unwrap().is_none());
+        assert!(app.media.read_picture(&name).unwrap().is_some(), "kept");
+        assert!(app.store.contact_picture_version("BBBBBBBB").unwrap() > 0);
+        let own = app.media.read_picture_for_ui(OWN_PICTURE).unwrap();
+        assert!(own.is_some(), "our own picture");
+        let groups = app.media.read_picture_for_ui(&group.key).unwrap();
+        assert!(groups.is_some(), "a group's picture");
+
+        // Also after a restart, and back.
+        app.apply_picture_gate();
+        assert!(app.media.read_picture_for_ui(&name).unwrap().is_none());
+        let on = json!({"cmd": "setSetting", "name": "showProfilePictures", "value": true});
+        call(&mut app, on).await;
+        assert!(versions(&app).iter().all(|version| *version > 0));
+        assert!(app.media.read_picture_for_ui(&name).unwrap().is_some());
+    }
+
+    /// Not shown, so nobody is asked; nothing but the switch stands in the way afterwards.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pictures_are_not_asked_for_while_not_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let off = json!({"cmd": "setSetting", "name": "showProfilePictures", "value": false});
+        call(&mut app, off).await;
+        assert!(!app.store.request_picture("BBBBBBBB").unwrap());
+        assert!(app.store.outbox().unwrap().is_empty());
+        let on = json!({"cmd": "setSetting", "name": "showProfilePictures", "value": true});
+        call(&mut app, on).await;
+        assert!(app.store.request_picture("BBBBBBBB").unwrap());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -801,10 +801,6 @@ impl ConversationProvider for StoreConversations {
             // succeeded (survives restarts and failures), then the app fetches it (no `done`:
             // persisted blob).
             ContactMessageBody::SetProfilePicture(picture) => {
-                // Android's "Receive profile pictures", off: nothing is downloaded or stored.
-                if !self.store.receive_pictures().map_err(foreign)? {
-                    return Ok(());
-                }
                 self.store
                     .set_picture_download(
                         &sender,

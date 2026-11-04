@@ -92,7 +92,9 @@ impl App {
                 .unwrap_or(images::AVATAR_LOW_MAX)
         };
         let name = match receiver_type(&key) {
-            "contact" => Some(crate::profile_pictures::contact_picture_name(&key)),
+            "contact" if self.store.pictures_shown().unwrap_or(true) => {
+                Some(crate::profile_pictures::contact_picture_name(&key))
+            }
             "group" => Some(key.clone()),
             _ => None,
         };

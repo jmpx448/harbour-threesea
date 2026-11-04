@@ -153,6 +153,8 @@ pub struct MediaStore {
     /// (`None`: nothing hidden). The core keeps it current; the readers for the UI, which run
     /// on other threads without the database, consult it (ADR 0009; deep audit D02).
     hidden: std::sync::RwLock<Option<std::collections::HashSet<i64>>>,
+    /// "Show profile pictures": whether the UI may read contacts' pictures. The same readers.
+    contact_pictures_shown: std::sync::atomic::AtomicBool,
 }
 
 const MEDIA_MAGIC: &[u8; 4] = b"3SM1";
@@ -171,6 +173,7 @@ impl MediaStore {
             dir,
             key,
             hidden: std::sync::RwLock::new(None),
+            contact_pictures_shown: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -220,6 +223,26 @@ impl MediaStore {
 
     pub fn read_picture(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, MediaError> {
         self.read_from(&self.picture_path(name))
+    }
+
+    /// What the UI reads of a picture: contacts' only while they are shown (Settings; our own
+    /// and groups' always). What the core does with them isn't affected.
+    pub fn read_picture_for_ui(
+        &self,
+        name: &str,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, MediaError> {
+        let shown = self
+            .contact_pictures_shown
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if !shown && crate::profile_pictures::is_contact_picture(name) {
+            return Ok(None);
+        }
+        self.read_picture(name)
+    }
+
+    pub fn set_contact_pictures_shown(&self, shown: bool) {
+        self.contact_pictures_shown
+            .store(shown, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn remove_picture(&self, name: &str) {

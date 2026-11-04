@@ -105,12 +105,12 @@ Page {
 
             TextSwitch {
                 automaticCheck: false
-                checked: window.appSettings.receiveProfilePictures !== false
-                //% "Accept profile pictures"
+                checked: window.appSettings.showProfilePictures !== false
+                //% "Show profile pictures"
                 text: qsTrId("threesea-la-receive-pictures")
-                //% "Contacts who share their profile picture are shown with it."
+                //% "Contacts who share their profile picture are shown with it. Pictures they send keep arriving while this is off, and appear when it is turned on again."
                 description: qsTrId("threesea-la-receive-pictures-description")
-                onClicked: backend.call("setSetting", { name: "receiveProfilePictures", value: !checked },
+                onClicked: backend.call("setSetting", { name: "showProfilePictures", value: !checked },
                                         function(ok, result) { if (ok) window.appSettings = result })
             }
 

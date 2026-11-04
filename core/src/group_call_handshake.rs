@@ -238,6 +238,22 @@ impl Peer {
 
     /// The other participant's identity and nickname once authenticated.
     #[must_use]
+    /// A participant the handshake is done with, whose keys don't matter to the test.
+    #[cfg(test)]
+    pub(crate) fn authenticated_for_test(id: u32, identity: &str) -> Self {
+        let mut peer = Self::new(id, State::Done);
+        peer.remote = Some(Remote {
+            pck: [0; 32],
+            pcck: [0; COOKIE_LEN],
+            pcsn: 1,
+            key: Zeroizing::new([0; 32]),
+            gcnhak: Zeroizing::new([0; 32]),
+            identity: identity.to_owned(),
+            nickname: String::new(),
+        });
+        peer
+    }
+
     pub fn identity(&self) -> Option<(&str, &str)> {
         if self.state != State::Done {
             return None;

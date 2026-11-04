@@ -67,15 +67,23 @@ pub(crate) const MIGRATION_RECOVERY: &str = "
 /// Settings keys.
 pub const SETTING_UPLOAD: &str = "profilePictureUpload";
 pub const SETTING_SHARE: &str = "profilePictureShare";
-/// Android's "Receive profile pictures" ("0" off; default on): with it off, contacts' pictures
-/// are neither asked for nor downloaded, and contacts show the usual stand-in.
-pub const SETTING_RECEIVE: &str = "profilePictureReceive";
+/// "Show profile pictures" ("0" off; default on), Android's `getProfilePicReceive`: pictures
+/// contacts send, or other devices sync, are downloaded and stored all the same, and everything
+/// that shows one comes by [`Store::shown_contact_picture_version`] and
+/// [`crate::media::MediaStore::read_picture_for_ui`]; with it off contacts show the usual stand-in.
+/// Android asks for pictures only in its setup steps; we also ask when a chat opens or a message
+/// comes, which stops with this off ([`Store::request_picture`]). (The key is from when it was
+/// called "Accept".)
+pub const SETTING_SHOW: &str = "profilePictureReceive";
 /// Media store names.
 pub const OWN_PICTURE: &str = "me";
 /// Our picture in Threema Safe's format (400 px, q=60), made by the bridge with `me`.
 pub const OWN_PICTURE_SAFE: &str = "me-safe";
 pub fn contact_picture_name(identity: &str) -> String {
     format!("contact:{identity}")
+}
+pub fn is_contact_picture(name: &str) -> bool {
+    name.starts_with("contact:")
 }
 
 /// Outbox kind: ask a contact for their picture (`body`: `{}`).
@@ -406,9 +414,29 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Whether contacts' profile pictures are wanted at all (Android's appearance setting).
-    pub fn receive_pictures(&self) -> Result<bool, StoreError> {
-        Ok(self.setting(SETTING_RECEIVE)?.as_deref() != Some("0"))
+    /// Whether contacts' profile pictures are shown ([`SETTING_SHOW`]).
+    pub fn pictures_shown(&self) -> Result<bool, StoreError> {
+        Ok(self.setting(SETTING_SHOW)?.as_deref() != Some("0"))
+    }
+
+    /// The version of a contact's picture to show: 0, as for none, while they aren't shown.
+    pub fn shown_contact_picture_version(&self, identity: &str) -> Result<i64, StoreError> {
+        if self.pictures_shown()? {
+            self.contact_picture_version(identity)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// [`Self::shown_contact_picture_version`] of every contact with one, in one query.
+    pub fn shown_contact_picture_versions(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+        if self.pictures_shown()? {
+            self.contact_picture_versions()
+        } else {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
     /// Ask `identity` for their picture (we have none, e.g. it was never received or the
@@ -416,7 +444,8 @@ impl Store {
     /// backoff step ([`REQUEST_PAUSES_MS`]); the marking and the queueing are one transaction,
     /// which also keeps concurrent triggers from queueing twice.
     pub fn request_picture(&self, identity: &str) -> Result<bool, StoreError> {
-        if !self.receive_pictures()? {
+        // Not shown, so nothing to ask them for: what they send anyway still comes in.
+        if !self.pictures_shown()? {
             return Ok(false);
         }
         if self.contact_picture_version(identity)? != 0
