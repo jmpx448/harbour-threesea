@@ -665,6 +665,23 @@ QtObject {
                 check("voice stopped", voice.playing, false)
             }, 0],
         ],
+        // The first start fails, with a share and more waiting: StartupPage stays, nothing waits on.
+        failsWithContentWaiting: [
+            [function() {
+                window.pendingShare = { files: [], text: "hello" }
+                window.pendingChat = "ABCD1234"
+                window.pendingLink = "threema://add?id=ABCD1234"
+                window.pendingUpdate = true
+                backend.errorText = "store"
+                backend.state = "error"
+            }, 800],
+            [function() {
+                check("share", window.pendingShare, null)
+                check("chat", window.pendingChat, "")
+                check("link", window.pendingLink, "")
+                check("update", window.pendingUpdate, false)
+            }, 0],
+        ],
         // The store fails after the passphrase: the failure shows.
         failsAfterPassphrase: [
             [function() { backend.state = "locked" }, 100],

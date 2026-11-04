@@ -487,6 +487,15 @@ ApplicationWindow {
         interval: 300
         repeat: true
         onTriggered: {
+            // The core won't come back, so nothing waiting here will ever go through. StartupPage
+            // says what happened; shownState may never catch up with this state (showStatePage).
+            if (backend.state === "error") {
+                window.pendingLink = ""
+                window.pendingChat = ""
+                window.pendingShare = null
+                window.pendingUpdate = false
+                return
+            }
             // Also wait while the stored data is locked (passphrase).
             if (backend.state === "starting" || backend.state === "locked" || pageStack.busy
                     || shownState !== backend.state) return
