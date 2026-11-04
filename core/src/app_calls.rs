@@ -3,7 +3,7 @@
 //! and takes SDP and ICE candidates; the core patches the SDP (`sdp.rs`), runs the call state
 //! (`calls.rs`), sends the signalling messages and records each call in the chat.
 //!
-//! Events to the UI: `callIncoming {identity, sdp, video}`, `callRinging`,
+//! Events to the UI: `callIncoming {identity, callId, sdp, video}`, `callRinging`,
 //! `callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record}`.
 
 use libthreema::{common::keys::ClientKey, protobuf::d2d_sync::contact as pc};
@@ -14,7 +14,7 @@ use data_encoding::BASE64;
 use crate::{
     app::{ApiError, App},
     call_video::{self, CaptureDevice, ChannelMessage, VideoParams},
-    calls::{Candidate, Effect, RejectReason, Signal},
+    calls::{CallRecord, Candidate, Effect, RejectReason, Signal},
     connection::ToConnection,
     providers::{CallSignalKind, CoreEvent},
     sdp::{HeaderExtensions, SdpKind, SdpPatcher},
@@ -78,7 +78,12 @@ impl App {
                 Effect::Send { peer, signal } => {
                     self.tell_connection(ToConnection::CallSignal { peer, signal });
                 }
-                Effect::Incoming { peer, sdp, video } => {
+                Effect::Incoming {
+                    peer,
+                    call_id,
+                    sdp,
+                    video,
+                } => {
                     // Video only if we take video calls (else we answer as an audio call).
                     let video = video && self.video_calls_enabled();
                     self.call_media = CallMedia::default();
@@ -89,6 +94,7 @@ impl App {
                             self.emit_call(json!({
                                 "event": "callIncoming",
                                 "identity": peer,
+                                "callId": call_id,
                                 "sdp": sdp,
                                 "video": video,
                             }));
@@ -123,22 +129,29 @@ impl App {
                 Effect::Ended { record } => {
                     tracing::info!(result = %record.result, outgoing = record.outgoing, "call ended");
                     self.call_patcher = None;
-                    // In the chat, like Android: "call|result|outgoing|seconds".
-                    let code = format!(
-                        "call|{}|{}|{}",
-                        record.result,
-                        u8::from(record.outgoing),
-                        record.duration.unwrap_or(0)
-                    );
-                    if let Ok(Some(message)) = self.store.insert_status(&record.peer, &code) {
-                        let _ = self.media_events.send(CoreEvent::MessageAdded {
-                            message,
-                            send_delivery_receipt: false,
-                        });
-                    }
+                    self.record_call(&record);
                     self.emit_call(json!({ "event": "callEnded", "record": record }));
                 }
+                Effect::RecordOnly { record } => self.record_call(&record),
             }
+        }
+    }
+
+    /// In the chat, like Android: "call|result|outgoing|seconds|callId". The call id is how a
+    /// late hangup or offer of this call is recognised, also after a restart (`on_call_signal`).
+    fn record_call(&self, record: &CallRecord) {
+        let code = format!(
+            "call|{}|{}|{}|{}",
+            record.result,
+            u8::from(record.outgoing),
+            record.duration.unwrap_or(0),
+            record.call_id
+        );
+        if let Ok(Some(message)) = self.store.insert_status(&record.peer, &code) {
+            let _ = self.media_events.send(CoreEvent::MessageAdded {
+                message,
+                send_delivery_receipt: false,
+            });
         }
     }
 
@@ -163,8 +176,19 @@ impl App {
             }
             return;
         }
+        // A call that is over already: the hangup crossing ours, or an offer delivered again after
+        // a lost acknowledgement. Neither is a missed call, and neither touches the current call.
         // No age check on offers: `created_at` is the sender's clock, and the server's short-lived
         // queue (about 30 s) and our ring time bound them anyway.
+        let call_id = signal.call_id();
+        if matches!(signal, Signal::Offer { .. } | Signal::Hangup { .. })
+            && call_id != 0
+            && !self.calls.is_current(peer, call_id)
+            && self.store.call_recorded(peer, call_id).unwrap_or(false)
+        {
+            tracing::debug!("signal of a call that is over ignored");
+            return;
+        }
         let effects = self
             .calls
             .on_signal(peer, signal, crate::messages::now_ms());
@@ -622,6 +646,21 @@ mod tests {
         );
     }
 
+    /// What reached the chat, and what reached the bridge.
+    fn drain(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+    ) -> (Vec<String>, Vec<Value>) {
+        let (mut lines, mut calls) = (Vec::new(), Vec::new());
+        while let Ok(event) = events.try_recv() {
+            match event {
+                CoreEvent::MessageAdded { message, .. } => lines.push(message.body),
+                CoreEvent::Call(event) => calls.push(event),
+                _ => {}
+            }
+        }
+        (lines, calls)
+    }
+
     #[test]
     fn incoming_call_rings() {
         let (_dir, mut app, mut rx) = app(true);
@@ -632,6 +671,7 @@ mod tests {
             panic!("no incoming call");
         };
         assert_eq!(event["event"], "callIncoming");
+        assert_eq!(event["callId"], 7);
         assert!(event["sdp"].as_str().unwrap().contains("cbr=1"));
         assert_eq!(app.call_state()["call"]["phase"], "incoming");
         // The core tells the caller it rings.
@@ -666,11 +706,137 @@ mod tests {
         let Ok(CoreEvent::MessageAdded { message, .. }) = events.try_recv() else {
             panic!("no call record");
         };
-        assert!(message.body.starts_with("call|") && message.body.ends_with("|1|0"));
+        assert_eq!(message.body, format!("call|aborted|1|0|{call_id}"));
         let Ok(CoreEvent::Call(event)) = events.try_recv() else {
             panic!("no end event");
         };
         assert_eq!(event["event"], "callEnded");
+        assert_eq!(event["record"]["callId"], call_id);
+    }
+
+    /// A call that is taken and hung up, then its peer's hangup comes after ours.
+    fn finished_call(
+        app: &mut App,
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+        call_id: u32,
+    ) {
+        let (kind, json) = offer(call_id);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        app.call_accept(OFFER, false).unwrap();
+        app.call_connected(false);
+        app.call_hang_up();
+        assert_eq!(
+            drain(events).0,
+            vec![format!("call|finished|0|0|{call_id}")]
+        );
+    }
+
+    #[test]
+    fn a_hangup_crossing_ours_is_no_missed_call() {
+        let (_dir, mut app, _rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        finished_call(&mut app, &mut events, 7);
+        let (kind, json) = Signal::Hangup { call_id: 7 }.encode();
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert!(events.try_recv().is_err());
+
+        // The memory is the chat's, so this holds after a restart too.
+        app.calls = crate::calls::Calls::default();
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn only_the_chats_last_call_lines_count() {
+        let (_dir, app, _rx) = app(true);
+        // An imported line has no call id; its seconds are not one.
+        app.store
+            .insert_status("ECHOECHO", "call|finished|1|7")
+            .unwrap();
+        assert!(!app.store.call_recorded("ECHOECHO", 7).unwrap());
+
+        app.store
+            .insert_status("ECHOECHO", "call|missed|0|0|7")
+            .unwrap();
+        assert!(app.store.call_recorded("ECHOECHO", 7).unwrap());
+        assert!(!app.store.call_recorded("ABCD1234", 7).unwrap());
+
+        // Other status lines in between don't push it out, four later calls do.
+        app.store.insert_status("ECHOECHO", "fsReset").unwrap();
+        for id in 8..11 {
+            app.store
+                .insert_status("ECHOECHO", &format!("call|missed|0|0|{id}"))
+                .unwrap();
+        }
+        assert!(app.store.call_recorded("ECHOECHO", 7).unwrap());
+        app.store
+            .insert_status("ECHOECHO", "call|missed|0|0|11")
+            .unwrap();
+        assert!(!app.store.call_recorded("ECHOECHO", 7).unwrap());
+    }
+
+    #[test]
+    fn an_offer_delivered_again_does_not_ring() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        finished_call(&mut app, &mut events, 7);
+        sent(&mut rx);
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert!(app.calls.current.is_none());
+        assert!(sent(&mut rx).is_empty());
+        assert!(call_events(&mut events).is_empty());
+    }
+
+    #[test]
+    fn a_hangup_for_an_unseen_call_records_a_missed_call_and_ends_nothing() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        let (kind, json) = Signal::Hangup { call_id: 3 }.encode();
+        app.on_call_signal("ECHOECHO", kind, &json);
+        // No event for the bridge: it may be setting up the next call right now.
+        let (lines, calls) = drain(&mut events);
+        assert_eq!(lines, vec!["call|missed|0|0|3"]);
+        assert!(calls.is_empty());
+        // Once only.
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert!(events.try_recv().is_err());
+        assert!(sent(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn a_call_during_a_call_leaves_a_line_and_the_call_goes_on() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert_eq!(call_events(&mut events)[0]["event"], "callIncoming");
+        sent(&mut rx);
+
+        let (kind, json) = offer(8);
+        app.on_call_signal("ABCD1234", kind, &json);
+        let mut busy = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let ToConnection::CallSignal { peer, signal } = message {
+                busy.push((peer, signal));
+            }
+        }
+        assert_eq!(
+            busy,
+            vec![(
+                "ABCD1234".to_owned(),
+                Signal::Reject {
+                    call_id: 8,
+                    reason: RejectReason::Busy,
+                },
+            )]
+        );
+        let (lines, calls) = drain(&mut events);
+        assert_eq!(lines, vec!["call|missed|0|0|8"]);
+        assert!(calls.is_empty(), "no callEnded");
+        assert!(app.call_patcher.is_some());
+        assert_eq!(app.call_state()["call"]["phase"], "incoming");
+        assert_eq!(app.call_state()["call"]["identity"], "ECHOECHO");
     }
 
     fn call_events(events: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<Value> {

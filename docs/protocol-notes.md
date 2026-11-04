@@ -28,6 +28,11 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
 (`core/src/calls.rs`, `app_calls.rs`, `bridge/callmanager.cpp`, `core/src/call_video.rs`)
 - An offer's `created_at` is the sender's clock, so offers are not aged: the server's short-lived
   queue and the 60 s ring time bound them, like Android (`VoipStateService`).
+- A hangup that matches no running call is a missed call only if the chat's last 4 call lines
+  don't name its call id (Android's `isMissedCall`; the id is the 5th field of `call|…`, so this
+  holds after a restart). It never touches a call in progress. Offers whose call is over are ignored
+  the same way (delivered again after a lost acknowledgement).
+- Offers during a call: rejected "busy" and recorded as missed (Android too).
 
 ## Reporting spam
 - From iOS 7.5.2 (`ServerAPIConnector.m`, `SpamDetector`, `GroupSpamDetector`), newer than Android's

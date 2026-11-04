@@ -693,6 +693,24 @@ impl Store {
         self.message(self.conn.last_insert_rowid())
     }
 
+    /// The chat with `peer` shows the call `call_id` (`call|…|callId`) among its last few calls
+    /// (Android looks at the last 4 too).
+    pub fn call_recorded(&self, peer: &str, call_id: u32) -> Result<bool, StoreError> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT body FROM messages
+             WHERE conversation = ?1 AND kind = 'status' AND body LIKE 'call|%'
+             ORDER BY id DESC LIMIT 4",
+        )?;
+        let call_id = call_id.to_string();
+        let bodies = statement.query_map(params![peer], |row| row.get::<_, String>(0))?;
+        for body in bodies {
+            if body?.split('|').nth(4) == Some(call_id.as_str()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Put a sent outgoing message back into the queue (the peer rejected it, e.g. after a lost
     /// forward security session). Returns the changed message.
     pub fn reset_outgoing(

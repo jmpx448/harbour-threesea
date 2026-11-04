@@ -46,9 +46,9 @@ also when synced from another device),
 `{"event": "messagesChanged", "messages"}` (acks, receipts), `{"event": "typing", "identity",
 "typing"}`, `{"event": "serverMessage", "message", "canReconnect"}` (server alert / close). `{"event": "messageNotify", "message", "notify", "private"}`: a message another device received first (it leads) and that is still unread after a grace time, or at the end of the mediator's backlog — its `messageAdded` came with `notify: false`. `{"event": "privateChanged", "identity", "private"}`: a chat was marked private or unmarked, here, on a linked device or by a restore. `{"event": "deviceCookieChanged"}`: the chat server saw the ID log in with another device cookie (Android's rogue-device warning; the core has already cleared the server's flag).
 
-Call events (Full, ADR 0012): `callIncoming {identity, sdp (patched), video}`, `callRinging`,
-`callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record: {peer, outgoing, result,
-duration, at}}`, `callChannelSend {data}` (base64, for the call's data channel),
+Call events (Full, ADR 0012): `callIncoming {identity, callId, sdp (patched), video}`,
+`callRinging`, `callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record: {peer,
+callId, outgoing, result, duration, at}}`, `callChannelSend {data}` (base64, for the call's data channel),
 `callRemoteCapture {device: camera|microphone, on}`, `callVideoParams {bitrateKbps, fps, width,
 height}` (what our video sender may use: Android's quality profiles, the lower of both sides,
 MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`.
@@ -185,7 +185,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `callTurnServers` | `identity` (who the call is with) | `{urls, username, password, relayOnly}` for the media engine (`identity/turn_cred`, cached until expiry; `relayOnly`: the peer is unverified or not a contact, or the setting `relayThreemaCalls` is on; then the dual-stack servers, like Android) |
 | `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012) |
 | `callAccept` | `sdp` (engine's answer), `video` | `{}` |
-| `callReject` / `callHangUp` | – | `{}`; the call ends with a status message `call\|result\|outgoing (0/1)\|seconds` |
+| `callReject` / `callHangUp` | – | `{}`; the call ends with a status message `call\|result\|outgoing (0/1)\|seconds\|callId` (imported lines have no call id) |
 | `callTimeout` | – | `{}`; nobody answered within the ring time (60 s): incoming → rejected "timeout" (missed), outgoing → hung up (unanswered) |
 | `callConnected` | `relayed` | `{}`; media is up: our video quality profile goes to the peer (`callChannelSend`), `callVideoParams` follows |
 | `callChannel` | `data` (base64, from the call's data channel) | `{}`; events `callRemoteCapture` or `callVideoParams` |
