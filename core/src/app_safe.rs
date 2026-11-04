@@ -296,7 +296,26 @@ impl App {
         self.safe_status()
     }
 
-    pub(crate) fn safe_disable(&mut self) -> Result<Value, ApiError> {
+    /// Turn Safe off: first the backup goes from the server, as the key to it goes with the
+    /// settings (Android's `disableSafe`). Off whatever the server says; the reply tells.
+    pub(crate) async fn safe_disable(&mut self) -> Result<Value, ApiError> {
+        let deleted = match self.safe_key() {
+            Ok(Some(key)) => server::delete(&self.https, &key)
+                .await
+                .map_err(ApiError::from),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        self.forget_safe(deleted)
+    }
+
+    /// The local half of [`Self::safe_disable`]: `deleted` is how the server copy fared.
+    fn forget_safe(&mut self, deleted: Result<(), ApiError>) -> Result<Value, ApiError> {
+        if let Err(error) = &deleted {
+            tracing::warn!(kind = error.kind(), "Threema Safe backup not deleted");
+            // The wait can outlast the page, and with the key gone nobody can delete it later.
+            self.note_ui_events(&["safeServerCopyLeft"]);
+        }
         for k in [
             keys::SAFE_MASTER_KEY,
             keys::SAFE_LAST_UPLOAD,
@@ -308,7 +327,9 @@ impl App {
         ] {
             self.store.delete_setting(k)?;
         }
-        self.safe_status()
+        let mut status = self.safe_status()?;
+        status["serverCopyDeleted"] = json!(deleted.is_ok());
+        Ok(status)
     }
 
     pub(crate) async fn safe_restore(
@@ -902,6 +923,34 @@ mod tests {
     use super::*;
     use crate::{app::StartConfig, store::StoredIdentity};
 
+    /// An app with the ID `AAAAAAAA`.
+    fn app_with_identity(dir: &std::path::Path) -> App {
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "AAAAAAAA".into(),
+                client_key: Zeroizing::new([5; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        app
+    }
+
     #[test]
     fn identity_format() {
         assert_eq!(
@@ -973,6 +1022,35 @@ mod tests {
             .unwrap();
         let parsed = safe::parse_backup(&key.decrypt(&blob).unwrap()).unwrap();
         assert_eq!(parsed.contacts.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn turning_safe_off_says_whether_the_server_copy_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        let enable = |app: &App| {
+            app.store
+                .set_setting(keys::SAFE_MASTER_KEY, &HEXLOWER.encode(&[1; 64]))
+                .unwrap();
+            app.store.set_setting(keys::SAFE_LAST_UPLOAD, "1").unwrap();
+        };
+        enable(&app);
+        assert_eq!(app.safe_status().unwrap()["enabled"], true);
+        let status = app.forget_safe(Ok(())).unwrap();
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["serverCopyDeleted"], true);
+        assert!(app.take_ui_events().is_empty());
+
+        // A failed deletion turns it off all the same, and both the reply and an event say so.
+        enable(&app);
+        let status = app
+            .forget_safe(Err(ApiError::Network("no route".into())))
+            .unwrap();
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["serverCopyDeleted"], false);
+        assert_eq!(app.take_ui_events(), ["safeServerCopyLeft"]);
+        assert!(app.store.setting(keys::SAFE_MASTER_KEY).unwrap().is_none());
+        assert_eq!(app.safe_status().unwrap().get("serverCopyDeleted"), None);
     }
 
     #[test]

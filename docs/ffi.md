@@ -42,6 +42,7 @@ the request as a whole ("invalid request"). Name it after what it is — `device
 
 Events (unsolicited): `{"event": "started", "version"}`, `{"event": "fatal", "kind", "message"}`,
 `{"event": "safeChanged"}` (automatic Safe backup ran or its error state changed),
+`{"event": "safeServerCopyLeft"}` (`safeDisable` couldn't delete the server copy; the window tells the user, as the page may be gone),
 `{"event": "contactsChanged"}` (contacts imported in the background; the bridge reloads the model),
 `{"event": "groupsChanged"}`, `{"event": "profileChanged"}` (the own profile/picture changed,
 also when synced from another device),
@@ -80,7 +81,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `safeStatus` | – | `{enabled, server, lastBackup, lastError, size, maxBytes, retentionDays, restore}`; `restore` = `{pendingContacts, pendingGroups, pendingLists, importError, summary}` — what a restore still has to import (retried on reconnect, hourly and via `safeRetryImport`), why the last attempt failed, and the import's counts (`summary`: `{contacts, revokedContacts, groups, lists, skippedGroups: {deleted, unknownCreator, invalid}, at}`) |
 | `safeEnable` | `password`, `pin` | status; derives the key, uploads a first backup |
 | `safeBackupNow` | – | status |
-| `safeDisable` | `pin` | status; forgets the key (server copy expires) |
+| `safeDisable` | `pin` | status with `serverCopyDeleted`; deletes the backup from the server, then forgets the key. Off even if the deletion fails (`serverCopyDeleted: false` and the event `safeServerCopyLeft`, as the page may be gone by then; that copy expires with the server's retention) |
 | `safeRestore` | `identity`, `password` | `{identity, contacts, groups}` (needs a license first); error `identityExists` on a device with an ID |
 | `safeRetryImport` | – | status; tries the rest of a restored backup's import now |
 | `androidBackupInspect` | `path`, `password` | `{version, identity (match\|otherIdentity\|keyMismatch\|unreadable\|missing), inventory: {contactChats, groupChats, listChats, mediaEntries, mediaBytes (declared, an estimate), thumbnails, contactAvatars, contactProfilePictures, groupAvatars, ownAvatar, has…, unknownEntries}}` — looks into an Android data backup ZIP, entirely locally; errors `backupDecrypt` (password), `backupVersion`, `backupInvalid` |

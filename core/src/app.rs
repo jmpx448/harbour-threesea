@@ -125,7 +125,8 @@ pub enum Command {
     },
     /// Upload a backup now.
     SafeBackupNow,
-    /// Disable Threema Safe and forget the key (the server copy expires by itself).
+    /// Disable Threema Safe: delete the backup from the server, then forget the key. Disabled even
+    /// if the deletion fails; the reply's `serverCopyDeleted` says how it went.
     SafeDisable {
         /// The app lock's PIN (`App::check_pin`).
         pin: Option<Zeroizing<String>>,
@@ -1512,7 +1513,7 @@ impl App {
             Command::SafeBackupNow => self.safe_backup_now().await,
             Command::SafeDisable { pin } => {
                 self.check_pin(pin)?;
-                self.safe_disable()
+                self.safe_disable().await
             }
             Command::SafeRestore { identity, password } => {
                 self.safe_restore(&identity, password).await

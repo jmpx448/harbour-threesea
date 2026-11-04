@@ -1451,6 +1451,10 @@ ApplicationWindow {
                 }
             } else if (name === "serverMessage") {
                 Notices.show(data.message, Notice.Long, Notice.Center)
+            } else if (name === "safeServerCopyLeft") {
+                // From here: the user may have left the Safe page during the wait.
+                //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."
+                Notices.show(qsTrId("threesea-la-safe-server-copy-left"), Notice.Long, Notice.Center)
             } else if (name === "deviceRemovalFailed") {
                 // On Linked devices the page itself tells. Elsewhere this is the only word: the
                 // user may have left it during the wait.

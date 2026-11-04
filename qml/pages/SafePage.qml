@@ -48,6 +48,8 @@ Page {
             working = false
             if (ok) {
                 page.status = result
+                //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."
+                if (result.serverCopyDeleted === false) errorLabel.text = qsTrId("threesea-la-safe-server-copy-left")
             } else {
                 errorLabel.text = Errors.text(kind, message)
                 refresh()
@@ -119,8 +121,8 @@ Page {
                 onClicked: {
                     if (page.working) return
                     if (page.status.enabled) {
-                        //% "Turning off Threema Safe"
-                        remorse.execute(qsTrId("threesea-la-safe-disabling"), function() { page.run("safeDisable", { pin: page.pin }) })
+                        //% "Turning off and deleting the backup"
+                        remorse.execute(qsTrId("threesea-la-safe-disabling-delete"), function() { page.run("safeDisable", { pin: page.pin }) })
                     } else {
                         page.askPassword()
                     }
