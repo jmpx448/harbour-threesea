@@ -1805,7 +1805,7 @@ Page {
                 visible: !page.selecting && page.isGroup && !page.groupCallRunning && !page.readOnly
                          && groupCalls.supported && window.appSettings.threemaCalls !== false
                          && window.appSettings.groupCalls !== false
-                enabled: groupCalls.state === "idle"
+                enabled: groupCalls.state === "idle" && calls.state === "idle"
                 //% "Start group call"
                 text: qsTrId("threesea-me-start-group-call")
                 onClicked: {
@@ -1815,8 +1815,8 @@ Page {
             }
             MenuItem {
                 visible: !page.selecting && page.isGroup && page.groupCallRunning && !page.inGroupCall
-                         && window.appSettings.groupCalls !== false
-                enabled: groupCalls.state === "idle"
+                         && groupCalls.supported && window.appSettings.groupCalls !== false
+                enabled: groupCalls.state === "idle" && calls.state === "idle"
                 //% "Join group call"
                 text: qsTrId("threesea-me-join-group-call")
                 onClicked: page.openGroupCall()
@@ -1981,7 +1981,7 @@ Page {
             height: visible ? Theme.itemSizeMedium : 0
             visible: page.isGroup && groupCalls.supported && window.appSettings.groupCalls !== false
                      && (page.groupCallRunning || page.inGroupCall)
-            enabled: page.inGroupCall || groupCalls.state === "idle"
+            enabled: page.inGroupCall || (groupCalls.state === "idle" && calls.state === "idle")
             onClicked: page.openGroupCall()
 
             Rectangle {
