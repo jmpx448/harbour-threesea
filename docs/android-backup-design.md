@@ -131,6 +131,30 @@ Separate change detection from position in history: a higher row ID can still be
 
 Treat the ZIP as untrusted local input: passwords alone do not establish record validity. Bound entry count, expanded bytes, per-record/field size and image dimensions. Validate actual byte counts while reading, rather than trusting central-directory sizes or compression ratios alone. Reject duplicate logical entries, path traversal, absolute paths, symlinks and unsupported entry methods. Never extract archive filenames directly to arbitrary filesystem paths. Read each encrypted entry to EOF and verify authentication/integrity before accepting it.
 
+### What the password covers
+
+The format is WinZip AE-2 per entry: a correct password proves each entry's *content* is authentic, and nothing else. Entry names, the set of entries, their order and the central directory are not covered, and every backup with the same password has entries that verify. So someone who can write to the file (shared storage, a cloud folder) but has no password can, without being noticed by any check:
+
+- rename entries: `message_<a>.csv` and `message_<b>.csv` swap, and one contact's messages land in another's chat under the other's name; renaming `message_media_<uid>` shows one message's picture in another;
+- remove entries: a chat, its media, or `nonces.csv`, which drops the replay protection for what Android already received;
+- put in entries from an older backup with the same password, under their own names or others.
+
+This is the format's limit, shared with Android's own restore, and Threesea can't close it while reading Android's files. What the reader does:
+
+- it refuses duplicate names and entries that share bytes, so an entry can't be shadowed by a second record and every reader of the file sees the same content;
+- the result page says when `nonces.csv` is missing, since that takes something away from the user;
+- two cross-checks give hints on the result page: rows whose `uid` another chat of the same kind already holds, and group chats whose incoming rows mostly come from people outside the group. They notice crude copies and swaps only. No hint is not evidence of an untouched file, and a hint can have an innocent cause (a group whose writers all left).
+
+Keep the backup file where others can't write to it, as you would with the messages inside.
+
+### Memory
+
+Decrypted entries, CSV tables, message rows and blob keys are wiped when dropped, and their buffers don't grow by leaving freed copies behind. What is not wiped: the zip crate's internal buffers (the inflate window), and the converted text on its way into the store, as for any received message.
+
+### Bounds
+
+The CSV reader refuses a table beyond fixed limits for field, row, row count and cell count (`android_backup/csv.rs`), in time linear in the text; tables are read and parsed on a blocking thread.
+
 Preview must distinguish wrong password/corruption, unsupported format, identity mismatch, malformed metadata, absent optional media, and insufficient free space. Report compatibility issues by file category/record number and reason without disclosing private contents. Preview should state verified counts versus estimates and whether all selected media have been authenticated. A “successful” full restore must not silently omit unsupported message families.
 
 Use synthetic public fixtures in tests. A user backup stays local/ignored and never becomes a repository fixture, CI upload, log attachment or third-party upload. The password is entered in the app and goes nowhere else.

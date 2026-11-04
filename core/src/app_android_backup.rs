@@ -105,6 +105,9 @@ struct Metadata {
     csp_nonces: Vec<[u8; 32]>,
     d2d_nonces: Vec<[u8; 32]>,
     nonces_skipped: usize,
+    /// The archive has no `nonces.csv`: old, or someone removed it (entry sets are not
+    /// authenticated). Told to the user, the import goes on.
+    nonces_missing: bool,
 }
 
 /// A picture entry must at least look like an image (Android writes JPEG or PNG).
@@ -164,6 +167,7 @@ fn load_metadata(
         nonces_skipped += skipped;
         Ok(hashed)
     };
+    let nonces_missing = !archive.has_entry("nonces.csv");
     let csp_nonces = nonces(&mut archive, "nonces.csv")?;
     let d2d_nonces = nonces(&mut archive, "nonces_d2d.csv")?;
 
@@ -223,6 +227,7 @@ fn load_metadata(
         csp_nonces,
         d2d_nonces,
         nonces_skipped,
+        nonces_missing,
     })
 }
 
@@ -584,6 +589,7 @@ impl App {
                 "existing": (data.csp_nonces.len() + data.d2d_nonces.len())
                     .saturating_sub(csp_nonces + d2d_nonces),
                 "skipped": data.nonces_skipped,
+                "missing": data.nonces_missing,
             },
             "invalidRows": data.invalid_rows,
         }))
@@ -695,6 +701,7 @@ mod tests {
         assert_eq!(summary["nonces"]["csp"], 2);
         assert_eq!(summary["nonces"]["d2d"], 1);
         assert_eq!(summary["nonces"]["skipped"], 1);
+        assert_eq!(summary["nonces"]["missing"], false);
         assert!(
             app.store.has_nonce(&[0x11; 24]).unwrap(),
             "a replay is refused"
@@ -830,6 +837,10 @@ mod history_tests {
 
     /// Run one history import to completion and return the Done event's summary.
     pub(super) async fn run_import(app: &App) -> Value {
+        run_import_of(app, fixture().into()).await
+    }
+
+    async fn run_import_of(app: &App, path: std::path::PathBuf) -> Value {
         let identity = app.store.identity().unwrap().unwrap();
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let job = HistoryImport {
@@ -841,7 +852,7 @@ mod history_tests {
             own_public_key: libthreema::common::keys::ClientKey::from(*identity.client_key)
                 .public_key()
                 .to_string(),
-            path: fixture().into(),
+            path,
             password: Zeroizing::new("test-password".into()),
         };
         job.run().await;
@@ -854,6 +865,129 @@ mod history_tests {
         }
         assert_eq!(done["ok"], true, "{done}");
         done["summary"].clone()
+    }
+
+    /// A backup of the fixture's identity with the given tables, written here.
+    fn backup_with(dir: &std::path::Path, tables: &[(&str, String)]) -> std::path::PathBuf {
+        use std::io::Write as _;
+        let mut fixture =
+            crate::android_backup::Archive::open(std::path::Path::new(&fixture()), "test-password")
+                .unwrap();
+        let identity = fixture.read("identity", 1 << 16).unwrap();
+        let path = dir.join("backup.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, "test-password");
+        let settings = b"\"version\",\"27\"\n".as_slice();
+        for (name, data) in [("settings", settings), ("identity", &identity)]
+            .into_iter()
+            .chain(tables.iter().map(|(name, text)| (*name, text.as_bytes())))
+        {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    fn message_rows(rows: impl IntoIterator<Item = (String, Option<&'static str>)>) -> String {
+        use crate::android_backup::csv::write_row;
+        let mut text = write_row(&["uid", "identity", "type", "body", "posted_at"]);
+        for (index, (uid, sender)) in rows.into_iter().enumerate() {
+            let at = (1_700_000_000_000 + index).to_string();
+            text.push_str(&write_row(&[
+                &uid,
+                sender.unwrap_or(""),
+                "TEXT",
+                "hello",
+                &at,
+            ]));
+        }
+        text
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hints_at_files_that_were_moved_around() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"aa".repeat(32), "17"])
+            + &write_row(&["C0C0C0C0", &"bb".repeat(32), "18"])
+            + &write_row(&["D0D0D0D0", &"cc".repeat(32), "19"]);
+        let groups = write_row(&["creator", "id", "groupname", "members", "group_uid"])
+            + &write_row(&[
+                "ABCD1234",
+                "0102030405060708",
+                "Ours",
+                "ABCD1234;B0B0B0B0",
+                "ours",
+            ])
+            + &write_row(&[
+                "ABCD1234",
+                "0202030405060708",
+                "Changing",
+                "ABCD1234;B0B0B0B0",
+                "changing",
+            ])
+            + &write_row(&[
+                "B0B0B0B0",
+                "0302030405060708",
+                "Theirs",
+                "ABCD1234;B0B0B0B0",
+                "theirs",
+            ]);
+        let mut theirs = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"]);
+        for (index, (sender, outgoing)) in std::iter::repeat_n(("ABCD1234", "1"), 10)
+            .chain(std::iter::repeat_n(("B0B0B0B0", "0"), 4))
+            .enumerate()
+        {
+            let at = (1_700_000_000_000 + index).to_string();
+            let uid = format!("theirs-{index}");
+            theirs.push_str(&write_row(&[&uid, sender, outgoing, "TEXT", "hello", &at]));
+        }
+        let copied =
+            |range: std::ops::Range<u32>| message_rows(range.map(|i| (format!("u-{i}"), None)));
+        let from = |sender: &'static str, count: u32| {
+            (0..count)
+                .map(|i| (format!("{sender}-{i}"), Some(sender)))
+                .collect::<Vec<_>>()
+        };
+        let path = backup_with(
+            dir.path(),
+            &[
+                ("contacts.csv", contacts),
+                ("groups.csv", groups),
+                ("message_17.csv", copied(0..5)),
+                // Holds a copy of three of the first chat's rows.
+                ("message_18.csv", copied(2..7)),
+                // Nobody who is in the group wrote here.
+                ("group_message_ours.csv", message_rows(from("D0D0D0D0", 10))),
+                // The user's own rows carry the user's ID in polls, which no member list holds.
+                ("group_message_theirs.csv", theirs),
+                // Someone left; most words are a member's.
+                (
+                    "group_message_changing.csv",
+                    message_rows([from("E0E0E0E0", 4), from("B0B0B0B0", 6)].concat()),
+                ),
+            ],
+        );
+        let metadata = app
+            .android_backup_import(
+                path.to_string_lossy().into_owned(),
+                Zeroizing::new("test-password".into()),
+                "metadata",
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata["nonces"]["missing"], true, "{metadata}");
+        assert_eq!(metadata["contacts"]["added"], 3, "{metadata}");
+
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["chats"], 5, "{summary}");
+        assert_eq!(summary["uidConflicts"], 3, "{summary}");
+        assert_eq!(summary["foreignGroupChats"], 1, "{summary}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -879,6 +1013,8 @@ mod history_tests {
         let summary = run_import(&app).await;
         assert_eq!(summary["chats"], 2, "{summary}");
         assert_eq!(summary["skippedChats"], 0);
+        assert_eq!(summary["uidConflicts"], 0);
+        assert_eq!(summary["foreignGroupChats"], 0);
         // 9 contact rows (one a poll), 6 group rows: 3 texts and a poll's created, modified
         // (not shown here) and closed lines.
         assert_eq!(summary["imported"], 14, "{summary}");

@@ -21,6 +21,8 @@ Page {
                                       + (imported.pictures.own ? 1 : 0)
     readonly property int nonces: imported && imported.nonces
                                   ? imported.nonces.csp + imported.nonces.d2d : 0
+    readonly property bool noncesMissing: !!imported && !!imported.nonces
+                                          && imported.nonces.missing === true
     readonly property int existing: (imported ? imported.contacts.existing + imported.groups.existing
                                                 + imported.lists.existing : 0)
                                     + (summary ? summary.existing : 0)
@@ -115,6 +117,17 @@ Page {
                 value: page.nonces
             }
 
+            Label {
+                visible: page.noncesMissing
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.secondaryHighlightColor
+                //% "This backup holds no replay protection entries. Protection covers what this device receives from now on."
+                text: qsTrId("threesea-la-data-backup-nonces-missing")
+            }
+
             DetailItem {
                 visible: page.imported !== null && page.imported.contacts.keyConflicts > 0
                 //% "Conflicting keys"
@@ -182,6 +195,20 @@ Page {
                 //% "Media not imported"
                 label: qsTrId("threesea-la-android-import-media-failed")
                 value: page.summary ? page.summary.mediaFailed : 0
+            }
+
+            DetailItem {
+                visible: page.summary !== null && page.summary.uidConflicts > 0
+                //% "Messages also found in another chat"
+                label: qsTrId("threesea-la-data-backup-uid-conflicts")
+                value: page.summary ? page.summary.uidConflicts : 0
+            }
+
+            DetailItem {
+                visible: page.summary !== null && page.summary.foreignGroupChats > 0
+                //% "Group chats mostly from non-members"
+                label: qsTrId("threesea-la-data-backup-foreign-group-chats")
+                value: page.summary ? page.summary.foreignGroupChats : 0
             }
         }
 

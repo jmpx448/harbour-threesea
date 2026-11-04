@@ -33,6 +33,16 @@ These are AI-run reviews, not a professional audit or certification.
 - [docs/security-audit-2026-10-27.md](docs/security-audit-2026-10-27.md), with what has been
   fixed since
 
+## What a data backup's password protects
+
+Android's data backup format, which Threesea reads and writes, authenticates each entry's content
+but not the entry names or which entries there are. Someone who can write to a backup file without
+knowing its password can't read or change the contents, but can swap or remove whole entries: put
+one chat's messages under another contact's name, or take out the list of used nonces. Threesea
+refuses duplicate and overlapping entries, says on the result page when that list is missing and
+points out some crude copies and swaps, but it can't notice every such change. Keep backups where
+others can't write to them. Details: [docs/android-backup-design.md](docs/android-backup-design.md).
+
 ## Verifying a release
 
 Each release lists `SHA256SUMS`, and every RPM has a build provenance attestation:

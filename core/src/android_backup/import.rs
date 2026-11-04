@@ -127,7 +127,69 @@ pub struct Summary {
     pub reactions_unmatched: usize,
     /// Poll messages imported with their poll (also counted in `imported`).
     pub polls: usize,
+    /// Rows whose `uid` another chat of the same kind in this archive already holds. Android's
+    /// uids are unique, so something copied a chat file: a hint, see [`CrossChecks`].
+    pub uid_conflicts: usize,
+    /// Group chats whose incoming rows mostly come from people outside the group: a hint too.
+    pub foreign_group_chats: usize,
     pub cancelled: bool,
+}
+
+/// Fewest incoming rows for a verdict on who wrote a group chat: a short chat may simply be
+/// the words of someone who left.
+const MIN_ROWS_FOR_SENDER_CHECK: usize = 10;
+
+/// Hints that an archive's files were moved around. Neither the entry names nor the set of
+/// entries are authenticated (docs/android-backup-design.md), and these only notice the crude
+/// cases: no hint means nothing, and a hint doesn't stop the import. Uids are kept as hashes, so
+/// the memory stays small however many rows pass by.
+#[derive(Default)]
+struct CrossChecks {
+    hasher: std::hash::RandomState,
+    owners: std::collections::HashMap<u64, usize>,
+}
+
+impl CrossChecks {
+    /// How many of a chat's rows carry a uid another chat of the family already holds.
+    fn claimed_elsewhere(
+        &mut self,
+        chat: usize,
+        family: Family,
+        messages: &[records::Message],
+    ) -> usize {
+        use std::hash::BuildHasher as _;
+        messages
+            .iter()
+            .filter(|message| {
+                let uid = self.hasher.hash_one((family.name(), &message.uid));
+                *self.owners.entry(uid).or_insert(chat) != chat
+            })
+            .count()
+    }
+}
+
+/// Whether most incoming rows come from people outside the group as it stands. People who left
+/// count as outside, which is why only a majority is worth a hint. The user's own rows are not
+/// incoming, even where Android writes the user's ID into them (polls), and the member list
+/// doesn't hold the user. A set, because the core thread runs this and a file decides both sizes.
+fn mostly_from_non_members(
+    members: &[String],
+    creator: &str,
+    messages: &[records::Message],
+) -> bool {
+    let members: std::collections::HashSet<&str> = members.iter().map(String::as_str).collect();
+    let (mut incoming, mut foreign) = (0, 0);
+    for sender in messages
+        .iter()
+        .filter(|message| !message.outgoing)
+        .filter_map(|message| message.sender.as_deref())
+    {
+        incoming += 1;
+        if sender != creator && !members.contains(sender) {
+            foreign += 1;
+        }
+    }
+    incoming >= MIN_ROWS_FOR_SENDER_CHECK && foreign * 2 > incoming
 }
 
 /// What the blocking thread brings back from opening the archive.
@@ -249,6 +311,7 @@ impl HistoryImport {
         let (plans, media_entries, thumbnail_entries) =
             self.plan_chats(&archive, contacts, &groups, &mut summary);
         let total = plans.len();
+        let mut checks = CrossChecks::default();
 
         for (done, plan) in plans.into_iter().enumerate() {
             if self.cancel.get() {
@@ -276,6 +339,17 @@ impl HistoryImport {
             .map_err(|e| ApiError::Internal(e.to_string()))??;
             archive = returned;
             summary.invalid_rows += invalid;
+            summary.uid_conflicts += checks.claimed_elsewhere(done, plan.family, &messages);
+            if plan.family == Family::Group
+                && let Ok(Some(group)) = self.store.group(&plan.conversation)
+                && mostly_from_non_members(
+                    &group.members,
+                    &group.identity.creator_identity.to_string(),
+                    &messages,
+                )
+            {
+                summary.foreign_group_chats += 1;
+            }
 
             archive = self
                 .import_chat(
@@ -883,4 +957,32 @@ fn fingerprint_file(path: &std::path::Path) -> Result<String, ArchiveError> {
     let mut hasher = sha2::Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
     Ok(data_encoding::HEXLOWER.encode(&hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mostly_from_non_members, records};
+    use crate::android_backup::csv::{Table, write_row};
+
+    #[test]
+    fn the_sender_check_stays_linear() {
+        // As many members as rows, nobody matching: comparing each pair took many minutes.
+        const SIZE: usize = 300_000;
+        let members: Vec<String> = (0..SIZE).map(|i| format!("M{i:07}")).collect();
+        let mut text = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"]);
+        for i in 0..SIZE {
+            let uid = i.to_string();
+            let sender = format!("S{i:07}");
+            text.push_str(&write_row(&[&uid, &sender, "0", "TEXT", "", "1"]));
+        }
+        let (messages, invalid) = records::messages(&Table::parse(&text).unwrap());
+        assert_eq!((messages.len(), invalid), (SIZE, 0));
+        let start = std::time::Instant::now();
+        assert!(mostly_from_non_members(&members, "ABCD1234", &messages));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            start.elapsed()
+        );
+    }
 }
