@@ -1633,10 +1633,16 @@ impl App {
                 }
                 None => Ok(Value::Null),
             },
-            Command::SetVoiceListened { message } => Ok(self
-                .store
-                .set_listened(message)?
-                .map_or(Value::Null, |m| self.store.message_json(&m))),
+            Command::SetVoiceListened { message } => {
+                // It changes and returns the message: not one of a hidden private chat.
+                if let Some(m) = self.store.message(message)? {
+                    self.check_readable(&m.conversation)?;
+                }
+                Ok(self
+                    .store
+                    .set_listened(message)?
+                    .map_or(Value::Null, |m| self.store.message_json(&m)))
+            }
             Command::SetStarred { message, starred } => {
                 // It returns the message: not one of a hidden private chat.
                 if let Some(m) = self.store.message(message)? {

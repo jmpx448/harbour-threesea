@@ -443,6 +443,17 @@ async fn private_content_stays_hidden_from_mutations_and_media() {
         .store
         .insert_outgoing("BBBBBBBB", 125, "text", "PRIVATE OWN TEXT")
         .unwrap();
+    let voice = app
+        .store
+        .insert_incoming(
+            "BBBBBBBB",
+            128,
+            "file",
+            &json!({"mediaType": "audio/aac", "name": "PRIVATE VOICE"}).to_string(),
+            1,
+        )
+        .unwrap()
+        .unwrap();
     let other = app
         .store
         .insert_incoming("CCCCCCCC", 126, "text", "public", 1)
@@ -457,6 +468,7 @@ async fn private_content_stays_hidden_from_mutations_and_media() {
         json!({"id": 4, "cmd": "sendText", "identity": "BBBBBBBB", "text": "into a hidden chat"}),
         json!({"id": 5, "cmd": "markRead", "identity": "BBBBBBBB"}),
         json!({"id": 6, "cmd": "addGifFavourite", "message": text.id}),
+        json!({"id": 7, "cmd": "setVoiceListened", "message": voice.id}),
     ] {
         let reply = app.handle(&request.to_string()).await;
         assert!(!reply.contains("PRIVATE"), "{request}: {reply}");
@@ -466,6 +478,15 @@ async fn private_content_stays_hidden_from_mutations_and_media() {
     assert_eq!(
         app.store.message(mine.id).unwrap().unwrap().body,
         "PRIVATE OWN TEXT"
+    );
+    assert!(
+        !app.store
+            .message(voice.id)
+            .unwrap()
+            .unwrap()
+            .body
+            .contains("listened"),
+        "the hidden message stays unchanged"
     );
     assert!(!app.media.shown(text.id) && !app.media.shown(poll.id));
     assert!(
