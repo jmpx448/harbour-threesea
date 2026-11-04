@@ -297,6 +297,30 @@ pub fn set_log_level(level: &str) {
     }
 }
 
+/// An event from the core's own queue (media, marks): the UI and the browsers learn of it.
+fn on_media_event(app: &mut App, event: &CoreEvent, emit: &Emit) {
+    app.gate_media(event);
+    emit(event.to_json(&app.store, app.unlocked).to_string());
+    app.on_media_event();
+    app.web_on_core_event(event);
+    app.web_refresh();
+}
+
+/// After a command: what it queued goes out before the browsers' refresh. A group taken out of
+/// the private chats reaches them as a receiver first, then as a conversation of that receiver.
+pub(crate) fn settle_command(
+    app: &mut App,
+    media_events: &mut Option<mpsc::UnboundedReceiver<CoreEvent>>,
+    emit: &Emit,
+) {
+    if let Some(events) = media_events.as_mut() {
+        while let Ok(event) = events.try_recv() {
+            on_media_event(app, &event, emit);
+        }
+    }
+    app.web_refresh();
+}
+
 /// The core loop: commands (in order), connection events, hourly maintenance.
 async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, emit: Emit) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -317,7 +341,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 for event in app.take_ui_events() {
                     emit(json!({ "event": event }).to_string());
                 }
-                app.web_refresh();
+                settle_command(&mut app, &mut media_events, &emit);
                 // An ID may just have been created/restored (or removed).
                 if let Some(started) = app.ensure_connection() {
                     connection = Some(started);
@@ -371,11 +395,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 }
             } => {
                 if let Some(event) = event {
-                    app.gate_media(&event);
-                    emit(event.to_json(&app.store, app.unlocked).to_string());
-                    app.on_media_event();
-                    app.web_on_core_event(&event);
-                    app.web_refresh();
+                    on_media_event(&mut app, &event, &emit);
                 }
             }
             event = async {

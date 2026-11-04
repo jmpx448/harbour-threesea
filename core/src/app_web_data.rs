@@ -149,12 +149,10 @@ fn status_text(code: &str) -> String {
 }
 
 impl App {
-    fn web_private_chats(&self) -> HashSet<String> {
-        self.store
-            .private_chats()
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
+    /// An error here leaves the browser without an answer: what isn't known to be public isn't
+    /// sent.
+    fn web_private_chats(&self) -> Result<HashSet<String>, ApiError> {
+        Ok(self.store.private_chats()?.into_iter().collect())
     }
 
     fn web_contact(
@@ -224,8 +222,8 @@ impl App {
         map(fields)
     }
 
-    fn web_group(&self, group: &Group, user: &str, private: &HashSet<String>) -> Value {
-        let is_private = private.contains(&group.key);
+    /// Private groups and lists don't get here (`web_receivers_of`).
+    fn web_group(&self, group: &Group, user: &str) -> Value {
         // What the browser may offer, like Android: the creator manages the group.
         let admin = group.identity.creator_identity.to_string() == user;
         let mut members = vec![Value::from(user)];
@@ -237,8 +235,8 @@ impl App {
             ("color", color(&group.key).into()),
             ("createdAt", secs(group.created_at)),
             ("disabled", group.left.into()),
-            ("locked", is_private.into()),
-            ("visible", (!is_private).into()),
+            ("locked", false.into()),
+            ("visible", true.into()),
             ("members", Value::Array(members)),
             (
                 "administrator",
@@ -258,14 +256,13 @@ impl App {
         ])
     }
 
-    fn web_list(&self, list: &DistributionList, private: &HashSet<String>) -> Value {
-        let is_private = private.contains(&list.key);
+    fn web_list(&self, list: &DistributionList) -> Value {
         map(vec![
             ("id", list.key.clone().into()),
             ("displayName", self.list_title(list).into()),
             ("color", color(&list.key).into()),
-            ("locked", is_private.into()),
-            ("visible", (!is_private).into()),
+            ("locked", false.into()),
+            ("visible", true.into()),
             (
                 "members",
                 Value::Array(
@@ -291,9 +288,11 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The receivers of one type (`contact`, `group`, `distributionList`).
+    /// The receivers of one type (`contact`, `group`, `distributionList`). A private group or
+    /// list stays on the device: its name and members would say what the mark hides. Contacts
+    /// stay, marked `locked` and not `visible`: the browser needs them for group members.
     pub(crate) fn web_receivers_of(&self, kind: &str) -> Result<Vec<Value>, ApiError> {
-        let private = self.web_private_chats();
+        let private = self.web_private_chats()?;
         let user = self
             .store
             .identity()?
@@ -313,13 +312,15 @@ impl App {
                 .store
                 .groups()?
                 .iter()
-                .map(|g| self.web_group(g, &user, &private))
+                .filter(|g| !private.contains(&g.key))
+                .map(|g| self.web_group(g, &user))
                 .collect(),
             _ => self
                 .store
                 .distribution_lists()?
                 .iter()
-                .map(|l| self.web_list(l, &private))
+                .filter(|l| !private.contains(&l.key))
+                .map(|l| self.web_list(l))
                 .collect(),
         })
     }
@@ -558,7 +559,7 @@ impl App {
             .identity()?
             .ok_or(ApiError::NoIdentity)?
             .threema_id;
-        let private = self.web_private_chats();
+        let private = self.web_private_chats()?;
         let pinned = self.store.pinned_chats()?;
         let mut list: Vec<Listed> = Vec::new();
         for (last, unread) in self.store.conversations()? {
@@ -715,11 +716,22 @@ impl App {
                     }
                 }
             }
-            CoreEvent::ContactsChanged | CoreEvent::GroupsChanged => {
-                let kind = if matches!(event, CoreEvent::ContactsChanged) {
-                    "contact"
-                } else {
-                    "group"
+            CoreEvent::ContactsChanged
+            | CoreEvent::GroupsChanged
+            | CoreEvent::PrivateChanged { .. } => {
+                let kind = match event {
+                    CoreEvent::GroupsChanged => "group",
+                    CoreEvent::PrivateChanged { conversation, .. }
+                        if conversation.starts_with("g:") =>
+                    {
+                        "group"
+                    }
+                    CoreEvent::PrivateChanged { conversation, .. }
+                        if conversation.starts_with("d:") =>
+                    {
+                        "distributionList"
+                    }
+                    _ => "contact",
                 };
                 if let Ok(receivers) = self.web_receivers_of(kind) {
                     for (session, subscriptions) in &self.web.subscriptions {
@@ -786,13 +798,16 @@ impl App {
         if self.web.refresh.last == Some(now) {
             return;
         }
-        self.web.refresh.last = Some(now);
         let Ok(Some(identity)) = self.store.identity() else {
             return;
         };
+        // Which chats are private isn't known: nothing goes out, the next refresh tries again.
+        let (Ok(list), Ok(private)) = (self.web_conversation_list(), self.web_private_chats())
+        else {
+            return;
+        };
+        self.web.refresh.last = Some(now);
         let user = identity.threema_id;
-        let list = self.web_conversation_list().unwrap_or_default();
-        let private = self.web_private_chats();
         let mut out: Vec<(i64, Value)> = Vec::new();
         let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
         for session in sessions {
@@ -972,7 +987,8 @@ mod tests {
             .unwrap();
         app.store.set_private("CCCCCCCC", true).unwrap();
 
-        // Contacts both; chats only the one that isn't private.
+        // Contacts both; chats only the one that isn't private (groups and lists:
+        // `private_groups_and_lists_stay_out_of_the_browser`).
         let receivers = app.web_receivers().unwrap();
         let contacts = field(&receivers, "contact").unwrap().as_array().unwrap();
         assert_eq!(contacts.len(), 2);

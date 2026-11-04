@@ -339,6 +339,8 @@ Threema Web:
 6. Pair with web.threema.ch and leave it open for a while.
    - Expect: chats and sending work; the browser shows the phone's battery level, and it reconnects
      after the phone has slept.
+   - With the browser open, mark a group private on the phone, then take the mark off.
+   - Expect: the group leaves the browser's list and comes back with its name, members and chat.
 
 Display:
 

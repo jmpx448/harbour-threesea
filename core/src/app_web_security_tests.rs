@@ -79,6 +79,157 @@ fn web_subscription_ends_when_chat_becomes_private() {
     );
 }
 
+/// A private group's or list's name and members stay on the device: never in the receiver lists,
+/// taken out of a connected browser when marked and back in when unmarked. A private contact
+/// stays, as locked and not visible, since groups name their members by ID.
+#[test]
+fn private_groups_and_lists_stay_out_of_the_browser() {
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    app.web_subscribe_receivers(1);
+    let group = app
+        .create_group("TELLING GROUP NAME", &["BBBBBBBB".into()])
+        .unwrap();
+    let key = group["key"].as_str().unwrap().to_owned();
+    let list = crate::distribution_lists::DistributionList {
+        key: "d:00000000000000ff".into(),
+        name: "TELLING LIST NAME".into(),
+        members: vec!["CCCCCCCC".into()],
+        created_at: 1,
+    };
+    app.store.upsert_distribution_list(&list).unwrap();
+    let changed = |conversation: &str, private: bool| CoreEvent::PrivateChanged {
+        conversation: conversation.to_owned(),
+        private,
+    };
+    let names = |app: &App| {
+        (
+            app.web_receivers_of("group").unwrap().len(),
+            app.web_receivers_of("distributionList").unwrap().len(),
+        )
+    };
+    assert_eq!(names(&app), (1, 1));
+    wires(&mut rx);
+
+    for (conversation, name) in [
+        (key.as_str(), "TELLING GROUP NAME"),
+        (list.key.as_str(), "TELLING LIST NAME"),
+    ] {
+        app.store.set_private(conversation, true).unwrap();
+        app.web_on_core_event(&changed(conversation, true));
+        let update = wires(&mut rx);
+        assert_eq!(update.len(), 1, "one update for {conversation}");
+        assert!(update[0].contains("receivers") && !update[0].contains(name));
+    }
+    assert_eq!(names(&app), (0, 0));
+    let everything = app.web_receivers().unwrap().to_string();
+    assert!(!everything.contains("TELLING"));
+
+    app.store.set_private(&key, false).unwrap();
+    app.web_on_core_event(&changed(&key, false));
+    assert!(wires(&mut rx)[0].contains("TELLING GROUP NAME"));
+
+    app.store.set_private("BBBBBBBB", true).unwrap();
+    let contact = app
+        .web_receivers_of("contact")
+        .unwrap()
+        .into_iter()
+        .find(|contact| saltyrtc::field(contact, "id") == Some(&Value::from("BBBBBBBB")))
+        .unwrap();
+    assert_eq!(
+        saltyrtc::field(&contact, "locked"),
+        Some(&Value::from(true))
+    );
+    assert_eq!(
+        saltyrtc::field(&contact, "visible"),
+        Some(&Value::from(false))
+    );
+}
+
+/// What a browser was sent since the last call, as text.
+fn wires(rx: &mut UnboundedReceiver<ToWeb>) -> Vec<String> {
+    let mut wires = Vec::new();
+    while let Ok(message) = rx.try_recv() {
+        if let ToWeb::Send(wire) = message {
+            wires.push(wire.to_string());
+        }
+    }
+    wires
+}
+
+/// Taking the mark off a group in the UI: the browser hears of the receiver before it gets the
+/// conversation of that receiver.
+#[tokio::test(flavor = "current_thread")]
+async fn unmarked_group_reaches_the_browser_as_receiver_first() {
+    let (_dir, mut app) = fixture();
+    let mut media_events = app.take_media_events();
+    let emit: crate::runtime::Emit = Box::new(|_| {});
+    let mut rx = browser(&mut app);
+    let group = app
+        .create_group("TELLING GROUP NAME", &["BBBBBBBB".into()])
+        .unwrap();
+    let key = group["key"].as_str().unwrap().to_owned();
+    app.store.set_private(&key, true).unwrap();
+    app.unlocked = true;
+    app.web_subscribe_receivers(1);
+    app.web_conversations(1).unwrap();
+    crate::runtime::settle_command(&mut app, &mut media_events, &emit);
+    wires(&mut rx);
+
+    let reply = app
+        .handle(
+            &json!({"id": 1, "cmd": "setPrivate", "identity": key, "private": false}).to_string(),
+        )
+        .await;
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+    crate::runtime::settle_command(&mut app, &mut media_events, &emit);
+
+    let sent = wires(&mut rx);
+    let position = |subtype: &str| {
+        sent.iter()
+            .position(|wire| wire.contains(subtype))
+            .unwrap_or_else(|| panic!("{subtype} not sent: {sent:?}"))
+    };
+    assert!(sent[position("\"receivers\"")].contains("TELLING GROUP NAME"));
+    assert!(position("\"receivers\"") < position("\"conversation\""));
+}
+
+/// The private marks can't be read: the browser's lists are refused and nothing goes out, rather
+/// than everything counting as public.
+#[test]
+fn browser_gets_nothing_when_the_private_marks_cannot_be_read() {
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    let group = app
+        .create_group("TELLING GROUP NAME", &["BBBBBBBB".into()])
+        .unwrap();
+    let key = group["key"].as_str().unwrap().to_owned();
+    app.store.set_private(&key, true).unwrap();
+    app.store
+        .insert_incoming("BBBBBBBB", 1, "text", "older message", 1)
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.web_subscribe_receivers(1);
+    app.web_conversations(1).unwrap();
+    app.web_refresh();
+    wires(&mut rx);
+
+    app.store
+        .conn
+        .execute_batch("DROP TABLE private_chats")
+        .unwrap();
+    for kind in ["contact", "group", "distributionList"] {
+        assert!(app.web_receivers_of(kind).is_err(), "{kind}");
+    }
+    assert!(app.web_receivers().is_err());
+    // Something new for the browser, so the refresh does run.
+    app.store
+        .insert_incoming("CCCCCCCC", 2, "text", "newer message", 2)
+        .unwrap();
+    app.web_refresh();
+    assert_eq!(wires(&mut rx), Vec::<String>::new());
+}
+
 /// S03: a download asked for before the chat became private is not delivered.
 #[test]
 fn web_pending_download_not_delivered_after_chat_becomes_private() {

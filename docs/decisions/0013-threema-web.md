@@ -38,5 +38,6 @@ The QR code of a self-hosted Threema Web can name any signalling server.
 - Everything, files included, goes through Threema's relay instead of peer to peer (as on iOS);
   still end-to-end encrypted by SaltyRTC.
 - Sessions (our permanent key, the browser's key, the server) are stored in the encrypted
-  store; hidden private chats (ADR 0009) stay hidden from the browser.
+  store; hidden private chats (ADR 0009) stay hidden from the browser; private groups and lists aren't in its receiver lists at all,
+  and marking one takes it out of a connected browser.
 - ADR 0012's step "Threema Web on webrtcbin" is dropped.
