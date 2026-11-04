@@ -458,6 +458,9 @@ impl Message {
             "deliveredAt": self.delivered_at,
             "readAt": self.read_at,
             "receivedAt": self.received_at,
+            // The history position: the chat page tells by it whether a row outside its window
+            // is new. Fits a JavaScript number: a row id shifted by 20 bits (see the migration).
+            "sortKey": self.sort_key,
         })
     }
 }
@@ -1490,6 +1493,38 @@ mod tests {
         assert_eq!(around.iter().filter(|m| m.id == hello.id).count(), 1);
     }
 
+    /// The chat page tells a new row from a change to one outside its window by `sortKey`:
+    /// a receipt or a star on an old message must not look newer than what came after it, and
+    /// only a message that really is new may be higher than everything.
+    #[test]
+    fn a_change_keeps_its_place_in_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let key = |m: &Message| m.to_json()["sortKey"].as_i64().unwrap();
+        let old = store
+            .insert_outgoing("00000BOB", 1, "text", "old of ours")
+            .unwrap();
+        let newest = store
+            .insert_incoming("00000BOB", 2, "text", "newest", 20)
+            .unwrap()
+            .unwrap();
+        assert!(key(&old) < key(&newest));
+
+        let receipt = store
+            .raise_outgoing_state("00000BOB", &[1], OutgoingState::Read)
+            .unwrap();
+        assert_eq!(receipt.len(), 1);
+        assert_eq!(key(&receipt[0]), key(&old), "a receipt doesn't move it");
+        let starred = store.set_starred(old.id, true).unwrap().unwrap();
+        assert_eq!(key(&starred), key(&old), "nor does anything else");
+
+        let added = store
+            .insert_incoming("00000BOB", 3, "text", "new", 5)
+            .unwrap()
+            .unwrap();
+        assert!(key(&added) > key(&newest), "whatever its own clock says");
+    }
+
     /// A jump to an old message used to load everything newer than it at once.
     #[test]
     fn a_window_around_a_message_is_bounded() {
@@ -1955,6 +1990,13 @@ mod tests {
         let texts: Vec<&str> = around.iter().map(|m| m.body.as_str()).collect();
         assert_eq!(texts, ["live one", "between", "live two"]);
         assert!(!reaches_newest, "the imported newest one lies beyond it");
+
+        // The UI gets the same order: a row keeps its place in history in its JSON, and only a
+        // message newer than everything has the highest key.
+        let key = |m: &Message| m.to_json()["sortKey"].as_i64().unwrap();
+        let shown = store.conversation_messages("00000BOB", 50).unwrap();
+        assert!(shown.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])));
+        assert!(key(&live1) < key(shown.last().unwrap()), "an old live row");
 
         // Change detection stays by insertion: everything imported after the last live row.
         let changed = store

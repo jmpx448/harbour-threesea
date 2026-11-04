@@ -58,9 +58,14 @@ Page {
                || (m.kind === "file" && m.body && m.body.fileState === 2)
     }
     function showMessage(id) {
+        focusMode = ListView.Center
         focusMessage = id
         load()
     }
+    // Where focusMessage ends up in the view.
+    property int focusMode: ListView.Center
+    // A new window is being put in place: the view passes through other positions on the way.
+    property bool settling: false
     property var contact: ({})
     // A group chat (identity is the group's key "g:<creator>:<id>").
     readonly property bool isGroup: identity.indexOf("g:") === 0
@@ -198,8 +203,10 @@ Page {
         page.loadingOlder = true
         page.loadingNewer = true
         var generation = page.loadGeneration
-        // A screenful and a bit: opening stays fast, scrolling back pages the rest in.
-        var args = { identity: identity, limit: 60 }
+        // A screenful and a bit: opening stays fast, scrolling back pages the rest in. With the
+        // target at the top of the view, the rows under it have to fill a tall screen as well:
+        // short of that the view stops at the window's end and the next page moves the target.
+        var args = { identity: identity, limit: focusMessage >= 0 && page.focusMode === ListView.End ? 200 : 60 }
         if (focusMessage >= 0) args.around = focusMessage
         backend.call("messages", args, function(ok, result, kind) {
             if (generation !== page.loadGeneration) return
@@ -219,10 +226,12 @@ Page {
             if (firstLoad && result.firstUnread !== null && result.firstUnread !== undefined) {
                 page.unreadMarkerId = result.firstUnread
             }
+            page.settling = true
             messages.update(result.messages.reverse())
             if (focusMessage >= 0) {
-                page.showLoadedMessage(focusMessage, ListView.Center)
+                if (!page.showLoadedMessage(focusMessage, page.focusMode)) listView.positionViewAtBeginning()
                 focusMessage = -1
+                page.focusMode = ListView.Center
             } else if (firstLoad && page.unreadMarkerId >= 0) {
                 // Open where the new messages start (their line at the top of the view).
                 page.showLoadedMessage(page.unreadMarkerId, ListView.End)
@@ -230,6 +239,8 @@ Page {
                 // The newest message and the input, as the chat always opens.
                 listView.positionViewAtBeginning()
             }
+            page.settling = false
+            page.reachedNewest()
         })
         markRead()
     }
@@ -254,35 +265,174 @@ Page {
         }
     }
 
-    // A message of this chat into the list. The view follows the newest message, like Jolla
-    // Messages — but only when the message is really new: an update of one that is already
-    // there (a receipt, an edit, a reaction) must leave the view where it is, and so must a
-    // page of older messages. The view's own countChanged cannot tell them apart, and it
-    // arrives after the handler that caused it (which is how scrolling back ended up jumping
-    // to the newest message, user report 2026-10-29).
-    function addMessage(message) {
-        if (!newerExhausted) {
-            // The window does not reach the newest message, so this one does not belong next
-            // to what is loaded. Ours brings the reader back to it; someone else's waits
-            // until they scroll forward (it is in the chat either way).
-            if (message.outgoing) page.load()
+    // A message of this chat as the core tells it: new, or a change to one (a receipt, an edit,
+    // a reaction; the core reports reflected new ones as changes too, so the event doesn't say).
+    // A row in the window is updated where it stands. One outside it is left out, unless it is
+    // newer than all of it: then it is new, and it takes its place at the newest end. The view
+    // follows it only for a reader who is there and looking, like Jolla Messages; whoever reads
+    // further back stays where they are, and the line shows where the new ones start.
+    // `arrived`: known to be new (the messageAdded event).
+    function addMessage(message, arrived) {
+        // The load on its way brings everything so far. No id: a private chat's message while
+        // they are hidden, its content left out by the core.
+        if (!shown || message.id === undefined) return
+        if (messages.indexOfKey(message.id) >= 0) {
+            messages.upsert(message, 0)
             return
         }
-        var before = messages.count
-        messages.upsert(message, 0)
-        if (messages.count !== before) listView.positionViewAtBeginning()
-    }
-
-    function showLoadedMessage(id, mode) {
-        for (var i = 0; i < messages.count; ++i) {
-            if (messages.get(i).id === id) {
-                listView.positionViewAtIndex(i, mode)
-                break
-            }
+        if (messages.count > 0 && !isNewer(message, messages.get(0))) return
+        if (!newerExhausted) {
+            // Not next to what is loaded: it comes with the pages when the reader gets there.
+            if (arrived) noteUnseen(message, false)
+            return
         }
+        // Row 0 is in view under an open bubble menu: an insert would push the bubble from under
+        // the finger, so the message waits until the menu closes.
+        if (bubbleMenuOpen && isWatching() && atNewest()) {
+            heldArrivals.push(message)
+            return
+        }
+        // Before the insert, which moves the rows; and a selection isn't scrolled away.
+        var following = atNewest() && !selecting
+        var watching = isWatching()
+        if (following && watching) unseenFrom = -1
+        else noteUnseen(message, following)
+        messages.upsert(message, 0)
+        if (following && (watching || message.outgoing)) listView.positionViewAtBeginning()
+        trimWindow(following)
     }
 
-    // The line above the first message that was unread when the chat was opened.
+    // A message sent from this page: the reader goes to it, wherever they were.
+    function messageSent(message) {
+        // A file's answer can come while the reader is away: that stays an ordinary arrival.
+        if (!isWatching()) {
+            addMessage(message)
+            return
+        }
+        var hadUnseen = unseenFrom >= 0
+        unseenFrom = -1
+        if (!newerExhausted) {
+            page.load()
+            return
+        }
+        messages.upsert(message, 0)
+        listView.positionViewAtBeginning()
+        trimWindow(true)
+        // What came unseen is in front of them now.
+        if (hadUnseen) markRead()
+    }
+
+    // The reader is back at the newest end: what came unseen has been seen.
+    function reachedNewest() {
+        if (unseenFrom < 0 || !newerExhausted || selecting || !isWatching() || !atNewest()) return
+        unseenFrom = -1
+        lineOnReturn = false
+        markRead()
+    }
+
+    // History order, as the core keeps it.
+    function isNewer(message, than) {
+        return message.sortKey > than.sortKey
+               || (message.sortKey === than.sortKey && message.id > than.id)
+    }
+
+    // The newest message is in view: the input under it is, at least its top edge.
+    function atNewest() {
+        if (listView.atYEnd) return true
+        var header = listView.headerItem
+        return !!header && header.y < listView.contentY + listView.height
+    }
+
+    function isWatching() {
+        return Qt.application.state === Qt.ApplicationActive && page.status === PageStatus.Active
+    }
+
+    // A bubble's menu is open, and what came meanwhile for a reader at the newest end.
+    property bool bubbleMenuOpen: false
+    property var heldArrivals: []
+    onBubbleMenuOpenChanged: {
+        if (bubbleMenuOpen) return
+        var held = heldArrivals
+        heldArrivals = []
+        for (var i = 0; i < held.length; ++i) addMessage(held[i])
+    }
+    onSelectingChanged: if (!selecting) reachedNewest()
+    // The first message that came unseen and counts as unread, since the reader last was at the
+    // newest end; -1 when none. Until they get there it stays unread, and so does what follows:
+    // no read receipt for a message nobody has seen, and leaving, the chat list says so.
+    property int unseenFrom: -1
+    // That reader was at the newest end when they went away: they come back to the line.
+    property bool lineOnReturn: false
+    function noteUnseen(message, following) {
+        // 0: unread (INCOMING_UNREAD), as the core counts it; not status lines and the like.
+        if (message.outgoing || message.state !== 0 || unseenFrom >= 0) return
+        unseenFrom = message.id
+        lineOnReturn = following && !isWatching()
+        // Someone reading further back can't see it come.
+        if (isWatching() && !atNewest()) {
+            //% "New message"
+            Notices.show(qsTrId("threesea-la-new-message"), Notice.Short, Notice.Center)
+        }
+        // A line the reader hasn't passed yet still says where the new ones start.
+        if (following || !lineStillAhead()) unreadMarkerId = message.id
+    }
+    function lineStillAhead() {
+        var line = messages.indexOfKey(unreadMarkerId)
+        // Not in the window: ahead if it is newer than all of it. By row id: the line stands on
+        // a message that arrived here, and those keep the order of their ids.
+        if (line < 0) return unreadMarkerId >= 0 && messages.count > 0 && unreadMarkerId > messages.get(0).id
+        var top = listView.indexAt(listView.width / 2, listView.contentY + Theme.paddingSmall)
+        return top < 0 || line <= top
+    }
+    // The page or the app in front again, before what came meanwhile is marked read.
+    function cameBack() {
+        if (!lineOnReturn || !isWatching()) return
+        lineOnReturn = false
+        var line = unseenFrom
+        unseenFrom = -1
+        // Out of the window after a long time away: a window around it.
+        if (showLoadedMessage(line, ListView.End)) return
+        focusMode = ListView.End
+        focusMessage = line
+        load()
+    }
+
+    // The window again; further back than the newest end, around the row at the top of the view.
+    function reloadInPlace() {
+        var top = listView.indexAt(listView.width / 2, listView.contentY + Theme.paddingSmall)
+        if (shown && focusMessage < 0 && top >= 0 && !(newerExhausted && atNewest())) {
+            focusMode = ListView.End
+            focusMessage = messages.get(top).id
+        }
+        load()
+    }
+
+    // A chat left open grows by a row per message, for weeks if nobody closes it: the same
+    // window as for scrolling. A reader at the newest end has nothing to lose at the old one
+    // (a screenful of rows is far from a window of them, and the layout may not be current
+    // while the app is away); one reading further back keeps what is around them. A page on its
+    // way waits, it would land next to rows that are gone.
+    function trimWindow(following) {
+        if (!following) {
+            dropNewest()
+            return
+        }
+        if (messages.count <= windowSize + windowSlack || loadingOlder) return
+        messages.truncate(windowSize)
+        olderExhausted = false
+        stickyIndex = -1
+    }
+
+    // Whether it is in the window.
+    function showLoadedMessage(id, mode) {
+        var index = messages.indexOfKey(id)
+        if (index < 0) return false
+        listView.positionViewAtIndex(index, mode)
+        return true
+    }
+
+    // The line above the first message that was unread when the chat was opened, or that came
+    // later while the reader wasn't looking at the newest end.
     property int unreadMarkerId: -1
 
     // The chat keeps a window of messages around what the reader is looking at, not the whole
@@ -352,7 +502,8 @@ Page {
     // just below it — the list is bottom to top, so the newest visible message has the
     // smallest index.
     function dropNewest() {
-        if (messages.count <= windowSize + windowSlack) return
+        // A page still on its way would land next to rows that are gone.
+        if (messages.count <= windowSize + windowSlack || loadingNewer) return
         var newestVisible = listView.indexAt(listView.width / 2, listView.contentY + listView.height - 1)
         if (newestVisible < 0) return
         var drop = Math.min(messages.count - windowSize, newestVisible - pageSize)
@@ -364,7 +515,7 @@ Page {
 
     // The same at the oldest end (the reader is scrolling forward).
     function dropOldest() {
-        if (messages.count <= windowSize + windowSlack) return
+        if (messages.count <= windowSize + windowSlack || loadingOlder) return
         var oldestVisible = listView.indexAt(listView.width / 2, listView.contentY)
         if (oldestVisible < 0) return
         var keep = Math.max(windowSize, oldestVisible + pageSize)
@@ -385,12 +536,12 @@ Page {
     // the newest ones are not loaded: fetch them again — one page, which is what opening the
     // chat does anyway.
     function backToNewest() {
-        if (newerExhausted || loadingNewer) return
+        if (newerExhausted || loadingNewer || settling) return
         page.load()
     }
 
     function markRead() {
-        if (!isList && Qt.application.state === Qt.ApplicationActive && page.status === PageStatus.Active) {
+        if (!isList && isWatching() && unseenFrom < 0) {
             backend.call("markRead", { identity: identity }, function() { backend.refreshUnread() })
         }
     }
@@ -483,7 +634,7 @@ Page {
                                          choices: dialog.choices, multiple: dialog.multiple,
                                          announce: dialog.announce }, function(ok, result, kind, message) {
                 if (ok) {
-                    page.addMessage(result)
+                    page.messageSent(result)
                 } else {
                     Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                 }
@@ -665,6 +816,9 @@ Page {
     // dismissal keeps it on the input (FocusBehavior.KeepFocus), so a close without focus
     // right after an insert is undone and the keyboard stays open (user report 2026-10-28).
     property double lastInsertAt: 0
+    // The input keeps the focus without scrolling to itself, until the reader comes to it.
+    property bool holdInputScroll: false
+    property bool keepPlaceOnRefocus: false
     Connections {
         target: Qt.inputMethod
         onKeyboardRectangleChanged: {
@@ -674,6 +828,10 @@ Page {
             } else if (h === 0 && !page.emojiPanelOpen && page.status === PageStatus.Active
                        && page.inputField && !page.inputField.activeFocus
                        && Date.now() - page.lastInsertAt < 1000) {
+                // Silica's text fields scroll their view to the cursor when they get the focus:
+                // that would throw a reader further back to the input.
+                page.holdInputScroll = !page.atNewest()
+                page.keepPlaceOnRefocus = page.holdInputScroll
                 refocus.restart()
             }
         }
@@ -725,7 +883,7 @@ Page {
     function sendGif(id) {
         backend.call("sendGifFavourite", { identity: identity, favourite: id }, function(ok, result, kind, message) {
             if (ok) {
-                page.addMessage(result)
+                page.messageSent(result)
             } else {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             }
@@ -831,7 +989,7 @@ Page {
         if (ok) {
             if (file.caption.length > 0 && savedDraft === file.draft) savedDraft = noDraft
             // Nothing to show for a file that went while its chat was hidden.
-            if (result.id !== undefined) page.addMessage(result)
+            if (result.id !== undefined) page.messageSent(result)
             draftSaver.restart()
             return ""
         }
@@ -1024,7 +1182,7 @@ Page {
     function sendRecording(duration) {
         backend.sendVoice(page.identity, duration, function(ok, result, kind, message) {
             if (ok) {
-                page.addMessage(result)
+                page.messageSent(result)
             } else {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             }
@@ -1064,7 +1222,7 @@ Page {
                                        longitude: location.longitude, accuracy: location.accuracy,
                                        name: name || null }, function(ok, result, kind, message) {
             if (ok) {
-                page.addMessage(result)
+                page.messageSent(result)
             } else {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             }
@@ -1135,7 +1293,7 @@ Page {
         backend.call("sendText", args, function(ok, result, kind, message) {
             page.sendingText = false
             if (ok) {
-                page.addMessage(result)
+                page.messageSent(result)
                 // Whoever gets an answer is no stranger any more.
                 page.spamPotential = false
                 page.textAccepted(sent, quoteId, sentDraft)
@@ -1149,6 +1307,8 @@ Page {
         id: refocus
         interval: 50
         onTriggered: {
+            if (!page.keepPlaceOnRefocus) page.holdInputScroll = false
+            page.keepPlaceOnRefocus = false
             page.inputField.forceActiveFocus()
             Qt.inputMethod.show()
         }
@@ -1343,6 +1503,7 @@ Page {
             // Also when coming back from a chat opened on top of this one (from a group's
             // member list): that one's closing left no chat open, and messages here would ring.
             window.openChat = identity
+            cameBack()
             markRead()
             // Back from the contact page: blocked or not may have changed.
             if (!isGroup) loadContact()
@@ -1364,6 +1525,7 @@ Page {
             } else if (page.recordingDiscarded) {
                 page.sayRecordingDiscarded()
             }
+            page.cameBack()
             page.markRead()
         }
     }
@@ -1373,7 +1535,7 @@ Page {
         onCoreEvent: {
             if (name === "messageAdded" && data.message.conversation === page.identity) {
                 page.lastInsertAt = Date.now()
-                page.addMessage(data.message)
+                page.addMessage(data.message, true)
                 page.typing = false
                 page.markRead()
                 page.checkSpam()
@@ -1389,8 +1551,9 @@ Page {
             } else if (name === "contactsChanged" || name === "groupsChanged") {
                 page.loadContact()
             } else if (name === "chatsChanged") {
-                // Bulk changes (a backup import): reload the whole page instead of patching.
-                page.load()
+                // Bulk changes (a backup import), also a small action in Threema Web: reload the
+                // whole page instead of patching, with the reader where they are.
+                page.reloadInPlace()
             }
         }
     }
@@ -1885,9 +2048,15 @@ Page {
             }
             // The quick scroll (and anything else) landing at the newest end while the
             // newest messages are out of the window: bring them back.
-            onAtYEndChanged: if (atYEnd) page.backToNewest()
+            onAtYEndChanged: {
+                if (!atYEnd) return
+                page.reachedNewest()
+                page.backToNewest()
+            }
             onContentYChanged: {
                 page.updateStickyDay()
+                if (page.unseenFrom >= 0) page.reachedNewest()
+                if (page.holdInputScroll && page.atNewest()) page.holdInputScroll = false
                 // The page beyond the end the reader is approaching, two screens ahead so it
                 // is there by the time they arrive.
                 if (contentY - originY < 2 * Screen.height) page.loadOlder()
@@ -2162,8 +2331,11 @@ Page {
                                      : qsTrId("threesea-la-type-message")
                     labelVisible: false
                     focusOutBehavior: FocusBehavior.KeepFocus
+                    autoScrollEnabled: !page.holdInputScroll
+                    onClicked: page.holdInputScroll = false
                     Component.onCompleted: page.inputField = input
                     onTextChanged: {
+                        if (!page.settingInput) page.holdInputScroll = false
                         page.userTyped()
                         draftSaver.restart()
                         page.updateMentionQuery()
@@ -2303,6 +2475,9 @@ Page {
                 canQuote: !page.isList && !page.attachment
                 selectionMode: page.selecting
                 selected: page.selected[model.id] === true
+                onMenuOpenChanged: page.bubbleMenuOpen = menuOpen
+                // A row can go with its menu open (a remote deletion, the window moving on).
+                Component.onDestruction: if (menuOpen) page.bubbleMenuOpen = false
                 onSelectToggled: page.toggleSelected(model.id)
                 canDelete: page.contact.canDelete === true
                 onReact: page.react(model.messageId, emoji, apply)
