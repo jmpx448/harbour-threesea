@@ -105,6 +105,11 @@ private:
     // The call can't go on (`failure`: see the property): the core tells the peer if it knows of
     // the call, and we go to the end screen at once.
     void fail(const QString &failure);
+    // The core took an offer this object has given up on since (`failure` empty: hung up).
+    void endStarted(qint64 callId, const QString &failure);
+    // The arguments naming this call: a request must not hit another call that took its place
+    // in the core before this object heard of the end.
+    QVariantMap callArgs() const;
     // Engine, timers and what is queued for this call: gone, and late answers to its requests
     // are recognised (m_serial).
     void stopMedia();
@@ -121,6 +126,8 @@ private:
     QString m_identity;
     QString m_result;
     QString m_failure;
+    // Why the call whose offer is on its way to the core failed, for the reply to that offer.
+    QString m_startFailure;
     QString m_remoteOffer;
     // The core's id of the call this object follows, -1: none (yet); events of others don't count.
     qint64 m_callId = -1;

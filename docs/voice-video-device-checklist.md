@@ -469,6 +469,10 @@ Only a phone with a real network shows these (Full).
      behind by a tile no longer stays until the app exits).
 9. Set the clock two minutes ahead by hand, and have someone call.
    - Expect: it rings.
+10. Start a call in the moment someone else's call comes in (try a few times; easier on a slow
+    network), and hang up a just started call at once.
+    - Expect: the incoming call rings on, perhaps after a short "Call failed"; hanging up the
+      started call leaves the other phone not ringing, and one line in the chat.
 
 ## One call has the microphone
 

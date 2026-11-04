@@ -267,8 +267,27 @@ impl App {
         Ok(json!({ "callId": call_id }))
     }
 
+    /// Whether a command of the bridge concerns the call in progress. These commands name their
+    /// call: the bridge hears of a call's end through an event, and until that arrives another
+    /// call may have taken its place here. A hangup, a failure or candidates (with addresses a
+    /// relay-only call must not show) meant for the old call must not reach the new one.
+    fn is_current_call(&self, call_id: u32) -> bool {
+        self.calls
+            .current
+            .as_ref()
+            .is_some_and(|call| call.call_id == call_id)
+    }
+
     /// `callAccept`: the engine's answer to the incoming offer.
-    pub(crate) fn call_accept(&mut self, sdp: &str, video: bool) -> Result<Value, ApiError> {
+    pub(crate) fn call_accept(
+        &mut self,
+        call_id: u32,
+        sdp: &str,
+        video: bool,
+    ) -> Result<Value, ApiError> {
+        if !self.is_current_call(call_id) {
+            return Ok(json!({})); // that call's `callEnded` is on its way
+        }
         let sdp = self
             .call_patcher
             .as_mut()
@@ -281,38 +300,48 @@ impl App {
     }
 
     /// `callReject` (incoming), `callHangUp` (any).
-    pub(crate) fn call_reject(&mut self) -> Value {
-        let effects = self.calls.reject(false, crate::messages::now_ms());
-        self.apply_call_effects(effects);
+    pub(crate) fn call_reject(&mut self, call_id: u32) -> Value {
+        if self.is_current_call(call_id) {
+            let effects = self.calls.reject(false, crate::messages::now_ms());
+            self.apply_call_effects(effects);
+        }
         json!({})
     }
 
     /// `callTimeout`: the ring time is over (the bridge's timer).
-    pub(crate) fn call_timeout(&mut self) -> Value {
-        let effects = self.calls.time_out(crate::messages::now_ms());
-        self.apply_call_effects(effects);
+    pub(crate) fn call_timeout(&mut self, call_id: u32) -> Value {
+        if self.is_current_call(call_id) {
+            let effects = self.calls.time_out(crate::messages::now_ms());
+            self.apply_call_effects(effects);
+        }
         json!({})
     }
 
-    pub(crate) fn call_hang_up(&mut self) -> Value {
-        let effects = self.calls.hang_up(crate::messages::now_ms());
-        self.apply_call_effects(effects);
+    pub(crate) fn call_hang_up(&mut self, call_id: u32) -> Value {
+        if self.is_current_call(call_id) {
+            let effects = self.calls.hang_up(crate::messages::now_ms());
+            self.apply_call_effects(effects);
+        }
         json!({})
     }
 
     /// `callFailed`: the media side gave up (`reason`: `certificate`, else `connection`).
-    pub(crate) fn call_failed(&mut self, reason: &str) -> Value {
-        let certificate = reason == "certificate";
-        tracing::warn!(certificate, "call failed");
-        let effects = self.calls.fail(crate::messages::now_ms());
-        self.apply_call_effects(effects);
+    pub(crate) fn call_failed(&mut self, call_id: u32, reason: &str) -> Value {
+        if self.is_current_call(call_id) {
+            let certificate = reason == "certificate";
+            tracing::warn!(certificate, "call failed");
+            let effects = self.calls.fail(crate::messages::now_ms());
+            self.apply_call_effects(effects);
+        }
         json!({})
     }
 
     /// `callCandidates`: our ICE candidates.
-    pub(crate) fn call_candidates(&mut self, candidates: Vec<Candidate>) -> Value {
-        let effects = self.calls.local_candidates(candidates);
-        self.apply_call_effects(effects);
+    pub(crate) fn call_candidates(&mut self, call_id: u32, candidates: Vec<Candidate>) -> Value {
+        if self.is_current_call(call_id) {
+            let effects = self.calls.local_candidates(candidates);
+            self.apply_call_effects(effects);
+        }
         json!({})
     }
 
@@ -689,7 +718,7 @@ mod tests {
         // The core tells the caller it rings.
         assert_eq!(sent(&mut rx), vec![Signal::Ringing { call_id: 7 }]);
 
-        app.call_reject();
+        app.call_reject(7);
         assert!(matches!(
             sent(&mut rx)[..],
             [Signal::Reject { call_id: 7, .. }]
@@ -713,7 +742,7 @@ mod tests {
         assert!(sdp.contains("opus/48000") && sdp.contains("cbr=1"));
         assert_eq!(app.call_state()["call"]["phase"], "calling");
 
-        app.call_hang_up();
+        app.call_hang_up(u32::try_from(call_id).unwrap());
         assert!(matches!(sent(&mut rx)[..], [Signal::Hangup { .. }]));
         let Ok(CoreEvent::MessageAdded { message, .. }) = events.try_recv() else {
             panic!("no call record");
@@ -734,9 +763,9 @@ mod tests {
     ) {
         let (kind, json) = offer(call_id);
         app.on_call_signal("ECHOECHO", kind, &json);
-        app.call_accept(OFFER, false).unwrap();
+        app.call_accept(call_id, OFFER, false).unwrap();
         app.call_connected(false);
-        app.call_hang_up();
+        app.call_hang_up(call_id);
         assert_eq!(
             drain(events).0,
             vec![format!("call|finished|0|0|{call_id}")]
@@ -852,6 +881,69 @@ mod tests {
     }
 
     #[test]
+    fn a_request_for_another_call_leaves_the_current_one_alone() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        sent(&mut rx);
+        call_events(&mut events);
+
+        // The bridge is still on an earlier call: it hasn't heard of this one yet.
+        let candidates = vec![Candidate {
+            candidate: "candidate:1 1 udp 1 192.0.2.1 5 typ host".into(),
+            sdp_mid: Some("0".into()),
+            sdp_m_line_index: Some(0),
+            ufrag: None,
+        }];
+        app.call_hang_up(6);
+        app.call_failed(6, "other");
+        app.call_reject(6);
+        app.call_timeout(6);
+        app.call_candidates(6, candidates.clone());
+        app.call_accept(6, OFFER, false).unwrap();
+        assert!(sent(&mut rx).is_empty());
+        assert_eq!(drain(&mut events), (Vec::new(), Vec::new()));
+        assert_eq!(app.call_state()["call"]["phase"], "incoming");
+        assert_eq!(app.call_state()["call"]["callId"], 7);
+
+        // An offer of ours is refused now, and that doesn't touch the call either.
+        assert!(app.call_start("ABCD1234", OFFER, false).is_err());
+        assert!(sent(&mut rx).is_empty());
+        assert_eq!(app.call_state()["call"]["callId"], 7);
+
+        // Its own id reaches it.
+        app.call_candidates(7, candidates);
+        assert!(matches!(
+            sent(&mut rx)[..],
+            [Signal::Candidates { call_id: 7, .. }]
+        ));
+        app.call_timeout(7);
+        assert!(matches!(
+            sent(&mut rx)[..],
+            [Signal::Reject {
+                call_id: 7,
+                reason: RejectReason::Timeout,
+            }]
+        ));
+        assert!(app.call_state()["call"].is_null());
+    }
+
+    #[test]
+    fn call_requests_name_their_call() {
+        use crate::app::Command;
+        let hang_up: Command =
+            serde_json::from_str(r#"{"cmd":"callHangUp","callId":4294967295}"#).unwrap();
+        assert!(matches!(
+            hang_up,
+            Command::CallHangUp {
+                call_id: 4_294_967_295
+            }
+        ));
+        assert!(serde_json::from_str::<Command>(r#"{"cmd":"callHangUp"}"#).is_err());
+    }
+
+    #[test]
     fn a_failed_incoming_call_is_no_declined_call() {
         let (_dir, mut app, mut rx) = app(true);
         let mut events = app.take_media_events().unwrap();
@@ -860,7 +952,7 @@ mod tests {
         sent(&mut rx);
         call_events(&mut events);
 
-        app.call_failed("connection");
+        app.call_failed(7, "connection");
         assert_eq!(
             sent(&mut rx),
             vec![Signal::Reject {

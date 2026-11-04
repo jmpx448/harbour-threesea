@@ -681,17 +681,26 @@ pub enum Command {
         video: bool,
     },
     CallAccept {
+        call_id: u32,
         sdp: String,
         #[serde(default)]
         video: bool,
     },
-    CallReject,
-    CallHangUp,
+    CallReject {
+        call_id: u32,
+    },
+    CallHangUp {
+        call_id: u32,
+    },
     CallFailed {
+        call_id: u32,
         reason: String,
     },
-    CallTimeout,
+    CallTimeout {
+        call_id: u32,
+    },
     CallCandidates {
+        call_id: u32,
         candidates: Vec<crate::calls::Candidate>,
     },
     CallState,
@@ -1837,12 +1846,19 @@ impl App {
                 sdp,
                 video,
             } => self.call_start(&identity, &sdp, video),
-            Command::CallAccept { sdp, video } => self.call_accept(&sdp, video),
-            Command::CallReject => Ok(self.call_reject()),
-            Command::CallHangUp => Ok(self.call_hang_up()),
-            Command::CallFailed { reason } => Ok(self.call_failed(&reason)),
-            Command::CallTimeout => Ok(self.call_timeout()),
-            Command::CallCandidates { candidates } => Ok(self.call_candidates(candidates)),
+            Command::CallAccept {
+                call_id,
+                sdp,
+                video,
+            } => self.call_accept(call_id, &sdp, video),
+            Command::CallReject { call_id } => Ok(self.call_reject(call_id)),
+            Command::CallHangUp { call_id } => Ok(self.call_hang_up(call_id)),
+            Command::CallFailed { call_id, reason } => Ok(self.call_failed(call_id, &reason)),
+            Command::CallTimeout { call_id } => Ok(self.call_timeout(call_id)),
+            Command::CallCandidates {
+                call_id,
+                candidates,
+            } => Ok(self.call_candidates(call_id, candidates)),
             Command::CallState => Ok(self.call_state()),
             Command::CallConnected { relayed } => Ok(self.call_connected(relayed)),
             Command::CallChannel { data } => self.call_channel(&data),

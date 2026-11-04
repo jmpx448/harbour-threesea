@@ -47,7 +47,7 @@ CallManager::CallManager(ThreeseBackend *backend, QObject *parent)
     m_ringTimer.setSingleShot(true);
     m_ringTimer.setInterval(60000);
     connect(&m_ringTimer, &QTimer::timeout, this,
-            [this] { m_backend->request(QStringLiteral("callTimeout"), QVariantMap()); });
+            [this] { m_backend->request(QStringLiteral("callTimeout"), callArgs()); });
     m_connectTimer.setSingleShot(true);
     m_connectTimer.setInterval(60000);
     connect(&m_connectTimer, &QTimer::timeout, this, [this] { fail(QStringLiteral("connection")); });
@@ -213,6 +213,13 @@ void CallManager::stopMedia()
     ++m_serial;
 }
 
+QVariantMap CallManager::callArgs() const
+{
+    QVariantMap args;
+    args.insert(QStringLiteral("callId"), m_callId);
+    return args;
+}
+
 void CallManager::withTurnServers(std::function<void(const QVariantMap &)> then)
 {
     QVariantMap args;
@@ -275,7 +282,7 @@ void CallManager::accept()
 void CallManager::reject()
 {
     if (m_state == QLatin1String("incoming")) {
-        m_backend->request(QStringLiteral("callReject"), QVariantMap());
+        m_backend->request(QStringLiteral("callReject"), callArgs());
     }
 }
 
@@ -285,15 +292,12 @@ void CallManager::hangUp()
         return;
     }
     if (m_state == QLatin1String("starting")) {
-        // Nothing was sent yet, or the offer is on its way to the core: this request follows it
-        // (they arrive in order), so the peer is told right after.
-        if (m_descriptionSent) {
-            m_backend->request(QStringLiteral("callHangUp"), QVariantMap());
-        }
+        // Nothing was sent yet, or the offer is on its way to the core: the reply to it says
+        // which call to end (onLocalDescription), so the peer is told right after.
         end(QStringLiteral("aborted"));
         return;
     }
-    m_backend->request(QStringLiteral("callHangUp"), QVariantMap());
+    m_backend->request(QStringLiteral("callHangUp"), callArgs());
 }
 
 void CallManager::endCallWithMicrophone()
@@ -324,15 +328,28 @@ void CallManager::fail(const QString &failure)
     if (m_state == QLatin1String("idle") || m_state == QLatin1String("ended")) {
         return;
     }
-    // In `starting` the core only knows of the call if the offer went out to it. Its reply and
-    // `callEnded` find this call gone, which is right: this is the end of it here.
-    if (m_state != QLatin1String("starting") || m_descriptionSent) {
-        QVariantMap args;
+    if (m_callId >= 0) {
+        QVariantMap args = callArgs();
         args.insert(QStringLiteral("reason"), failure);
         m_backend->request(QStringLiteral("callFailed"), args);
+    } else if (m_descriptionSent) {
+        // The offer is on its way to the core: the reply to it says which call to end.
+        m_startFailure = failure;
     }
     m_failure = failure;
     end(QStringLiteral("failed"));
+}
+
+void CallManager::endStarted(qint64 callId, const QString &failure)
+{
+    QVariantMap args;
+    args.insert(QStringLiteral("callId"), callId);
+    if (failure.isEmpty()) {
+        m_backend->request(QStringLiteral("callHangUp"), args);
+    } else {
+        args.insert(QStringLiteral("reason"), failure);
+        m_backend->request(QStringLiteral("callFailed"), args);
+    }
 }
 
 // Mid-call: libnice (SFOS) doesn't notice a dead path by itself (see GroupCallEngine::sendConsent),
@@ -452,20 +469,32 @@ void CallManager::onLocalDescription(const QString &type, const QString &sdp)
         args.insert(QStringLiteral("identity"), m_identity);
         m_backend->request(QStringLiteral("callStart"), args,
                            [this, serial](bool ok, const QVariantMap &result, const QString &) {
-                               // Hung up meanwhile: the core has the request to end it too. An
-                               // incoming call took over: the core refused this one.
+                               const QString startFailure = m_startFailure;
+                               m_startFailure.clear();
                                if (serial != m_serial) {
+                                   // Given up meanwhile: now the core's call has an id to end it
+                                   // by, and nothing else can be hit.
+                                   if (ok) {
+                                       endStarted(result.value(QStringLiteral("callId")).toLongLong(),
+                                                  startFailure);
+                                   }
                                    return;
                                }
                                if (ok) {
                                    m_callId = result.value(QStringLiteral("callId")).toLongLong();
                                    setState(QStringLiteral("calling"));
                                    m_ringTimer.start();
+                                   sendCandidates();
                                } else {
-                                   fail(QStringLiteral("other"));
+                                   // The core took no call, usually because another one came in
+                                   // (`callIncoming` may still be on its way). It has nothing of
+                                   // ours to end, and that other call stays untouched.
+                                   m_failure = QStringLiteral("other");
+                                   end(QStringLiteral("failed"));
                                }
                            });
     } else {
+        args.insert(QStringLiteral("callId"), m_callId);
         m_backend->request(QStringLiteral("callAccept"), args,
                            [this, serial](bool ok, const QVariantMap &, const QString &) {
                                if (!ok && serial == m_serial) {
@@ -487,8 +516,9 @@ void CallManager::onLocalCandidate(const QVariantMap &candidate)
 void CallManager::sendCandidates()
 {
     // Only after our offer/answer (requests reach the core in order; the peer drops candidates
-    // of calls it doesn't know).
-    if (!m_descriptionSent || m_candidates.isEmpty()) {
+    // of calls it doesn't know), and once the core said which call this is: until `callStart`'s
+    // reply the core may have another one, whose caller must not get these addresses.
+    if (!m_descriptionSent || m_callId < 0 || m_candidates.isEmpty()) {
         return;
     }
     // Which kinds were found (host, srflx, relay), never the addresses.
@@ -497,7 +527,7 @@ void CallManager::sendCandidates()
         kinds << candidate.toMap().value(QStringLiteral("candidate")).toString().section(QLatin1String(" typ "), 1).section(QLatin1Char(' '), 0, 0);
     }
     qInfo() << "call candidates:" << kinds.join(QLatin1Char(' '));
-    QVariantMap args;
+    QVariantMap args = callArgs();
     args.insert(QStringLiteral("candidates"), m_candidates);
     m_candidates.clear();
     m_backend->request(QStringLiteral("callCandidates"), args);

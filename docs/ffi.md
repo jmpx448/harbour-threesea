@@ -53,7 +53,10 @@ call now), `callCandidates {candidates}`, `callEnded {record: {peer, callId, out
 duration, at}}` (`duration` counts from `callConnected`), `callChannelSend {data}` (base64, for the call's data channel),
 `callRemoteCapture {device: camera|microphone, on}`, `callVideoParams {bitrateKbps, fps, width,
 height}` (what our video sender may use: Android's quality profiles, the lower of both sides,
-MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`.
+MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`. The commands about a
+running call name it with `callId`, and do nothing if another call is current by then: `callEnded`
+of the earlier call can still be on its way. Before `callStart`'s reply the bridge has no id, so it
+keeps its candidates and a hangup until then.
 
 Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCallOffer {sdp}`,
 `groupCallParticipants {participants}`, `groupCallChannelSend {data}`, `groupCallAlone`, and
@@ -186,15 +189,15 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `verifyQrCode` | `text` | contact JSON; adds the contact if new, fully verified if the key matches (errors `qrInvalid`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |
 | `callTurnServers` | `identity` (who the call is with) | `{urls, username, password, relayOnly}` for the media engine (`identity/turn_cred`, cached until expiry; `relayOnly`: the peer is unverified or not a contact, or the setting `relayThreemaCalls` is on; then the dual-stack servers, like Android) |
 | `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012) |
-| `callAccept` | `sdp` (engine's answer), `video` | `{}` |
-| `callReject` / `callHangUp` | – | `{}`; the call ends with a status message `call\|result\|outgoing (0/1)\|seconds\|callId` (imported lines have no call id) |
-| `callFailed` | `reason` (`certificate`, `connection`, `other`) | `{}`; the media side gave up: the peer is told (hangup, or reject "unknown" before the answer went out), the status message says `failed` |
-| `callTimeout` | – | `{}`; nobody answered within the ring time (60 s): incoming → rejected "timeout" (missed), outgoing → hung up (unanswered) |
+| `callAccept` | `callId`, `sdp` (engine's answer), `video` | `{}` |
+| `callReject` / `callHangUp` | `callId` | `{}`; the call ends with a status message `call\|result\|outgoing (0/1)\|seconds\|callId` (imported lines have no call id) |
+| `callFailed` | `callId`, `reason` (`certificate`, `connection`, `other`) | `{}`; the media side gave up: the peer is told (hangup, or reject "unknown" before the answer went out), the status message says `failed` |
+| `callTimeout` | `callId` | `{}`; nobody answered within the ring time (60 s): incoming → rejected "timeout" (missed), outgoing → hung up (unanswered) |
 | `callConnected` | `relayed` | `{}`; media is up: our video quality profile goes to the peer (`callChannelSend`), `callVideoParams` follows |
 | `callChannel` | `data` (base64, from the call's data channel) | `{}`; events `callRemoteCapture` or `callVideoParams` |
 | `callCapture` | `device` (`camera`\|`microphone`), `on` | `{}`; tells the peer (`callChannelSend`) |
 | `setVideoQuality` | `quality` (`auto`\|`low`\|`max`) | the settings JSON, which also has `videoCalls` (switched with `setSetting`; synced like Android's video policy, not in Threema Safe) and `videoQuality` |
-| `callCandidates` | `candidates`: `[{candidate, sdpMid, sdpMLineIndex, ufrag}]` | `{}` |
+| `callCandidates` | `callId`, `candidates`: `[{candidate, sdpMid, sdpMLineIndex, ufrag}]` | `{}` |
 | `callState` | – | `{call: {identity, callId, phase (calling\|ringing\|incoming\|active), outgoing, video, startedAt, acceptedAt} \| null}` |
 | `matchAddressBook` | `entries`: `[{firstName, lastName, emails, phones}]` | `{matched, added}`; hashed lookup (protocol-notes "Address book matching") |
 
