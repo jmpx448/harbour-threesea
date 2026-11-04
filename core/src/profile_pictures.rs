@@ -484,30 +484,20 @@ impl Store {
         let pause = REQUEST_PAUSES_MS[usize::try_from(attempts)
             .unwrap_or(usize::MAX)
             .min(REQUEST_PAUSES_MS.len() - 1)];
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let queued = (|| -> Result<(), StoreError> {
-            self.conn.execute(
-                "INSERT OR REPLACE INTO picture_requests (identity, requested_at, attempts, next_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![identity, now, attempts + 1, now + pause],
-            )?;
-            self.outbox_add(
-                identity,
-                libthreema::common::MessageId::random().0,
-                OUTBOX_REQUEST_PICTURE,
-                &json!({}),
-            )
-        })();
-        match queued {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(true)
-            }
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
+        let step = self.step()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO picture_requests (identity, requested_at, attempts, next_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![identity, now, attempts + 1, now + pause],
+        )?;
+        self.outbox_add(
+            identity,
+            libthreema::common::MessageId::random().0,
+            OUTBOX_REQUEST_PICTURE,
+            &json!({}),
+        )?;
+        step.commit()?;
+        Ok(true)
     }
 
     /// Hold picture requests to `identity` for `pause_ms` without sending one (their picture

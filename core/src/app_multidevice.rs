@@ -852,7 +852,7 @@ fn queue_owed_picture(
     version: i64,
     synced: libthreema::protobuf::d2d_sync::Group,
 ) -> Result<bool, StoreError> {
-    let step = store.conn.unchecked_transaction()?;
+    let step = store.step()?;
     let same = store
         .group(key)?
         .is_some_and(|now| now.picture_version == version);

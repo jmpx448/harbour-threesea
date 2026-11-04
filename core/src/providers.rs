@@ -616,10 +616,27 @@ impl ConversationProvider for StoreConversations {
         Ok(())
     }
 
+    /// One store step, whatever the message takes: what fails here comes again from the server,
+    /// and a row left behind would make that look like a duplicate, without the rest of what the
+    /// message said (a file's keys, a group message's sender). Nothing is announced unless it holds.
     fn add_or_update_incoming_message(
         &mut self,
         message: IncomingMessage,
     ) -> Result<(), ProviderError> {
+        let announced = self.events.borrow().len();
+        let stored = self.store.step().map_err(foreign).and_then(|step| {
+            self.store_incoming(message)?;
+            step.commit().map_err(foreign)
+        });
+        if stored.is_err() {
+            self.events.borrow_mut().truncate(announced);
+        }
+        stored
+    }
+}
+
+impl StoreConversations {
+    fn store_incoming(&self, message: IncomingMessage) -> Result<(), ProviderError> {
         let body = match message.body {
             IncomingMessageBody::Contact(body) => body,
             IncomingMessageBody::Group(group) => {
@@ -946,7 +963,10 @@ impl ConversationProvider for StoreConversations {
 
 #[cfg(test)]
 mod tests {
-    use libthreema::common::config::ConfigEnvironment;
+    use libthreema::{
+        common::config::ConfigEnvironment,
+        model::message::{GroupMessageBody, IncomingGroupMessageBody, TextMessage},
+    };
 
     use super::*;
 
@@ -996,6 +1016,175 @@ mod tests {
             })
             .unwrap();
         key
+    }
+
+    /// A message of this kind fails at the store write `trigger` refuses, comes again once that
+    /// works, and is then complete: what `check` looks at is there, and it is announced once.
+    fn redelivery_is_complete(
+        kind_of_write: &str,
+        sender: &str,
+        conversation: &str,
+        body: &dyn Fn() -> IncomingMessageBody,
+        check: &dyn Fn(&Store, &Message),
+    ) {
+        let (_dir, store) = store();
+        contact(
+            &store,
+            sender,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        if conversation != sender {
+            group(&store, &["ABCD1234", sender], false);
+        }
+        store
+            .conn
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse {kind_of_write} BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+            ))
+            .unwrap();
+        let store = Rc::new(store);
+        let events: EventSink = Rc::default();
+        let mut conversations = StoreConversations {
+            store: Rc::clone(&store),
+            events: Rc::clone(&events),
+            user: ThreemaId::try_from("USER0001").unwrap(),
+            from_sync: false,
+        };
+        let message = || IncomingMessage {
+            sender_identity: ThreemaId::try_from(sender).unwrap(),
+            id: MessageId(9),
+            overrides: libthreema::model::message::MessageOverrides::default(),
+            created_at: 1,
+            body: body(),
+        };
+
+        assert!(
+            conversations
+                .add_or_update_incoming_message(message())
+                .is_err()
+        );
+        assert!(store.conn.is_autocommit(), "no transaction left open");
+        assert!(events.borrow().is_empty(), "nothing announced");
+        assert!(
+            store
+                .message_by_id(conversation, false, 9)
+                .unwrap()
+                .is_none(),
+            "nothing left that makes the next delivery look like a duplicate"
+        );
+
+        store.conn.execute_batch("DROP TRIGGER refuse").unwrap();
+        conversations
+            .add_or_update_incoming_message(message())
+            .unwrap();
+        let stored = store
+            .message_by_id(conversation, false, 9)
+            .unwrap()
+            .unwrap();
+        check(&store, &stored);
+        let added = events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+            .count();
+        assert_eq!(added, 1);
+    }
+
+    fn file() -> libthreema::model::message::FileMessage {
+        libthreema::model::message::FileMessage {
+            rendering_type: libthreema::model::message::FileRenderingType::Media,
+            key: [7; 32],
+            blob_id: libthreema::common::BlobId([7; 16]),
+            media_type: "image/jpeg".into(),
+            name: None,
+            size: 1000,
+            thumbnail_blob_id: None,
+            thumbnail_media_type: None,
+            caption: None,
+            correlation_id: None,
+            metadata: libthreema::model::message::FileMetadata::default(),
+        }
+    }
+
+    fn group_body(body: GroupMessageBody) -> IncomingMessageBody {
+        IncomingMessageBody::Group(IncomingGroupMessageBody {
+            group_identity: GroupIdentity {
+                creator_identity: ThreemaId::try_from("ABCD1234").unwrap(),
+                group_id: 7,
+            },
+            body,
+        })
+    }
+
+    #[test]
+    fn a_file_whose_keys_failed_comes_again_with_its_keys() {
+        redelivery_is_complete(
+            "BEFORE INSERT ON files",
+            MEMBER,
+            MEMBER,
+            &|| IncomingMessageBody::Contact(ContactMessageBody::File(file())),
+            &|store, stored| assert!(store.file_keys(stored.id).unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn a_group_text_whose_sender_failed_comes_again_with_its_sender() {
+        let key = crate::groups::key(&GroupIdentity {
+            creator_identity: ThreemaId::try_from("ABCD1234").unwrap(),
+            group_id: 7,
+        });
+        redelivery_is_complete(
+            "BEFORE UPDATE OF sender ON messages",
+            MEMBER,
+            &key,
+            &|| group_body(GroupMessageBody::Text(TextMessage { text: "hi".into() })),
+            &|_, stored| assert_eq!(stored.sender.as_deref(), Some(MEMBER)),
+        );
+    }
+
+    #[test]
+    fn a_group_file_whose_keys_failed_comes_again_with_keys_and_sender() {
+        let key = crate::groups::key(&GroupIdentity {
+            creator_identity: ThreemaId::try_from("ABCD1234").unwrap(),
+            group_id: 7,
+        });
+        redelivery_is_complete(
+            "BEFORE INSERT ON files",
+            MEMBER,
+            &key,
+            &|| group_body(GroupMessageBody::File(file())),
+            &|store, stored| {
+                assert!(store.file_keys(stored.id).unwrap().is_some());
+                assert_eq!(stored.sender.as_deref(), Some(MEMBER));
+            },
+        );
+    }
+
+    /// The group steps and a picture request have store steps of their own, which have to work
+    /// inside the message's.
+    #[test]
+    fn a_message_asks_for_the_senders_picture_in_its_own_step() {
+        let (_dir, store) = store();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        group(&store, &["ABCD1234", MEMBER], false);
+        let store = Rc::new(store);
+        deliver(
+            &store,
+            MEMBER,
+            1,
+            group_body(GroupMessageBody::Text(TextMessage { text: "hi".into() })),
+        );
+        assert!(store.conn.is_autocommit());
+        assert_eq!(
+            store.outbox().unwrap()[0].kind,
+            crate::profile_pictures::OUTBOX_REQUEST_PICTURE
+        );
     }
 
     /// `body` arriving from `sender`, as the connection hands it over.

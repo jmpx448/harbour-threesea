@@ -483,7 +483,7 @@ impl Store {
         if invalid.is_empty() {
             return Ok(false);
         }
-        let step = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         let mut changed = false;
         for mut group in self.groups()? {
             let before = group.members.len();
@@ -573,7 +573,7 @@ impl Store {
     /// A picture from the group's creator is on the device. One store step with the note that the
     /// other devices are owed it, so a crash before the upload can't lose that.
     pub(crate) fn store_received_group_picture(&self, group: &Group) -> Result<(), StoreError> {
-        let step = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         self.upsert_group(group)?;
         if self.multi_device()?.is_some() {
             self.conn.execute(
@@ -604,7 +604,7 @@ impl Store {
     /// writing, and the creator's answer to the next sync request brings the group back. Anything
     /// else queued for the group goes with it.
     pub fn delete_group(&self, key: &str) -> Result<(), StoreError> {
-        let step = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         self.conn
             .execute("DELETE FROM groups WHERE key = ?1", [key])?;
         for entry in self.outbox_until(key, i64::MAX)? {
@@ -962,7 +962,7 @@ pub fn receive(
             name_of,
         );
     }
-    let step = store.conn.unchecked_transaction()?;
+    let step = store.step()?;
     let mut outcome = receive_steps(
         store,
         user,

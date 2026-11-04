@@ -103,7 +103,7 @@ impl Store {
 
     /// The list and its chat.
     pub fn delete_distribution_list(&self, key: &str) -> Result<(), StoreError> {
-        let step = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         self.conn
             .execute("DELETE FROM distribution_lists WHERE key = ?1", [key])?;
         self.forget_chat_choices(key)?;

@@ -332,6 +332,41 @@ pub struct Store {
 /// never. Several times the 4 MiB at which SQLite checkpoints by itself.
 const WAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
 
+/// Writes that stand or fall together: what isn't [`Step::commit`]ted is undone when this goes out
+/// of scope. A step inside a step is a savepoint, so a function that needs one can be called from
+/// a larger one; there is one connection and a step never spans an `await`, so nothing else writes
+/// meanwhile.
+pub(crate) struct Step<'a> {
+    conn: &'a Connection,
+    nested: bool,
+    open: bool,
+}
+
+impl Step<'_> {
+    pub(crate) fn commit(mut self) -> Result<(), StoreError> {
+        self.conn.execute_batch(if self.nested {
+            "RELEASE store_step"
+        } else {
+            "COMMIT"
+        })?;
+        self.open = false;
+        Ok(())
+    }
+}
+
+impl Drop for Step<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            // Fails only if SQLite has rolled back by itself (a full disk, say): then it's undone.
+            let _ = self.conn.execute_batch(if self.nested {
+                "ROLLBACK TO store_step; RELEASE store_step"
+            } else {
+                "ROLLBACK"
+            });
+        }
+    }
+}
+
 /// Below this share of free pages (in percent) a rewrite gives back too little to wait for.
 const SHRINK_MIN_FREE_PERCENT: i64 = 25;
 /// VACUUM's copy of the live pages lies in memory: SQLCipher builds keep temporary data out of
@@ -403,6 +438,21 @@ impl Store {
         };
         store.migrate(MIGRATIONS, upgrading)?;
         Ok(store)
+    }
+
+    /// Begin writes that stand or fall together ([`Step`]).
+    pub(crate) fn step(&self) -> Result<Step<'_>, StoreError> {
+        let nested = !self.conn.is_autocommit();
+        self.conn.execute_batch(if nested {
+            "SAVEPOINT store_step"
+        } else {
+            "BEGIN"
+        })?;
+        Ok(Step {
+            conn: &self.conn,
+            nested,
+            open: true,
+        })
     }
 
     fn migrate(&mut self, migrations: &[&str], upgrading: &dyn Fn()) -> Result<(), StoreError> {
@@ -890,6 +940,49 @@ mod tests {
             0,
             "the write-ahead log is emptied too"
         );
+    }
+
+    /// A group sync from another device can delete a group, inside the step that applies it.
+    #[test]
+    fn deleting_chats_works_inside_a_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        let step = store.step().unwrap();
+        store.delete_group("g:ABCD1234:0000000000000007").unwrap();
+        store.delete_conversation("ABCD1234").unwrap();
+        store.delete_distribution_list("d:1").unwrap();
+        step.commit().unwrap();
+        assert!(store.conn.is_autocommit());
+    }
+
+    /// A step undoes what it didn't commit, and one inside another only its own part.
+    #[test]
+    fn steps_nest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        let get = |key| store.setting(key).unwrap();
+
+        let outer = store.step().unwrap();
+        store.set_setting("kept", "1").unwrap();
+        let inner = store.step().unwrap();
+        store.set_setting("undone", "1").unwrap();
+        drop(inner);
+        let inner = store.step().unwrap();
+        store.set_setting("kept too", "1").unwrap();
+        inner.commit().unwrap();
+        outer.commit().unwrap();
+        assert!(store.conn.is_autocommit());
+        assert!(get("kept").is_some() && get("kept too").is_some());
+        assert!(get("undone").is_none());
+
+        // What an inner step committed goes with the outer one.
+        let outer = store.step().unwrap();
+        let inner = store.step().unwrap();
+        store.set_setting("gone", "1").unwrap();
+        inner.commit().unwrap();
+        drop(outer);
+        assert!(store.conn.is_autocommit());
+        assert!(get("gone").is_none());
     }
 
     /// A deletion that fails changes nothing and leaves no transaction open.

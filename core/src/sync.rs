@@ -565,7 +565,7 @@ pub(crate) fn members_looked_up(
 ) -> Result<MembersLookedUp, StoreError> {
     use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
 
-    let step = store.conn.unchecked_transaction()?;
+    let step = store.step()?;
     let device_group = store.multi_device()?.is_some();
     let mut queued = false;
     let mut lines = Vec::new();
@@ -667,7 +667,7 @@ pub(crate) fn reflect_group_contacts_once(store: &Store) -> Result<(), StoreErro
     if store.setting(keys::GROUP_CONTACTS_TO_REFLECT)?.is_none() {
         return Ok(());
     }
-    let step = store.conn.unchecked_transaction()?;
+    let step = store.step()?;
     if store.multi_device()?.is_some() {
         for contact in store.contacts()? {
             if contact.acquaintance_level == AcquaintanceLevel::GroupOrDeleted {

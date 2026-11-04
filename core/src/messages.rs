@@ -1215,7 +1215,7 @@ impl Store {
     /// to the contact or group (notification choice, tone) and the private mark stay; see
     /// [`Self::empty_conversation`] to keep the chat.
     pub fn delete_conversation(&self, conversation: &str) -> Result<(), StoreError> {
-        let step = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         self.delete_chat_rows(conversation)?;
         step.commit()?;
         Ok(())
