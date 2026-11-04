@@ -440,6 +440,36 @@ device; what is left here is the real cover, the real window manager and the rea
     - Expect: after the restart the passphrase page, also with the folder gone. A wrong passphrase
       keeps you there; the right one leads to the license page, with no app lock.
 
+## How calls end
+
+Only a phone with a real network shows these (Full).
+
+1. In a 1:1 call, turn off Wi-Fi and mobile data on the other phone (or walk out of range).
+   - Expect: after about 10 s "Connection interrupted…" instead of the time, after about 30 s
+     "Connection failed" and a "Call failed" line in the chat. Back within the 30 s: the time
+     returns and the call goes on. In a call with someone muted nothing of this shows.
+2. The same in a group call, once with others speaking and once alone with everyone else muted.
+   - Expect: a notice "The connection to the group call failed." after about a minute of no
+     connection, and **no** such notice while the connection is fine, however quiet the call is.
+     If one comes, the log line to look for is `group call failed: silence`.
+3. Accept a call with the phone offline (airplane mode right after it rang).
+   - Expect: "Connecting…", then "Connection failed" after a minute; the chat says "Call failed",
+     not "You declined the call".
+4. Call someone who has video calls off, as a video call.
+   - Expect: it connects as an audio call: no camera, no video buttons, no preview.
+5. While in a call, have someone else call.
+   - Expect: they are told you are busy, and their chat shows "Missed call" with a notification.
+6. End a call, and have someone else call within two seconds, while "Call ended" shows.
+   - Expect: their name and picture on the answer screen; after answering not muted, no camera.
+7. Hang up a call on both phones at the same moment.
+   - Expect: one line in each chat, no "Missed call".
+8. Start a video call and watch the phone's memory during a group video call with three or more
+   people for a few minutes, then repeat it a few times.
+   - Expect: pictures keep coming, and memory goes back down after each call (a picture left
+     behind by a tile no longer stays until the app exits).
+9. Set the clock two minutes ahead by hand, and have someone call.
+   - Expect: it rings.
+
 ## One call has the microphone
 
 Two phones needed for the 1:1 parts; a group with at least one other member for the rest.
