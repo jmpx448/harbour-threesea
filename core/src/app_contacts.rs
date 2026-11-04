@@ -247,7 +247,8 @@ impl App {
             .iter()
             // Contacts only known from groups/deleted ones are not shown in the contact list.
             .filter(|c| c.acquaintance_level == pc::AcquaintanceLevel::Direct)
-            .filter(|c| !hide_inactive || c.activity_state != pc::ActivityState::Inactive)
+            // Inactive and revoked IDs alike, as Android's `showInactiveContacts`.
+            .filter(|c| !hide_inactive || c.activity_state == pc::ActivityState::Active)
             .map(|c| {
                 let mut value = self.contact_value(c);
                 // Nicknames ("~nick") sort under their letter; the UI takes the section from it.
@@ -1383,6 +1384,34 @@ mod contact_policy_tests {
         )
         .await;
         assert!(app.store.contact("CCCCCCCC").unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hiding_inactive_ids_hides_revoked_ones_too() {
+        use libthreema::protobuf::d2d_sync::contact::{AcquaintanceLevel, ActivityState};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        for (id, state) in [
+            ("BBBBBBBB", ActivityState::Active),
+            ("CCCCCCCC", ActivityState::Inactive),
+            ("DDDDDDDD", ActivityState::Invalid),
+        ] {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.acquaintance_level = AcquaintanceLevel::Direct;
+            contact.activity_state = state;
+            app.store.upsert_contact(&contact).unwrap();
+        }
+        let listed = |app: &App| -> Vec<String> {
+            app.contacts_json().unwrap()["contacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["identity"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(listed(&app).len(), 3);
+        app.set_display_settings(None, None, Some(false)).unwrap();
+        assert_eq!(listed(&app), ["BBBBBBBB"]);
     }
 
     /// The contact page shows what the reply holds until something else reloads it.
