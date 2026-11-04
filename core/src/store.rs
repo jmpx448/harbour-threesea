@@ -359,6 +359,11 @@ impl Store {
 
     /// Delete everything (identity, contacts, messages, settings, …) but keep the schema: every
     /// table is emptied, so tables added by later migrations can never be left out here.
+    ///
+    /// All or nothing: on an error the transaction rolls back and the ID is still there. Once it
+    /// has committed the deletion counts as done; shrinking the file afterwards can fail for
+    /// lack of space, just when someone removes everything because the phone is full, and is
+    /// only logged. The bridge replaces the file and its key next (`threesea_data_remove`).
     pub fn wipe(&self) -> Result<(), StoreError> {
         let tables: Vec<String> = {
             // Not the search index's own tables (its virtual table and its shadow tables):
@@ -370,15 +375,25 @@ impl Store {
             let rows = statement.query_map([], |row| row.get(0))?;
             rows.collect::<Result<_, _>>()?
         };
+        let transaction = self.conn.unchecked_transaction()?;
         // Deferred foreign keys: the deletion order doesn't matter inside the transaction.
-        let mut sql = String::from("BEGIN; PRAGMA defer_foreign_keys = ON;");
+        let mut sql = String::from("PRAGMA defer_foreign_keys = ON;");
         for table in &tables {
             sql.push_str(&format!(" DELETE FROM \"{table}\";"));
         }
-        sql.push_str(
-            " INSERT INTO messages_search (messages_search) VALUES ('delete-all'); COMMIT; VACUUM;",
-        );
-        self.conn.execute_batch(&sql)?;
+        sql.push_str(" INSERT INTO messages_search (messages_search) VALUES ('delete-all');");
+        transaction.execute_batch(&sql)?;
+        transaction.commit()?;
+        self.held_notifications.borrow_mut().clear();
+        // The old rows still lie in the free pages and the write-ahead log until these two ran.
+        for (step, sql) in [
+            ("vacuum", "VACUUM;"),
+            ("checkpoint", "PRAGMA wal_checkpoint(TRUNCATE);"),
+        ] {
+            if let Err(error) = self.conn.execute_batch(sql) {
+                tracing::warn!(step, %error, "the emptied database could not be shrunk");
+            }
+        }
         Ok(())
     }
 
@@ -546,5 +561,92 @@ mod tests {
         // The schema survives: the store works again afterwards.
         assert_eq!(store.identity().unwrap().map(|i| i.threema_id), None);
         store.set_setting(keys::LICENSE_KEY, "NEWKE-YHERE").unwrap();
+    }
+
+    fn store_with_identity(path: &Path) -> Store {
+        let store = Store::open(path, &[1; 32]).unwrap();
+        store
+            .set_identity(&StoredIdentity {
+                threema_id: "ECHOECHO".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        store
+            .insert_incoming("ECHOECHO", 1, "text", "secret words", 1)
+            .unwrap();
+        store
+    }
+
+    /// The rows must not stay readable with the old key in the main file: not in the free pages
+    /// and not behind a write-ahead log that a later checkpoint would have folded in. The closed
+    /// earlier session matters: without it the rows never reached the main file and any wipe
+    /// looks clean.
+    #[test]
+    fn wipe_leaves_nothing_in_the_main_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        drop(store_with_identity(&path));
+
+        let store = Store::open(&path, &[1; 32]).unwrap();
+        assert!(store.identity().unwrap().is_some());
+        store.wipe().unwrap();
+
+        // The main file alone, as a copy would be taken while the app still runs.
+        let copy = dir.path().join("copy.db");
+        std::fs::copy(&path, &copy).unwrap();
+        let copied = Store::open(&copy, &[1; 32]).unwrap();
+        assert!(copied.identity().unwrap().is_none());
+        assert!(
+            copied
+                .conversation_messages("ECHOECHO", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("t.db-wal")).map_or(0, |wal| wal.len()),
+            0,
+            "the write-ahead log is emptied too"
+        );
+    }
+
+    /// A deletion that fails changes nothing and leaves no transaction open.
+    #[test]
+    fn failed_wipe_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        store.set_setting(keys::LICENSE_KEY, "ABCDE-FGHIJ").unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE DELETE ON settings
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        assert!(store.wipe().is_err());
+
+        assert!(store.conn.is_autocommit(), "no transaction left open");
+        assert!(store.identity().unwrap().is_some());
+        assert_eq!(
+            store.setting(keys::LICENSE_KEY).unwrap().as_deref(),
+            Some("ABCDE-FGHIJ")
+        );
+    }
+
+    /// VACUUM can't run (here: a statement in progress; on the phone: no space left) and the
+    /// deletion stands all the same.
+    #[test]
+    fn wipe_survives_a_failing_vacuum() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        let mut reading = store.conn.prepare("SELECT 1 FROM sqlite_master").unwrap();
+        let mut rows = reading.query([]).unwrap();
+        assert!(rows.next().unwrap().is_some());
+
+        store.wipe().unwrap();
+
+        drop(rows);
+        assert!(store.identity().unwrap().is_none());
     }
 }
