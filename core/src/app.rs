@@ -3527,6 +3527,22 @@ mod tests {
             rt.block_on(app.export_chat("ABCD1234", false, &out, empty, None, None))
                 .is_ok()
         );
+
+        // What an export killed half way left behind goes with the next one, and nothing else.
+        let folder = std::path::Path::new(&out);
+        let leftover = folder.join("threesea-chat-20261104-120000.zip.part");
+        let kept = [
+            folder.join("threesea-chat-notes.zip"),
+            folder.join("holiday.zip.part"),
+        ];
+        std::fs::write(&leftover, b"messages").unwrap();
+        for file in &kept {
+            std::fs::write(file, b"the user's").unwrap();
+        }
+        rt.block_on(app.export_chat("ABCD1234", false, &out, None, None, None))
+            .unwrap();
+        assert!(!leftover.exists());
+        assert!(kept.iter().all(|file| file.exists()));
     }
 
     /// The cover names the chat that still has something unread, not whoever wrote last: reading

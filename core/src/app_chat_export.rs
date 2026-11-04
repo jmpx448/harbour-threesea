@@ -89,7 +89,9 @@ impl App {
         let path = std::path::Path::new(directory).join(&name);
         let temporary = path.with_extension("zip.part");
         let create = temporary.clone();
+        let folder = std::path::PathBuf::from(directory);
         let mut writer = tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
+            remove_leftovers(&folder);
             let file =
                 std::fs::File::create(&create).map_err(|e| ApiError::Internal(e.to_string()))?;
             Ok(zip::ZipWriter::new(file))
@@ -251,6 +253,22 @@ impl App {
             .flatten()
             .as_ref()
             .map_or_else(|| identity.to_owned(), contacts::display_name)
+    }
+}
+
+/// What an export left behind when the app was killed during it, with the chat's messages inside:
+/// the user doesn't know about the file and nothing else ever takes it away. Only one export runs
+/// at a time (`export_chat` holds the whole `App`), so none of these is in use.
+fn remove_leftovers(directory: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("threesea-chat-") && name.ends_with(".zip.part") {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
