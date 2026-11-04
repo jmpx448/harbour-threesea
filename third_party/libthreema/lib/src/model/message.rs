@@ -388,6 +388,10 @@ pub struct FileMetadata {
     pub animated: Option<bool>,
     /// Duration in seconds (audio, videos).
     pub duration: Option<f64>,
+    /// Only set for a [`FileMessage`] decoded from a `deprecated-image` message, and never sent: the
+    /// blob's nonce. Its data is encrypted for us with `X25519HSalsa20(sender, receiver)` and this
+    /// nonce instead of a file key, and [`FileMessage::key`] means nothing.
+    pub legacy_nonce: Option<[u8; 24]>,
 }
 
 /// A `file` message: a file (or media) uploaded to the blob server, encrypted with `key` (file

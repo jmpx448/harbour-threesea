@@ -650,6 +650,7 @@ impl InternalCspMessageDecoder for FileMessage {
                 height: metadata.height,
                 animated: metadata.animated,
                 duration: metadata.duration,
+                legacy_nonce: None,
             },
         })
     }
@@ -686,6 +687,79 @@ impl InternalCspMessageEncoder for FileMessage {
             }),
         };
         writer.write(&serde_json::to_vec(&json).expect("file message JSON must serialize"))
+    }
+}
+
+/// The deprecated media messages come in as the [`FileMessage`] they would be today, as on Android
+/// (`LegacyMessageTransformer`); nobody may send them any more. What follows their fields is ignored.
+struct DeprecatedMedia;
+impl DeprecatedMedia {
+    const AUDIO_MEDIA_TYPE: &str = "audio/aac";
+    const IMAGE_MEDIA_TYPE: &str = "image/jpeg";
+    const VIDEO_MEDIA_TYPE: &str = "video/mpeg";
+
+    fn file(media_type: &str, key: [u8; 32], blob_id: BlobId, size: u32) -> FileMessage {
+        FileMessage {
+            rendering_type: FileRenderingType::Media,
+            key,
+            blob_id,
+            media_type: media_type.to_owned(),
+            name: None,
+            size: u64::from(size),
+            thumbnail_blob_id: None,
+            thumbnail_media_type: None,
+            caption: None,
+            correlation_id: None,
+            metadata: FileMetadata::default(),
+        }
+    }
+
+    /// `deprecated-image`: no key, the blob is encrypted between sender and receiver with a nonce.
+    fn decode_image(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let nonce = reader.read_fixed::<24>()?;
+        let _ = reader.read_remaining();
+        let mut file = Self::file(Self::IMAGE_MEDIA_TYPE, [0; 32], blob_id, size);
+        file.metadata.legacy_nonce = Some(nonce);
+        Ok(file)
+    }
+
+    /// `deprecated-group-image`.
+    fn decode_group_image(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        let _ = reader.read_remaining();
+        Ok(Self::file(Self::IMAGE_MEDIA_TYPE, key, blob_id, size))
+    }
+
+    /// `deprecated-audio`, also wrapped for a group.
+    fn decode_audio(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let duration = reader.read_u16_le()?;
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        let _ = reader.read_remaining();
+        let mut file = Self::file(Self::AUDIO_MEDIA_TYPE, key, blob_id, size);
+        file.metadata.duration = Some(f64::from(duration));
+        Ok(file)
+    }
+
+    /// `deprecated-video`, also wrapped for a group.
+    fn decode_video(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let duration = reader.read_u16_le()?;
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let thumbnail_blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let _thumbnail_size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        let _ = reader.read_remaining();
+        let mut file = Self::file(Self::VIDEO_MEDIA_TYPE, key, blob_id, size);
+        file.thumbnail_blob_id = Some(thumbnail_blob_id);
+        file.thumbnail_media_type = Some(Self::IMAGE_MEDIA_TYPE.to_owned());
+        file.metadata.duration = Some(f64::from(duration));
+        Ok(file)
     }
 }
 
@@ -919,6 +993,15 @@ impl CspMessageDecoder for IncomingMessageBody {
             CspE2eMessageType::File => {
                 Self::Contact(ContactMessageBody::File(FileMessage::decode(&mut reader)?))
             },
+            CspE2eMessageType::DeprecatedImage => Self::Contact(ContactMessageBody::File(
+                DeprecatedMedia::decode_image(&mut reader)?,
+            )),
+            CspE2eMessageType::DeprecatedAudio => Self::Contact(ContactMessageBody::File(
+                DeprecatedMedia::decode_audio(&mut reader)?,
+            )),
+            CspE2eMessageType::DeprecatedVideo => Self::Contact(ContactMessageBody::File(
+                DeprecatedMedia::decode_video(&mut reader)?,
+            )),
 
             CspE2eMessageType::ContactSetProfilePicture => Self::Contact(
                 ContactMessageBody::SetProfilePicture(SetProfilePictureMessage::decode(&mut reader)?),
@@ -981,6 +1064,21 @@ impl CspMessageDecoder for IncomingMessageBody {
 
             CspE2eMessageType::GroupFile => member(&mut reader, |group_reader| {
                 Ok(GroupMessageBody::File(FileMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupImage => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(DeprecatedMedia::decode_group_image(
+                    group_reader,
+                )?))
+            })?,
+            CspE2eMessageType::GroupAudio => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(DeprecatedMedia::decode_audio(
+                    group_reader,
+                )?))
+            })?,
+            CspE2eMessageType::GroupVideo => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(DeprecatedMedia::decode_video(
+                    group_reader,
+                )?))
             })?,
             CspE2eMessageType::GroupReaction => member(&mut reader, |group_reader| {
                 Ok(GroupMessageBody::Reaction(ReactionMessage::decode(group_reader)?))
@@ -1424,6 +1522,97 @@ mod tests {
         let blob = "00112233445566778899aabbccddeeff";
         assert!(decode(&format!(r#"{{"k":"{key}","b":"{blob}","m":"a"}}"#)).is_err());
         assert!(decode(&format!(r#"{{"k":"{key}","b":"{blob}","m":"a","s":"big"}}"#)).is_err());
+    }
+
+    #[test]
+    fn deprecated_media_come_in_as_file_messages() {
+        let blob = [0xb1; 16];
+        let thumbnail = [0xb2; 16];
+        let key = [0x4b; 32];
+        let nonce = [0x4e; 24];
+        let group_header = [b"CREATOR1".as_slice(), &7_u64.to_le_bytes()].concat();
+        let contact = |message_type, data: &[u8]| {
+            let IncomingMessageBody::Contact(ContactMessageBody::File(file)) =
+                IncomingMessageBody::decode(test_sender(), message_type, data).unwrap()
+            else {
+                panic!("expected a file message")
+            };
+            file
+        };
+        let group = |message_type, data: &[u8]| {
+            let data = [group_header.as_slice(), data].concat();
+            let IncomingMessageBody::Group(IncomingGroupMessageBody {
+                body: GroupMessageBody::File(file),
+                ..
+            }) = IncomingMessageBody::decode(test_sender(), message_type, &data).unwrap()
+            else {
+                panic!("expected a group file message")
+            };
+            file
+        };
+
+        // Image: blob, size, nonce. Sealed between us, so without a key of its own.
+        let image = [blob.as_slice(), &1000_u32.to_le_bytes(), &nonce].concat();
+        let file = contact(CspE2eMessageType::DeprecatedImage, &image);
+        assert_eq!(file.rendering_type, FileRenderingType::Media);
+        assert_eq!(file.media_type, "image/jpeg");
+        assert_eq!(file.blob_id.0, blob);
+        assert_eq!(file.size, 1000);
+        assert_eq!(file.metadata.legacy_nonce, Some(nonce));
+
+        // Group image: blob, size, key.
+        let group_image = [blob.as_slice(), &1000_u32.to_le_bytes(), &key].concat();
+        let file = group(CspE2eMessageType::GroupImage, &group_image);
+        assert_eq!(file.media_type, "image/jpeg");
+        assert_eq!((file.key, file.size), (key, 1000));
+        assert_eq!(file.metadata.legacy_nonce, None);
+
+        // Audio: duration, blob, size, key.
+        let audio = [
+            &30_u16.to_le_bytes(),
+            blob.as_slice(),
+            &2000_u32.to_le_bytes(),
+            &key,
+        ]
+        .concat();
+        for file in [
+            contact(CspE2eMessageType::DeprecatedAudio, &audio),
+            group(CspE2eMessageType::GroupAudio, &audio),
+        ] {
+            assert_eq!(file.media_type, "audio/aac");
+            assert_eq!((file.key, file.size), (key, 2000));
+            assert_eq!(file.metadata.duration, Some(30.0));
+            assert_eq!(file.blob_id.0, blob);
+        }
+
+        // Video: duration, blob, size, thumbnail, its size, key.
+        let video = [
+            &60_u16.to_le_bytes(),
+            blob.as_slice(),
+            &3000_u32.to_le_bytes(),
+            &thumbnail,
+            &40_u32.to_le_bytes(),
+            &key,
+        ]
+        .concat();
+        for file in [
+            contact(CspE2eMessageType::DeprecatedVideo, &video),
+            group(CspE2eMessageType::GroupVideo, &video),
+        ] {
+            assert_eq!(file.media_type, "video/mpeg");
+            assert_eq!((file.key, file.size), (key, 3000));
+            assert_eq!(file.metadata.duration, Some(60.0));
+            assert_eq!(file.thumbnail_blob_id.unwrap().0, thumbnail);
+            assert_eq!(file.thumbnail_media_type.as_deref(), Some("image/jpeg"));
+        }
+
+        // Too short is still wrong, and more than there should be is ignored as on Android.
+        assert!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::DeprecatedImage, &image[..39])
+                .is_err()
+        );
+        let longer = [image.as_slice(), &[0_u8; 3]].concat();
+        assert_eq!(contact(CspE2eMessageType::DeprecatedImage, &longer).size, 1000);
     }
 
     #[test]

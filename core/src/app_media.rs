@@ -95,6 +95,7 @@ pub fn outgoing_file_message(body: &Value, keys: &FileKeys) -> Option<FileMessag
             duration: body["duration"]
                 .as_f64()
                 .filter(|d| d.is_finite() && *d >= 0.0),
+            legacy_nonce: None,
         },
     })
 }
