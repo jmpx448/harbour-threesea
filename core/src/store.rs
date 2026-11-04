@@ -140,6 +140,10 @@ pub mod keys {
     pub const LICENSE_REFUSED: &str = "license_refused";
     /// When the directory last accepted the stored license (ms since the epoch).
     pub const LICENSE_CHECKED_AT: &str = "license_checked_at";
+    /// Until when automatic directory calls rest after a 429 (ms since the epoch).
+    pub const DIRECTORY_RETRY_AFTER: &str = "directory_retry_after";
+    /// Group members still to be looked up (JSON list of IDs), see `owe_member_lookups`.
+    pub const MEMBER_LOOKUPS_OWED: &str = "member_lookups_owed";
     /// Random persistent device id sent with license checks (like Android's `DeviceIdProvider`).
     pub const DEVICE_ID: &str = "device_id";
     /// App settings as the Threema Safe `settings` object (JSON). One source of truth that
@@ -267,6 +271,16 @@ fn worth_shrinking(total_pages: i64, free_pages: i64, page_size: i64) -> bool {
         && (total_pages - free_pages).saturating_mul(page_size) <= SHRINK_LIVE_BYTES_MAX
 }
 
+/// How long automatic directory calls rest after a 429. Maintenance runs hourly, so together
+/// that's about one request an hour or two while the directory is limiting us.
+const DIRECTORY_REST_MS: i64 = 3_600_000;
+
+/// A date further off than a rest lasts comes from a clock that was wrong then, and must not stop
+/// the calls for however long that was.
+fn directory_resting_at(until: Option<i64>, now: i64) -> bool {
+    until.is_some_and(|until| now < until && until - now <= DIRECTORY_REST_MS)
+}
+
 impl Store {
     /// Open (or create) the database at `path` with the given raw 32-byte key.
     ///
@@ -357,6 +371,69 @@ impl Store {
     }
 
     /// Write a setting.
+    /// The directory said too many requests: what runs by itself leaves it alone for a while.
+    /// What the user asks for still goes, and is told what the directory says. Best effort. A rest
+    /// under way keeps its end: otherwise whatever keeps asking would keep it going for good, and
+    /// the license recheck is among what waits.
+    pub fn rest_directory_calls(&self) {
+        if self.directory_resting() {
+            return;
+        }
+        tracing::warn!("the directory says too many requests, automatic calls rest");
+        let until = crate::messages::now_ms() + DIRECTORY_REST_MS;
+        if let Err(error) = self.set_setting(keys::DIRECTORY_RETRY_AFTER, &until.to_string()) {
+            tracing::warn!(%error, "noting the directory's rate limit failed");
+        }
+    }
+
+    /// Group members who have no contact yet and still need their lookup: a rest or a failed
+    /// request doesn't lose them. Noted before asking, and kept until the directory has answered
+    /// for them. Without another device too; `group_member_lookups` is what the devices are owed.
+    pub fn owe_member_lookups(&self, identities: &[String]) -> Result<(), StoreError> {
+        let mut owed: std::collections::BTreeSet<String> =
+            self.owed_member_lookups()?.into_iter().collect();
+        owed.extend(identities.iter().cloned());
+        self.set_owed_member_lookups(&owed)
+    }
+
+    pub fn owed_member_lookups(&self) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .setting(keys::MEMBER_LOOKUPS_OWED)?
+            .and_then(|owed| serde_json::from_str(&owed).ok())
+            .unwrap_or_default())
+    }
+
+    /// The directory has answered for these, whatever it said.
+    pub fn member_lookups_answered(&self, identities: &[&str]) -> Result<(), StoreError> {
+        let mut owed: std::collections::BTreeSet<String> =
+            self.owed_member_lookups()?.into_iter().collect();
+        for identity in identities {
+            owed.remove(*identity);
+        }
+        self.set_owed_member_lookups(&owed)
+    }
+
+    fn set_owed_member_lookups(
+        &self,
+        owed: &std::collections::BTreeSet<String>,
+    ) -> Result<(), StoreError> {
+        if owed.is_empty() {
+            return self.delete_setting(keys::MEMBER_LOOKUPS_OWED);
+        }
+        let owed = serde_json::to_string(owed).expect("a list of strings");
+        self.set_setting(keys::MEMBER_LOOKUPS_OWED, &owed)
+    }
+
+    /// Whether automatic directory calls are resting.
+    pub fn directory_resting(&self) -> bool {
+        let until = self
+            .setting(keys::DIRECTORY_RETRY_AFTER)
+            .ok()
+            .flatten()
+            .and_then(|until| until.parse().ok());
+        directory_resting_at(until, crate::messages::now_ms())
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -521,6 +598,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_rest_ends_also_when_the_clock_was_wrong() {
+        let now = 1_700_000_000_000;
+        assert!(!directory_resting_at(None, now));
+        assert!(directory_resting_at(Some(now + 1), now));
+        assert!(directory_resting_at(Some(now + DIRECTORY_REST_MS), now));
+        assert!(!directory_resting_at(Some(now), now), "over");
+        assert!(
+            !directory_resting_at(Some(now + DIRECTORY_REST_MS + 1), now),
+            "set by a clock ahead of this one"
+        );
+    }
 
     #[test]
     fn forward_security_setting() {

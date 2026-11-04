@@ -781,6 +781,9 @@ impl App {
                 }
             }
             Err(error) => {
+                if matches!(error, ApiError::RateLimited) {
+                    self.store.rest_directory_calls();
+                }
                 tracing::warn!(kind = error.kind(), "pending Safe import failed");
                 if self
                     .store
@@ -816,7 +819,7 @@ impl App {
             .pending_import_counts()
             .map(|(contacts, groups, lists)| contacts + groups + lists)
             .unwrap_or(0);
-        if pending > 0 {
+        if pending > 0 && !self.store.directory_resting() {
             events = self.try_pending_import().await;
         }
         self.run_restore_setup().await;
@@ -835,7 +838,12 @@ impl App {
         let imported = self
             .pending_import_counts()
             .is_ok_and(|counts| counts == (0, 0, 0));
-        if !matches!(waiting, Ok(Some(_))) || !imported || self.connection_state != "connected" {
+        // The feature mask goes first, and during a rest it stays home without saying so.
+        if !matches!(waiting, Ok(Some(_)))
+            || !imported
+            || self.connection_state != "connected"
+            || self.store.directory_resting()
+        {
             return;
         }
         if let Err(error) = self.publish_feature_mask().await {
@@ -1090,7 +1098,9 @@ impl App {
             }
             Err(error) => tracing::warn!(kind = error.kind(), "license check failed"),
         }
-        events.extend(self.try_pending_import().await);
+        if !self.store.directory_resting() {
+            events.extend(self.try_pending_import().await);
+        }
         self.run_restore_setup().await;
         self.resume_picture_downloads();
         self.request_missing_pictures(PICTURE_REQUEST_BATCH);
@@ -1294,6 +1304,26 @@ mod tests {
             .delete_setting(keys::LINKED_EMAIL_PENDING)
             .unwrap();
         assert_eq!(links(&app), ["ab@example.org"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restore_setup_waits_for_a_directory_rest_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        app.store
+            .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)
+            .unwrap();
+        app.connection_state = "connected";
+        app.store.rest_directory_calls();
+        app.run_restore_setup().await;
+        assert_eq!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .as_deref(),
+            Some(RESTORE_SETUP_START),
+            "no step before the feature mask is out"
+        );
     }
 
     /// An app without an ID, and what it restores.

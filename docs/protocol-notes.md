@@ -70,9 +70,17 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   such requests (2026-11-03: an invalid key got the normal "This license key is invalid or
   expired." answer).
 - Rechecked: Android whenever its main screen opens (`CheckLicenseRoutine`), we at most daily from
-  the hourly maintenance. Like Android only `success: false` counts as a refusal; any other failure
-  is ignored and retried. Refused: the state is `needsLicense` again and stays so across restarts,
+  the hourly maintenance. Like Android only `success: false` with the directory's own words counts
+  as a refusal; any other failure is ignored and retried. A 429 is not a refusal either
+  (`DirectoryError::RateLimited`, kind `rateLimited`). Refused: the state is `needsLicense` again and stays so across restarts,
   nothing connects until a key is accepted (Android opens `EnterSerialActivity`).
+- A 429 from the directory on any call starts a rest of an hour, kept across restarts
+  (`Store::rest_directory_calls`): the license recheck, contact refresh, pending Safe import,
+  e-mail link check, feature mask, group member lookups, the forward secrecy mask check and the
+  hourly address book sync stay home until then. A rest under way keeps its end. What the user asks
+  for still goes. Group members skipped or left without an answer stay in `MEMBER_LOOKUPS_OWED` and
+  are looked up again on connecting and in maintenance. Android under the same 429 runs its worker
+  about once a day; we have no scheduler to lean on.
 - `deviceId`: random UUID persisted once (`DeviceIdProvider.kt`).
 - Identity creation for Shop licenses also sends `licenseKey` + `deviceId`
   (`UserServiceImpl.createIdentityRequestDataJSON`); libthreema's `create_identity_request`
@@ -113,7 +121,10 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   conversations, nonces, settings. Without multi-device, the only instruction of the incoming
   task is `FetchSender` (directory lookup); contacts are written by libthreema directly.
 - One device cookie per installation (random 16 bytes, stored). Echo request after 60 s of
-  silence, reconnect if nothing comes back within another 60 s; backoff 1 s → 60 s.
+  silence, reconnect if nothing comes back within another 60 s; backoff 1 s → 60 s. A rate limit on
+  the incoming task's `FetchSender` ends the session too, and libthreema asks for at least 10 s:
+  no attempt before that, wake-ups included, and the wait grows to 5 minutes while each login
+  meets the limit again (the waiting message repeats the lookup every time).
 - Outgoing (no libthreema task yet, LIB-51): patch 0003 encodes; we pick a fresh nonce, record it
   in the nonce table, send, and mark the message "sent" on the server's message-ack. Delivery and
   read receipts are delivery-receipt messages handled by libthreema and surfaced through

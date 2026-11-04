@@ -8,6 +8,7 @@ use crate::{
     app::{ApiError, App},
     connection::ToConnection,
     contacts::{self, Lookup},
+    directory::DirectoryError,
     safe::backup,
     store::keys,
 };
@@ -74,6 +75,10 @@ impl App {
         if self.store.setting(keys::PUBLISHED_FEATURE_MASK)?.as_deref() == Some(mask.as_str()) {
             return Ok(());
         }
+        // Still different when maintenance comes by after the rest.
+        if self.store.directory_resting() {
+            return Ok(());
+        }
         let client_key = ClientKey::from(*identity.client_key);
         crate::directory::set_feature_mask(
             &self.https,
@@ -81,7 +86,8 @@ impl App {
             &client_key,
             feature_mask,
         )
-        .await?;
+        .await
+        .map_err(|error| self.directory_error(error))?;
         self.store
             .set_setting(keys::PUBLISHED_FEATURE_MASK, &mask)?;
         tracing::info!(mask = feature_mask, "feature mask published");
@@ -633,7 +639,13 @@ impl App {
         ) else {
             return Ok(false);
         };
-        if !crate::directory::email_linked(&self.https, &identity.threema_id, &email).await? {
+        if self.store.directory_resting() {
+            return Ok(false);
+        }
+        if !crate::directory::email_linked(&self.https, &identity.threema_id, &email)
+            .await
+            .map_err(|error| self.directory_error(error))?
+        {
             return Ok(false);
         }
         self.store.delete_setting(keys::LINKED_EMAIL_PENDING)?;
@@ -796,7 +808,7 @@ impl App {
             .setting(keys::CONTACTS_REFRESHED_AT)?
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
-        if !force && now - last < 86_400 {
+        if !force && (now - last < 86_400 || self.store.directory_resting()) {
             return Ok(false);
         }
         let stored = self.store.contacts()?;
@@ -804,7 +816,9 @@ impl App {
             return Ok(false);
         }
         let ids: Vec<String> = stored.iter().map(|c| c.identity.to_string()).collect();
-        let found = contacts::lookup(&self.https, &self.config, &ids).await?;
+        let found = contacts::lookup(&self.https, &self.config, &ids)
+            .await
+            .map_err(|error| self.directory_error(error))?;
         let mut changed = false;
         for (id, result) in found {
             // Read again: the lookup took a while, and a rename or a deletion meanwhile stands.
@@ -1032,6 +1046,7 @@ impl App {
                 .await
             {
                 Ok(found) => found,
+                Err(DirectoryError::RateLimited) => return Err(ApiError::RateLimited),
                 // The token may have expired: once more with a new one (like Android).
                 Err(_) => {
                     let token =
@@ -1065,8 +1080,10 @@ impl App {
             let mut contact = match self.store.contact(&hit.identity)? {
                 Some(contact) => contact,
                 None => {
-                    if self.add_contact(&hit.identity).await.is_err() {
-                        continue;
+                    match self.add_contact(&hit.identity).await {
+                        Ok(_) => {}
+                        Err(ApiError::RateLimited) => return Err(ApiError::RateLimited),
+                        Err(_) => continue,
                     }
                     added += 1;
                     self.store

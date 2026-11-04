@@ -202,7 +202,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setVideoQuality` | `quality` (`auto`\|`low`\|`max`) | the settings JSON, which also has `videoCalls` (switched with `setSetting`; synced like Android's video policy, not in Threema Safe) and `videoQuality` |
 | `callCandidates` | `callId`, `candidates`: `[{candidate, sdpMid, sdpMLineIndex, ufrag}]` | `{}` |
 | `callState` | – | `{call: {identity, callId, phase (calling\|ringing\|incoming\|active), outgoing, video, startedAt, acceptedAt} \| null}` |
-| `matchAddressBook` | `entries`: `[{firstName, lastName, emails, phones}]` | `{matched, added}`; hashed lookup (protocol-notes "Address book matching") |
+| `matchAddressBook` | `entries`: `[{firstName, lastName, emails, phones}]`, `automatic?` (the hourly sync, which rests with the directory's rate limit: error `rateLimited`) | `{matched, added}`; hashed lookup (protocol-notes "Address book matching") |
 
 File message `body`: `{rendering, mediaType, name, fileType, size, caption, width, height, duration, animated, thumbnail, fileState, thumbnailState, uploadState, fileOnDemand}`, states 0 remote, 1 loading, 2 on the device, 3 failed; `fileOnDemand`: cleaned up by the user, the file downloads only through `downloadFile`. `name` comes without characters that reorder text; `fileType` (image\|audio\|video\|pdf\|document\|contact\|archive\|other) follows from the name it would be saved under, not from `mediaType`, and is what the icon shows. Media: `image://threesea/<id>/thumb|file` (bridge), `threesea_media_read` (FFI).
 

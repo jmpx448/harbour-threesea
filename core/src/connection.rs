@@ -21,8 +21,8 @@ use libthreema::{
         payload::{EchoPayload, IncomingPayload, MessageWithMetadataBox, OutgoingPayload},
     },
     csp_e2e::{
-        CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, D2mRole, D2xContextInit,
-        ReflectId,
+        CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, CspE2eProtocolError, D2mRole,
+        D2xContextInit, ReflectId,
         contacts::{
             create::{CreateContactsInstruction, CreateContactsResponse},
             lookup::ContactsLookupResponse,
@@ -124,6 +124,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const HOLD_OFF: Duration = Duration::from_secs(600);
 /// A session this long was a working connection: the next attempts start over.
 const STABLE_SESSION: Duration = Duration::from_secs(60);
+/// libthreema's rule for `RateLimitExceeded`: no new connection attempt before this.
+const RATE_LIMIT_FLOOR: Duration = Duration::from_secs(10);
+/// How far the wait grows while every login meets the rate limit again: each one repeats the
+/// lookup that failed, because the message waits for it.
+const RATE_LIMIT_MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 /// Connection state as shown in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +352,9 @@ enum ConnectionError {
     Protocol(String),
     #[error("connection timed out")]
     Timeout,
+    /// A directory lookup inside libthreema's message task met its rate limit.
+    #[error("rate limited")]
+    RateLimited,
     #[error("closed by server: {message}")]
     Closed {
         message: String,
@@ -416,6 +424,14 @@ fn d2m_name(payload: &D2mIncoming) -> &'static str {
 
 fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Protocol(error.to_string())
+}
+
+/// Like [`protocol_error`], but a rate limit stays what it is: it has its own wait.
+fn e2e_error(error: CspE2eProtocolError) -> ConnectionError {
+    match error {
+        CspE2eProtocolError::RateLimitExceeded => ConnectionError::RateLimited,
+        other => protocol_error(other),
+    }
 }
 
 /// A message without forward secrecy reports it before the message is stored, and its line goes
@@ -520,6 +536,16 @@ fn backoff_after_session(backoff: Duration, session: Duration) -> Duration {
     }
 }
 
+/// The wait after the one just over.
+fn next_backoff(backoff: Duration, rate_limited: bool) -> Duration {
+    let most = if rate_limited {
+        RATE_LIMIT_MAX_BACKOFF
+    } else {
+        MAX_BACKOFF
+    };
+    (backoff * 2).min(most)
+}
+
 /// Run the connection until the app goes away (`rx` closed). Reconnects with backoff.
 pub async fn run(
     setup: ConnectionSetup,
@@ -532,8 +558,10 @@ pub async fn run(
         let started = Instant::now();
         let result = Session::run(&setup, &mut rx, &tx).await;
         let _ = tx.send(FromConnection::State(ConnectionState::Disconnected));
+        let rate_limited = matches!(result, Err(ConnectionError::RateLimited));
         match result {
             Err(ConnectionError::Stopped) => return,
+            Err(ConnectionError::RateLimited) => setup.store.rest_directory_calls(),
             Err(ConnectionError::Reconnect) => {
                 backoff = Duration::from_secs(1);
                 continue;
@@ -581,7 +609,12 @@ pub async fn run(
             Ok(()) => {}
         }
         backoff = backoff_after_session(backoff, started.elapsed());
-        // Wait for the backoff, or reconnect immediately on a wake-up.
+        let earliest = rate_limited.then(|| {
+            backoff = backoff.max(RATE_LIMIT_FLOOR);
+            tokio::time::Instant::now() + RATE_LIMIT_FLOOR
+        });
+        // Wait for the backoff, or reconnect immediately on a wake-up: after a rate limit, as soon
+        // as its floor allows.
         let wait = sleep(backoff);
         tokio::pin!(wait);
         loop {
@@ -589,7 +622,10 @@ pub async fn run(
                 () = &mut wait => break,
                 message = rx.recv() => match message {
                     None => return,
-                    Some(ToConnection::Wake | ToConnection::Reconnect) => break,
+                    Some(ToConnection::Wake | ToConnection::Reconnect) => match earliest {
+                        Some(at) if tokio::time::Instant::now() < at => wait.as_mut().reset(at),
+                        _ => break,
+                    },
                     Some(ToConnection::Devices(reply)) => {
                         let _ = reply.send(Err(DeviceGroupError::NotConnected));
                     }
@@ -610,7 +646,7 @@ pub async fn run(
                 },
             }
         }
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = next_backoff(backoff, rate_limited);
     }
 }
 
@@ -1794,7 +1830,7 @@ impl<'a> Session<'a> {
             });
         }
         let store = &self.setup.store;
-        if store.contact(peer).map_err(protocol_error)?.is_none() {
+        if store.contact(peer).map_err(protocol_error)?.is_none() || store.directory_resting() {
             return Ok(MaskCheck::Unknown);
         }
         let identities = [peer.to_owned()];
@@ -1802,6 +1838,9 @@ impl<'a> Session<'a> {
         let found = match tokio::time::timeout(FS_MASK_LOOKUP_LIMIT, lookup).await {
             Ok(Ok(found)) => found,
             Ok(Err(error)) => {
+                if matches!(error, crate::directory::DirectoryError::RateLimited) {
+                    store.rest_directory_calls();
+                }
                 tracing::warn!(%error, "feature mask lookup failed");
                 checks.record(peer, now, false);
                 return Ok(MaskCheck::Unknown);
@@ -2906,7 +2945,7 @@ impl<'a> Session<'a> {
     ) -> Result<(), ConnectionError> {
         let mut task = self.e2e.handle_incoming_message(message);
         let result = loop {
-            match task.poll(self.e2e.context()).map_err(protocol_error)? {
+            match task.poll(self.e2e.context()).map_err(e2e_error)? {
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::FetchSender(
                     lookup,
                 )) => {
@@ -2917,7 +2956,7 @@ impl<'a> Session<'a> {
                             work_directory_result: None,
                         },
                     ))
-                    .map_err(protocol_error)?;
+                    .map_err(e2e_error)?;
                 }
                 // Multi-device: reflect to the other devices before acknowledging; contacts are
                 // created/updated in a transaction.
@@ -3331,6 +3370,33 @@ mod backoff_tests {
     fn told_to_stay_away_holds_however_long_the_session_was() {
         assert_eq!(backoff_after_session(HOLD_OFF, LONG), HOLD_OFF);
         assert_eq!(backoff_after_session(HOLD_OFF, SHORT), HOLD_OFF);
+    }
+
+    #[test]
+    fn a_rate_limit_keeps_its_identity_and_gets_a_longer_wait() {
+        assert!(matches!(
+            e2e_error(CspE2eProtocolError::RateLimitExceeded),
+            ConnectionError::RateLimited
+        ));
+        assert!(matches!(
+            e2e_error(CspE2eProtocolError::NetworkError("gone".into())),
+            ConnectionError::Protocol(_)
+        ));
+
+        // Login after login meets the limit: the wait keeps growing past the usual cap.
+        let mut wait = RATE_LIMIT_FLOOR;
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            wait = next_backoff(wait, true);
+            waits.push(wait.as_secs());
+        }
+        assert_eq!(waits, [20, 40, 80, 160, 300, 300]);
+        // Over: back to the usual cap.
+        assert_eq!(next_backoff(RATE_LIMIT_MAX_BACKOFF, false), MAX_BACKOFF);
+        assert_eq!(
+            next_backoff(Duration::from_secs(1), false),
+            Duration::from_secs(2)
+        );
     }
 }
 

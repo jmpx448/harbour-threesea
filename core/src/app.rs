@@ -434,6 +434,9 @@ pub enum Command {
     /// Address book entries to look up on Threema (hashed).
     MatchAddressBook {
         entries: Vec<crate::address_book::Entry>,
+        /// The hourly sync, not the user's request.
+        #[serde(default)]
+        automatic: bool,
     },
     /// Send a location: `latitude`, `longitude` (degrees), optional `accuracy` (m), `name`,
     /// `address`. Returns the outgoing message.
@@ -1523,6 +1526,9 @@ impl App {
                 json!({"reply": request.id, "ok": true, "result": result})
             }
             Err(error) => {
+                if matches!(error, ApiError::RateLimited) {
+                    self.store.rest_directory_calls();
+                }
                 tracing::info!(kind = error.kind(), "command failed");
                 json!({"reply": request.id, "ok": false,
                     "error": {"kind": error.kind(), "message": error.to_string()}})
@@ -1851,7 +1857,12 @@ impl App {
                 .map(|link| link.to_json())
                 .ok_or(ApiError::LinkInvalid),
             Command::MyQrCode => self.my_qr_code(),
-            Command::MatchAddressBook { entries } => self.match_address_book(entries).await,
+            Command::MatchAddressBook { entries, automatic } => {
+                if automatic && self.store.directory_resting() {
+                    return Err(ApiError::RateLimited);
+                }
+                self.match_address_book(entries).await
+            }
             Command::VerifyQrCode { text } => self.verify_qr_code(&text).await,
             Command::QrKind { text } => self.classify_qr(&text),
             Command::SetProfilePicture => self.set_profile_picture(),
@@ -2187,7 +2198,9 @@ impl App {
             .store
             .setting(keys::LICENSE_CHECKED_AT)?
             .and_then(|at| at.parse().ok());
-        if !license_check_due(checked_at, crate::messages::now_ms()) {
+        if !license_check_due(checked_at, crate::messages::now_ms())
+            || self.store.directory_resting()
+        {
             return Ok(false);
         }
         let device_id = self.device_id()?;
@@ -2217,12 +2230,24 @@ impl App {
                 self.stop_connection();
                 Ok(true)
             }
-            // Too many requests, a server without words for it: none of that is about the key.
+            Err(DirectoryError::RateLimited) => {
+                self.store.rest_directory_calls();
+                Ok(false)
+            }
+            // A server without words for it, or no answer at all: that's not about the key.
             Err(error) => {
                 tracing::info!(%error, "license check not answered");
                 Ok(false)
             }
         }
+    }
+
+    /// The error for the UI from a directory call that runs by itself: a 429 also starts the rest.
+    pub(crate) fn directory_error(&self, error: DirectoryError) -> ApiError {
+        if matches!(error, DirectoryError::RateLimited) {
+            self.store.rest_directory_calls();
+        }
+        error.into()
     }
 
     pub(crate) fn license(&self) -> Result<SerialLicense, ApiError> {
@@ -2769,6 +2794,128 @@ mod tests {
                 assert_eq!(app.store.setting(keys::LICENSE_REFUSED).unwrap(), None);
                 assert_eq!(app.store.setting(keys::LICENSE_CHECKED_AT).unwrap(), None);
                 assert_eq!(state(&mut app), "ready");
+            })
+            .await;
+    }
+
+    /// Asking during a rest doesn't lengthen it: the hourly address book sync would otherwise keep
+    /// it going for as long as the phone stays awake, license recheck included.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_directory_rest_ends_when_it_said_it_would() {
+        let (_dir, mut app) = licensed_app();
+        let automatic = r#"{"id":1,"cmd":"matchAddressBook","entries":[],"automatic":true}"#;
+        let until = (crate::messages::now_ms() + 600_000).to_string();
+        app.store
+            .set_setting(keys::DIRECTORY_RETRY_AFTER, &until)
+            .unwrap();
+        let reply: Value = serde_json::from_str(&app.handle(automatic).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "rateLimited");
+        app.store.rest_directory_calls();
+        assert_eq!(
+            app.store.setting(keys::DIRECTORY_RETRY_AFTER).unwrap(),
+            Some(until),
+            "neither the sync's own refusal nor another 429 moves the end"
+        );
+
+        // Over: the sync goes again, and a new 429 starts a new rest.
+        let over = (crate::messages::now_ms() - 1).to_string();
+        app.store
+            .set_setting(keys::DIRECTORY_RETRY_AFTER, &over)
+            .unwrap();
+        let reply: Value = serde_json::from_str(&app.handle(automatic).await).unwrap();
+        assert_eq!(reply["ok"], true);
+        app.store.rest_directory_calls();
+        assert!(app.store.directory_resting());
+    }
+
+    /// Without another device, too, a group's unknown member isn't lost to a rest or a failed
+    /// request: messages to them wait for the contact.
+    #[test]
+    fn group_members_looked_up_during_a_rest_wait_for_its_end() {
+        let (_dir, app) = licensed_app();
+        assert!(app.store.multi_device().unwrap().is_none());
+        app.store.rest_directory_calls();
+        app.fetch_members(vec!["EFGH5678".to_owned(), "IJKL9012".to_owned()]);
+        app.fetch_members(vec!["EFGH5678".to_owned()]);
+        assert_eq!(app.member_lookups_due(), ["EFGH5678", "IJKL9012"]);
+
+        // Any answer ends the wait: a contact, or that the directory doesn't know the ID.
+        let found = crate::contacts::test_contact("EFGH5678");
+        assert!(
+            !crate::sync::members_looked_up(
+                &app.store,
+                vec![
+                    (
+                        "EFGH5678".to_owned(),
+                        crate::contacts::Lookup::Found(Box::new(found))
+                    ),
+                    ("IJKL9012".to_owned(), crate::contacts::Lookup::Invalid),
+                ],
+            )
+            .unwrap()
+        );
+        assert!(app.store.contact("EFGH5678").unwrap().is_some());
+        assert!(app.member_lookups_due().is_empty());
+        assert_eq!(app.store.setting(keys::MEMBER_LOOKUPS_OWED).unwrap(), None);
+    }
+
+    /// Nothing automatic asks the directory during a rest. Without the gates these would either
+    /// reach the server or, offline, leave an error behind.
+    #[tokio::test(flavor = "current_thread")]
+    async fn automatic_directory_calls_rest_after_too_many_requests() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                assert!(!app.store.directory_resting());
+                assert!(
+                    !app.apply_license_answer(Err(DirectoryError::RateLimited))
+                        .unwrap()
+                );
+                assert!(app.store.directory_resting(), "the 429 starts the rest");
+
+                app.store
+                    .set_setting(keys::LINKED_EMAIL_PENDING, "1")
+                    .unwrap();
+                app.store
+                    .set_setting(keys::LINKED_EMAIL, "someone@example.org")
+                    .unwrap();
+                app.store
+                    .set_setting(
+                        keys::SAFE_PENDING_IMPORT,
+                        r#"{"contacts":[{"identity":"EFGH5678"}]}"#,
+                    )
+                    .unwrap();
+
+                assert!(!app.recheck_license().await.unwrap());
+                assert!(!app.check_email_link().await.unwrap());
+                app.publish_feature_mask().await.unwrap();
+                assert_eq!(
+                    app.store.setting(keys::PUBLISHED_FEATURE_MASK).unwrap(),
+                    None,
+                    "publishes after the rest"
+                );
+
+                app.maintenance().await;
+                assert_eq!(app.store.setting(keys::SAFE_IMPORT_ERROR).unwrap(), None);
+                assert!(app.on_connected().await.is_empty());
+                assert_eq!(app.store.setting(keys::SAFE_IMPORT_ERROR).unwrap(), None);
+                assert_eq!(app.store.setting(keys::LICENSE_CHECKED_AT).unwrap(), None);
+
+                // The hourly address book sync stays home; the user's own request goes on.
+                let reply: Value = serde_json::from_str(
+                    &app.handle(
+                        r#"{"id":1,"cmd":"matchAddressBook","entries":[],"automatic":true}"#,
+                    )
+                    .await,
+                )
+                .unwrap();
+                assert_eq!(reply["error"]["kind"], "rateLimited");
+                let reply: Value = serde_json::from_str(
+                    &app.handle(r#"{"id":2,"cmd":"matchAddressBook","entries":[]}"#)
+                        .await,
+                )
+                .unwrap();
+                assert_eq!(reply["ok"], true);
             })
             .await;
     }

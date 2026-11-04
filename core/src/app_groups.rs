@@ -414,6 +414,12 @@ impl App {
     /// the other devices are owed of them goes out in the same store step (`sync::members_looked_up`)
     /// and, if the lookup fails, stays noted for the next try (`resume_picture_downloads`).
     pub(crate) fn fetch_members(&self, identities: Vec<String>) {
+        if let Err(error) = self.store.owe_member_lookups(&identities) {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
+        if self.store.directory_resting() {
+            return;
+        }
         let https = self.https.clone();
         let config = std::sync::Arc::clone(&self.config);
         let store = Rc::clone(&self.store);
@@ -434,7 +440,12 @@ impl App {
                     // Reload contact names; the media/progress channel also triggers sending.
                     let _ = events.send(CoreEvent::ContactsChanged);
                 }
-                Err(error) => tracing::warn!(%error, "looking up group members failed"),
+                Err(error) => {
+                    if matches!(error, crate::directory::DirectoryError::RateLimited) {
+                        store.rest_directory_calls();
+                    }
+                    tracing::warn!(%error, "looking up group members failed");
+                }
             }
         });
     }
@@ -541,11 +552,19 @@ impl App {
                 });
             }
         }
-        if let Ok(owed) = self.store.outstanding_member_lookups()
-            && !owed.is_empty()
-        {
-            self.fetch_members(owed);
+        let due = self.member_lookups_due();
+        if !due.is_empty() {
+            self.fetch_members(due);
         }
+    }
+
+    /// Members whose lookup failed, never got to run or waited for a rest to end.
+    pub(crate) fn member_lookups_due(&self) -> Vec<String> {
+        let mut due = self.store.outstanding_member_lookups().unwrap_or_default();
+        due.extend(self.store.owed_member_lookups().unwrap_or_default());
+        due.sort();
+        due.dedup();
+        due
     }
 
     /// `setProfilePicture`: our picture (attachment 0, a JPEG prepared by the bridge). Everyone

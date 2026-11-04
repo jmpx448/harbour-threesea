@@ -1313,7 +1313,7 @@ ApplicationWindow {
         onFinished: {
             var manual = addressBook.manual
             var checked = entries.length
-            backend.call("matchAddressBook", { entries: entries }, function(ok, result, kind, message) {
+            backend.call("matchAddressBook", { entries: entries, automatic: !manual }, function(ok, result, kind, message) {
                 addressBook.active = false
                 if (ok) {
                     backend.addressBookSyncedAt = Date.now()

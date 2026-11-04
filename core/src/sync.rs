@@ -556,6 +556,8 @@ pub(crate) fn members_looked_up(
     let device_group = store.multi_device()?.is_some();
     let mut queued = false;
     let mut groups: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    let answered: Vec<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
+    store.member_lookups_answered(&answered)?;
     for (identity, result) in results {
         let waiting = store.take_member_lookups(&identity)?;
         if let Lookup::Found(contact) = result
