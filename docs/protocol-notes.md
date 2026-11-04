@@ -365,7 +365,9 @@ is muted (`never`, optionally until a time; Android offers 1/2/4/8/24/144 h, we 
 ## Locations
 
 `location` messages (libthreema `LocationMessage`: latitude, longitude, accuracy, name,
-address) are received into the store as JSON and sent with `sendLocation`. The position comes
+address) are received into the store as JSON and sent with `sendLocation`. On the wire there is
+one line after the coordinates for a place given by a single text, and decoders read it as the
+address, so a name alone goes out as the address (libthreema's encoder would drop it). The position comes
 from QtPositioning (Sailjail permission `Location`, Harbour-allowed). No map preview and no
 reverse geocoding: both need a tile or geocoding server outside Threema (§7.6). Received
 locations open as `geo:` links in an installed maps app (e.g. Pure Maps); the bubble shows the
