@@ -303,9 +303,10 @@ public:
     Q_INVOKABLE QString chatTone(const QString &identity) const;
     Q_INVOKABLE void setChatTone(const QString &identity, const QString &path);
     // In-app camera: where captures go (the app's cache), and removing one once it was sent
-    // (it is in the encrypted store then; only files in that folder are removed).
+    // (it is in the encrypted store then; only files in that folder are removed: returns whether
+    // this was one).
     Q_INVOKABLE QString captureFile(const QString &extension) const;
-    Q_INVOKABLE void removeCapture(const QString &path) const;
+    Q_INVOKABLE bool removeCapture(const QString &path) const;
     // A picked photo turned by `rotation` (0, 90, 180, 270 degrees clockwise) and cut to `crop`
     // — a rectangle in fractions (0..1) of the turned picture — written as a new capture.
     // Returns its path, empty if the picture could not be read or written. EXIF data (the

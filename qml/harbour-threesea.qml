@@ -247,6 +247,9 @@ ApplicationWindow {
     Connections {
         target: Qt.application
         onStateChanged: {
+            if (Qt.application.state === Qt.ApplicationActive && window.captureDiscardedUnsaid) {
+                window.sayCaptureDiscarded()
+            }
             window.lockedNotification()
             // The group may have become private during the call.
             if (Qt.application.state !== Qt.ApplicationActive && groupCalls.conversation.length > 0
@@ -320,6 +323,18 @@ ApplicationWindow {
             var chat = pageStack.replace(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity })
             if (text.length > 0 && chat.inputField) chat.setInput(text)
         })
+    }
+
+    // A photo or video taken in the app went with its chat, unsent: said now, or on coming back.
+    property bool captureDiscardedUnsaid: false
+    function captureDiscarded() {
+        if (Qt.application.state === Qt.ApplicationActive) sayCaptureDiscarded()
+        else captureDiscardedUnsaid = true
+    }
+    function sayCaptureDiscarded() {
+        captureDiscardedUnsaid = false
+        //% "The photo or video waiting to be sent was discarded"
+        Notices.show(qsTrId("threesea-la-capture-discarded"), Notice.Long, Notice.Center)
     }
 
     // The captions on their way with their files, by chat. A chat can be closed and opened again

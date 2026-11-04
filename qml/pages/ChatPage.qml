@@ -776,9 +776,14 @@ Page {
         })
     }
 
+    // Whether this took a photo or video away for good (the device's own files stay where they are).
     function dropAttachments() {
-        for (var i = 0; i < attachments.length; ++i) backend.removeCapture(attachments[i].path)
+        var captures = false
+        for (var i = 0; i < attachments.length; ++i) {
+            if (backend.removeCapture(attachments[i].path)) captures = true
+        }
         attachments = []
+        return captures
     }
     // A multi-select picker's choice (its selectedContent): videos as videos, pictures as
     // pictures (from the image picker), everything else as files.
@@ -1294,7 +1299,8 @@ Page {
         // stay in the way, and a private chat's is hidden with the chat.
         if (!voicePlayer.playing || isPrivate) voicePlayer.stop()
         voicePlayer.earpiece = false
-        dropAttachments()
+        // Nobody asked for that here: a notification opened another chat, or private chats closed.
+        if (dropAttachments()) window.captureDiscarded()
         // Files still waiting to be sent go to the core at once, in their order; a video's
         // thumbnail is made here, so a waiting video goes as a file. A thumbnail still on its
         // way finds the path empty, and doesn't send it twice.

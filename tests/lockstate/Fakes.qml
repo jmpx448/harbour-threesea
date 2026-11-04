@@ -55,7 +55,10 @@ QtObject {
         // What the camera pages were told to remove.
         property var removedCaptures: []
         function captureFile(extension) { return "/cache/capture/test." + extension }
-        function removeCapture(path) { if (path) removedCaptures.push(path) }
+        function removeCapture(path) {
+            if (path) removedCaptures.push(path)
+            return !!path
+        }
         function decodeQr(image, callback) { callback("") }
     }
     property QtObject dbus: QtObject {

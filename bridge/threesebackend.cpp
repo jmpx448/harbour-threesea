@@ -596,13 +596,11 @@ void ThreeseBackend::lockWithFilesOnTheirWay()
     call(QStringLiteral("lock"), args);
 }
 
-void ThreeseBackend::removeCapture(const QString &path) const
+bool ThreeseBackend::removeCapture(const QString &path) const
 {
     const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
     const QFileInfo info(local);
-    if (info.absolutePath() == QDir(captureDir()).absolutePath()) {
-        QFile::remove(local);
-    }
+    return info.absolutePath() == QDir(captureDir()).absolutePath() && QFile::remove(local);
 }
 
 QVariantList ThreeseBackend::alertTones() const
