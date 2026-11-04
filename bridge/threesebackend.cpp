@@ -499,11 +499,14 @@ void ThreeseBackend::onCoreMessage(void *userData, const char *json)
 void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool asPhoto, const QString &caption,
                               const QJSValue &callback)
 {
+    const quint64 id = m_nextId++;
+    // Picker results are file:// URLs.
+    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_tempSources.insert(id, localPath);
     if (!m_core) {
-        answerNoCore(callback);
+        answerNoCore(callback, id);
         return;
     }
-    const quint64 id = m_nextId++;
     if (callback.isCallable()) {
         m_callbacks.insert(id, callback);
     }
@@ -513,9 +516,6 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
     request.insert(QStringLiteral("identity"), identity);
     request.insert(QStringLiteral("caption"), caption);
     request.insert(QStringLiteral("rendering"), asPhoto ? QStringLiteral("media") : QStringLiteral("file"));
-    // Picker results are file:// URLs.
-    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
-    m_tempSources.insert(id, localPath);
     m_filesPreparing.insert(id, identity);
     auto *preparer = new FilePreparer(localPath, request);
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
@@ -703,11 +703,13 @@ void ThreeseBackend::addGifFavourite(const QString &path, const QJSValue &callba
 void ThreeseBackend::sendVideo(const QString &identity, const QString &path, const QVariant &frame,
                                double seconds, const QString &caption, const QJSValue &callback)
 {
+    const quint64 id = m_nextId++;
+    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_tempSources.insert(id, localPath);
     if (!m_core) {
-        answerNoCore(callback);
+        answerNoCore(callback, id);
         return;
     }
-    const quint64 id = m_nextId++;
     if (callback.isCallable()) {
         m_callbacks.insert(id, callback);
     }
@@ -720,8 +722,6 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
     if (seconds > 0) {
         request.insert(QStringLiteral("duration"), seconds);
     }
-    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
-    m_tempSources.insert(id, localPath);
     // Where a scaled-down copy may go (Settings → Media & storage → Video size). Nothing is
     // written unless the video is really scaled; the file goes once the core has read it.
     const QString scratch = captureFile(QStringLiteral("mp4"));
@@ -921,8 +921,7 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
         return;
     }
     if (!m_core) {
-        answerNoCore(m_callbacks.take(id));
-        removeTempSources(id);
+        answerNoCore(m_callbacks.take(id), id);
         return;
     }
     QByteArray json = QJsonDocument(QJsonObject::fromVariantMap(request)).toJson(QJsonDocument::Compact);
@@ -955,20 +954,21 @@ void ThreeseBackend::request(const QString &command, const QVariantMap &args, Na
     call(command, args, QJSValue());
 }
 
-void ThreeseBackend::answerNoCore(const QJSValue &callback)
+void ThreeseBackend::answerNoCore(const QJSValue &callback, quint64 id)
 {
     if (!callback.isCallable()) {
+        removeTempSources(id);
         return;
     }
     // Later, like any answer of the core: callers go on after the call before they expect one.
     QJSValue answer = callback;
-    QTimer::singleShot(0, this, [this, answer]() mutable {
+    QTimer::singleShot(0, this, [this, answer, id]() mutable {
         QJSValueList arguments;
         arguments << QJSValue(false);
         arguments << m_engine->toScriptValue(QVariantMap());
         arguments << QJSValue(QStringLiteral("internal"));
         arguments << QJSValue(QStringLiteral("the app's core is not running"));
-        answer.call(arguments);
+        removeTempSources(id, answer.call(arguments));
     });
 }
 

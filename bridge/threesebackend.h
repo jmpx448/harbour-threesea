@@ -382,8 +382,9 @@ private:
                            bool safeCopy = false);
     void fail(const QString &reason);
     // A command that can't reach a core still gets its answer: a refusal, or whoever waits for it
-    // (a page holding its text, a reply from a notification) would wait for ever.
-    void answerNoCore(const QJSValue &callback);
+    // (a page holding its text, a reply from a notification) would wait for ever. `id`: the
+    // sources of a file command, cleaned up after the answer.
+    void answerNoCore(const QJSValue &callback, quint64 id = 0);
     void stopCore();
     void requestDataRemoval(const QString &pin);
     void dataRemovalRefused(const QVariantMap &error, const QString &kind);
