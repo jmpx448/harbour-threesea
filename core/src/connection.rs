@@ -835,19 +835,16 @@ impl<'a> Session<'a> {
                 client_key,
                 flavor: Flavor::Consumer,
                 nonce_storage: Box::new(RefCell::new(StoreNonces(Rc::clone(store)))),
+                fs_sessions: Some(Box::new(RefCell::new(StoreFs {
+                    store: Rc::clone(store),
+                    my_identity: setup.identity,
+                    events: Rc::clone(&events),
+                }))),
                 // No sessions with multi-device (SE-199) or when the user switched forward
-                // security off (Settings → Advanced): incoming FS messages are then rejected
-                // and the session terminated, so the peer falls back, like Android with a
-                // device group.
-                fs_sessions: if multi_device.is_some() || fs_disabled {
-                    None
-                } else {
-                    Some(Box::new(RefCell::new(StoreFs {
-                        store: Rc::clone(store),
-                        my_identity: setup.identity,
-                        events: Rc::clone(&events),
-                    })))
-                },
+                // security off (Settings → Advanced). Contacts may not know yet and messages may
+                // already wait on the server: those get a Reject, so that they are sent again
+                // without, and aren't lost until the contact's mask refreshes.
+                fs_answering_only: multi_device.is_some() || fs_disabled,
             },
             d2x: match &multi_device {
                 Some(properties) => Some(D2xContextInit {
@@ -3648,6 +3645,7 @@ mod sync_order_tests {
                 flavor: Flavor::Consumer,
                 nonce_storage: Box::new(RefCell::new(StoreNonces(Rc::clone(store)))),
                 fs_sessions: None,
+                fs_answering_only: false,
             },
             d2x: None,
             shortcut: Box::new(WebShortcuts {

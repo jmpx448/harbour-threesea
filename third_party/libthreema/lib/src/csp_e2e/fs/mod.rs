@@ -158,6 +158,8 @@ pub struct FsContext {
     pub(crate) store: Box<core::cell::RefCell<dyn FsSessionStore>>,
     /// Peer ratchet to turn once the current incoming message is acknowledged.
     pub(crate) pending_commit: Option<PeerRatchetCommit>,
+    /// Forward security is off (see [`FsContext::answering_only`]).
+    answering_only: bool,
 }
 
 impl FsContext {
@@ -167,6 +169,19 @@ impl FsContext {
         Self {
             store,
             pending_commit: None,
+            answering_only: false,
+        }
+    }
+
+    /// Forward security is off here, but incoming envelopes get the answer the protocol asks of a
+    /// client that doesn't support it: a message in an envelope is rejected, so that the sender
+    /// can send it again without, and everything else is discarded. No session is created or
+    /// used.
+    #[must_use]
+    pub fn answering_only(store: Box<core::cell::RefCell<dyn FsSessionStore>>) -> Self {
+        Self {
+            answering_only: true,
+            ..Self::new(store)
         }
     }
 }
@@ -257,6 +272,26 @@ pub(crate) fn process_incoming(
     };
     let mut store = fs.store.borrow_mut();
     let store = &mut *store;
+    if fs.answering_only {
+        if let Some(envelope::Content::Encapsulated(encapsulated)) = envelope.content {
+            info!(?session_id, "Rejecting FS message, forward security is off");
+            send_reject(
+                store,
+                peer,
+                *peer_public_key,
+                session_id,
+                outer_message_id,
+                encapsulated.group_identity,
+                reject::Cause::DisabledByLocal,
+            )?;
+        } else {
+            info!(
+                ?session_id,
+                "Discarding FS control message, forward security is off"
+            );
+        }
+        return Ok(IncomingFsOutcome::Handled);
+    }
     match envelope.content {
         Some(envelope::Content::Init(init)) => {
             handle_init(
@@ -551,7 +586,7 @@ pub(crate) fn check_message_without_fs(
     peer: ThreemaId,
     message_type: u8,
 ) -> Result<(), ProviderError> {
-    let Some(required) = minimum_version_for(message_type) else {
+    let Some(required) = minimum_version_for(message_type).filter(|_| !fs.answering_only) else {
         return Ok(());
     };
     let mut store = fs.store.borrow_mut();

@@ -333,7 +333,7 @@ fn decrypt_and_decode_message(
     let (inner_metadata, inner_type, inner_message_data) =
         if outer_type == CspE2eMessageType::ForwardSecurityEnvelope {
             let Some(decapsulate) = decapsulate else {
-                warn!("Discarding FS envelope, forward security is disabled");
+                warn!("Discarding FS envelope, forward security is not available");
                 return Ok(ProcessingOutcome::Discard {
                     reason: DiscardReason::MessageForwardSecurityUnsupported,
                     acknowledge: AcknowledgeContext::from(&*payload),
@@ -1826,6 +1826,7 @@ mod tests {
                     flavor: init.flavor,
                     nonce_storage: Box::new(RefCell::new(database.csp_e2e_nonce_provider())),
                     fs_sessions: None,
+                    fs_answering_only: false,
                 },
                 d2x: init.device_group_key.map(|device_group_key| D2xContextInit {
                     device_id: D2xDeviceId(0x01),

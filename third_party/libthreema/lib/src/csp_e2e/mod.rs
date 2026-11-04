@@ -183,6 +183,12 @@ pub struct CspE2eContextInit {
     /// Note: Forward security must not be enabled together with multi-device (see
     /// `csp.struct.yml`, SE-199).
     pub fs_sessions: Option<Box<RefCell<dyn fs::FsSessionStore>>>,
+
+    /// Forward security is off, for a client that knows it but doesn't use it now (multi-device, a
+    /// setting): with this set, `fs_sessions` only serves to answer incoming FS envelopes as
+    /// described for [`fs::FsContext::answering_only`], so that senders whose copy of our feature
+    /// mask is out of date don't lose their messages.
+    pub fs_answering_only: bool,
 }
 
 /// Initializer for a [`D2xContext`].
@@ -248,7 +254,13 @@ impl From<CspE2eContextInit> for CspE2eContext {
             client_key: init.client_key,
             flavor: init.flavor,
             nonce_storage: init.nonce_storage.into(),
-            fs: init.fs_sessions.map(fs::FsContext::new),
+            fs: init.fs_sessions.map(|sessions| {
+                if init.fs_answering_only {
+                    fs::FsContext::answering_only(sessions)
+                } else {
+                    fs::FsContext::new(sessions)
+                }
+            }),
         }
     }
 }

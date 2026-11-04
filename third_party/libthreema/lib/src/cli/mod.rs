@@ -396,6 +396,7 @@ impl FullIdentityConfig {
             flavor: self.minimal.common.flavor.clone(),
             nonce_storage,
             fs_sessions: None,
+            fs_answering_only: false,
         }
     }
 

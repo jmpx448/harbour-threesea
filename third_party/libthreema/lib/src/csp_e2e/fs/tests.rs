@@ -536,6 +536,46 @@ fn answers_come_with_the_key_of_whoever_wrote_who_may_not_be_a_contact_yet() {
 }
 
 #[test]
+fn with_forward_security_off_a_message_is_rejected_and_nothing_else_answered() {
+    let mut alice = alice();
+    let mut bob = bob();
+    let data = bob.data.clone();
+    bob.fs = FsContext::answering_only(Box::new(RefCell::new(data)));
+
+    let first = alice.send_in_group(&bob, 0x01, b"to the group", Some(group_identity()));
+    // The Init: discarded, and no session for it.
+    let _ = bob.receive(&alice, &first.prelude[0], 1);
+    assert!(bob.take_controls().is_empty());
+    assert!(bob.with_store(|store| store.sessions.is_empty()));
+
+    // The message: rejected, so that Alice can send it again without.
+    assert!(matches!(
+        bob.receive(&alice, first.envelope.as_ref().unwrap(), 42),
+        IncomingFsOutcome::Handled
+    ));
+    let controls = bob.take_controls();
+    assert_eq!(controls.len(), 1);
+    let reject = reject_of(&controls[0]);
+    assert_eq!(reject.message_id, 42);
+    assert_eq!(reject.cause, reject::Cause::DisabledByLocal as i32);
+    assert_eq!(reject.group_identity, Some(group_identity()));
+    assert!(bob.with_store(|store| store.sessions.is_empty() && store.statuses.is_empty()));
+
+    // A Reject or Terminate of hers is no reason to answer back.
+    let _ = bob.receive(&alice, &controls[0], 43);
+    assert!(bob.take_controls().is_empty());
+    assert!(bob.with_store(|store| store.statuses.is_empty()));
+
+    // Nor is a plain message anything to warn about.
+    check_message_without_fs(&bob.fs, alice.id, 0x01).unwrap();
+    assert!(bob.with_store(|store| store.statuses.is_empty()));
+
+    // Alice drops the session; the message can go out again.
+    let _ = alice.receive(&bob, &controls[0], 44);
+    assert!(alice.with_store(|store| store.sessions.is_empty()));
+}
+
+#[test]
 fn tampered_message_is_rejected_and_session_dropped() {
     let mut alice = alice();
     let mut bob = bob();

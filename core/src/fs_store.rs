@@ -325,6 +325,10 @@ mod tests {
 
     impl Party {
         fn new(id: &str, key: [u8; 32], peer: (&str, [u8; 32])) -> Self {
+            Self::build(id, key, peer, false)
+        }
+
+        fn build(id: &str, key: [u8; 32], peer: (&str, [u8; 32]), fs_off: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let store = Rc::new(Store::open(&dir.path().join("t.db"), &[4; 32]).unwrap());
             let id = ThreemaId::try_from(id).unwrap();
@@ -346,6 +350,7 @@ mod tests {
                         my_identity: id,
                         events: Rc::clone(&events),
                     }))),
+                    fs_answering_only: fs_off,
                 },
                 d2x: None,
                 shortcut: Box::new(NoShortcuts),
@@ -684,6 +689,37 @@ mod tests {
         block(&bob, &alice);
         let plain = plain_text(&alice, &bob);
         assert_eq!(statuses(&mut bob, plain), Vec::new());
+    }
+
+    #[test]
+    fn with_forward_security_off_a_message_is_rejected_so_that_it_can_be_sent_again() {
+        let (alice_key, bob_key) = ([1; 32], [2; 32]);
+        let mut alice = Party::new("ABCD1234", alice_key, ("EFGH5678", bob_key));
+        let mut bob = Party::build("EFGH5678", bob_key, ("ABCD1234", alice_key), true);
+
+        // A contact with our old feature mask: Init and message, neither of them readable here.
+        let (texts, replies) = bob.receive(&alice, first_message(&alice, &bob));
+        assert!(texts.is_empty());
+        assert_eq!(replies.len(), 1, "only the message gets an answer");
+        assert_eq!(session_count(&bob, &alice), 0);
+
+        // It ends her session and tells her connection that the message was rejected.
+        assert_eq!(session_count(&alice, &bob), 1);
+        let reject = replies.into_iter().next().unwrap();
+        let found = statuses(&mut alice, reject);
+        assert!(matches!(
+            found.as_slice(),
+            [FsStatus::MessageRejected {
+                session_known: true,
+                ..
+            }]
+        ));
+        assert_eq!(session_count(&alice, &bob), 0);
+
+        // Sent again without forward secrecy, it arrives.
+        let plain = plain_text(&alice, &bob);
+        let (texts, _) = bob.receive(&alice, vec![plain]);
+        assert_eq!(texts, vec!["plain".to_owned()]);
     }
 
     #[test]
