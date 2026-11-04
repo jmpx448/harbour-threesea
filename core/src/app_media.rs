@@ -169,9 +169,10 @@ impl Store {
     }
 
     /// Delete the messages that reached this device before `before` (ms), except starred ones,
-    /// status lines, messages still on their way out and polls that are still open (Android's
-    /// auto-delete keeps those two as well: a message nobody has seen and a vote still running
-    /// are not old news). Returns how many.
+    /// messages still on their way out and polls that are still open (Android's auto-delete keeps
+    /// those two as well: a message nobody has seen and a vote still running are not old news).
+    /// Status lines go by the same rule, as on Android: who called when is what someone setting
+    /// a period for privacy wants gone. Returns how many.
     ///
     /// Age by arrival, as on Android: an incoming `created_at` is the sender's clock, which could
     /// make a late or backdated message vanish before anyone saw it. Rows with no arrival time
@@ -188,7 +189,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         Ok(self.conn.execute(
             "DELETE FROM messages
-             WHERE COALESCE(received_at, created_at) < ?1 AND starred = 0 AND kind != 'status'
+             WHERE COALESCE(received_at, created_at) < ?1 AND starred = 0
                AND NOT (outgoing = 1 AND state = ?2)
                AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
                AND NOT (?3 AND conversation IN
@@ -1884,8 +1885,20 @@ mod tests {
             )
             .unwrap();
         arrived_when_written(&store);
+        // A call long ago: its status line goes with the rest.
+        let call = store
+            .insert_status("AAAAAAAA", "call|finished|1|65")
+            .unwrap()
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+                params![old, call.id],
+            )
+            .unwrap();
 
-        assert_eq!(store.delete_messages_before(now - 1, false).unwrap(), 2);
+        assert_eq!(store.delete_messages_before(now - 1, false).unwrap(), 3);
         let left: Vec<String> = store
             .conversation_messages("AAAAAAAA", 50)
             .unwrap()
