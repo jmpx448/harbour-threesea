@@ -133,9 +133,9 @@ pub fn file_keys(file: &FileMessage) -> FileKeys {
 
 impl Store {
     /// File messages that reached this device before `before` (ms) whose file is on the device
-    /// and can come back: not starred, not still on their way out (their upload reads the file),
-    /// and with a blob. A list's own copy or an unsent imported file has none, so its bytes here
-    /// are the only ones. Age by arrival: an incoming `created_at` is the sender's clock.
+    /// and may still be on a server: not starred, not still on their way out (their upload reads
+    /// the file), and with a blob. A list's own copy or an unsent imported file has none, so its
+    /// bytes here are the only ones. Age by arrival: an incoming `created_at` is the sender's clock.
     pub fn files_before(&self, before: i64) -> Result<Vec<i64>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT id FROM messages WHERE kind = 'file' AND starred = 0
@@ -156,7 +156,7 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The user removed a message's file to free space: it can be fetched again, on request only.
+    /// The user removed a message's file to free space: a fetch, on request only, may bring it back.
     pub fn set_file_cleaned(&self, message: i64) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE messages
@@ -1075,8 +1075,9 @@ impl App {
     }
 
     /// `cleanUp` (Android's storage management): older than `days` (0: everything), starred
-    /// messages kept. Media only: the files go (thumbnails stay, the file can be downloaded
-    /// again while the server still has it); messages: the messages and their media go.
+    /// messages kept. Media only: the files go (thumbnails stay; a download can bring a file back
+    /// only while the server still has it, and a received 1:1 file was marked done at its first
+    /// download); messages: the messages and their media go.
     pub(crate) fn clean_up(&mut self, days: u32, messages: bool) -> Result<Value, ApiError> {
         let before = if days == 0 {
             i64::MAX
@@ -2367,8 +2368,8 @@ mod tests {
         assert!(!cleaned.contains(&unsent.id));
     }
 
-    /// The clean-up promises that a file can be fetched again: one with no blob stays, a list's
-    /// own copy and a file without keys alike, since a tap could bring nothing back.
+    /// Clean up takes only files a server may still have: one with no blob stays, a list's own
+    /// copy and a file without keys alike, since nothing could ever bring it back.
     #[test]
     fn cleaning_up_leaves_what_could_not_come_back() {
         let dir = tempfile::tempdir().unwrap();

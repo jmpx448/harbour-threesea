@@ -232,7 +232,7 @@ Page {
                 label: qsTrId("threesea-la-keep-messages")
                 options: page.keepNames
                 choice: Math.max(0, page.keepDays.indexOf(page.media.autoDeleteDays || 0))
-                //% "Older messages are deleted by themselves, with their media. Starred messages, open polls and messages still on their way stay."
+                //% "Messages older than the chosen time are deleted by themselves, with their media. Starred messages, open polls, messages still on their way and groups with only you in them stay."
                 description: qsTrId("threesea-la-keep-messages-description")
                 onChosen: page.chooseKeepDays(page.keepDays[index])
             }
