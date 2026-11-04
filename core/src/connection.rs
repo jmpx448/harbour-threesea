@@ -18,7 +18,9 @@ use libthreema::{
     },
     csp::{
         CspProtocol, CspProtocolContextInit, CspProtocolInstruction, CspStateUpdate,
-        payload::{EchoPayload, IncomingPayload, MessageWithMetadataBox, OutgoingPayload},
+        payload::{
+            EchoPayload, IncomingPayload, MessageAck, MessageWithMetadataBox, OutgoingPayload,
+        },
     },
     csp_e2e::{
         CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, CspE2eProtocolError, D2mRole,
@@ -309,11 +311,47 @@ pub struct ConnectionSetup {
     pub client_info: ClientInfo,
     /// Feature mask lookups for forward secrecy's sake; outlive a connection.
     pub fs_mask_checks: FsMaskChecks,
-    /// The store failed on the last connection, and the UI has been told.
-    pub storage_failing: core::cell::Cell<bool>,
+    /// Where the store is failing; the UI has been told.
+    pub storage_failing: StorageFailing,
     /// Answers to what has been received that the last connection couldn't send
     /// ([`waits_for_the_next_connection`]).
     pub carried_events: RefCell<Vec<CoreEvent>>,
+}
+
+/// What was being done when the store failed. Each of these has its own way of showing that it
+/// works again, and only that may end the notice: a multi-device login, for one, runs through the
+/// mediator's queue every time and only then comes to the chat server's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageStep {
+    /// Handling what the chat server sent. Over when a message got through or its queue is empty.
+    Incoming,
+    /// Applying what another device reflected. Over when one got applied or the queue is empty.
+    Reflected,
+    /// Anything else. Over when a connection gets through what it does at the start.
+    Other,
+}
+
+/// Which of the [`StorageStep`]s the store is failing in.
+#[derive(Default)]
+pub struct StorageFailing(core::cell::Cell<[bool; 3]>);
+
+impl StorageFailing {
+    /// Whether this is the first failure of a streak.
+    fn failed(&self, step: StorageStep) -> bool {
+        let mut failing = self.0.get();
+        let first = !failing.contains(&true);
+        failing[step as usize] = true;
+        self.0.set(failing);
+        first
+    }
+
+    /// Whether this ended the streak.
+    fn works(&self, step: StorageStep) -> bool {
+        let mut failing = self.0.get();
+        let was_failing = core::mem::take(&mut failing[step as usize]);
+        self.0.set(failing);
+        was_failing && !failing.contains(&true)
+    }
 }
 
 /// When a contact's feature mask was last looked up for forward secrecy's sake, and whether we can
@@ -377,16 +415,25 @@ enum ConnectionError {
     MediatorClosed { code: u16, reason: String },
     /// Our store failed (SQLite's code): nothing the network can help with.
     #[error("storage failed ({code})")]
-    Storage { code: i32 },
+    Storage { code: i32, step: StorageStep },
 }
 
 fn storage_error(error: crate::store::StoreError) -> ConnectionError {
     ConnectionError::Storage {
         code: error.sqlite_code(),
+        step: StorageStep::Other,
     }
 }
 
 impl ConnectionError {
+    /// If the store failed: while doing this.
+    fn while_doing(self, step: StorageStep) -> Self {
+        match self {
+            Self::Storage { code, .. } => Self::Storage { code, step },
+            other => other,
+        }
+    }
+
     /// What failed was the connection, not what it was doing: that can be done on the next one.
     /// (Anything else could fail the same way every time, and end every connection.)
     fn is_connection_lost(&self) -> bool {
@@ -487,7 +534,10 @@ fn d2m_name(payload: &D2mIncoming) -> &'static str {
 fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
     let error = error.to_string();
     match crate::providers::storage_code(&error) {
-        Some(code) => ConnectionError::Storage { code },
+        Some(code) => ConnectionError::Storage {
+            code,
+            step: StorageStep::Other,
+        },
         None => ConnectionError::Protocol(error),
     }
 }
@@ -635,8 +685,9 @@ fn note_storage_failure(
     setup: &ConnectionSetup,
     tx: &mpsc::UnboundedSender<FromConnection>,
     code: i32,
+    step: StorageStep,
 ) {
-    if setup.storage_failing.replace(true) {
+    if !setup.storage_failing.failed(step) {
         tracing::info!(code, "storage still failing");
     } else {
         tracing::error!(code, "storage failed while connected");
@@ -705,8 +756,8 @@ pub async fn run(
                 backoff = HOLD_OFF;
             }
             // No use trying harder.
-            Err(ConnectionError::Storage { code }) => {
-                note_storage_failure(&setup, &tx, code);
+            Err(ConnectionError::Storage { code, step }) => {
+                note_storage_failure(&setup, &tx, code, step);
                 backoff = backoff.max(STORAGE_BACKOFF);
             }
             Err(error) => tracing::info!(%error, "chat server connection lost"),
@@ -880,6 +931,7 @@ impl<'a> Session<'a> {
         session.terminate_fs_if_pending().await?;
         session.reflect_queued_syncs().await?;
         session.send_pending().await?;
+        session.storage_works(StorageStep::Other);
         session.payload_loop(rx).await
     }
 
@@ -2197,9 +2249,9 @@ impl<'a> Session<'a> {
         self.after_incoming().await
     }
 
-    /// What came in could be stored: if the store was failing, that is over.
-    fn storage_works(&self) {
-        if self.setup.storage_failing.replace(false) {
+    /// This step went fine: if the store was failing in it, that is over.
+    fn storage_works(&self, step: StorageStep) {
+        if self.setup.storage_failing.works(step) {
             tracing::info!("storage works again");
             self.emit(CoreEvent::StorageProblem { active: false });
         }
@@ -2554,11 +2606,12 @@ impl<'a> Session<'a> {
                 crate::reflected::apply_once(&store, self.setup.identity, opened, &self.events)
             });
         match applied {
-            Ok(()) => self.storage_works(),
+            Ok(()) => self.storage_works(StorageStep::Reflected),
             // Unacknowledged, it comes again at the next login: this is its only way here.
             Err(error) if error.storage_code().is_some() => {
                 return Err(ConnectionError::Storage {
                     code: error.storage_code().unwrap_or_default(),
+                    step: StorageStep::Reflected,
                 });
             }
             Err(error) => tracing::warn!(
@@ -2910,7 +2963,7 @@ impl<'a> Session<'a> {
                 // The backlog is in, read updates included: what is still unread notifies.
                 self.reflection_backlog = false;
                 self.release_held_notifications(true);
-                self.storage_works();
+                self.storage_works(StorageStep::Reflected);
             }
             // Only the leader receives from the chat server (Android's MonitoringLayer).
             D2mIncoming::RolePromotedToLeader => {
@@ -3123,7 +3176,7 @@ impl<'a> Session<'a> {
             }
             IncomingPayload::QueueSendComplete => {
                 tracing::debug!("message queue drained");
-                self.storage_works();
+                self.storage_works(StorageStep::Incoming);
             }
             // Like Android's TaskManager: warn (unless our own cookie is new) and clear the
             // server's flag. Left set, every login of every device in the group gets it again
@@ -3156,6 +3209,25 @@ impl<'a> Session<'a> {
         &mut self,
         message: MessageWithMetadataBox,
     ) -> Result<(), ConnectionError> {
+        let ack = self
+            .run_incoming_task(message)
+            .await
+            .map_err(|error| error.while_doing(StorageStep::Incoming))?;
+        self.storage_works(StorageStep::Incoming);
+        // It's in the store by now: before anything that can fail on the network.
+        self.emit_stored_message_events();
+        if let Some(ack) = ack {
+            self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
+        }
+        self.after_incoming().await
+    }
+
+    /// libthreema's incoming message task, to its end. What is left to do is the acknowledgement,
+    /// if any.
+    async fn run_incoming_task(
+        &mut self,
+        message: MessageWithMetadataBox,
+    ) -> Result<Option<MessageAck>, ConnectionError> {
         let (sender, message_id) = (message.sender_identity.to_string(), message.id.0);
         let mut task = self.e2e.handle_incoming_message(message);
         let result = loop {
@@ -3228,13 +3300,7 @@ impl<'a> Session<'a> {
                 .reflection_done(&sender, message_id)
                 .map_err(storage_error)?;
         }
-        self.storage_works();
-        // It's in the store by now: before anything that can fail on the network.
-        self.emit_stored_message_events();
-        if let Some(ack) = result.outgoing_message_ack {
-            self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
-        }
-        self.after_incoming().await
+        Ok(result.outgoing_message_ack)
     }
 
     /// Look up group members we have no contact for (`app_groups::resolve_members`) and send
@@ -3957,7 +4023,7 @@ mod sync_order_tests {
             device_cookie: DeviceCookie([1; 16]),
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
-            storage_failing: core::cell::Cell::default(),
+            storage_failing: StorageFailing::default(),
             carried_events: RefCell::default(),
         };
         let mut fs = StoreFs {
@@ -4347,12 +4413,14 @@ mod sync_order_tests {
             )
             .unwrap();
 
-        let Err(ConnectionError::Storage { code }) = session.handle_incoming(message).await else {
+        let Err(ConnectionError::Storage { code, step }) = session.handle_incoming(message).await
+        else {
             panic!("expected a storage failure");
         };
         assert_ne!(code, 0, "SQLite's code");
-        note_storage_failure(&setup, &tx, code);
-        note_storage_failure(&setup, &tx, code);
+        assert_eq!(step, StorageStep::Incoming);
+        note_storage_failure(&setup, &tx, code, step);
+        note_storage_failure(&setup, &tx, code, step);
         assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
 
         setup
@@ -4365,6 +4433,56 @@ mod sync_order_tests {
         let error = session.handle_incoming(again).await.unwrap_err();
         assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
         assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+    }
+
+    /// A multi-device login runs through the mediator's queue before it gets to the chat server. If
+    /// that is where the store fails, the end of that queue says nothing about it: without this the
+    /// notice would go and come back at every attempt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_what_failed_ends_a_storage_notice() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let queue_dry = D2mIncoming::ReflectionQueueDry;
+
+        note_storage_failure(&setup, &tx, 13, StorageStep::Incoming);
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
+        session.handle_d2m(queue_dry).await.unwrap();
+        session.storage_works(StorageStep::Other);
+        session.storage_works(StorageStep::Reflected);
+        assert!(storage_notices(&sent_to_ui(&mut rx)).is_empty());
+
+        // Another step failing too is the same streak, and it lasts until both work.
+        note_storage_failure(&setup, &tx, 13, StorageStep::Reflected);
+        assert!(storage_notices(&sent_to_ui(&mut rx)).is_empty());
+        session
+            .handle_d2m(D2mIncoming::ReflectionQueueDry)
+            .await
+            .unwrap();
+        assert!(storage_notices(&sent_to_ui(&mut rx)).is_empty());
+        session
+            .handle_instruction(CspProtocolInstruction {
+                state_update: None,
+                outgoing_frame: None,
+                incoming_payload: Some(IncomingPayload::QueueSendComplete),
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+
+        // On the mediator's side, the end of its queue is the sign.
+        note_storage_failure(&setup, &tx, 13, StorageStep::Reflected);
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
+        session
+            .handle_d2m(D2mIncoming::ReflectionQueueDry)
+            .await
+            .unwrap();
         assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
     }
 
@@ -4531,7 +4649,11 @@ mod sync_order_tests {
         ));
         let lost = ConnectionError::Io(std::io::ErrorKind::ConnectionReset.into());
         assert!(lost.is_connection_lost());
-        assert!(!ConnectionError::Storage { code: 13 }.is_connection_lost());
+        let storage = ConnectionError::Storage {
+            code: 13,
+            step: StorageStep::Other,
+        };
+        assert!(!storage.is_connection_lost());
     }
 
     /// With other devices, the connection can die while waiting for the mediator to confirm a
@@ -4744,7 +4866,7 @@ mod sync_order_tests {
             device_cookie: DeviceCookie([1; 16]),
             client_info: app.version.client_info(),
             fs_mask_checks: FsMaskChecks::default(),
-            storage_failing: core::cell::Cell::default(),
+            storage_failing: StorageFailing::default(),
             carried_events: RefCell::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
