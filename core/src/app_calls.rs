@@ -784,11 +784,15 @@ mod tests {
         assert!(app.call_state()["call"].is_null());
     }
 
-    /// Removing the ID ends the call, tells the caller and the UI's engine, and the next ID's
-    /// first call isn't refused because of the old one.
+    /// Removing the ID ends the call and tells the UI's engine. The caller is told while the
+    /// contact is still there, or the signal can't be encoded; the next ID's first call isn't
+    /// refused because of the old one.
     #[tokio::test(flavor = "current_thread")]
     async fn removing_the_id_ends_the_call() {
         let (_dir, mut app, mut rx) = app(true);
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ECHOECHO"))
+            .unwrap();
         let mut events = app.take_media_events().unwrap();
         let (kind, json) = offer(7);
         app.on_call_signal("ECHOECHO", kind, &json);
@@ -796,12 +800,28 @@ mod tests {
         sent(&mut rx);
         while events.try_recv().is_ok() {}
 
-        app.delete_all_data().await.unwrap();
+        let store = std::rc::Rc::clone(&app.store);
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let connection = tokio::task::spawn_local(async move {
+                    let Some(ToConnection::CallSignal { signal, .. }) = rx.recv().await else {
+                        panic!("the caller is not told");
+                    };
+                    assert!(matches!(signal, Signal::Reject { call_id: 7, .. }));
+                    let Some(ToConnection::Flush(reply)) = rx.recv().await else {
+                        panic!("the removal doesn't wait for it");
+                    };
+                    assert!(
+                        store.contact("ECHOECHO").unwrap().is_some(),
+                        "not wiped yet"
+                    );
+                    reply.send(()).unwrap();
+                });
+                app.delete_all_data().await.unwrap();
+                connection.await.unwrap();
+            })
+            .await;
 
-        assert!(matches!(
-            sent(&mut rx)[..],
-            [Signal::Reject { call_id: 7, .. }]
-        ));
         assert!(app.calls.current.is_none());
         assert!(app.call_patcher.is_none());
         assert!(

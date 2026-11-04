@@ -150,6 +150,8 @@ pub enum ToConnection {
         typing: bool,
         at: Instant,
     },
+    /// Answered once everything sent before this has been handled; dropped while disconnected.
+    Flush(oneshot::Sender<()>),
     /// Connect now if disconnected; if connected, verify the connection with an echo (15 s).
     Wake,
     /// Drop the connection and connect again at once (the server addresses changed).
@@ -2357,6 +2359,9 @@ impl<'a> Session<'a> {
                     Some(ToConnection::ReflectSync) => self.reflect_queued_syncs().await?,
                     Some(ToConnection::CallSignal { peer, signal }) => {
                         self.send_call_signal(&peer, &signal).await?;
+                    },
+                    Some(ToConnection::Flush(reply)) => {
+                        let _ = reply.send(());
                     },
                     Some(ToConnection::Devices(reply)) => {
                         let devices = self.devices().await;

@@ -71,6 +71,9 @@ impl Conversation {
     }
 }
 
+/// How long removing the ID waits for the connection to send a call's end.
+const CONNECTION_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl App {
     /// The conversation `identity` (a Threema ID or a group key) refers to, with its key.
     pub(crate) fn conversation(&self, identity: &str) -> Result<(String, Conversation), ApiError> {
@@ -476,6 +479,17 @@ impl App {
     pub(crate) fn stop_connection(&mut self) {
         self.connection = None;
         self.connection_state = "disconnected";
+    }
+
+    /// Wait until the connection has handled what it was told so far, within a short limit.
+    pub(crate) async fn connection_flushed(&self) {
+        if self.connection.is_none() {
+            return;
+        }
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.tell_connection(ToConnection::Flush(reply));
+        // Offline the answer is dropped at once; connecting or busy it may not come in time.
+        let _ = tokio::time::timeout(CONNECTION_FLUSH_LIMIT, answer).await;
     }
 
     pub(crate) fn tell_connection(&self, message: ToConnection) {

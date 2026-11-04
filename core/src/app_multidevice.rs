@@ -901,6 +901,10 @@ mod tests {
         let result = local
             .run_until(async {
                 let connection = tokio::task::spawn_local(async move {
+                    let Some(ToConnection::Flush(flushed)) = rx.recv().await else {
+                        panic!("no wait for what was queued");
+                    };
+                    flushed.send(()).unwrap();
                     let Some(ToConnection::DropDevices { ids: None, reply }) = rx.recv().await
                     else {
                         panic!("no request to remove all the others");

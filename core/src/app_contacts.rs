@@ -193,6 +193,8 @@ impl App {
         self.group_call_forget();
         // Paired browsers belong to this identity: none may carry over to the next one.
         self.web_stop_all();
+        // The call's end goes out now: once the contact is gone it can't be encoded any more.
+        self.connection_flushed().await;
         let linked_devices_remain = self.drop_linked_devices_for_removal().await;
         self.stop_connection();
         self.store.wipe()?;
