@@ -146,7 +146,9 @@ Not in libthreema (only the URL template); implemented in `core/src/safe/` after
 - Restore: license first (Libre), derive, download, decrypt, parse (reject version > 1),
   `identity/fetch_priv` for the server group, keep nickname/links. Contacts, then groups and
   lists, wait in `safe_pending_import` until imported (directory lookups) **and are carried into
-  new backups** meanwhile, so an automatic upload never drops them.
+  new backups** meanwhile, so an automatic upload never drops them. What the restore keeps goes
+  into the store in one transaction (the picture's files before it): killed half way, there is no
+  ID yet and the restore can simply be repeated.
 - Groups and lists (Android `getGroups`/`restoreGroups`, `…DistributionLists`): ids are
   lowercase hex of the **little-endian** 8 bytes (the wire order; list ids likewise from our
   `d:<u64>` key). Group `members` are all participants incl. the user while a member (we store

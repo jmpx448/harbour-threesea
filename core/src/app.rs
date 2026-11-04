@@ -2273,6 +2273,16 @@ impl App {
     ) -> Result<(), ApiError> {
         let private =
             directory::fetch_identity_private(&self.https, threema_id, client_key).await?;
+        self.store_adopted_identity(threema_id, client_key, private)
+    }
+
+    /// The local half of [`Self::adopt_identity`].
+    pub(crate) fn store_adopted_identity(
+        &self,
+        threema_id: &str,
+        client_key: &ClientKey,
+        private: directory::PrivateIdentityData,
+    ) -> Result<(), ApiError> {
         self.store.set_identity(&StoredIdentity {
             threema_id: threema_id.to_owned(),
             client_key: Zeroizing::new(*client_key.as_bytes()),

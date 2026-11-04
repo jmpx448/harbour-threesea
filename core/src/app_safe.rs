@@ -15,7 +15,7 @@ use crate::{
         backup::{self, Backup},
         server::{self, ServerError},
     },
-    store::keys,
+    store::{StoreError, keys},
 };
 
 impl From<ServerError> for ApiError {
@@ -361,41 +361,13 @@ impl App {
             .try_into()
             .map_err(|_| ApiError::SafeDamaged("backup private key invalid".into()))?;
         let client_key = ClientKey::from(client_key);
-        self.adopt_identity(&identity, &client_key).await?;
-
-        match backup.user.nickname.as_deref().filter(|n| !n.is_empty()) {
-            Some(nickname) => self.store.set_setting(keys::NICKNAME, nickname)?,
-            None => self.store.delete_setting(keys::NICKNAME)?,
-        }
-        self.restore_profile_picture(&backup.user)?;
-        if let Some(release) = &backup.user.profile_pic_release {
-            let (share, recipients) = crate::profile_pictures::from_safe_release(release);
-            self.store.set_picture_share(share)?;
-            self.store.set_picture_recipients(&recipients)?;
-        }
-        self.save_app_settings(&backup.settings)?;
-        // Contacts, then groups and lists, are imported below (lookups needed); until then they
-        // wait here and are carried into our own backups.
-        let pending = json!({
-            "contacts": backup.contacts,
-            "groups": backup.groups,
-            "distributionlists": backup.distributionlists,
-        });
-        self.store
-            .set_setting(keys::SAFE_PENDING_IMPORT, &pending.to_string())?;
-
-        // Keep Safe on with the same key; the server copy is current, so no immediate upload.
-        self.store
-            .set_setting(keys::SAFE_MASTER_KEY, &HEXLOWER.encode(key.as_bytes()))?;
-        self.store
-            .set_setting(keys::SAFE_LAST_UPLOAD, &now().to_string())?;
-        self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+        let private =
+            crate::directory::fetch_identity_private(&self.https, &identity, &client_key).await?;
+        let picture = self.restore_profile_picture(&backup.user);
+        self.store_restored(&identity, &client_key, private, &backup, &key, picture)?;
         if let Ok(config) = server::config(&self.https, &key).await {
             self.store_safe_limits(config)?;
         }
-        // A fresh restore starts a fresh import record.
-        self.store.delete_setting(keys::SAFE_IMPORT_SUMMARY)?;
-        self.store.delete_setting(keys::SAFE_IMPORT_ERROR)?;
         // Best effort now; failures are recorded and retried on reconnect, by maintenance and
         // on request.
         let events = self.try_pending_import().await;
@@ -460,25 +432,74 @@ impl App {
             .map(|jpeg| BASE64.encode(&jpeg))
     }
 
-    /// Our picture from a backup (Android `restoreUser`): stored as the picture and its Safe copy;
-    /// if it can't be decoded, forget about it.
-    fn restore_profile_picture(&self, user: &backup::User) -> Result<(), ApiError> {
-        if let Some(jpeg) = user
-            .profile_pic
+    /// Our picture from a backup (Android `restoreUser`), as the picture and its Safe copy: whether
+    /// that worked. If it can't be decoded, forget about it. Without a stored version the files
+    /// mean nothing, so a kill right after this leaves no picture behind.
+    fn restore_profile_picture(&self, user: &backup::User) -> bool {
+        user.profile_pic
             .as_deref()
             .and_then(|b64| BASE64.decode(b64.as_bytes()).ok())
             .filter(|jpeg| jpeg.starts_with(&[0xff, 0xd8]))
-        {
-            let stored = [
-                crate::profile_pictures::OWN_PICTURE,
-                crate::profile_pictures::OWN_PICTURE_SAFE,
-            ]
-            .iter()
-            .all(|name| self.media.write_picture(name, &jpeg).is_ok());
-            if stored {
-                self.store.bump_profile_picture_version()?;
-            }
+            .is_some_and(|jpeg| {
+                [
+                    crate::profile_pictures::OWN_PICTURE,
+                    crate::profile_pictures::OWN_PICTURE_SAFE,
+                ]
+                .iter()
+                .all(|name| self.media.write_picture(name, &jpeg).is_ok())
+            })
+    }
+
+    /// Everything a restore keeps, all or nothing. A kill or a full disk half way would leave an
+    /// ID without its contacts and with Safe off: nothing would say so, the restore page is gone
+    /// once there is an ID, and turning Safe on again would overwrite the good copy on the server.
+    fn store_restored(
+        &self,
+        identity: &str,
+        client_key: &ClientKey,
+        private: crate::directory::PrivateIdentityData,
+        backup: &Backup,
+        key: &MasterKey,
+        picture_stored: bool,
+    ) -> Result<(), ApiError> {
+        let transaction = self
+            .store
+            .conn
+            .unchecked_transaction()
+            .map_err(StoreError::from)?;
+        self.store_adopted_identity(identity, client_key, private)?;
+        match backup.user.nickname.as_deref().filter(|n| !n.is_empty()) {
+            Some(nickname) => self.store.set_setting(keys::NICKNAME, nickname)?,
+            None => self.store.delete_setting(keys::NICKNAME)?,
         }
+        if picture_stored {
+            self.store.bump_profile_picture_version()?;
+        }
+        if let Some(release) = &backup.user.profile_pic_release {
+            let (share, recipients) = crate::profile_pictures::from_safe_release(release);
+            self.store.set_picture_share(share)?;
+            self.store.set_picture_recipients(&recipients)?;
+        }
+        self.save_app_settings(&backup.settings)?;
+        // Contacts, then groups and lists, are imported afterwards (lookups needed); until then
+        // they wait here and are carried into our own backups.
+        let pending = json!({
+            "contacts": backup.contacts,
+            "groups": backup.groups,
+            "distributionlists": backup.distributionlists,
+        });
+        self.store
+            .set_setting(keys::SAFE_PENDING_IMPORT, &pending.to_string())?;
+        // Keep Safe on with the same key; the server copy is current, so no immediate upload.
+        self.store
+            .set_setting(keys::SAFE_MASTER_KEY, &HEXLOWER.encode(key.as_bytes()))?;
+        self.store
+            .set_setting(keys::SAFE_LAST_UPLOAD, &now().to_string())?;
+        self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+        // A fresh restore starts a fresh import record.
+        self.store.delete_setting(keys::SAFE_IMPORT_SUMMARY)?;
+        self.store.delete_setting(keys::SAFE_IMPORT_ERROR)?;
+        transaction.commit().map_err(StoreError::from)?;
         Ok(())
     }
 
@@ -1102,6 +1123,92 @@ mod tests {
         assert_eq!(links(&app), ["ab@example.org"]);
     }
 
+    /// An app without an ID, and what it restores.
+    fn restore_material(dir: &std::path::Path) -> (App, Backup, MasterKey) {
+        let app = app_with_identity(dir);
+        let mut backup = app.build_backup().unwrap();
+        backup.user.nickname = Some("julia".into());
+        backup.contacts = Some(vec![crate::contacts::to_backup(
+            &crate::contacts::test_contact("BBBBBBBB"),
+        )]);
+        app.store.wipe().unwrap();
+        (app, backup, MasterKey::from_bytes([1; 64]))
+    }
+
+    fn private_data() -> crate::directory::PrivateIdentityData {
+        crate::directory::PrivateIdentityData {
+            server_group: "a1".into(),
+            email: None,
+            mobile_no: None,
+        }
+    }
+
+    #[test]
+    fn a_restore_is_stored_all_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, backup, key) = restore_material(dir.path());
+        let client_key = ClientKey::from([5; 32]);
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap();
+        assert!(app.store.identity().unwrap().is_some());
+        let status = app.safe_status().unwrap();
+        assert_eq!(status["enabled"], true);
+        assert_eq!(status["restore"]["pendingContacts"], 1);
+        assert!(status["lastBackup"].is_number());
+        assert!(
+            app.store
+                .setting(keys::PROFILE_PICTURE_VERSION)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            app.store.setting(keys::NICKNAME).unwrap().as_deref(),
+            Some("julia")
+        );
+    }
+
+    #[test]
+    fn a_restore_that_cant_finish_leaves_no_id_so_it_can_be_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, backup, key) = restore_material(dir.path());
+        // The last write fails, as with a full disk.
+        app.store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER no_more BEFORE INSERT ON settings WHEN NEW.key = 'safe_last_upload'
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let client_key = ClientKey::from([5; 32]);
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap_err();
+        assert!(app.store.conn.is_autocommit(), "no transaction left open");
+        assert!(app.store.identity().unwrap().is_none());
+        for name in [
+            keys::NICKNAME,
+            keys::SAFE_PENDING_IMPORT,
+            keys::SAFE_MASTER_KEY,
+            keys::PROFILE_PICTURE_VERSION,
+        ] {
+            assert!(app.store.setting(name).unwrap().is_none(), "{name}");
+        }
+        // Once it works, the same restore goes through.
+        app.store
+            .conn
+            .execute_batch("DROP TRIGGER no_more;")
+            .unwrap();
+        app.store_restored(
+            "AAAAAAAA",
+            &client_key,
+            private_data(),
+            &backup,
+            &key,
+            false,
+        )
+        .unwrap();
+        assert!(app.store.identity().unwrap().is_some());
+    }
+
     #[test]
     fn turning_safe_off_says_whether_the_server_copy_went() {
         let dir = tempfile::tempdir().unwrap();
@@ -1363,7 +1470,7 @@ mod tests {
         assert!(!new.import_pending_groups().await.unwrap(), "nothing left");
 
         assert_eq!(backup.user.profile_pic, Some(BASE64.encode(&jpeg)));
-        new.restore_profile_picture(&backup.user).unwrap();
+        assert!(new.restore_profile_picture(&backup.user));
         assert_eq!(
             new.media
                 .read_picture(crate::profile_pictures::OWN_PICTURE)
@@ -1372,25 +1479,10 @@ mod tests {
                 .map(Vec::as_slice),
             Some(&jpeg[..])
         );
-        assert!(
-            new.store
-                .setting(keys::PROFILE_PICTURE_VERSION)
-                .unwrap()
-                .is_some()
-        );
         // Not a JPEG: ignored.
-        let other_dir = tempfile::tempdir().unwrap();
-        let other = new_app(other_dir.path());
         let mut user = backup.user.clone();
         user.profile_pic = Some(BASE64.encode(b"GIF89a"));
-        other.restore_profile_picture(&user).unwrap();
-        assert!(
-            other
-                .store
-                .setting(keys::PROFILE_PICTURE_VERSION)
-                .unwrap()
-                .is_none()
-        );
+        assert!(!new.restore_profile_picture(&user));
         assert_eq!(new.build_backup().unwrap().groups.unwrap().len(), 3);
     }
 
