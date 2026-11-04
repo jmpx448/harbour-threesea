@@ -439,12 +439,30 @@ struct Requeued {
 }
 
 /// Put a rejected message back in the queue, if it is ours to send again (only the store, no
-/// sending): a group message of ours, or the 1:1 message, which like on Android needs a new session.
+/// sending). With a group named it goes by that group, without one by the ID: a group message of
+/// ours for a member, or the 1:1 message, which like on Android needs a new session.
 fn requeue_rejected(
     store: &crate::store::Store,
+    user: &str,
     peer: &str,
     message_id: u64,
+    group_identity: Option<GroupIdentity>,
 ) -> Result<Requeued, crate::store::StoreError> {
+    if let Some(group_identity) = group_identity {
+        let rejected = crate::groups::message_rejected(
+            store,
+            user,
+            peer,
+            group_identity,
+            message_id,
+            &|identity| store.is_explicitly_blocked(identity),
+        )?;
+        return Ok(Requeued {
+            send: rejected.send,
+            resending: rejected.resending,
+            changed: Vec::new(),
+        });
+    }
     let in_group = store.requeue_group_receiver(peer, message_id)?;
     let changed = store.reset_outgoing(peer, message_id)?;
     let resending = in_group || !changed.is_empty();
@@ -1670,7 +1688,12 @@ impl<'a> Session<'a> {
                 // In the store before anything that can take a while or fail: the Reject has been
                 // acknowledged, and a message left "sent" now would be lost without a trace.
                 let mut requeued = Requeued::default();
-                if let FsStatus::MessageRejected { message_id, .. } = status {
+                if let FsStatus::MessageRejected {
+                    message_id,
+                    group_identity,
+                    ..
+                } = status
+                {
                     // Once per message and connection: a peer that rejects the re-send too
                     // would otherwise bounce the message back and forth without end — the
                     // second rejection leaves it failed for the user to resend by hand.
@@ -1686,8 +1709,14 @@ impl<'a> Session<'a> {
                             self.emit(CoreEvent::MessagesChanged(vec![failed]));
                         }
                     } else {
-                        requeued =
-                            requeue_rejected(&store, &peer, message_id).map_err(protocol_error)?;
+                        requeued = requeue_rejected(
+                            &store,
+                            &self.setup.identity.to_string(),
+                            &peer,
+                            message_id,
+                            group_identity,
+                        )
+                        .map_err(protocol_error)?;
                         if !requeued.changed.is_empty() {
                             self.emit(CoreEvent::MessagesChanged(core::mem::take(
                                 &mut requeued.changed,
@@ -3184,13 +3213,13 @@ mod fs_status_tests {
             .unwrap();
         assert!(store.pending_outgoing().unwrap().is_empty());
 
-        let requeued = requeue_rejected(&store, "ABCD1234", 7).unwrap();
+        let requeued = requeue_rejected(&store, "EFGH5678", "ABCD1234", 7, None).unwrap();
         assert!(requeued.send && requeued.resending);
         assert_eq!(requeued.changed.len(), 1);
         assert_eq!(store.pending_outgoing().unwrap().len(), 1);
 
         // What isn't ours to send: nothing to do, and no claim that it goes out.
-        let requeued = requeue_rejected(&store, "ABCD1234", 8).unwrap();
+        let requeued = requeue_rejected(&store, "EFGH5678", "ABCD1234", 8, None).unwrap();
         assert!(!requeued.send && !requeued.resending && requeued.changed.is_empty());
     }
 

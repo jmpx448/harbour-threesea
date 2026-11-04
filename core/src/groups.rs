@@ -548,8 +548,10 @@ impl Store {
         self.set_pending_receivers(key, message_id, receivers)
     }
 
-    /// `peer` rejected `message_id` (lost FS session): if it is one of our group messages (or a
-    /// group outbox entry), it has to get it again. Returns whether something was requeued.
+    /// `peer` rejected `message_id` without naming a group, as anyone does for a message we sent
+    /// without naming one: if it is one of our group messages (or a group outbox entry) in a
+    /// group `peer` is a member of, it has to get it again. Returns whether something was
+    /// requeued. Whoever isn't a member gets nothing this way, however old an ID they know.
     pub fn requeue_group_receiver(&self, peer: &str, message_id: u64) -> Result<bool, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT conversation FROM messages
@@ -560,15 +562,53 @@ impl Store {
         let conversations: Vec<String> = statement
             .query_map([message_id.cast_signed()], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
+        let mut requeued = false;
         for conversation in &conversations {
-            self.set_pending_receivers(conversation, message_id, &[peer.to_owned()])?;
-            self.conn.execute(
-                "UPDATE messages SET state = 0, sent_at = NULL WHERE conversation = ?1 AND outgoing = 1
-                     AND message_id = ?2 AND state = 1",
-                params![conversation, message_id.cast_signed()],
-            )?;
+            let member = self
+                .group(conversation)?
+                .is_some_and(|group| !group.left && group.members.iter().any(|m| m == peer));
+            if member {
+                self.requeue_for(conversation, peer, message_id)?;
+                requeued = true;
+            }
         }
-        Ok(!conversations.is_empty())
+        Ok(requeued)
+    }
+
+    /// Put a group message of ours back in the queue for `peer`.
+    fn requeue_for(
+        &self,
+        conversation: &str,
+        peer: &str,
+        message_id: u64,
+    ) -> Result<(), StoreError> {
+        self.set_pending_receivers(conversation, message_id, &[peer.to_owned()])?;
+        self.conn.execute(
+            "UPDATE messages SET state = 0, sent_at = NULL WHERE conversation = ?1 AND outgoing = 1
+                 AND message_id = ?2 AND state = 1",
+            params![conversation, message_id.cast_signed()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `message_id` is in this group's chat or its outbox: `Some(true)` if we sent it.
+    fn group_message_is_ours(
+        &self,
+        conversation: &str,
+        message_id: u64,
+    ) -> Result<Option<bool>, StoreError> {
+        let id = message_id.cast_signed();
+        let outgoing: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT outgoing FROM messages WHERE conversation = ?1 AND message_id = ?2
+                 UNION ALL SELECT 1 FROM outbox WHERE conversation = ?1 AND message_id = ?2
+                 ORDER BY 1 DESC LIMIT 1",
+                params![conversation, id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(outgoing)
     }
 
     /// `recently resynced` marks: `true` (and marked now) if not marked within the last hour.
@@ -826,43 +866,20 @@ fn receive_steps(
         _ => {}
     }
 
-    // Common Group Receive Steps. A group we don't know is none of a blocked creator's business:
-    // asking them would bring it back (ADR 0019).
-    let Some(mut group) = group else {
-        if !user_is_creator && !blocked(&creator)? {
-            sync_request(store, &key, &creator, &mut outcome)?;
-        }
+    let Some(mut group) = common_receive_steps(
+        store,
+        &key,
+        &creator,
+        user,
+        sender,
+        group,
+        from_sync,
+        blocked,
+        &mut outcome,
+    )?
+    else {
         return Ok(outcome);
     };
-    let reply_to = vec![sender.to_owned()];
-    if group.left && !from_sync {
-        if user_is_creator {
-            store.group_outbox_add(
-                &key,
-                &reply_to,
-                OUTBOX_GROUP_SETUP,
-                &json!({ "members": [] }),
-            )?;
-        } else {
-            store.group_outbox_add(&key, &reply_to, OUTBOX_GROUP_LEAVE, &json!({}))?;
-        }
-        outcome.send = true;
-        return Ok(outcome);
-    }
-    if !group.members.iter().any(|m| m == sender) && !from_sync {
-        if user_is_creator {
-            store.group_outbox_add(
-                &key,
-                &reply_to,
-                OUTBOX_GROUP_SETUP,
-                &json!({ "members": [] }),
-            )?;
-            outcome.send = true;
-        } else {
-            sync_request(store, &key, &creator, &mut outcome)?;
-        }
-        return Ok(outcome);
-    }
 
     let content = |kind: &str, body: String| -> Result<Option<Message>, StoreError> {
         store.insert_incoming_group(&key, sender, message_id, kind, &body, created_at)
@@ -1024,6 +1041,124 @@ fn status(
 ) -> Result<(), StoreError> {
     outcome.added.extend(store.insert_status(key, code)?);
     Ok(())
+}
+
+/// What to do after a Reject that names a group.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GroupReject {
+    /// Something was queued: send it.
+    pub send: bool,
+    /// The rejected message goes out again.
+    pub resending: bool,
+}
+
+/// `peer` rejected `message_id` in the group `identity` (`Reject` in csp-e2e-fs.proto): the
+/// _Common Group Receive Steps_ first, so that someone removed learns it from this too. A message
+/// we don't have is a sync request if the group is ours (the group's state may be what got lost),
+/// and one of ours goes out again to `peer`.
+pub fn message_rejected(
+    store: &Store,
+    user: &str,
+    peer: &str,
+    identity: GroupIdentity,
+    message_id: u64,
+    blocked: &dyn Fn(&str) -> Result<bool, StoreError>,
+) -> Result<GroupReject, StoreError> {
+    let key = key(&identity);
+    let creator = identity.creator_identity.to_string();
+    let mut outcome = GroupOutcome::default();
+    let group = store.group(&key)?;
+    let Some(group) = common_receive_steps(
+        store,
+        &key,
+        &creator,
+        user,
+        peer,
+        group,
+        false,
+        blocked,
+        &mut outcome,
+    )?
+    else {
+        return Ok(GroupReject {
+            send: outcome.send,
+            resending: false,
+        });
+    };
+    match store.group_message_is_ours(&key, message_id)? {
+        Some(true) => {
+            store.requeue_for(&key, peer, message_id)?;
+            Ok(GroupReject {
+                send: true,
+                resending: true,
+            })
+        }
+        // Someone else's: not for us to send.
+        Some(false) => Ok(GroupReject::default()),
+        None if creator == user && store.resync_allowed(&format!("{key}|{peer}"))? => {
+            send_state(store, &group, &[peer.to_owned()])?;
+            Ok(GroupReject {
+                send: true,
+                resending: false,
+            })
+        }
+        None => Ok(GroupReject::default()),
+    }
+}
+
+/// _Common Group Receive Steps_: the group, if `sender` is a member of one we are in. If not, what
+/// the protocol asks for in that case is queued: the creator gets a sync request (not a blocked
+/// creator, for a group we don't know: asking them would bring it back, ADR 0019), someone removed
+/// or left behind an empty setup or our leave.
+#[expect(clippy::too_many_arguments, reason = "the receive context")]
+fn common_receive_steps(
+    store: &Store,
+    key: &str,
+    creator: &str,
+    user: &str,
+    sender: &str,
+    group: Option<Group>,
+    from_sync: bool,
+    blocked: &dyn Fn(&str) -> Result<bool, StoreError>,
+    outcome: &mut GroupOutcome,
+) -> Result<Option<Group>, StoreError> {
+    let user_is_creator = creator == user;
+    let Some(group) = group else {
+        if !user_is_creator && !blocked(creator)? {
+            sync_request(store, key, creator, outcome)?;
+        }
+        return Ok(None);
+    };
+    let reply_to = vec![sender.to_owned()];
+    if group.left && !from_sync {
+        if user_is_creator {
+            store.group_outbox_add(
+                key,
+                &reply_to,
+                OUTBOX_GROUP_SETUP,
+                &json!({ "members": [] }),
+            )?;
+        } else {
+            store.group_outbox_add(key, &reply_to, OUTBOX_GROUP_LEAVE, &json!({}))?;
+        }
+        outcome.send = true;
+        return Ok(None);
+    }
+    if !group.members.iter().any(|m| m == sender) && !from_sync {
+        if user_is_creator {
+            store.group_outbox_add(
+                key,
+                &reply_to,
+                OUTBOX_GROUP_SETUP,
+                &json!({ "members": [] }),
+            )?;
+            outcome.send = true;
+        } else {
+            sync_request(store, key, creator, outcome)?;
+        }
+        return Ok(None);
+    }
+    Ok(Some(group))
 }
 
 /// _Group Sync Request Steps_ (we are not the creator).
@@ -2056,6 +2191,193 @@ mod tests {
 
         let outcome = run(&store, CREATOR, CREATOR, setup(&[]));
         assert!(outcome.change.user_state && !outcome.change.members);
+    }
+
+    fn own_group(creator: &str, members: &[&str]) -> Group {
+        Group {
+            key: key(&gid(creator)),
+            identity: gid(creator),
+            name: "Group".into(),
+            members: members.iter().map(|m| (*m).to_owned()).collect(),
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        }
+    }
+
+    /// A text of ours in the group, sent: its id.
+    fn sent_text(store: &Store, group: &Group) -> u64 {
+        let message_id: u64 = rand::random();
+        store
+            .conn
+            .execute(
+                "INSERT INTO messages
+                     (conversation, message_id, outgoing, kind, body, created_at, updated_at, state)
+                 VALUES (?1, ?2, 1, 'text', 'hi', 1, 1, 1)",
+                params![group.key, message_id.cast_signed()],
+            )
+            .unwrap();
+        message_id
+    }
+
+    fn rejected(store: &Store, peer: &str, creator: &str, message_id: u64) -> GroupReject {
+        message_rejected(store, USER, peer, gid(creator), message_id, &|m| {
+            Ok(m == BLOCKED)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_reject_without_a_group_only_requeues_for_members() {
+        let (_dir, store) = store();
+        let mut group = own_group(USER, &[BOB]);
+        store.upsert_group(&group).unwrap();
+        let message_id = sent_text(&store, &group);
+        let pending =
+            |store: &Store, group: &Group| store.pending_receivers(&group.key, message_id).unwrap();
+
+        // Someone who isn't a member, however they came by the ID.
+        assert!(
+            !store
+                .requeue_group_receiver("STRANGER", message_id)
+                .unwrap()
+        );
+        assert!(pending(&store, &group).is_empty());
+        assert_eq!(
+            store.pending_outgoing().unwrap().len(),
+            0,
+            "the message stays sent"
+        );
+
+        // A group we left is nobody's to ask.
+        group.left = true;
+        store.upsert_group(&group).unwrap();
+        assert!(!store.requeue_group_receiver(BOB, message_id).unwrap());
+
+        // A member gets it again.
+        group.left = false;
+        store.upsert_group(&group).unwrap();
+        assert!(store.requeue_group_receiver(BOB, message_id).unwrap());
+        assert_eq!(pending(&store, &group), vec![BOB.to_owned()]);
+        assert_eq!(store.pending_outgoing().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_reject_naming_the_group_goes_by_the_group() {
+        let (_dir, store) = store();
+        let group = own_group(USER, &[BOB]);
+        store.upsert_group(&group).unwrap();
+        let message_id = sent_text(&store, &group);
+
+        // Ours, to a member: out again, to them alone.
+        assert_eq!(
+            rejected(&store, BOB, USER, message_id),
+            GroupReject {
+                send: true,
+                resending: true,
+            }
+        );
+        assert_eq!(
+            store.pending_receivers(&group.key, message_id).unwrap(),
+            vec![BOB.to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_rejected_message_we_dont_have_is_a_sync_request_if_the_group_is_ours() {
+        let (_dir, store) = store();
+        store.upsert_group(&own_group(USER, &[BOB])).unwrap();
+        assert_eq!(
+            rejected(&store, BOB, USER, 1),
+            GroupReject {
+                send: true,
+                resending: false,
+            }
+        );
+        let kinds: Vec<_> = outbox_kinds(&store).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                OUTBOX_GROUP_SETUP,
+                OUTBOX_GROUP_NAME,
+                OUTBOX_GROUP_DELETE_PICTURE
+            ]
+        );
+        // Not once for each of a burst.
+        assert_eq!(rejected(&store, BOB, USER, 2), GroupReject::default());
+        assert_eq!(outbox_kinds(&store).len(), 3);
+    }
+
+    #[test]
+    fn a_rejected_message_we_dont_have_in_someone_elses_group_is_nothing_to_do() {
+        let (_dir, store) = store();
+        store
+            .upsert_group(&own_group(CREATOR, &[BOB, CREATOR]))
+            .unwrap();
+        assert_eq!(rejected(&store, BOB, CREATOR, 1), GroupReject::default());
+        assert!(outbox_kinds(&store).is_empty());
+    }
+
+    #[test]
+    fn someone_elses_message_is_not_ours_to_send_again() {
+        let (_dir, store) = store();
+        let group = own_group(CREATOR, &[BOB, CREATOR]);
+        store.upsert_group(&group).unwrap();
+        let message_id = sent_text(&store, &group);
+        store
+            .conn
+            .execute("UPDATE messages SET outgoing = 0", [])
+            .unwrap();
+        assert_eq!(
+            rejected(&store, BOB, CREATOR, message_id),
+            GroupReject::default()
+        );
+        assert!(
+            store
+                .pending_receivers(&group.key, message_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn someone_removed_learns_it_from_their_reject() {
+        let (_dir, store) = store();
+        let group = own_group(USER, &[BOB]);
+        store.upsert_group(&group).unwrap();
+        let message_id = sent_text(&store, &group);
+        assert_eq!(
+            rejected(&store, "STRANGER", USER, message_id),
+            GroupReject {
+                send: true,
+                resending: false,
+            }
+        );
+        assert!(
+            store
+                .pending_receivers(&group.key, message_id)
+                .unwrap()
+                .is_empty()
+        );
+        let last = store.outbox().unwrap().pop().unwrap();
+        assert_eq!(last.kind, OUTBOX_GROUP_SETUP);
+        assert_eq!(last.body["members"], json!([]));
+    }
+
+    #[test]
+    fn a_reject_for_a_group_we_dont_know_asks_its_creator_unless_blocked() {
+        let (_dir, store) = store();
+        assert_eq!(
+            rejected(&store, BOB, CREATOR, 1),
+            GroupReject {
+                send: true,
+                resending: false,
+            }
+        );
+        let (_dir, store) = self::store();
+        assert_eq!(rejected(&store, BOB, BLOCKED, 1), GroupReject::default());
+        assert!(outbox_kinds(&store).is_empty());
     }
 
     #[test]
