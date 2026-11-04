@@ -24,6 +24,8 @@ ListItem {
     property var olderMessage: null
     // The contact understands any emoji; otherwise only thumbs up/down (legacy reactions).
     property bool anyReaction: true
+    // Distribution lists have no reactions at all, not even the thumbs.
+    property bool canReact: true
 
     // The contact understands edits / deletions for everyone.
     property bool canEdit: false
@@ -142,7 +144,7 @@ ListItem {
                                                       && !item.unsent && item.canDelete && item.recent
             Row {
                 id: reactionRow
-                visible: !item.isStatus && !item.isDeleted
+                visible: item.canReact && !item.isStatus && !item.isDeleted
                 width: parent.width
                 // Threema's quick reactions, then any other emoji (Android's "+").
                 readonly property var quick: item.anyReaction

@@ -2594,6 +2594,7 @@ Page {
                 olderMessage: index + 1 < messages.count ? messages.get(index + 1) : null
                 showUnread: model.id === page.unreadMarkerId
                 anyReaction: page.contact.reactions !== false
+                canReact: !page.isList
                 senderName: page.isGroup && !model.outgoing && model.sender ? page.memberName(model.sender) : ""
                 canEdit: page.contact.canEdit === true
                 noAgeLimit: page.contact.isNotes === true
