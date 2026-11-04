@@ -87,8 +87,9 @@ ListItem {
 
     readonly property bool isDeleted: model.kind === "deleted"
     readonly property bool isEdited: (model.kind === "text" || isFile) && !!model.editedAt
-    // Ours, sent and young enough; messages nobody can have yet are simply changed or removed.
-    readonly property bool unsent: outgoing && (model.state === 0 || model.state === 4)
+    // Ours, sent and young enough; messages nobody can have yet are simply changed or removed. Once
+    // its send has begun someone may have it, even while one member keeps it pending.
+    readonly property bool unsent: outgoing && ((model.state === 0 && !model.writtenOut) || model.state === 4)
     readonly property bool recent: noAgeLimit || Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
 
     // Inner Repeaters have their own `model`.
