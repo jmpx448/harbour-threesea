@@ -455,6 +455,10 @@ A pinned chat or one with a draft stays listed when its last message goes. Other
 list; Android keeps every chat as an empty row, but a period chosen for privacy shouldn't leave a
 list of who wrote.
 
+Clean up takes private chats only while they are unlocked (it needs no PIN when the app lock is off).
+A period already set for Keep messages applies to them whether hidden or not, also a shorter one set
+while they are hidden.
+
 ## Share target (Sailfish OS, not Threema)
 
 - Sailfish.Share "app share methods": the `.desktop` file lists `X-Share-Methods=threesea` with a

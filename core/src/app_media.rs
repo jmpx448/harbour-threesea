@@ -144,12 +144,17 @@ impl Store {
     /// and may still be on a server: not starred, not still on their way out (their upload reads
     /// the file), and with a blob. A list's own copy or an unsent imported file has none, so its
     /// bytes here are the only ones. Age by arrival: an incoming `created_at` is the sender's clock.
-    pub fn files_before(&self, before: i64) -> Result<Vec<i64>, StoreError> {
+    pub fn files_before(
+        &self,
+        before: i64,
+        spare_chats: &[String],
+    ) -> Result<Vec<i64>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
             "SELECT id FROM messages WHERE kind = 'file' AND starred = 0
                AND {AGE_SQL} < :before
                AND json_extract(body, '$.fileState') = :local
                AND NOT (outgoing = 1 AND state = :pending)
+               AND conversation NOT IN (SELECT value FROM json_each(:spare_chats))
                AND EXISTS (SELECT 1 FROM files
                            WHERE files.message = messages.id AND files.blob_id IS NOT NULL)"
         ))?;
@@ -159,6 +164,7 @@ impl Store {
                 ":before": before,
                 ":local": STATE_LOCAL,
                 ":pending": crate::messages::OutgoingState::Pending as i64,
+                ":spare_chats": json!(spare_chats).to_string(),
             },
             |row| row.get(0),
         )?;
@@ -191,23 +197,29 @@ impl Store {
     /// `upload_target`). Keep messages does, like Android's auto-delete: nobody else has a copy
     /// of a notebook, and a period chosen for chats shouldn't eat it. Clean up doesn't, again like
     /// Android: there the user asks for this, now, in every chat.
+    ///
+    /// `spare_chats`: chats left out altogether (Clean up: private chats while they are hidden).
     pub fn delete_messages_before(
         &self,
         before: i64,
         spare_notes: bool,
+        spare_chats: &[String],
     ) -> Result<usize, StoreError> {
+        let spare_chats = json!(spare_chats).to_string();
         let old = format!(
             "{AGE_SQL} < :before AND starred = 0
              AND NOT (outgoing = 1 AND state = :pending)
              AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
              AND NOT (:spare_notes AND conversation IN
-                      (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))"
+                      (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))
+             AND conversation NOT IN (SELECT value FROM json_each(:spare_chats))"
         );
         let condition = named_params! {
             ":now": crate::messages::now_ms(),
             ":before": before,
             ":pending": crate::messages::OutgoingState::Pending as i64,
             ":spare_notes": spare_notes,
+            ":spare_chats": spare_chats,
         };
         let transaction = self.conn.unchecked_transaction()?;
         // A pinned chat or one with a draft stays in the list when its last row goes: otherwise
@@ -1112,15 +1124,22 @@ impl App {
     /// `cleanUp` (Android's storage management): older than `days` (0: everything), starred
     /// messages kept. Media only: the files go (thumbnails stay; a download can bring a file back
     /// only while the server still has it, and a received 1:1 file was marked done at its first
-    /// download); messages: the messages and their media go.
+    /// download); messages: the messages and their media go. Private chats only while they are
+    /// unlocked: changing what is hidden takes the PIN, and this command needs none when the app
+    /// lock is off. A period already set for Keep messages applies to them regardless.
     pub(crate) fn clean_up(&mut self, days: u32, messages: bool) -> Result<Value, ApiError> {
         let before = if days == 0 {
             i64::MAX
         } else {
             crate::messages::now_ms() - days_ms(days)
         };
+        let hidden = if self.unlocked {
+            Vec::new()
+        } else {
+            self.store.private_chats()?
+        };
         let removed = if messages {
-            let removed = self.delete_messages_with_media(before, false)?;
+            let removed = self.delete_messages_with_media(before, false, &hidden)?;
             // Someone asking for this wants the space, and sees the figure in Settings. Keep
             // messages doesn't do this: its free pages are soon reused, and nobody asked to wait.
             if removed > 0 {
@@ -1128,7 +1147,7 @@ impl App {
             }
             removed
         } else {
-            let ids = self.store.files_before(before)?;
+            let ids = self.store.files_before(before, &hidden)?;
             for id in &ids {
                 self.media.remove_part(*id, MediaPart::File);
                 self.store.set_file_cleaned(*id)?;
@@ -1144,8 +1163,11 @@ impl App {
         &self,
         before: i64,
         spare_notes: bool,
+        spare_chats: &[String],
     ) -> Result<usize, ApiError> {
-        let removed = self.store.delete_messages_before(before, spare_notes)?;
+        let removed = self
+            .store
+            .delete_messages_before(before, spare_notes, spare_chats)?;
         let store = Rc::clone(&self.store);
         self.media
             .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
@@ -1182,7 +1204,7 @@ impl App {
         if last <= now && now - last < 12 * 3_600_000 {
             return false;
         }
-        let removed = match self.delete_messages_with_media(now - days_ms(days), true) {
+        let removed = match self.delete_messages_with_media(now - days_ms(days), true, &[]) {
             Ok(removed) => removed,
             Err(error) => {
                 tracing::warn!(kind = error.kind(), "auto-delete failed");
@@ -1888,8 +1910,13 @@ mod tests {
             .unwrap()
             .unwrap();
         let week = 7 * 86_400_000;
-        assert!(store.files_before(now - week).unwrap().is_empty());
-        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 0);
+        assert!(store.files_before(now - week, &[]).unwrap().is_empty());
+        assert_eq!(
+            store
+                .delete_messages_before(now - week, false, &[])
+                .unwrap(),
+            0
+        );
         assert!(store.message(backdated.id).unwrap().is_some());
 
         // Dated ahead: it doesn't outstay the others either.
@@ -1904,7 +1931,12 @@ mod tests {
                 params![now - 2 * week, future.id],
             )
             .unwrap();
-        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 1);
+        assert_eq!(
+            store
+                .delete_messages_before(now - week, false, &[])
+                .unwrap(),
+            1
+        );
         assert!(store.message(future.id).unwrap().is_none());
 
         // Rows without an arrival time (ours, imported ones) go by their only clock.
@@ -1922,8 +1954,49 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 1);
+        assert_eq!(
+            store
+                .delete_messages_before(now - week, false, &[])
+                .unwrap(),
+            1
+        );
         assert!(store.message(own.id).unwrap().is_none());
+    }
+
+    /// Clean up leaves private chats alone while they are hidden, and doesn't count them: it needs
+    /// no PIN when the app lock is off. Unlocked, they are chats like any other.
+    #[test]
+    fn clean_up_leaves_hidden_private_chats_alone() {
+        let (_dir, mut app) = app();
+        let body = json!({"mediaType": "image/jpeg", "fileState": STATE_LOCAL}).to_string();
+        let mut files = Vec::new();
+        for (id, chat) in [(1, "AAAAAAAA"), (3, "BBBBBBBB")] {
+            let file = app
+                .store
+                .insert_incoming(chat, id, "file", &body, 1_000)
+                .unwrap()
+                .unwrap();
+            with_blob(&app.store, file.id, Some(1));
+            files.push(file.id);
+            app.store
+                .insert_incoming(chat, id + 1, "text", "old", 1_000)
+                .unwrap();
+        }
+        arrived_when_written(&app.store);
+        app.store.set_private("AAAAAAAA", true).unwrap();
+        assert!(!app.unlocked);
+
+        assert_eq!(app.clean_up(7, false).unwrap()["removed"], 1);
+        assert_eq!(state(&app.store, files[0], "fileState"), Some(STATE_LOCAL));
+        assert_eq!(state(&app.store, files[1], "fileState"), Some(STATE_REMOTE));
+        assert_eq!(app.clean_up(7, true).unwrap()["removed"], 2);
+        assert_eq!(app.store.message_count("AAAAAAAA").unwrap(), 2);
+        assert_eq!(app.store.message_count("BBBBBBBB").unwrap(), 0);
+
+        app.unlocked = true;
+        assert_eq!(app.clean_up(7, false).unwrap()["removed"], 1);
+        assert_eq!(app.clean_up(7, true).unwrap()["removed"], 2);
+        assert_eq!(app.store.message_count("AAAAAAAA").unwrap(), 0);
     }
 
     /// A pinned chat or one with a draft stays listed when its last message ages out, in the
@@ -1953,7 +2026,7 @@ mod tests {
         store.set_pinned("EEEEEEEE", true).unwrap();
         store.set_setting("draft:BBBBBBBB", "a thought").unwrap();
 
-        assert_eq!(store.delete_messages_before(5_000, false).unwrap(), 4);
+        assert_eq!(store.delete_messages_before(5_000, false, &[]).unwrap(), 4);
 
         let mut listed: Vec<(String, String, i64)> = store
             .conversations()
@@ -1999,7 +2072,12 @@ mod tests {
         let behind_but_old = insert(2, now - 2 * week, now - 365 * day);
         let ahead_of_now = insert(3, now + 365 * day, now - 2 * week);
         let small_skew = insert(4, now - 2 * week + 3_600_000, now - 2 * week);
-        assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 3);
+        assert_eq!(
+            store
+                .delete_messages_before(now - week, false, &[])
+                .unwrap(),
+            3
+        );
         assert!(store.message(behind).unwrap().is_some());
         for gone in [behind_but_old, ahead_of_now, small_skew] {
             assert!(store.message(gone).unwrap().is_none());
@@ -2054,7 +2132,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(store.delete_messages_before(now - 1, false).unwrap(), 3);
+        assert_eq!(
+            store.delete_messages_before(now - 1, false, &[]).unwrap(),
+            3
+        );
         let left: Vec<String> = store
             .conversation_messages("AAAAAAAA", 50)
             .unwrap()
@@ -2518,7 +2599,7 @@ mod tests {
                 crate::messages::OutgoingState::Sent,
             )
             .unwrap();
-        let cleaned = store.files_before(i64::MAX).unwrap();
+        let cleaned = store.files_before(i64::MAX, &[]).unwrap();
         assert_eq!(cleaned, vec![sent.id]);
         assert!(!cleaned.contains(&unsent.id));
     }
@@ -2542,7 +2623,7 @@ mod tests {
         let with_one = insert(3);
         with_blob(&store, without_blob, None);
         with_blob(&store, with_one, Some(1));
-        assert_eq!(store.files_before(i64::MAX).unwrap(), vec![with_one]);
+        assert_eq!(store.files_before(i64::MAX, &[]).unwrap(), vec![with_one]);
         assert_eq!(
             state(&store, without_keys, "fileState"),
             Some(STATE_LOCAL),
@@ -2575,8 +2656,8 @@ mod tests {
             with_blob(&store, message, Some(1));
         }
         arrived_when_written(&store);
-        assert_eq!(store.files_before(5_000).unwrap(), vec![old.id]);
-        assert_eq!(store.delete_messages_before(5_000, false).unwrap(), 2);
+        assert_eq!(store.files_before(5_000, &[]).unwrap(), vec![old.id]);
+        assert_eq!(store.delete_messages_before(5_000, false, &[]).unwrap(), 2);
         assert!(store.message(old.id).unwrap().is_none());
         assert!(store.message(starred.id).unwrap().is_some());
         assert!(store.message(recent.id).unwrap().is_some());

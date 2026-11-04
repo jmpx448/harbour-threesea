@@ -26,7 +26,7 @@ Dialog {
         qsTrId("threesea-me-older-all")
     ]
 
-    //% "Groups with only you in them are cleaned up too."
+    //% "Groups with only you in them are cleaned up too, and private chats while they are unlocked."
     readonly property string scopeText: qsTrId("threesea-me-clean-up-scope")
 
     SilicaFlickable {
