@@ -567,12 +567,18 @@ QString ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int r
     return out;
 }
 
-void ThreeseBackend::removeTempSources(quint64 id)
+void ThreeseBackend::removeTempSources(quint64 id, const QJSValue &callbackAnswer)
 {
+    // A callback that took a refused file back says so by returning its path. Anything else, such
+    // as the error of a function whose page has gone, keeps nothing: nothing stays for nobody.
+    const QString answer = callbackAnswer.isString() ? callbackAnswer.toString() : QString();
+    const QString kept = answer.startsWith(QLatin1String("file://")) ? QUrl(answer).toLocalFile() : answer;
     const QStringList paths = m_tempSources.values(id);
     m_tempSources.remove(id);
     for (const QString &path : paths) {
-        removeCapture(path);
+        if (path != kept) {
+            removeCapture(path);
+        }
     }
 }
 
@@ -889,11 +895,12 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
     }
     if (!error.isEmpty()) {
         // Nothing was sent, so nothing will answer and clean up after it.
-        removeTempSources(id);
+        QJSValue answer;
         QJSValue callback = m_callbacks.take(id);
         if (callback.isCallable()) {
-            callback.call(QJSValueList() << false << QJSValue() << QStringLiteral("internal") << error);
+            answer = callback.call(QJSValueList() << false << QJSValue() << QStringLiteral("internal") << error);
         }
+        removeTempSources(id, answer);
         return;
     }
     if (!m_core) {
@@ -1144,14 +1151,12 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         m_contacts->update(result.value(QStringLiteral("contacts")).toArray().toVariantList());
     }
 
-    // What the core has now read into its own store.
-    removeTempSources(id);
-
     const NativeCallback native = m_nativeCallbacks.take(id);
     if (native) {
         // On failure: the error's `kind` and `message`.
         native(ok, ok ? result.toVariantMap() : error.toVariantMap(), error.value(QStringLiteral("kind")).toString());
     }
+    QJSValue answer;
     QJSValue callback = m_callbacks.take(id);
     if (callback.isCallable()) {
         QJSValueList arguments;
@@ -1159,6 +1164,8 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         arguments << m_engine->toScriptValue(result.toVariantMap());
         arguments << QJSValue(error.value(QStringLiteral("kind")).toString());
         arguments << QJSValue(error.value(QStringLiteral("message")).toString());
-        callback.call(arguments);
+        answer = callback.call(arguments);
     }
+    // What the core has now read into its own store; a refused file only if nobody took it back.
+    removeTempSources(id, ok ? QJSValue() : answer);
 }

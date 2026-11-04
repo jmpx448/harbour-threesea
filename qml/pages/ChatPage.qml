@@ -536,6 +536,7 @@ Page {
     }
 
     function startQuote(message) {
+        if (attachment) return
         if (editingMessageId !== "") endEdit()
         var copy = JSON.parse(JSON.stringify(message))
         copy.senderName = senderNameOf(message)
@@ -737,6 +738,8 @@ Page {
         }
         if (list.length === attachments.length) return
         if (editingMessageId !== "") endEdit()
+        // A file can't carry a quote, and the next text shouldn't inherit it.
+        quoting = null
         attachments = list
         refocus.restart()
     }
@@ -785,23 +788,68 @@ Page {
         attachAll(files)
     }
 
+    // Files and their caption leave the input for the queue, and come back from it if the core
+    // refuses them. The caption stays in the stored draft on the way: the core takes it away
+    // when it accepts the file, so it survives the page and the app too.
     function sendAttachment() {
-        var caption = encodeMentions(page.inputField.text.trim())
-        composeMentions = {}
+        saveDraft()
+        // Should one have been started since a refused file came back: a file can't carry it.
+        quoting = null
+        var shown = page.inputField.text
+        var caption = encodeMentions(shown.trim())
         var queue = sendQueue.slice()
         for (var i = 0; i < attachments.length; ++i) {
             var file = attachments[i]
-            queue.push({ path: file.path, photo: file.photo, video: file.video, caption: i === 0 ? caption : "" })
+            queue.push({ path: file.path, photo: file.photo, video: file.video, name: file.name,
+                         caption: i === 0 ? caption : "" })
+            if (i === 0 && caption.length > 0) {
+                queue[queue.length - 1].shown = shown
+                queue[queue.length - 1].mentions = composeMentions
+                queue[queue.length - 1].draft = savedDraft
+                window.captionSent(identity, caption)
+            }
         }
         sendQueue = queue
         attachments = []
+        composeMentions = {}
         setInput("")
-        // Sent: no draft left, even if the app ends before the page saves it.
-        saveDraft()
         if (!sendingQueue) sendNext()
     }
+    // The core's answer for a file of the queue. Returns the path of a refused one, which stays
+    // picked: the bridge leaves that file in place (see removeTempSources).
+    function fileAnswered(file, ok, result, kind, message) {
+        if (ok) {
+            if (file.caption.length > 0 && savedDraft === file.draft) savedDraft = noDraft
+            page.addMessage(result)
+            draftSaver.restart()
+            return ""
+        }
+        Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+        attachments = [{ path: file.path, photo: file.photo, name: file.name, video: file.video === true }]
+                      .concat(attachments)
+        if (file.caption.length > 0) restoreCaption(file)
+        draftSaver.restart()
+        return file.path
+    }
+    // Before whatever has been typed since, where a refused caption's words were first.
+    function restoreCaption(file) {
+        var editing = editingMessageId !== ""
+        var map = editing ? beforeEdit.mentions : composeMentions
+        for (var tag in file.mentions) map[tag] = file.mentions[tag]
+        var typed = editing ? beforeEdit.text : inputField.text
+        var text = typed.length > 0 ? file.shown + "\n" + typed : file.shown
+        if (editing) {
+            beforeEdit.text = text
+        } else {
+            composeMentions = map
+            setInput(text)
+        }
+    }
+    // An answer can outlive the page: see window.fileAnswer.
+    property var pageAlive: ({ yes: true })
     function sendNow(file) {
-        backend.sendFile(identity, file.path, file.photo, file.caption)
+        backend.sendFile(identity, file.path, file.photo, file.caption,
+                         window.fileAnswer(page, pageAlive, identity, file))
     }
     function sendNext() {
         if (sendQueue.length === 0) {
@@ -813,17 +861,10 @@ Page {
         var file = queue.shift()
         sendQueue = queue
         if (file.video) {
-            videoPreparer.start(file.path, file.caption)
+            videoPreparer.start(file)
             return
         }
-        backend.sendFile(identity, file.path, file.photo, file.caption, function(ok, result, kind, message) {
-            if (ok) {
-                page.addMessage(result)
-            } else {
-                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-            }
-            page.sendNext()
-        })
+        sendNow(file)
     }
 
     // Voice messages: the send button records while the input is empty (Threema), a second tap
@@ -1188,14 +1229,20 @@ Page {
             groupCall = groupCalls.call(identity)
             groupCalls.refresh(identity)
         }
-        // The unsent text from last time, as it was: with its mentions and what it quotes (a
-        // shared/linked text set before wins).
+        loadDraft()
+    }
+    // The unsent text from last time, as it was: with its mentions and what it quotes (a
+    // shared/linked text set before wins).
+    function loadDraft() {
         backend.call("draft", { identity: identity }, function(ok, result) {
             page.draftLoaded = ok && !!page.inputField
             if (!page.draftLoaded || !result.text) return
             var quote = result.quote
             page.savedDraft = page.draftKey(result.text, quote ? quote.messageId : "")
             if (page.inputField.text.length > 0) return
+            // A caption still on its way with a file, sent before this page was opened: it comes
+            // back only if the core refuses that file (window.fileAnswer).
+            if (window.captionOnItsWay(page.identity, result.text.trim())) return
             page.rememberMentions(result.text, result.mentions)
             page.setInput(Fmt.withMentions(result.text, result.mentions))
             if (quote && !page.attachment) {
@@ -1222,7 +1269,7 @@ Page {
         var text = editing ? encodeMentions(beforeEdit.text, beforeEdit.mentions)
                            : encodeMentions(inputField.text)
         var quote = editing ? beforeEdit.quoting : quoting
-        if (!draftLoaded && text.length === 0) return
+        if (text.length === 0 && (!draftLoaded || window.captionOnItsWay(identity))) return
         var key = draftKey(text, quote ? quote.messageId : "")
         if (key === savedDraft) return
         savedDraft = key
@@ -1237,17 +1284,21 @@ Page {
     }
     onQuotingChanged: draftSaver.restart()
     Component.onDestruction: {
+        pageAlive.yes = false
         // Playing on is fine, the system's media controls have it; a paused message would only
         // stay in the way, and a private chat's is hidden with the chat.
         if (!voicePlayer.playing || isPrivate) voicePlayer.stop()
         voicePlayer.earpiece = false
         dropAttachments()
-        // Files still waiting to be sent go to the core at once; a video's thumbnail is made here,
-        // so a waiting video goes as a file.
-        for (var i = 0; i < sendQueue.length; ++i) sendNow(sendQueue[i])
+        // Files still waiting to be sent go to the core at once, in their order; a video's
+        // thumbnail is made here, so a waiting video goes as a file. A thumbnail still on its
+        // way finds the path empty, and doesn't send it twice.
         if (videoPreparer.path.length > 0) {
-            sendNow({ path: videoPreparer.path, photo: false, caption: videoPreparer.caption })
+            var preparing = videoPreparer.path
+            videoPreparer.path = ""
+            sendNow({ path: preparing, photo: false, caption: videoPreparer.file.caption })
         }
+        for (var i = 0; i < sendQueue.length; ++i) sendNow(sendQueue[i])
         saveDraft()
         stopTyping()
         // Going back to this same chat further down, that one is the open one already.
@@ -2234,7 +2285,7 @@ Page {
                 anyReaction: page.contact.reactions !== false
                 senderName: page.isGroup && !model.outgoing && model.sender ? page.memberName(model.sender) : ""
                 canEdit: page.contact.canEdit === true
-                canQuote: !page.isList
+                canQuote: !page.isList && !page.attachment
                 selectionMode: page.selecting
                 selected: page.selected[model.id] === true
                 onSelectToggled: page.toggleSelected(model.id)
@@ -2407,15 +2458,16 @@ Page {
         width: 512
         height: 512
         property string path
-        property string caption
+        // The sendQueue entry.
+        property var file
         property real seconds: 0
 
-        function start(path, caption) {
-            videoPreparer.path = path
-            videoPreparer.caption = caption
+        function start(entry) {
+            videoPreparer.path = entry.path
+            videoPreparer.file = entry
             seconds = 0
-            frame.path = path
-            durationProbe.source = path
+            frame.path = entry.path
+            durationProbe.source = entry.path
             giveUp.restart()
         }
         function finish(image) {
@@ -2423,19 +2475,10 @@ Page {
             var path = videoPreparer.path
             if (path.length === 0) return
             videoPreparer.path = ""
-            var done = function(ok, result, kind, message) {
-                if (ok) {
-                    page.addMessage(result)
-                } else {
-                    Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                }
-            }
-            var sent = function(ok, result, kind, message) {
-                done(ok, result, kind, message)
-                page.sendNext()
-            }
-            if (image) backend.sendVideo(page.identity, path, image, seconds, caption, sent)
-            else backend.sendFile(page.identity, path, false, caption, sent)
+            var entry = file
+            var sent = window.fileAnswer(page, page.pageAlive, page.identity, entry)
+            if (image) backend.sendVideo(page.identity, path, image, seconds, entry.caption, sent)
+            else backend.sendFile(page.identity, path, false, entry.caption, sent)
             frame.path = ""
             durationProbe.source = ""
         }

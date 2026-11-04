@@ -534,6 +534,35 @@ QtObject {
             }, 100],
             [function() { checkStack("conversations share") }, 0],
         ],
+        // A file's answer from the window: to the chat while it is there, and if it has gone
+        // nothing is kept (so the bridge removes the file), and its caption is off the list.
+        fileAnswerOutlivesChat: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var asked = []
+                var chat = {
+                    fileAnswered: function(file, ok) { asked.push(ok); return ok ? "" : file.path },
+                    sendNext: function() { asked.push("next") }
+                }
+                var alive = { yes: true }
+                var file = { path: "/cache/capture/a.jpg", caption: "a caption" }
+                window.captionSent("ABCD1234", "a caption")
+                check("on its way", window.captionOnItsWay("ABCD1234", "a caption"), true)
+                check("another", window.captionOnItsWay("ABCD1234", "another"), false)
+                check("any", window.captionOnItsWay("ABCD1234"), true)
+                check("other chat", window.captionOnItsWay("EFGH5678"), false)
+                var kept = window.fileAnswer(chat, alive, "ABCD1234", file)(false, {}, "messageTooLong", "")
+                check("taken back", kept, file.path)
+                check("told", asked.join(), "false,next")
+                check("answered", window.captionOnItsWay("ABCD1234"), false)
+                alive.yes = false
+                window.captionSent("ABCD1234", "a caption")
+                kept = window.fileAnswer(chat, alive, "ABCD1234", file)(false, {}, "messageTooLong", "")
+                check("nothing kept", kept, undefined)
+                check("chat not asked", asked.length, 2)
+                check("answered too", window.captionOnItsWay("ABCD1234"), false)
+            }, 0],
+        ],
         // A link's text for a private chat, set before the chat found out: it survives the PIN.
         linkTextToPrivateChat: [
             [function() { ready(false) }, 100],

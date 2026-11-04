@@ -322,6 +322,44 @@ ApplicationWindow {
         })
     }
 
+    // The captions on their way with their files, by chat. A chat can be closed and opened again
+    // meanwhile: the stored draft still holds such a caption, and it isn't a draft for now.
+    property var captionsOnTheirWay: ({})
+    function captionSent(identity, caption) {
+        var list = captionsOnTheirWay[identity] || []
+        list.push(caption)
+        captionsOnTheirWay[identity] = list
+    }
+    // This caption, or without one any at all.
+    function captionOnItsWay(identity, caption) {
+        var list = captionsOnTheirWay[identity] || []
+        return caption === undefined ? list.length > 0 : list.indexOf(caption) >= 0
+    }
+    // The answer to a file sent from a chat. Made here, not on the chat page: the answer may come
+    // after that page has gone, when nothing of the page can be relied on to run, and a refused
+    // file must still be said (`alive`: the page's own record of that). It returns the path of a
+    // file the page took back, so that the bridge leaves it in place (removeTempSources).
+    function fileAnswer(chat, alive, identity, file) {
+        return function(ok, result, kind, message) {
+            if (file.caption) {
+                var list = captionsOnTheirWay[identity] || []
+                var at = list.indexOf(file.caption)
+                if (at >= 0) list.splice(at, 1)
+            }
+            if (alive.yes) {
+                var kept = chat.fileAnswered(file, ok, result, kind, message)
+                chat.sendNext()
+                return kept
+            }
+            if (ok) return undefined
+            Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            // The chat, opened again meanwhile, left the caption alone until now.
+            var open = pageStack.find(function(page) { return page.identity === identity && page.loadDraft })
+            if (file.caption && open) open.loadDraft()
+            return undefined
+        }
+    }
+
     // Close the page holding a PIN (pushWithPin or the app lock settings; it and what it opened):
     // the next person gets the prompt again. Its PIN goes first, in case the stack can't pop right
     // now; settleStack takes the page away.

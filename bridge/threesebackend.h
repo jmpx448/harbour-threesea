@@ -380,7 +380,7 @@ private:
     void stopCore();
     void requestDataRemoval(const QString &pin);
     void dataRemovalRefused(const QVariantMap &error, const QString &kind);
-    void removeTempSources(quint64 id);
+    void removeTempSources(quint64 id, const QJSValue &callbackAnswer = QJSValue());
     QString startConfigJson() const;
 
     QJSEngine *m_engine;
