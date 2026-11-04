@@ -25,8 +25,13 @@ Dialog {
             spacing: Theme.paddingLarge
 
             DialogHeader {
-                //% "Link"
-                acceptText: qsTrId("threesea-he-link")
+                //% "Link Threema for Desktop"
+                title: qsTrId("threesea-he-link-desktop")
+                acceptText: dialog.code
+                            //% "Link"
+                            ? qsTrId("threesea-he-link")
+                            //% "Next"
+                            : qsTrId("threesea-he-link-next")
             }
 
             Label {
@@ -43,10 +48,19 @@ Dialog {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
+                color: Theme.highlightColor
+                //% "Threema for Desktop gets your Threema ID with its private key, your contacts and groups, and can read and send messages as you. Link only your own computer."
+                text: qsTrId("threesea-la-link-grant")
+            }
+
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                wrapMode: Text.Wrap
                 color: Theme.secondaryHighlightColor
                 font.pixelSize: Theme.fontSizeSmall
-                //% "While a device is linked, chats with your contacts use end-to-end encryption without Perfect Forward Secrecy. It comes back when you remove the last linked device."
-                text: qsTrId("threesea-la-link-pfs")
+                //% "While a device is linked, chats with your contacts use end-to-end encryption without Perfect Forward Secrecy. If it was on, it comes back when the last linked device is removed."
+                text: qsTrId("threesea-la-link-pfs-if-on")
             }
         }
     }

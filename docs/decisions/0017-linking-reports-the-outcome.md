@@ -1,5 +1,7 @@
 # 0017 — Linking and removing devices report what the mediator did
 
+Status: accepted (2026-11-04).
+
 ## Context
 
 Linking and unlinking inferred their result from a timer or the local step, not from the device

@@ -167,14 +167,19 @@ Page {
                 // Multi-device needs it off (the protocol's rule): the switch rests then.
                 //% "Forward secrecy"
                 text: qsTrId("threesea-la-forward-secrecy")
-                //% "Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts or resets."
-                description: qsTrId("threesea-la-forward-secrecy-description")
+                property bool linked: false
+                description: linked
+                             //% "Off while other devices are linked to this ID. Your choice here applies again when the last one is removed."
+                             ? qsTrId("threesea-la-forward-secrecy-linked")
+                             //% "Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts or resets."
+                             : qsTrId("threesea-la-forward-secrecy-description")
                 Component.onCompleted: refresh()
                 function refresh() {
                     backend.call("forwardSecurity", {}, function(ok, result) {
                         if (!ok) return
                         fsSwitch.checked = result.on
-                        fsSwitch.enabled = result.multiDevice !== true
+                        fsSwitch.linked = result.multiDevice === true
+                        fsSwitch.enabled = !fsSwitch.linked
                     })
                 }
                 onClicked: {

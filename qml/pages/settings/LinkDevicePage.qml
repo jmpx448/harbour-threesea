@@ -97,7 +97,9 @@ Page {
             armChoices.restart()
         })
     }
-    Component.onDestruction: if (step === "verify") backend.call("cancelLinking", {})
+    // Left before the check was answered: the link closes, in the core's turn if it is still
+    // connecting, and the computer doesn't wait at its emoji step.
+    Component.onDestruction: if (step === "connecting" || step === "verify") backend.call("cancelLinking", {})
 
     SilicaFlickable {
         anchors.fill: parent
@@ -173,6 +175,17 @@ Page {
                 //% "None of them"
                 text: qsTrId("threesea-me-link-no-match")
                 onClicked: page.pick(-1)
+            }
+
+            // The point of decision: the emojis confirm the computer, and this is what it gets.
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                visible: page.step === "verify"
+                wrapMode: Text.Wrap
+                color: Theme.secondaryHighlightColor
+                font.pixelSize: Theme.fontSizeSmall
+                text: qsTrId("threesea-la-link-grant")
             }
 
             Button {
