@@ -532,6 +532,7 @@ Port of Android's link handling (`AndroidManifest.xml` intent filters, `AppLinks
 | `threema://compose?id=&text=`, `https://go.threema.ch/compose?…`, `https://threema.id/compose?…` | write (no `id`: choose the chat) |
 | `threema://add?id=`, `https://go.threema.ch/add?id=` | add contact |
 | `threema://license?key=`, `https://go.threema.ch/license?key=` | license key (setup only) |
+| `threema://link_mobileno?code=` | the code of a pending phone link, digits only and at most 8 (`VerifyMobileNumberUseCase`); only from outside the app, never from a chat message |
 
 Parsing is `core/src/links.rs`. Sailfish side: the `.desktop` declares
 `x-scheme-handler/threema`, `x-url-handler/threema.id` and `x-url-handler/go.threema.ch`;

@@ -702,12 +702,25 @@ impl App {
     }
 
     /// `verifyMobile`: the SMS code.
-    pub(crate) async fn verify_mobile(&mut self, code: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn verify_mobile(
+        &mut self,
+        code: &str,
+        from_link: bool,
+    ) -> Result<Value, ApiError> {
+        // The SMS's link tapped twice, or after typing the code: it is confirmed (Android too).
+        if from_link
+            && self.store.setting(keys::LINKED_MOBILE_PENDING)?.is_none()
+            && self.store.setting(keys::LINKED_MOBILE)?.is_some()
+        {
+            return self.profile_json();
+        }
         let (number, id) = self.pending_mobile()?;
         crate::directory::verify_mobile(&self.https, &id, code.trim()).await?;
         self.store.set_setting(keys::LINKED_MOBILE, &number)?;
         self.store.delete_setting(keys::LINKED_MOBILE_PENDING)?;
         tracing::info!("phone link verified");
+        // Also from a link in the SMS, with a profile page open or not.
+        self.note_ui_events(&["profileChanged"]);
         self.profile_json()
     }
 

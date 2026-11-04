@@ -539,6 +539,23 @@ ApplicationWindow {
                 return
             }
             if (backend.state !== "ready") return
+            if (link.action === "verifyMobile") {
+                // Threema's SMS, opened from outside. Someone's message in a chat doesn't get to
+                // spend the attempts at a pending code.
+                if (fromMessage) return
+                activate()
+                backend.call("verifyMobile", { code: link.code, fromLink: true }, function(ok, profile, kind, message) {
+                    if (!ok) {
+                        Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        return
+                    }
+                    var top = pageStack.currentPage
+                    if (top && top.objectName === "mobileCode" && !pageStack.busy) top.reject()
+                    //% "Phone number confirmed"
+                    Notices.show(qsTrId("threesea-la-mobile-verified"), Notice.Long, Notice.Center)
+                })
+                return
+            }
             if (link.action === "compose" && !link.identity) {
                 showConversations()
                 pageStack.push(Qt.resolvedUrl("pages/SharePage.qml"), { text: link.text || "" },

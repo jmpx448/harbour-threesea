@@ -247,6 +247,9 @@ pub enum Command {
     /// The SMS code of a pending phone link.
     VerifyMobile {
         code: String,
+        /// From the link in Threema's SMS.
+        #[serde(default)]
+        from_link: bool,
     },
     /// Have Threema call and read the code instead.
     CallMobile,
@@ -1655,7 +1658,7 @@ impl App {
             Command::NormalizeMobile { number } => Ok(json!({
                 "number": crate::address_book::international_phone(&number),
             })),
-            Command::VerifyMobile { code } => self.verify_mobile(&code).await,
+            Command::VerifyMobile { code, from_link } => self.verify_mobile(&code, from_link).await,
             Command::CallMobile => self.call_mobile().await,
             Command::SetRevocationPassword { password, pin } => {
                 self.check_pin(pin)?;
@@ -3113,6 +3116,29 @@ mod tests {
             matches!(&refused, ApiError::Server(words) if words == "This key is used up."),
             "{refused:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_sms_link_says_confirmed_when_the_number_already_is() {
+        let (_dir, mut app) = licensed_app();
+        let link = r#"{"id":1,"cmd":"verifyMobile","code":"1234","fromLink":true}"#;
+        let typed = r#"{"id":2,"cmd":"verifyMobile","code":"1234"}"#;
+
+        // Nothing linked: there is nothing to confirm, whichever way the code came.
+        let reply: Value = serde_json::from_str(&app.handle(link).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "noVerification");
+
+        // Tapped twice, or after typing the code.
+        app.store
+            .set_setting(keys::LINKED_MOBILE, "41790000000")
+            .unwrap();
+        let reply: Value = serde_json::from_str(&app.handle(link).await).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["result"]["linkedMobile"], "41790000000");
+
+        // The dialog is only there with something pending, and keeps its error.
+        let reply: Value = serde_json::from_str(&app.handle(typed).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "noVerification");
     }
 
     #[test]

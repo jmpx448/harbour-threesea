@@ -101,7 +101,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `linkEmail` | `email` ("" unlinks) | profile (`linkedEmail`, `linkedEmailPending` until the link in the e-mail is opened; checked again on `profile` and in maintenance) |
 | `linkMobile` | `number` (with its country code, `+` or `00`; "" unlinks) | profile (`linkedMobilePending`: E.164 without `+` waiting for the SMS code; `linkedMobile` is empty meanwhile, as the server has dropped an old number); errors `phoneInvalid` |
 | `normalizeMobile` | `number` | `{number}`: what `linkMobile` would send, E.164 without `+`, or `null` if it can't be linked. No network |
-| `verifyMobile` | `code` | profile (`linkedMobile`); errors `noVerification`, server message for a wrong code |
+| `verifyMobile` | `code`, `fromLink?` (the SMS's link: an already linked number with nothing pending counts as done) | profile (`linkedMobile`); errors `noVerification`, server message for a wrong code |
 | `callMobile` | – | profile; Threema calls and reads the code |
 | `revocationStatus` | optional `cached` (no network: last known state) | `{set, setAt (ms or null), checked}` (`identity/check_revocation_key`) |
 | `setRevocationPassword` | `password` (8–256 chars), `pin` | revocation status; only base64(SHA-256(password)[0..4]) goes to the directory |
@@ -189,7 +189,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setChatTone` | `identity` (ID or group key), `tone` (path, empty or null: the tone of all chats) | `{}`; `locked` for a hidden private chat |
 | `importChatTones` | `tones` `{key: path}` | `{}`; the tones the app kept in its settings file until 0.2.0, also those of hidden private chats |
 | `exportChat` | `identity`, `media`, `directory`, `password?`, `me?`, `offsetMinutes?` | `{path, name, messages, files}`; a non-empty `password` under 8 characters: `passwordTooShort` |
-| `parseLink` | `url` | `{action: contact\|compose\|add\|license, identity, text, key}` or error `linkInvalid` (protocol-notes "Threema links") |
+| `parseLink` | `url` | `{action: contact\|compose\|add\|license\|verifyMobile, identity, text, key, code}` or error `linkInvalid` (protocol-notes "Threema links") |
 | `myQrCode` | – | `{text, size, modules}`: `3mid:<ID>,<public key hex>` and its QR modules (`size`² chars `0`/`1`) |
 | `verifyQrCode` | `text` | contact JSON; fully verified if the key matches, a new contact added only then (errors `qrInvalid`, `qrExpired`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |
 | `callTurnServers` | `identity` (who the call is with) | `{urls, username, password, relayOnly}` for the media engine (`identity/turn_cred`, cached until expiry; `relayOnly`: the peer is unverified or not a contact, or the setting `relayThreemaCalls` is on; then the dual-stack servers, like Android) |
