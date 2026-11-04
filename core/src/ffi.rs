@@ -238,7 +238,9 @@ pub unsafe extern "C" fn threesea_voice_decode(
     };
     match crate::voice::decode(&file) {
         Ok(pcm) => {
-            let boxed: Box<[u8]> = pcm.into_boxed_slice();
+            // An exact copy: shrinking the buffer could leave the audio in freed memory, and
+            // `pcm` is wiped when it goes.
+            let boxed: Box<[u8]> = pcm.to_vec().into_boxed_slice();
             // SAFETY: caller contract.
             unsafe { *out_len = boxed.len() };
             Box::into_raw(boxed).cast::<u8>()

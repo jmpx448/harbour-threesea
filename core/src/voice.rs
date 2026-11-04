@@ -7,6 +7,7 @@ use opus_pure::{
     Application, MAX_PACKET_BYTES, MAX_PACKET_SAMPLES, OggOpusReader, OggOpusWriter, OpusEncoder,
     OpusHead, Trim,
 };
+use zeroize::Zeroizing;
 
 /// The bridge records (and plays) 16-bit mono PCM at this rate.
 pub const SAMPLE_RATE: i32 = 48_000;
@@ -26,6 +27,8 @@ pub enum VoiceError {
 /// Longest voice message decoded (to PCM in memory: 20 minutes are 115 MB). Opus expands
 /// about a hundredfold, so the file's size doesn't bound it (security audit 2026-10-27, S06).
 const MAX_DECODED_SECONDS: usize = 20 * 60;
+/// Room for ten seconds of decoded audio to begin with, the buffer doubles from there.
+const INITIAL_DECODED_BYTES: usize = 10 * SAMPLE_RATE as usize * 2;
 
 /// Encode 16-bit mono PCM at [`SAMPLE_RATE`] (little endian bytes) into an Ogg Opus file;
 /// returns the file and the duration in seconds. Gapless: decodes back to exactly the input.
@@ -66,16 +69,32 @@ pub fn encode(pcm_le: &[u8]) -> Result<(Vec<u8>, f64), VoiceError> {
     Ok((file, total as f64 / f64::from(SAMPLE_RATE)))
 }
 
+/// Make room for `additional` more bytes. A `Vec` growing by itself leaves its old buffer, the
+/// audio so far, unwiped in freed memory; here it moves to a larger one and the old one is wiped.
+fn reserve_wiped(buffer: &mut Zeroizing<Vec<u8>>, additional: usize) {
+    if buffer.capacity() - buffer.len() >= additional {
+        return;
+    }
+    let capacity = (buffer.len() + additional)
+        .max(buffer.capacity() * 2)
+        .max(INITIAL_DECODED_BYTES);
+    let mut larger = Zeroizing::new(Vec::with_capacity(capacity));
+    larger.extend_from_slice(buffer);
+    *buffer = larger;
+}
+
 /// Decode an Ogg Opus file to 16-bit mono PCM at [`SAMPLE_RATE`] (little endian bytes).
-pub fn decode(file: &[u8]) -> Result<Vec<u8>, VoiceError> {
+pub fn decode(file: &[u8]) -> Result<Zeroizing<Vec<u8>>, VoiceError> {
     let mut reader = OggOpusReader::new(std::io::Cursor::new(file))?;
     let channels = usize::from(reader.head().channel_count).max(1);
     let mut decoder = reader.head().decoder(SAMPLE_RATE)?;
     let mut trim = Trim::new(reader.head(), SAMPLE_RATE, channels)?;
-    let mut block = vec![0.0_f32; MAX_PACKET_SAMPLES * channels];
-    let mut out = Vec::new();
-    while let Some(packet) = reader.read_packet()? {
-        let n = decoder.decode(&packet.data, MAX_PACKET_SAMPLES, &mut block)?;
+    let mut block = Zeroizing::new(vec![0.0_f32; MAX_PACKET_SAMPLES * channels]);
+    let mut out = Zeroizing::new(Vec::new());
+    while let Some(mut packet) = reader.read_packet()? {
+        let data = Zeroizing::new(std::mem::take(&mut packet.data));
+        let n = decoder.decode(&data, MAX_PACKET_SAMPLES, &mut block)?;
+        reserve_wiped(&mut out, n * 2);
         for frame in trim
             .keep(&packet, &block[..n * channels])
             .chunks_exact(channels)
@@ -99,6 +118,23 @@ pub fn decode(file: &[u8]) -> Result<Vec<u8>, VoiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growing_keeps_the_audio_in_a_new_buffer() {
+        let mut buffer = Zeroizing::new(Vec::new());
+        reserve_wiped(&mut buffer, 3);
+        assert_eq!(buffer.capacity(), INITIAL_DECODED_BYTES);
+        buffer.extend_from_slice(&[1, 2, 3]);
+        let start = buffer.as_ptr();
+        // Room enough: the same buffer.
+        reserve_wiped(&mut buffer, INITIAL_DECODED_BYTES - 3);
+        assert_eq!(buffer.as_ptr(), start);
+        // Too small: a larger one with the same content, so nothing ever reallocates in place.
+        reserve_wiped(&mut buffer, INITIAL_DECODED_BYTES);
+        assert_ne!(buffer.as_ptr(), start);
+        assert!(buffer.capacity() >= INITIAL_DECODED_BYTES + 3);
+        assert_eq!(&buffer[..], &[1, 2, 3]);
+    }
 
     #[test]
     fn roundtrip_keeps_length_and_sound() {
