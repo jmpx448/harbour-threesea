@@ -7,6 +7,8 @@ import "../components/Errors.js" as Errors
 Page {
     id: page
     allowedOrientations: Orientation.All
+    // The core finishes the restore anyway, and meanwhile the page below offers a new ID.
+    backNavigation: !working
 
     property bool working: false
 

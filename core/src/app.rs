@@ -2288,6 +2288,15 @@ impl App {
         Ok(())
     }
 
+    /// The one way a created or restored ID gets stored. Asked again here because the network
+    /// waits since the first check: the old ID's key would be gone from the device, and a later
+    /// automatic Safe backup would put the new one over its copy.
+    fn store_new_identity(&self, identity: &StoredIdentity) -> Result<(), ApiError> {
+        self.check_no_identity()?;
+        self.store.set_identity(identity)?;
+        Ok(())
+    }
+
     async fn create_identity(&mut self) -> Result<Value, ApiError> {
         self.check_no_identity()?;
         let mut task = CreateIdentityTask::new(CreateIdentityContext {
@@ -2310,7 +2319,7 @@ impl App {
                 CreateIdentityLoop::Done(result) => break result,
             }
         };
-        self.store.set_identity(&StoredIdentity {
+        self.store_new_identity(&StoredIdentity {
             threema_id: identity.to_string(),
             client_key: Zeroizing::new(*client_key.as_bytes()),
             server_group: server_group.to_string(),
@@ -2348,6 +2357,7 @@ impl App {
         threema_id: &str,
         client_key: &ClientKey,
     ) -> Result<(), ApiError> {
+        self.check_no_identity()?;
         let private =
             directory::fetch_identity_private(&self.https, threema_id, client_key).await?;
         self.store_adopted_identity(threema_id, client_key, private)
@@ -2360,7 +2370,7 @@ impl App {
         client_key: &ClientKey,
         private: directory::PrivateIdentityData,
     ) -> Result<(), ApiError> {
-        self.store.set_identity(&StoredIdentity {
+        self.store_new_identity(&StoredIdentity {
             threema_id: threema_id.to_owned(),
             client_key: Zeroizing::new(*client_key.as_bytes()),
             server_group: private.server_group,
@@ -2937,6 +2947,30 @@ mod tests {
                 assert_eq!(reply["ok"], true);
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_second_id_takes_the_place_of_the_first() {
+        let (_dir, mut app) = licensed_app();
+        let other = StoredIdentity {
+            threema_id: "EFGH5678".into(),
+            client_key: Zeroizing::new([8; 32]),
+            server_group: "31".into(),
+        };
+        // Refused before any request: nothing reaches the directory.
+        assert!(matches!(
+            app.adopt_identity("EFGH5678", &ClientKey::from([8; 32]))
+                .await,
+            Err(ApiError::IdentityExists)
+        ));
+        assert!(matches!(
+            app.store_new_identity(&other),
+            Err(ApiError::IdentityExists)
+        ));
+        assert_eq!(
+            app.store.identity().unwrap().unwrap().threema_id,
+            "ABCD1234"
+        );
     }
 
     /// Runs libthreema's real task against these answers: what comes out of it is what the user
