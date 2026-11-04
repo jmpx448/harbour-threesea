@@ -119,7 +119,7 @@ Page {
         interval: 100
         repeat: true
         onTriggered: {
-            if (pageStack.busy) return
+            if (pageStack.busy || window.stackHeld) return
             if (pageStack.currentPage !== page) {
                 pageStack.pop(page, PageStackAction.Immediate)
                 return
@@ -137,7 +137,7 @@ Page {
         interval: 100
         repeat: true
         onTriggered: {
-            if (pageStack.busy) return
+            if (pageStack.busy || window.stackHeld) return
             if (pageStack.currentPage !== page) {
                 pageStack.pop(page, PageStackAction.Immediate)
                 return
@@ -153,7 +153,7 @@ Page {
         interval: 100
         repeat: true
         onTriggered: {
-            if (pageStack.busy) return
+            if (pageStack.busy || window.stackHeld) return
             stop()
             pageStack.pop(page, PageStackAction.Immediate)
             pageStack.pop()

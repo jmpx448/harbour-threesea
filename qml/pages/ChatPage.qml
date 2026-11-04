@@ -1246,7 +1246,7 @@ Page {
         interval: 50
         repeat: true
         onTriggered: {
-            if (pageStack.busy) return
+            if (pageStack.busy || window.stackHeld) return
             stop()
             page.askPin()
         }

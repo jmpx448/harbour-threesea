@@ -65,7 +65,8 @@ Page {
         resultTimer.start()
     }
 
-    // To the results once the page stack is idle (a fast import may end during the push).
+    // To the results once the page stack is idle (a fast import may end during the push) and
+    // the app is unlocked.
     Timer {
         id: resultTimer
         property var summary: null
@@ -73,7 +74,8 @@ Page {
         interval: 100
         repeat: true
         onTriggered: {
-            if (pageStack.busy) return
+            // Replace takes the top page: only this one, not the lock page over it.
+            if (pageStack.busy || window.locked || pageStack.currentPage !== page) return
             stop()
             pageStack.replace(Qt.resolvedUrl("DataBackupResultPage.qml"), {
                 "imported": page.imported,
