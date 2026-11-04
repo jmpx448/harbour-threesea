@@ -1207,6 +1207,7 @@ impl App {
         match conversation {
             // A group's conversation goes with the group, which must have been left.
             Some(Conversation::Group(group)) if group.left => {
+                self.reflect_group_deleted(&group)?;
                 self.store.delete_group(&id)?;
                 self.media.remove_picture(&id);
             }
@@ -1221,11 +1222,15 @@ impl App {
     }
 
     /// A chat's rows are gone: its media go too. The UI takes its notification, and with it the
-    /// notification's action token, away; a page still open on it no longer keeps a draft.
+    /// notification's action token, away; a page still open on it no longer keeps a draft. Of a
+    /// hidden private chat (deleted on another device) the UI hears nothing.
     pub(crate) fn chat_removed(&self, key: &str) {
         let store = Rc::clone(&self.store);
         self.media
             .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
+        if self.check_readable(key).is_err() {
+            return;
+        }
         for event in ["conversationRead", "chatDeleted"] {
             let _ = self.media_events.send(crate::providers::CoreEvent::Call(
                 json!({ "event": event, "identity": key }),

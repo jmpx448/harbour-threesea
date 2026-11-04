@@ -1324,6 +1324,10 @@ impl App {
             CoreEvent::SyncPicture { target, blob } => {
                 self.apply_synced_picture(target.clone(), blob.clone());
             }
+            CoreEvent::GroupDeleted(key) => {
+                self.media.remove_picture(key);
+                self.chat_removed(key);
+            }
             CoreEvent::MessagesChanged(messages) => {
                 for message in messages.iter().filter(|m| m.kind == "deleted") {
                     self.media.remove(message.id);

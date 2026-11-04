@@ -3617,6 +3617,28 @@ mod tests {
         assert_eq!(event["identity"], "ABCD1234");
     }
 
+    /// The picture is on the disk, whichever device deleted the group.
+    #[test]
+    fn a_group_deleted_on_another_device_leaves_no_picture_behind() {
+        let (_dir, mut app) = app();
+        let mut events = app.take_media_events().unwrap();
+        let key = "g:BBBBBBBB:0000000000000007".to_owned();
+        app.media.write_picture(&key, b"picture").unwrap();
+
+        app.on_core_event(&crate::providers::CoreEvent::GroupDeleted(key.clone()));
+        assert!(app.media.read_picture(&key).unwrap().is_none());
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "conversationRead");
+
+        // A hidden private group: its name stays out of what the UI hears.
+        app.store.set_private(&key, true).unwrap();
+        app.unlocked = false;
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "chatDeleted");
+        app.on_core_event(&crate::providers::CoreEvent::GroupDeleted(key));
+        assert!(events.try_recv().is_err());
+    }
+
     fn call(app: &mut App, request: serde_json::Value) -> serde_json::Value {
         let reply = rt().block_on(app.handle(&request.to_string()));
         serde_json::from_str(&reply).unwrap()

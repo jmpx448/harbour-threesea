@@ -528,6 +528,31 @@ impl App {
         }
     }
 
+    /// A group we left is deleted here: from the other devices too (Android's
+    /// `ReflectGroupSyncDeleteTask`), unless they never got it. Queued while the row is there.
+    pub(crate) fn reflect_group_deleted(&self, group: &Group) -> Result<(), ApiError> {
+        if self.store.multi_device()?.is_none() || !crate::join::group_syncable(&self.store, group)?
+        {
+            return Ok(());
+        }
+        queue_syncs(
+            &self.store,
+            vec![(
+                Scope::GroupSync,
+                Content::GroupSync(GroupSync {
+                    action: Some(group_sync::Action::Delete(group_sync::Delete {
+                        group_identity: Some(libthreema::protobuf::common::GroupIdentity {
+                            group_id: group.identity.group_id,
+                            creator_identity: group.identity.creator_identity.to_string(),
+                        }),
+                    })),
+                }),
+            )],
+        );
+        self.tell_connection(ToConnection::ReflectSync);
+        Ok(())
+    }
+
     /// After a command that changed something other devices keep too: reflect it.
     pub(crate) async fn reflect_change(&self, change: SyncChange, result: &Value) {
         use libthreema::protobuf::d2d::{
@@ -1930,5 +1955,87 @@ mod tests {
             synced.conversation_visibility,
             Some(ConversationVisibility::Normal as i32)
         );
+    }
+
+    /// Android's order: the other devices hear of it, then the row goes.
+    #[test]
+    fn deleting_a_left_group_is_reflected_and_a_joined_ones_chat_is_not() {
+        use libthreema::protobuf::common::GroupIdentity;
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let group = |id: u64, left: bool| {
+            let identity = libthreema::common::GroupIdentity {
+                creator_identity: "ABCD1234".parse().unwrap(),
+                group_id: id,
+            };
+            Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: String::new(),
+                members: Vec::new(),
+                left,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            }
+        };
+        let (left, joined) = (group(1, true), group(2, false));
+        app.store.upsert_group(&left).unwrap();
+        app.store.upsert_group(&joined).unwrap();
+
+        app.delete_conversation(&joined.key).unwrap();
+        assert!(app.store.next_sync().unwrap().is_none());
+        assert!(app.store.group(&joined.key).unwrap().is_some());
+
+        app.delete_conversation(&left.key).unwrap();
+        let group_sync::Action::Delete(deleted) = next_group_sync(&app) else {
+            panic!("not a deletion");
+        };
+        assert_eq!(
+            deleted.group_identity,
+            Some(GroupIdentity {
+                group_id: 1,
+                creator_identity: "ABCD1234".into(),
+            })
+        );
+        assert!(app.store.group(&left.key).unwrap().is_none());
+    }
+
+    /// A group the others never got (its creator isn't known here) isn't deleted there.
+    #[test]
+    fn a_group_the_others_never_got_is_not_reflected_as_deleted() {
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "BBBBBBBB".parse().unwrap(),
+            group_id: 1,
+        };
+        let group = Group {
+            key: crate::groups::key(&identity),
+            identity,
+            name: String::new(),
+            members: Vec::new(),
+            left: true,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        app.delete_conversation(&group.key).unwrap();
+        assert!(app.store.next_sync().unwrap().is_none());
     }
 }

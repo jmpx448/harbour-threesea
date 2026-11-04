@@ -727,6 +727,7 @@ pub fn group_sync(
         {
             Some((key, _)) => {
                 store.delete_group(&key)?;
+                events.push(CoreEvent::GroupDeleted(key));
                 true
             }
             None => false,
@@ -1138,5 +1139,53 @@ mod tests {
         assert_eq!(asked, Some(vec![CREATOR.to_owned(), EVE.to_owned()]));
         // Another device named them: it tells the others itself, nothing is owed from here.
         assert!(store.outstanding_member_lookups().unwrap().is_empty());
+    }
+
+    /// Deleted on another device: the chat is gone from the store here, and the app is told, as
+    /// the picture and the media are for it to remove.
+    #[test]
+    fn a_group_deleted_on_another_device_goes_with_all_that_is_its() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "BBBBBBBB".parse().unwrap(),
+            group_id: 7,
+        };
+        let key = crate::groups::key(&identity);
+        store
+            .upsert_group(&crate::groups::Group {
+                key: key.clone(),
+                identity,
+                name: "Crew".into(),
+                members: vec!["BBBBBBBB".into()],
+                left: true,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        store.set_pinned(&key, true).unwrap();
+        let mut events = Vec::new();
+        group_sync(
+            &store,
+            "ABCD1234",
+            GroupSync {
+                action: Some(group_sync::Action::Delete(group_sync::Delete {
+                    group_identity: Some(ProtoGroupIdentity {
+                        group_id: 7,
+                        creator_identity: "BBBBBBBB".into(),
+                    }),
+                })),
+            },
+            &mut events,
+        )
+        .unwrap();
+        assert!(store.group(&key).unwrap().is_none());
+        assert!(store.pinned_chats().unwrap().is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CoreEvent::GroupDeleted(deleted) if *deleted == key))
+        );
     }
 }

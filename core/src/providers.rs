@@ -111,6 +111,8 @@ pub enum CoreEvent {
         target: String,
         blob: Option<crate::sync::SyncedBlob>,
     },
+    /// Internal: a group was deleted on another device: its picture and media go here too.
+    GroupDeleted(String),
     /// Internal: Threema Web wants this session back (`web-session-resume` from `*3MAPUSH`):
     /// the hex SHA-256 of the browser's permanent key.
     WebSessionResume(String),
@@ -210,6 +212,7 @@ impl CoreEvent {
             | Self::DownloadGroupPicture(_)
             | Self::DownloadContactPicture(_)
             | Self::SyncPicture { .. }
+            | Self::GroupDeleted(_)
             | Self::CallSignal { .. }
             | Self::AnnounceGroupCall { .. }
             | Self::GroupCallStart { .. }
