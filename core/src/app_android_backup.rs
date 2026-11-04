@@ -430,12 +430,7 @@ impl App {
                 existing += 1;
                 continue;
             }
-            let mut members: Vec<String> = Vec::new();
-            for member in &g.members {
-                if member != me && !members.contains(member) && known(&self.store, member) {
-                    members.push(member.clone());
-                }
-            }
+            let members = known_members(&g.members, me, |id| known(&self.store, id));
             let user_listed = g.members.iter().any(|m| m == me);
             let mut left = match g.user_state {
                 Some(state) => state != 0,
@@ -473,12 +468,7 @@ impl App {
                 existing += 1;
                 continue;
             }
-            let mut members: Vec<String> = Vec::new();
-            for member in &l.members {
-                if member != me && !members.contains(member) && known(&self.store, member) {
-                    members.push(member.clone());
-                }
-            }
+            let members = known_members(&l.members, me, |id| known(&self.store, id));
             self.store
                 .upsert_distribution_list(&crate::distribution_lists::DistributionList {
                     key: key.clone(),
@@ -594,6 +584,17 @@ impl App {
             "invalidRows": data.invalid_rows,
         }))
     }
+}
+
+/// The listed people known here, each once and without the user, in the file's order. A set,
+/// because this runs on the core thread and the file decides how long the list is.
+fn known_members(listed: &[String], me: &str, known: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    listed
+        .iter()
+        .filter(|member| *member != me && seen.insert(member.as_str()) && known(member))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -824,6 +825,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), "backupIdentity");
         assert!(foreign.store.contact("B0B0B0B0").unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod member_list_tests {
+    use super::known_members;
+
+    #[test]
+    fn keeps_known_people_once_without_the_user() {
+        let listed = ["B0B0B0B0", "ABCD1234", "C0C0C0C0", "B0B0B0B0", "D0D0D0D0"].map(String::from);
+        let members = known_members(&listed, "ABCD1234", |id| id != "D0D0D0D0");
+        assert_eq!(members, ["B0B0B0B0", "C0C0C0C0"]);
+    }
+
+    #[test]
+    fn a_huge_list_stays_linear() {
+        // Comparing each new member with those before it took minutes at this size.
+        const SIZE: usize = 300_000;
+        let listed: Vec<String> = (0..SIZE).map(|i| format!("M{i:07}")).collect();
+        let start = std::time::Instant::now();
+        assert_eq!(known_members(&listed, "ABCD1234", |_| true).len(), SIZE);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }
 
