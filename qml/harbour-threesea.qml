@@ -1019,6 +1019,14 @@ ApplicationWindow {
                 if (data.private) window.clearNotification(data.identity)
             } else if (name === "serverMessage") {
                 Notices.show(data.message, Notice.Long, Notice.Center)
+            } else if (name === "deviceRemovalFailed") {
+                // On Linked devices the page itself tells. Elsewhere this is the only word: the
+                // user may have left it during the wait.
+                var top = pageStack.currentPage
+                if (!top || top.objectName !== "linkedDevices") {
+                    //% "Removing linked devices did not finish. Linked devices shows what is still linked, and you can try again there."
+                    Notices.show(qsTrId("threesea-la-device-removal-failed"), Notice.Long, Notice.Center)
+                }
             } else if (name === "licenseChanged") {
                 window.licenseNotification()
             } else if (name === "deviceCookieChanged") {

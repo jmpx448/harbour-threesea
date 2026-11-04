@@ -720,6 +720,7 @@ impl App {
     /// Rate-limited so flapping connections don't hammer the servers. Returns the UI events to
     /// emit.
     pub async fn on_connected(&mut self) -> Vec<&'static str> {
+        self.check_device_group();
         let now = tokio::time::Instant::now();
         if self
             .last_import_attempt
@@ -878,6 +879,7 @@ impl App {
         if self.refresh_contacts(false).await.unwrap_or(false) {
             events.push("contactsChanged");
         }
+        self.check_device_group();
         if let Err(error) = self.publish_feature_mask().await {
             tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
         }

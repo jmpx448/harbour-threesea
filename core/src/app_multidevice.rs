@@ -9,12 +9,18 @@ use tokio::{sync::oneshot, time::timeout};
 
 use crate::{
     app::{ApiError, App},
-    connection::{DeviceGroupError, ToConnection},
+    connection::{DeviceGroupError, DropOutcome, LinkedDevice, ToConnection},
     multidevice::{Properties, SETTING_FS_TERMINATE},
 };
 
 /// A question to the mediator (30 s) and the wait for a connection coming up (15 s).
 const DEVICES_REPLY_LIMIT: Duration = Duration::from_secs(50);
+/// Removing devices: the transaction's start, the list, the mediator's acks; past this the
+/// answer counts as missing, and what the connection still does arrives as an event.
+const DROP_REPLY_LIMIT: Duration = Duration::from_secs(200);
+/// How often to look whether this device is alone in its group (Android: hourly, and a removal on
+/// another device gives no other signal); a little under the hourly maintenance.
+const ALONE_CHECK_INTERVAL: Duration = Duration::from_secs(50 * 60);
 
 /// No connection is shown as such by the UI; the server's or protocol's "no" keeps its text.
 fn device_group_error(error: DeviceGroupError) -> ApiError {
@@ -148,6 +154,11 @@ impl App {
             .map_err(|_| no_connection())?
             .map_err(|_| no_connection())?
             .map_err(device_group_error)?;
+        self.devices_json(&devices)
+    }
+
+    /// The linked devices for the UI, with the names the user gave them here.
+    fn devices_json(&self, devices: &[LinkedDevice]) -> Result<Value, ApiError> {
         let mut devices =
             serde_json::to_value(devices).map_err(|error| ApiError::Internal(error.to_string()))?;
         for device in devices.as_array_mut().into_iter().flatten() {
@@ -158,7 +169,49 @@ impl App {
                 device["alias"] = alias.into();
             }
         }
-        Ok(json!({ "devices": devices, "label": self.device_label()? }))
+        Ok(json!({ "devices": devices, "label": self.device_label()?, "active": true }))
+    }
+
+    /// `linkedDevices` as the page asks for it: a list of just this device means nothing else
+    /// is linked any more (removed on the other device, say), so multi-device ends now.
+    pub(crate) async fn linked_devices_checked(&mut self) -> Result<Value, ApiError> {
+        let devices = self.linked_devices().await?;
+        let others = devices["devices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|device| device["current"] != true)
+            .count();
+        if others == 0 {
+            self.deactivate_if_alone();
+        }
+        Ok(devices)
+    }
+
+    /// Multi-device ends if this device turns out to be the only one in the group; the
+    /// connection decides from the mediator's list and reports it as an event. Android's
+    /// `DeactivateMultiDeviceIfAloneTask`.
+    fn deactivate_if_alone(&self) {
+        if matches!(self.store.multi_device(), Ok(Some(_))) {
+            let (reply, _answer) = oneshot::channel();
+            self.tell_connection(ToConnection::DropDevices {
+                ids: Some(Vec::new()),
+                reply,
+            });
+        }
+    }
+
+    /// The periodic form of that, from `maintenance` and when connected.
+    pub(crate) fn check_device_group(&mut self) {
+        let now = tokio::time::Instant::now();
+        if self
+            .last_group_check
+            .is_some_and(|at| now.duration_since(at) < ALONE_CHECK_INTERVAL)
+        {
+            return;
+        }
+        self.last_group_check = Some(now);
+        self.deactivate_if_alone();
     }
 
     /// This device's label, as the other devices show it.
@@ -211,66 +264,67 @@ impl App {
         Ok(json!({}))
     }
 
-    /// `dropDevices`: remove devices (hex ids) from the group.
+    /// Remove devices through the connection (see `ToConnection::DropDevices`).
+    async fn drop_from_group(&self, ids: Option<Vec<u64>>) -> Result<DropOutcome, ApiError> {
+        let (reply, answer) = oneshot::channel();
+        self.tell_connection(ToConnection::DropDevices { ids, reply });
+        timeout(DROP_REPLY_LIMIT, answer)
+            .await
+            .map_err(|_| no_connection())?
+            .map_err(|_| no_connection())?
+            .map_err(device_group_error)
+    }
+
+    /// `dropDevices`: remove devices (hex ids) from the group. Once none but this one would
+    /// remain, this one leaves too: multi-device ends and forward security returns.
     pub(crate) async fn drop_devices(&mut self, ids: &[String]) -> Result<Value, ApiError> {
         let ids = ids
             .iter()
             .map(|id| u64::from_str_radix(id, 16))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| ApiError::Internal("bad device id".into()))?;
-        let (reply, answer) = oneshot::channel();
-        self.tell_connection(ToConnection::DropDevices { ids, reply });
-        answer
-            .await
-            .map_err(|_| no_connection())?
-            .map_err(device_group_error)?;
-        self.linked_devices().await
+        let outcome = self.drop_from_group(Some(ids)).await;
+        let outcome = self.tell_failed_removal(outcome)?;
+        if outcome.left_group {
+            return Ok(json!({ "devices": [], "active": false }));
+        }
+        self.devices_json(&outcome.remaining)
     }
 
     /// `deactivateMultiDevice`: remove every other device, then this one (Android's
-    /// `DeactivateMultiDeviceTask`); the connection goes back to the chat server. When the
-    /// mediator cannot be reached, this device still leaves the group locally and reconnects
-    /// directly — the phone must never stay trapped behind an unreachable mediator (user
-    /// report 2026-10-28: offline until the ID was set up anew). Other devices' slots can
-    /// then only be dropped by those devices.
-    pub(crate) async fn deactivate_multi_device(&mut self) -> Result<Value, ApiError> {
-        let Some(properties) = self.store.multi_device()? else {
+    /// `DeactivateMultiDeviceTask`); the connection goes back to the chat server. When that
+    /// doesn't work nothing changes here, so it can be tried again: a phone that has left can't
+    /// remove anything any more, and the others keep the ID. The UI then offers
+    /// `leave_locally`, which leaves the group on this device alone: the way out when the
+    /// mediator stays out of reach (user report 2026-10-28: offline until the ID was set up
+    /// anew).
+    pub(crate) async fn deactivate_multi_device(
+        &mut self,
+        leave_locally: bool,
+    ) -> Result<Value, ApiError> {
+        if self.store.multi_device()?.is_none() {
             return self.multi_device_json();
-        };
-        let own = properties.mediator_device_id;
-        let dropped = async {
-            let devices = self.linked_devices().await?;
-            let mut ids: Vec<String> = devices["devices"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|device| device["current"] != true)
-                .filter_map(|device| device["id"].as_str().map(str::to_owned))
-                .collect();
-            // Ourselves last: that ends the connection through the mediator.
-            ids.push(format!("{own:016x}"));
-            let ids = ids
-                .iter()
-                .map(|id| u64::from_str_radix(id, 16))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| ApiError::Internal("bad device id".into()))?;
-            let (reply, answer) = oneshot::channel();
-            self.tell_connection(ToConnection::DropDevices { ids, reply });
-            tokio::time::timeout(std::time::Duration::from_secs(30), answer)
-                .await
-                .map_err(|_| no_connection())?
-                .map_err(|_| no_connection())?
-                .map_err(device_group_error)
         }
-        .await;
-        if let Err(error) = dropped {
-            tracing::warn!(
-                kind = error.kind(),
-                "dropping the device slots failed; leaving the device group locally"
-            );
+        if leave_locally {
+            tracing::warn!("leaving the device group on this device only");
+            self.leave_device_group_locally().await;
+        } else {
+            let outcome = self.drop_from_group(None).await;
+            self.tell_failed_removal(outcome)?;
         }
-        self.leave_device_group_locally().await;
         self.multi_device_json()
+    }
+
+    /// The reply can take minutes and the page that asked may be gone by then, so a failed
+    /// removal is also an event the UI hears wherever the user is.
+    fn tell_failed_removal(
+        &mut self,
+        outcome: Result<DropOutcome, ApiError>,
+    ) -> Result<DropOutcome, ApiError> {
+        if outcome.is_err() {
+            self.note_ui_events(&["deviceRemovalFailed"]);
+        }
+        outcome
     }
 
     /// Multi-device off on this device, whatever the mediator knows: clear the stored
@@ -702,6 +756,20 @@ mod tests {
         rx
     }
 
+    fn device(id: u64, current: bool) -> LinkedDevice {
+        LinkedDevice {
+            id: format!("{id:016x}"),
+            raw_id: id,
+            current,
+            label: String::new(),
+            platform: "desktop",
+            platform_details: String::new(),
+            app_version: String::new(),
+            connected_since: None,
+            last_disconnect_at: None,
+        }
+    }
+
     /// A connection waiting for its next try, as `connection::run` answers then.
     async fn offline(mut rx: mpsc::UnboundedReceiver<ToConnection>) {
         while let Some(message) = rx.recv().await {
@@ -748,5 +816,164 @@ mod tests {
         let rx = in_a_group(&mut app);
         drop(rx);
         assert_eq!(app.linked_devices().await.unwrap_err().kind(), "network");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_devices_needs_the_mediators_word() {
+        let (_dir, mut app) = app();
+        let rx = in_a_group(&mut app);
+        tokio::spawn(offline(rx));
+        let error = app.deactivate_multi_device(false).await.unwrap_err();
+        assert_eq!(error.kind(), "network");
+        assert!(
+            app.store.multi_device().unwrap().is_some(),
+            "still in the group, to remove the devices later"
+        );
+        assert_eq!(
+            app.take_ui_events(),
+            ["deviceRemovalFailed"],
+            "heard even if the page that asked is gone"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_removal_of_one_device_is_heard_too() {
+        let (_dir, mut app) = app();
+        let rx = in_a_group(&mut app);
+        tokio::spawn(offline(rx));
+        let id = format!("{:016x}", 7);
+        app.drop_devices(&[id]).await.unwrap_err();
+        assert_eq!(app.take_ui_events(), ["deviceRemovalFailed"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn leaving_on_this_device_alone_is_a_choice() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let result = app.deactivate_multi_device(true).await.unwrap();
+        assert_eq!(result["active"], false);
+        assert!(app.store.multi_device().unwrap().is_none());
+        assert!(
+            matches!(rx.try_recv(), Ok(ToConnection::Reconnect)),
+            "nothing but the way back to the chat server"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_all_lets_the_connection_decide_from_its_list() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let store = std::rc::Rc::clone(&app.store);
+        let connection = async {
+            let Some(ToConnection::DropDevices { ids, reply }) = rx.recv().await else {
+                panic!("expected a drop");
+            };
+            assert!(ids.is_none(), "all there are, not a list from before");
+            store.set_multi_device(None).unwrap();
+            let _ = reply.send(Ok(DropOutcome {
+                remaining: Vec::new(),
+                left_group: true,
+            }));
+        };
+        let (result, ()) = tokio::join!(app.deactivate_multi_device(false), connection);
+        assert_eq!(result.unwrap()["active"], false);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_the_last_device_reports_multi_device_over() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let store = std::rc::Rc::clone(&app.store);
+        let connection = async {
+            let Some(ToConnection::DropDevices { ids, reply }) = rx.recv().await else {
+                panic!("expected a drop");
+            };
+            assert_eq!(ids, Some(vec![7]));
+            store.set_multi_device(None).unwrap();
+            let _ = reply.send(Ok(DropOutcome {
+                remaining: Vec::new(),
+                left_group: true,
+            }));
+        };
+        let id = format!("{:016x}", 7);
+        let ids = [id];
+        let (result, ()) = tokio::join!(app.drop_devices(&ids), connection);
+        let result = result.unwrap();
+        assert_eq!(result["active"], false);
+        assert_eq!(result["devices"], json!([]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_one_of_two_returns_who_remains() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        app.set_device_alias(&format!("{:016x}", 8), "Laptop")
+            .unwrap();
+        let connection = async {
+            let Some(ToConnection::DropDevices { reply, .. }) = rx.recv().await else {
+                panic!("expected a drop");
+            };
+            let _ = reply.send(Ok(DropOutcome {
+                remaining: vec![device(1, true), device(8, false)],
+                left_group: false,
+            }));
+        };
+        let id = format!("{:016x}", 7);
+        let ids = [id];
+        let (result, ()) = tokio::join!(app.drop_devices(&ids), connection);
+        let result = result.unwrap();
+        assert_eq!(result["active"], true);
+        let devices = result["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[1]["alias"], "Laptop");
+        assert!(devices[0].get("rawId").is_none(), "hex ids only for the UI");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_page_finding_only_this_device_checks_whether_it_is_alone() {
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        let connection = async {
+            let Some(ToConnection::Devices(reply)) = rx.recv().await else {
+                panic!("expected the list");
+            };
+            let _ = reply.send(Ok(vec![device(1, true)]));
+        };
+        let (result, ()) = tokio::join!(app.linked_devices_checked(), connection);
+        result.unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ToConnection::DropDevices { ids: Some(ids), .. }) if ids.is_empty()
+        ));
+        // With another device, nothing.
+        let connection = async {
+            let Some(ToConnection::Devices(reply)) = rx.recv().await else {
+                panic!("expected the list");
+            };
+            let _ = reply.send(Ok(vec![device(1, true), device(2, false)]));
+        };
+        let (result, ()) = tokio::join!(app.linked_devices_checked(), connection);
+        result.unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_periodic_check_runs_about_hourly_and_only_with_multi_device() {
+        let (_dir, mut app) = app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.connection = Some(tx);
+        app.check_device_group();
+        assert!(rx.try_recv().is_err(), "no device group, nothing to check");
+        app.store
+            .set_multi_device(Some(&Properties::generate()))
+            .unwrap();
+        app.last_group_check = None;
+        app.check_device_group();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ToConnection::DropDevices { ids: Some(ids), .. }) if ids.is_empty()
+        ));
+        app.check_device_group();
+        assert!(rx.try_recv().is_err(), "not again so soon");
     }
 }

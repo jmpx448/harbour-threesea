@@ -657,8 +657,12 @@ pub enum Command {
     DropDevices {
         ids: Vec<String>,
     },
-    /// Remove all devices including this one: multi-device off.
-    DeactivateMultiDevice,
+    /// Remove all devices including this one: multi-device off. With `leaveLocally` this device
+    /// only leaves on its own: the others stay linked.
+    DeactivateMultiDevice {
+        #[serde(default)]
+        leave_locally: bool,
+    },
     /// Linking Threema Desktop: the scanned code; connects to it and returns
     /// `{choices: [[emoji ×3] ×3], correct}` for the emoji check.
     StartLinking {
@@ -1207,6 +1211,8 @@ pub struct App {
     pub(crate) android_export: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// When the pending Safe import was last tried automatically (reconnect rate limit).
     pub(crate) last_import_attempt: Option<tokio::time::Instant>,
+    /// When this device last looked whether it is alone in its device group.
+    pub(crate) last_group_check: Option<tokio::time::Instant>,
     /// Private chats readable (ADR 0009); memory only, starts locked.
     pub(crate) unlocked: bool,
     /// On an unmetered network (Wi-Fi/Ethernet, from the bridge): auto-download policy.
@@ -1273,6 +1279,7 @@ impl App {
             android_import: None,
             android_export: None,
             last_import_attempt: None,
+            last_group_check: None,
             unlocked: false,
             on_wifi: false,
             pictures_dir: start.pictures_dir.clone(),
@@ -1830,9 +1837,11 @@ impl App {
                 Ok(json!({}))
             }
             Command::MultiDevice => self.multi_device_json(),
-            Command::LinkedDevices => self.linked_devices().await,
+            Command::LinkedDevices => self.linked_devices_checked().await,
             Command::DropDevices { ids } => self.drop_devices(&ids).await,
-            Command::DeactivateMultiDevice => self.deactivate_multi_device().await,
+            Command::DeactivateMultiDevice { leave_locally } => {
+                self.deactivate_multi_device(leave_locally).await
+            }
             Command::StartLinking { code, pin } => {
                 self.check_pin(pin)?;
                 self.start_linking(&code).await

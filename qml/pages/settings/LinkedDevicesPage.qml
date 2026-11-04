@@ -7,6 +7,8 @@ import "../../components/Errors.js" as Errors
 // for Desktop). Pull-down: link a device, remove all; long press a device: remove it.
 Page {
     id: page
+    // The window tells of a failed removal unless this page is on top to do it.
+    objectName: "linkedDevices"
     allowedOrientations: Orientation.All
 
     property var devices: []
@@ -52,8 +54,26 @@ Page {
         //% "Removing"
         item.remorseAction(qsTrId("threesea-la-removing-device"), function() {
             backend.call("dropDevices", { ids: [id] }, function(ok, result, kind, message) {
-                if (ok) page.devices = result.devices
-                else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                if (ok) {
+                    page.devices = result.devices
+                    page.active = result.active
+                } else if (pageStack.currentPage === page) {
+                    Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                }
+            })
+        })
+    }
+
+    // Removing them all didn't finish: try again later, or leave here alone. With another page on
+    // top the window tells of it, and this page offers it on the next failure.
+    function offerLeaving() {
+        if (pageStack.currentPage !== page) return
+        var dialog = pageStack.push(Qt.resolvedUrl("LeaveDeviceGroupDialog.qml"))
+        dialog.accepted.connect(function() {
+            page.loading = true
+            backend.call("deactivateMultiDevice", { leaveLocally: true }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
             })
         })
     }
@@ -85,9 +105,6 @@ Page {
         onConnectionStateChanged: if (backend.connectionState === "connected" && page.offline) page.load()
     }
 
-    SilicaListView {
-        id: list
-        anchors.fill: parent
     // Connected, and the list still timed out (a long backlog after a time offline): no state
     // change will bring it.
     Timer {
@@ -96,6 +113,9 @@ Page {
         onTriggered: if (page.offline && page.status === PageStatus.Active && backend.connectionState === "connected") page.load()
     }
 
+    SilicaListView {
+        id: list
+        anchors.fill: parent
         model: page.devices
 
         PullDownMenu {
@@ -106,9 +126,9 @@ Page {
                 //% "Removing all linked devices"
                 onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-all-devices"), function() {
                     page.loading = true
-                    backend.call("deactivateMultiDevice", {}, function(ok, result, kind, message) {
-                        if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                    backend.call("deactivateMultiDevice", {}, function(ok) {
                         page.load()
+                        if (!ok) page.offerLeaving()
                     })
                 })
             }

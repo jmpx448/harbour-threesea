@@ -90,6 +90,8 @@ const NOTIFY_GRACE: Duration = Duration::from_secs(8);
 /// Typing indicators older than this when the connection gets to them are not sent.
 const TYPING_MAX_AGE: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a transaction may take to begin, other devices' transactions included.
+const TRANSACTION_BEGIN_LIMIT: Duration = Duration::from_secs(90);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// How long we stay away when a server told us not to come back by ourselves.
 const HOLD_OFF: Duration = Duration::from_secs(600);
@@ -145,11 +147,13 @@ pub enum ToConnection {
     /// other devices, inside a transaction of its scope (Android's `Reflect*SyncTask`).
     /// (They are queued in the store first.)
     ReflectSync,
-    /// Multi-device: remove these devices from the group (Android's `DropDevicesSteps`); with our
-    /// own id, multi-device ends here and the connection goes back to the chat server.
+    /// Multi-device: remove devices from the group (Android's `DropDevicesSteps`): these, or
+    /// with `None` all the others. Once no other device would remain, or with our own id,
+    /// multi-device ends here and the connection goes back to the chat server (so no ids at
+    /// all is Android's "deactivate if alone").
     DropDevices {
-        ids: Vec<u64>,
-        reply: oneshot::Sender<Result<(), DeviceGroupError>>,
+        ids: Option<Vec<u64>>,
+        reply: oneshot::Sender<Result<DropOutcome, DeviceGroupError>>,
     },
     /// A call signalling message (ADR 0012); dropped while disconnected, the call times out.
     CallSignal {
@@ -181,12 +185,22 @@ impl From<ConnectionError> for DeviceGroupError {
     }
 }
 
+/// What removing devices left: what the mediator listed minus what it confirmed removed.
+#[derive(Debug, Clone)]
+pub struct DropOutcome {
+    pub remaining: Vec<LinkedDevice>,
+    /// This device left as well: multi-device is off.
+    pub left_group: bool,
+}
+
 /// A device of the device group (multi-device), for the Linked devices page.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkedDevice {
     /// Hex (a u64 doesn't fit a JavaScript number).
     pub id: String,
+    #[serde(skip)]
+    pub raw_id: u64,
     /// This device.
     pub current: bool,
     pub label: String,
@@ -408,6 +422,23 @@ pub async fn run(
         }
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+}
+
+/// Which devices to remove, from what the mediator lists now (Android's `runDropDevicesSteps`):
+/// only ones that are in the group; none named means all of them. When that leaves no other
+/// device, this one goes too: multi-device ends rather than lingering with forward security off.
+fn plan_drop(requested: Option<&[u64]>, others: &[u64], own: u64) -> (Vec<u64>, bool) {
+    let to_drop: Vec<u64> = match requested {
+        Some(ids) => others
+            .iter()
+            .copied()
+            .filter(|other| ids.contains(other))
+            .collect(),
+        None => others.to_vec(),
+    };
+    let drop_self =
+        to_drop.len() == others.len() || requested.is_some_and(|ids| ids.contains(&own));
+    (to_drop, drop_self)
 }
 
 /// Whether the connection is alive: anything read counts, wherever it was read, and an echo gets
@@ -1883,46 +1914,52 @@ impl<'a> Session<'a> {
             .ok_or_else(|| ConnectionError::Protocol("multi-device is not active".into()))
     }
 
-    /// Lock the device group for `scope` (retrying after other devices' transactions), for the
-    /// server's maximum time.
+    /// Lock the device group for `scope` (retrying after other devices' transactions, within
+    /// `TRANSACTION_BEGIN_LIMIT`), for the server's maximum time.
     async fn begin_transaction(
         &mut self,
         scope: libthreema::protobuf::d2d::transaction_scope::Scope,
     ) -> Result<(), ConnectionError> {
         use prost::Message as _;
-        loop {
-            let scope_bytes = libthreema::protobuf::d2d::TransactionScope {
-                scope: scope as i32,
-            }
-            .encode_to_vec();
-            let encrypted_scope = self
-                .device_group_key()?
-                .encrypt_transaction_scope(&scope_bytes)
-                .map_err(protocol_error)?;
-            self.transport
-                .send_d2m(D2mOutgoing::BeginTransaction(BeginTransaction {
-                    encrypted_scope,
-                    // The server's maximum (Android: TRANSACTION_TTL_MAX).
-                    ttl: None,
-                }))
-                .await?;
-            match self
-                .await_d2m(|payload| {
-                    matches!(
-                        payload,
-                        D2mIncoming::BeginTransactionAck | D2mIncoming::TransactionRejected(_)
-                    )
-                })
-                .await?
-            {
-                D2mIncoming::BeginTransactionAck => return Ok(()),
-                _ => {
-                    // Another device holds the lock: try again once it is released.
-                    self.await_d2m(|payload| matches!(payload, D2mIncoming::TransactionEnded(_)))
+        timeout(TRANSACTION_BEGIN_LIMIT, async {
+            loop {
+                let scope_bytes = libthreema::protobuf::d2d::TransactionScope {
+                    scope: scope as i32,
+                }
+                .encode_to_vec();
+                let encrypted_scope = self
+                    .device_group_key()?
+                    .encrypt_transaction_scope(&scope_bytes)
+                    .map_err(protocol_error)?;
+                self.transport
+                    .send_d2m(D2mOutgoing::BeginTransaction(BeginTransaction {
+                        encrypted_scope,
+                        // The server's maximum (Android: TRANSACTION_TTL_MAX).
+                        ttl: None,
+                    }))
+                    .await?;
+                match self
+                    .await_d2m(|payload| {
+                        matches!(
+                            payload,
+                            D2mIncoming::BeginTransactionAck | D2mIncoming::TransactionRejected(_)
+                        )
+                    })
+                    .await?
+                {
+                    D2mIncoming::BeginTransactionAck => return Ok(()),
+                    _ => {
+                        // Another device holds the lock: try again once it is released.
+                        self.await_d2m(|payload| {
+                            matches!(payload, D2mIncoming::TransactionEnded(_))
+                        })
                         .await?;
+                    }
                 }
             }
-        }
+        })
+        .await
+        .map_err(|_| ConnectionError::Timeout)?
     }
 
     async fn commit_transaction(&mut self) -> Result<(), ConnectionError> {
@@ -1965,6 +2002,7 @@ impl<'a> Session<'a> {
                 };
                 LinkedDevice {
                     id: format!("{:016x}", id.0),
+                    raw_id: id.0,
                     current: own == Some(id.0),
                     label: decoded
                         .as_ref()
@@ -2063,15 +2101,26 @@ impl<'a> Session<'a> {
         .map_err(|_| ConnectionError::Timeout)?
     }
 
-    /// Drop devices inside a `DROP_DEVICE` transaction (Android's `runDropDevicesSteps`). Our own
-    /// id goes last: the mediator answers that by closing the connection (4113, "dropped by
-    /// itself"), which ends the transaction too; that counts as done.
-    async fn drop_devices(&mut self, ids: &[u64]) -> Result<(), ConnectionError> {
+    /// Drop devices inside a `DROP_DEVICE` transaction (Android's `runDropDevicesSteps`), deciding
+    /// from the mediator's list there. Our own id goes last: the mediator answers that by closing
+    /// the connection (4113, "dropped by itself"), which ends the transaction too; that counts
+    /// as done.
+    async fn drop_devices(&mut self, ids: Option<&[u64]>) -> Result<DropOutcome, ConnectionError> {
         use libthreema::protobuf::d2d::transaction_scope::Scope;
-        let own = self.multi_device.as_ref().map(|p| p.mediator_device_id);
-        let (own_ids, others): (Vec<u64>, Vec<u64>) = ids.iter().partition(|id| Some(**id) == own);
+        let own = self
+            .multi_device
+            .as_ref()
+            .map(|p| p.mediator_device_id)
+            .ok_or_else(|| ConnectionError::Protocol("multi-device is not active".into()))?;
         self.begin_transaction(Scope::DropDevice).await?;
-        for id in others {
+        let mut devices = self.devices().await?;
+        let others: Vec<u64> = devices
+            .iter()
+            .filter(|device| !device.current)
+            .map(|device| device.raw_id)
+            .collect();
+        let (to_drop, drop_self) = plan_drop(ids, &others, own);
+        for &id in &to_drop {
             self.transport
                 .send_d2m(D2mOutgoing::DropDevice(D2xDeviceId(id)))
                 .await?;
@@ -2080,9 +2129,14 @@ impl<'a> Session<'a> {
             )
             .await?;
         }
-        let Some(own) = own_ids.first().copied() else {
-            return self.commit_transaction().await;
-        };
+        devices.retain(|device| !to_drop.contains(&device.raw_id));
+        if !drop_self {
+            self.commit_transaction().await?;
+            return Ok(DropOutcome {
+                remaining: devices,
+                left_group: false,
+            });
+        }
         self.transport
             .send_d2m(D2mOutgoing::DropDevice(D2xDeviceId(own)))
             .await?;
@@ -2092,7 +2146,10 @@ impl<'a> Session<'a> {
             )
             .await
         {
-            Ok(_) | Err(ConnectionError::MediatorClosed { code: 4113, .. }) => Ok(()),
+            Ok(_) | Err(ConnectionError::MediatorClosed { code: 4113, .. }) => Ok(DropOutcome {
+                remaining: Vec::new(),
+                left_group: true,
+            }),
             Err(error) => Err(error),
         }
     }
@@ -2183,17 +2240,30 @@ impl<'a> Session<'a> {
                         let devices = self.devices().await;
                         let _ = reply.send(devices.map_err(DeviceGroupError::from));
                     },
-                    Some(ToConnection::DropDevices { ids, reply }) => {
-                        let own = self.multi_device.as_ref().map(|p| p.mediator_device_id);
-                        let result = self.drop_devices(&ids).await;
-                        let dropped_self = result.is_ok() && own.is_some_and(|own| ids.contains(&own));
-                        let _ = reply.send(result.map_err(DeviceGroupError::from));
-                        if dropped_self {
-                            // Like Android's removeMultiDeviceLocally: forget the group, then
-                            // connect directly again (forward security comes back with it).
-                            self.setup.store.set_multi_device(None).map_err(protocol_error)?;
-                            self.emit(CoreEvent::MultiDeviceChanged);
-                            return Err(ConnectionError::Reconnect);
+                    Some(ToConnection::DropDevices { ids, reply }) => match self.drop_devices(ids.as_deref()).await {
+                        Ok(outcome) => {
+                            let left_group = outcome.left_group;
+                            if left_group {
+                                // Like Android's removeMultiDeviceLocally: forget the group, then
+                                // connect directly again (forward security comes back with it:
+                                // the core publishes the feature mask on this event).
+                                self.setup.store.set_multi_device(None).map_err(protocol_error)?;
+                                self.emit(CoreEvent::MultiDeviceChanged);
+                            }
+                            let _ = reply.send(Ok(outcome));
+                            if left_group {
+                                return Err(ConnectionError::Reconnect);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "removing devices failed");
+                            // A timeout leaves it open what the mediator did with the transaction:
+                            // a new connection releases it.
+                            let restart = matches!(error, ConnectionError::Timeout);
+                            let _ = reply.send(Err(error.into()));
+                            if restart {
+                                return Err(ConnectionError::Reconnect);
+                            }
                         }
                     },
                     // Woken up (e.g. after the device slept): check the connection is still alive.
@@ -2678,5 +2748,69 @@ mod device_group_error_tests {
                 DeviceGroupError::Failed(_)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod drop_plan_tests {
+    use super::*;
+
+    const OWN: u64 = 1;
+    const DESKTOP: u64 = 2;
+    const LAPTOP: u64 = 3;
+    const GONE: u64 = 4;
+
+    #[test]
+    fn removing_the_last_other_device_ends_multi_device() {
+        assert_eq!(
+            plan_drop(Some(&[DESKTOP]), &[DESKTOP], OWN),
+            (vec![DESKTOP], true)
+        );
+    }
+
+    #[test]
+    fn removing_one_of_two_keeps_the_group() {
+        assert_eq!(
+            plan_drop(Some(&[DESKTOP]), &[DESKTOP, LAPTOP], OWN),
+            (vec![DESKTOP], false)
+        );
+    }
+
+    #[test]
+    fn removing_all_named_ends_multi_device() {
+        assert_eq!(
+            plan_drop(Some(&[DESKTOP, LAPTOP]), &[LAPTOP, DESKTOP], OWN),
+            (vec![LAPTOP, DESKTOP], true)
+        );
+    }
+
+    #[test]
+    fn deactivating_removes_whatever_the_mediator_lists() {
+        assert_eq!(
+            plan_drop(None, &[DESKTOP, LAPTOP], OWN),
+            (vec![DESKTOP, LAPTOP], true)
+        );
+        assert_eq!(plan_drop(None, &[], OWN), (Vec::new(), true));
+    }
+
+    #[test]
+    fn a_device_that_is_gone_already_is_not_dropped_again() {
+        assert_eq!(
+            plan_drop(Some(&[GONE]), &[DESKTOP], OWN),
+            (Vec::new(), false)
+        );
+        // ... and if it was the last one, this device is alone.
+        assert_eq!(plan_drop(Some(&[GONE]), &[], OWN), (Vec::new(), true));
+    }
+
+    #[test]
+    fn alone_ends_multi_device_and_with_others_nothing_happens() {
+        assert_eq!(plan_drop(Some(&[]), &[], OWN), (Vec::new(), true));
+        assert_eq!(plan_drop(Some(&[]), &[DESKTOP], OWN), (Vec::new(), false));
+    }
+
+    #[test]
+    fn this_device_alone_may_leave_while_others_stay() {
+        assert_eq!(plan_drop(Some(&[OWN]), &[DESKTOP], OWN), (Vec::new(), true));
     }
 }
