@@ -326,8 +326,10 @@ Calls (Full):
 
 Camera:
 
-4. Attachment menu → camera: a photo and a video, sent to ECHOECHO.
-   - Expect: both arrive upright and in focus, with sound on the video.
+4. Attachment menu → camera: a photo and a video, sent to ECHOECHO, then the same with the front
+   camera.
+   - Expect: both arrive upright and in focus, with sound on the video, also from the front
+     camera (`metaData.orientation` follows the sensor; the front one's sign is what to look at).
 
 Notifications:
 
@@ -511,3 +513,24 @@ Two phones needed for the 1:1 parts; a group with at least one other member for 
    contact and look at the log.
    - Expect: `call candidates: relay` only, no `host` or `srflx`, on both an outgoing and an
      incoming call. A verified contact also shows `host` and `srflx`.
+
+## A voice recording stops with the app
+
+1. Start a recording and leave the phone untouched for two minutes.
+   - Expect: the screen stays on and the recording runs on.
+2. Group chat → swipe to its page → a member → record there and tap send.
+   - Expect: it goes to the member's chat and nothing to the group.
+3. Record, then swipe to the contact page and back.
+   - Expect: the recording is gone and the mic is back; nothing was sent.
+4. Start a recording and have someone call the phone (the phone app, not Threesea).
+   - Expect: back in the chat, "Recording stopped and discarded", or the bar still recording if
+     the phone left the microphone alone. If the phone stops it while the app stays in front, the
+     bar shows "Recorded" with send and discard. Nothing is sent by itself, and
+     `ls ~/.cache/org.threesea/harbour-threesea/` shows no `voice-recording.m4a` after a discard.
+5. Record, then close the window (Full), or let the app lock engage.
+   - Expect: the microphone is free at once (Jolla's Voice Recorder can record) and no message goes
+     out.
+6. Record, and have someone call you in Threesea; also with a voice message or video playing.
+   - Expect: the recording goes with a notice, what plays pauses and stays paused after the call.
+7. Tap the mic and tap again at once (under a second).
+   - Expect: nothing sent, no `voice-recording.m4a` in the cache.

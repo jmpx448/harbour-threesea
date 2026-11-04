@@ -345,6 +345,8 @@ ApplicationWindow {
             // after the grace time without any app lock (a private chat stops with its page).
             if (!letVoiceFinish || !voicePlayer.playing) voicePlayer.stop()
             videoPlayer.stop()
+            // So is what a recording would still pick up, and its sending.
+            voiceRecorder.cancel()
             showLock()
         }
     }
@@ -956,6 +958,22 @@ ApplicationWindow {
             }
             window.settleStack()
         }
+    }
+
+    // A call takes the sound and the microphone, also a group call whose page isn't on top. What
+    // is playing pauses and stays paused, the call may be long. A recording has nobody to ask
+    // during the call, and would pick up its sound.
+    readonly property bool anyCallRunning: callRunning || (groupCalls.state !== "idle" && groupCalls.state !== "ended")
+    onAnyCallRunningChanged: {
+        if (!anyCallRunning) return
+        if (voiceRecorder.recording || voiceRecorder.held) {
+            voiceRecorder.cancel()
+            //% "Recording stopped and discarded"
+            Notices.show(qsTrId("threesea-la-recording-discarded"), Notice.Long, Notice.Center)
+        }
+        // The chime leads to the next message: that must not start in the call either.
+        if (voicePlayer.playing || voicePlayer.chiming) voicePlayer.pause()
+        if (videoPlayer.playing) videoPlayer.pause()
     }
 
     // The group of the group call we are in (cover); empty for a private group, as in the

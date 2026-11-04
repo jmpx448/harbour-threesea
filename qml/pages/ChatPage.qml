@@ -806,7 +806,7 @@ Page {
     // sends; the recording bar's ✕ throws it away. The recorder is the app's, the recording this
     // page's: the bar and the button, and sending it, are for the chat it was started in.
     readonly property bool recordingHere: voiceRecorder.owner === page
-    readonly property bool canRecord: voiceRecorder.available && !voiceRecorder.owner
+    readonly property bool canRecord: voiceRecorder.available && !voiceRecorder.owner && !window.anyCallRunning
                                       && !attachment && !quoting && editingMessageId === ""
                                       && inputField && inputField.text.trim().length === 0
     // A recording went while nobody was looking: said when the app is back.

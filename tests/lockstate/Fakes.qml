@@ -111,7 +111,11 @@ QtObject {
             active = false
             playing = false
         }
-        function pause() { playing = false }
+        property int pauses: 0
+        function pause() {
+            pauses = pauses + 1
+            playing = false
+        }
         function resume() { playing = true }
     }
     property QtObject videoPlayer: QtObject {
@@ -120,6 +124,21 @@ QtObject {
         property int position
         property int duration
         function stop() { }
+        function pause() { playing = false }
+    }
+    property QtObject voiceRecorder: QtObject {
+        property bool available: true
+        property bool recording
+        property bool held
+        property QtObject owner
+        property int duration
+        property int cancels: 0
+        function cancel() {
+            cancels = cancels + 1
+            recording = false
+            held = false
+            owner = null
+        }
     }
     property QtObject softSound: QtObject {
         function play() { }

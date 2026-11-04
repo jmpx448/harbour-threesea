@@ -38,6 +38,7 @@
 
 #include "videoplayer.h"
 #include "voiceplayer.h"
+#include "voicerecorder.h"
 
 #include <threesea_core.h>
 
@@ -185,9 +186,12 @@ int main(int argc, char *argv[])
     // Closing the window means done with it, also when the process stays for the connection.
     // The close itself, not visibleChanged: the window also goes invisible when it is minimized,
     // and playing on from the cover is what the system's media controls are for.
-    view->installEventFilter(new CloseWatcher([voicePlayer, videoPlayer]() {
+    // A recording goes too: with the window closed nothing shows that the microphone is on.
+    VoiceRecorder *voiceRecorder = backend->voiceRecorder();
+    view->installEventFilter(new CloseWatcher([voicePlayer, videoPlayer, voiceRecorder]() {
         voicePlayer->stop();
         videoPlayer->stop();
+        voiceRecorder->cancel();
     }, view->engine()));
 
     CallManager *calls = new CallManager(backend, view->engine());

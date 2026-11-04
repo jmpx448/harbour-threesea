@@ -308,7 +308,7 @@ public:
     Q_INVOKABLE QString editPhoto(const QString &path, const QRectF &crop, int rotation) const;
     // Keep a GIF from the device as a favourite (`addGifFavourite`).
     Q_INVOKABLE void addGifFavourite(const QString &path, const QJSValue &callback = QJSValue());
-    QObject *voiceRecorder() const;
+    VoiceRecorder *voiceRecorder() const;
     // A stored Opus voice message as 16-bit mono 48 kHz PCM; empty if not possible. Thread-safe.
     QByteArray decodeVoice(qint64 message) const;
     bool passphraseKeyboard() const

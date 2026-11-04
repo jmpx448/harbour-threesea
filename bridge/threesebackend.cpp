@@ -539,7 +539,7 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
     QThreadPool::globalInstance()->start(preparer);
 }
 
-QObject *ThreeseBackend::voiceRecorder() const
+VoiceRecorder *ThreeseBackend::voiceRecorder() const
 {
     return m_voiceRecorder;
 }

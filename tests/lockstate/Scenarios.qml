@@ -13,6 +13,8 @@ QtObject {
     readonly property var backend: fakes.backend
     readonly property var calls: fakes.calls
     readonly property var voice: fakes.voicePlayer
+    readonly property var video: fakes.videoPlayer
+    readonly property var recorder: fakes.voiceRecorder
 
     function names() {
         var list = []
@@ -72,6 +74,81 @@ QtObject {
     }
 
     readonly property var scenarios: ({
+        // Behind the lock nothing shows that the microphone is on.
+        lockEndsRecording: [
+            [function() { ready(true) }, 100],
+            [function() {
+                recorder.recording = true
+                window.lockNow()
+                check("recording gone", recorder.recording, false)
+            }, 100],
+        ],
+        // The grace time ending lets a voice message finish, but not a recording.
+        graceEndsRecording: [
+            [function() { ready(true, 1) }, 100],
+            [function() {
+                recorder.recording = true
+                window.lockNow(true)
+                check("recording gone", recorder.recording, false)
+            }, 100],
+        ],
+        // Without an app lock, coming back after the grace time leaves it alone.
+        noLockKeepsRecording: [
+            [function() { ready(false) }, 100],
+            [function() {
+                recorder.recording = true
+                window.lockNow()
+                check("still recording", recorder.recording, true)
+            }, 100],
+        ],
+        // A call, ringing already: no recording goes on, and nothing plays over it.
+        callStopsMedia: [
+            [function() { ready(false) }, 100],
+            [function() {
+                recorder.recording = true
+                voice.playing = true
+                video.playing = true
+                calls.state = "incoming"
+                check("recording gone", recorder.recording, false)
+                check("voice paused", voice.playing, false)
+                check("voice not stopped", voice.stops, 0)
+                check("video paused", video.playing, false)
+            }, 100],
+        ],
+        // A recording waiting for its answer goes as well, and the end of a call starts nothing.
+        callEndDoesNotResume: [
+            [function() { ready(false) }, 100],
+            [function() {
+                recorder.held = true
+                calls.state = "calling"
+                check("held recording gone", recorder.held, false)
+                calls.state = "active"
+                check("one cancel for one call", recorder.cancels, 1)
+                calls.state = "ended"
+                calls.state = "idle"
+                check("voice stays paused", voice.playing, false)
+            }, 100],
+        ],
+        // Between two voice messages: the next one doesn't follow into the call.
+        callEndsChimeQueue: [
+            [function() { ready(false) }, 100],
+            [function() {
+                voice.chiming = true
+                calls.state = "incoming"
+                check("queue ended", voice.stops + voice.pauses, 1)
+            }, 100],
+        ],
+        // A group call likewise, whose page need not be on top.
+        groupCallStopsMedia: [
+            [function() { ready(false) }, 100],
+            [function() {
+                recorder.recording = true
+                voice.playing = true
+                fakes.groupCalls.state = "joining"
+                check("recording gone", recorder.recording, false)
+                check("voice paused", voice.playing, false)
+            }, 100],
+        ],
         // Leaving during a page transition: the lock comes anyway.
         lockDuringTransition: [
             [function() { ready(true) }, 100],
