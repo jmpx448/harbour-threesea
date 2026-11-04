@@ -38,6 +38,9 @@ function text(kind, message) {
     case "safeTooLarge":
         //% "The backup is larger than the Threema Safe server allows."
         return qsTrId("threesea-la-error-safe-too-large")
+    case "safeDamaged":
+        //% "This Threema Safe backup is damaged and can't be read."
+        return qsTrId("threesea-la-error-safe-damaged")
     case "identityFormat":
         //% "A Threema ID has 8 characters, letters and digits."
         return qsTrId("threesea-la-error-identity-format")
@@ -162,10 +165,17 @@ function text(kind, message) {
     case "privateChatsExist":
         //% "Remove all chats from the private chats first."
         return qsTrId("threesea-la-error-private-chats-exist")
+    case "serverTrouble":
+        //% "Threema's server didn't accept this. Try again later."
+        return qsTrId("threesea-la-error-server-trouble")
     case "server":
-        // Message from the Threema server, possibly already localized.
-        return message
+        // Message from the Threema server, possibly already localized. Stored errors keep only
+        // the kind, so there may be none.
+        return message || qsTrId("threesea-la-error-server-trouble")
     default:
+        // Stored errors keep only the kind: no message to show after the colon.
+        //% "Something went wrong."
+        if (!message) return qsTrId("threesea-la-error-internal-plain")
         //% "Something went wrong: %1"
         return qsTrId("threesea-la-error-internal").arg(message)
     }

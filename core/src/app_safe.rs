@@ -24,7 +24,9 @@ impl From<ServerError> for ApiError {
             ServerError::Network(e) => Self::Network(e.to_string()),
             ServerError::NotFound => Self::SafeNotFound,
             ServerError::TooLarge { .. } => Self::SafeTooLarge(error.to_string()),
-            other => Self::Server(other.to_string()),
+            other @ (ServerError::Status(_) | ServerError::InvalidResponse(_)) => {
+                Self::ServerTrouble(other.to_string())
+            }
         }
     }
 }
@@ -32,8 +34,11 @@ impl From<ServerError> for ApiError {
 impl From<SafeError> for ApiError {
     fn from(error: SafeError) -> Self {
         match error {
-            SafeError::Decrypt => Self::BackupDecrypt,
-            other => Self::Internal(other.to_string()),
+            // The backup's address comes from the key, so a wrong password finds none at all
+            // (`SafeNotFound`): one that is there but won't decrypt is damaged.
+            SafeError::Decrypt | SafeError::Format(_) => Self::SafeDamaged(error.to_string()),
+            SafeError::UnsupportedVersion(version) => Self::BackupVersion(i64::from(version)),
+            other @ (SafeError::Encrypt | SafeError::Kdf) => Self::Internal(other.to_string()),
         }
     }
 }
@@ -349,12 +354,12 @@ impl App {
         let client_key = Zeroizing::new(
             BASE64
                 .decode(backup.user.privatekey.as_bytes())
-                .map_err(|_| ApiError::Internal("backup private key invalid".into()))?,
+                .map_err(|_| ApiError::SafeDamaged("backup private key invalid".into()))?,
         );
         let client_key: [u8; 32] = client_key
             .as_slice()
             .try_into()
-            .map_err(|_| ApiError::Internal("backup private key invalid".into()))?;
+            .map_err(|_| ApiError::SafeDamaged("backup private key invalid".into()))?;
         let client_key = ClientKey::from(client_key);
         self.adopt_identity(&identity, &client_key).await?;
 
@@ -1022,6 +1027,43 @@ mod tests {
             .unwrap();
         let parsed = safe::parse_backup(&key.decrypt(&blob).unwrap()).unwrap();
         assert_eq!(parsed.contacts.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn server_and_backup_failures_have_kinds_of_their_own() {
+        let kind = |error: ServerError| ApiError::from(error).kind();
+        assert_eq!(kind(ServerError::Status(503)), "serverTrouble");
+        assert_eq!(
+            kind(ServerError::InvalidResponse("line 1".into())),
+            "serverTrouble"
+        );
+        assert_eq!(kind(ServerError::NotFound), "safeNotFound");
+        let kind = |error: crate::directory::DirectoryError| ApiError::from(error).kind();
+        assert_eq!(
+            kind(crate::directory::DirectoryError::Status(503)),
+            "serverTrouble"
+        );
+        assert_eq!(
+            kind(crate::directory::DirectoryError::InvalidResponse(
+                "line 1".into()
+            )),
+            "serverTrouble"
+        );
+        assert_eq!(
+            kind(crate::directory::DirectoryError::Server("Nein".into())),
+            "server"
+        );
+        // A backup from a newer version, and one that isn't JSON.
+        let error = safe::parse_backup(br#"{"info":{"version":2}}"#).unwrap_err();
+        assert_eq!(ApiError::from(error).kind(), "backupVersion");
+        let error = safe::parse_backup(b"not json").unwrap_err();
+        assert_eq!(ApiError::from(error).kind(), "safeDamaged");
+        // Found by the key, but it won't decrypt.
+        let key = MasterKey::from_bytes([1; 64]);
+        let mut damaged = key.encrypt(b"{}").unwrap();
+        damaged[30] ^= 1;
+        let error = key.decrypt(&damaged).unwrap_err();
+        assert_eq!(ApiError::from(error).kind(), "safeDamaged");
     }
 
     #[test]

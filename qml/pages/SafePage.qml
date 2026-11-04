@@ -150,8 +150,8 @@ Page {
 
             DetailItem {
                 visible: page.status.enabled && !!page.status.lastError
-                //% "Last attempt"
-                label: qsTrId("threesea-la-safe-last-attempt")
+                //% "Last attempt failed"
+                label: qsTrId("threesea-la-safe-last-attempt-failed")
                 value: page.status.lastError ? Errors.text(page.status.lastError, "") : ""
             }
 

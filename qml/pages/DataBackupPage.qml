@@ -314,8 +314,8 @@ Page {
 
             DetailItem {
                 visible: !!page.exportStatus.lastError
-                //% "Last attempt"
-                label: qsTrId("threesea-la-safe-last-attempt")
+                //% "Last attempt failed"
+                label: qsTrId("threesea-la-safe-last-attempt-failed")
                 value: page.exportStatus.lastError
                        ? Errors.text(page.exportStatus.lastError, "") : ""
             }

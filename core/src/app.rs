@@ -930,6 +930,10 @@ pub enum ApiError {
     /// Network/TLS problem.
     #[error("{0}")]
     Network(String),
+    /// A Threema server answered with an unexpected status or something unreadable. The text is
+    /// for the log's kind of reader; the UI has its own.
+    #[error("{0}")]
+    ServerTrouble(String),
     /// Wrong backup password or damaged backup.
     #[error("backup could not be decrypted")]
     BackupDecrypt,
@@ -955,6 +959,9 @@ pub enum ApiError {
     /// Threema Safe backup larger than the server allows.
     #[error("{0}")]
     SafeTooLarge(String),
+    /// A Threema Safe backup that decrypts but can't be read.
+    #[error("{0}")]
+    SafeDamaged(String),
     /// Creating or restoring an ID while this device has one (removing it needs the PIN).
     #[error("this device already has an ID")]
     IdentityExists,
@@ -1089,6 +1096,7 @@ impl ApiError {
             Self::LicenseFormat => "licenseFormat",
             Self::Server(_) => "server",
             Self::Network(_) => "network",
+            Self::ServerTrouble(_) => "serverTrouble",
             Self::BackupDecrypt => "backupDecrypt",
             Self::BackupVersion(_) => "backupVersion",
             Self::BackupOtherIdentity => "backupIdentity",
@@ -1097,6 +1105,7 @@ impl ApiError {
             Self::PasswordTooLong => "passwordTooLong",
             Self::SafeNotFound => "safeNotFound",
             Self::SafeTooLarge(_) => "safeTooLarge",
+            Self::SafeDamaged(_) => "safeDamaged",
             Self::IdentityFormat => "identityFormat",
             Self::ContactInvalid => "contactInvalid",
             Self::ContactIsSelf => "contactIsSelf",
@@ -1157,7 +1166,9 @@ impl From<DirectoryError> for ApiError {
         match error {
             DirectoryError::Network(e) => Self::Network(e.to_string()),
             DirectoryError::Server(message) => Self::Server(message),
-            other => Self::Internal(other.to_string()),
+            other @ (DirectoryError::Status(_) | DirectoryError::InvalidResponse(_)) => {
+                Self::ServerTrouble(other.to_string())
+            }
         }
     }
 }

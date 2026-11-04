@@ -77,7 +77,7 @@ Page {
     }
 
     function fail(kind, message, text, fromPicture) {
-        refuse(Errors.text(kind, message), text, fromPicture, kind === "network" || kind === "server")
+        refuse(Errors.text(kind, message), text, fromPicture, kind === "network" || kind === "server" || kind === "serverTrouble")
     }
 
     function decline(text, fromPicture) {

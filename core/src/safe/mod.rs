@@ -27,6 +27,8 @@ const NONCE_LENGTH: usize = 24;
 pub enum SafeError {
     #[error("backup could not be decrypted")]
     Decrypt,
+    #[error("backup could not be encrypted")]
+    Encrypt,
     #[error("backup is damaged: {0}")]
     Format(String),
     #[error("backup format version {0} is not supported")]
@@ -83,14 +85,13 @@ impl MasterKey {
     /// XSalsa20-Poly1305 with a random nonce placed in front.
     pub fn encrypt(&self, json: &[u8]) -> Result<Vec<u8>, SafeError> {
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
-        gz.write_all(json)
-            .map_err(|e| SafeError::Format(e.to_string()))?;
-        let mut compressed = gz.finish().map_err(|e| SafeError::Format(e.to_string()))?;
+        gz.write_all(json).map_err(|_| SafeError::Encrypt)?;
+        let mut compressed = gz.finish().map_err(|_| SafeError::Encrypt)?;
         let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
         let ciphertext = self
             .cipher()
             .encrypt(&nonce, compressed.as_slice())
-            .map_err(|_| SafeError::Format("encryption failed".into()))?;
+            .map_err(|_| SafeError::Encrypt)?;
         compressed.zeroize();
         let mut blob = Vec::with_capacity(NONCE_LENGTH + ciphertext.len());
         blob.extend_from_slice(&nonce);
