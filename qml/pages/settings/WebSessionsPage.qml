@@ -78,8 +78,17 @@ Page {
     }
 
     // Here, not in the context menu: its scope is gone when the remorse runs out.
-    function removeServer(item, host) {
+    function removeSession(item, id) {
         //% "Removing"
+        item.remorseAction(qsTrId("threesea-la-web-removing"), function() {
+            backend.call("webDelete", { session: id }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
+            })
+        })
+    }
+
+    function removeServer(item, host) {
         item.remorseAction(qsTrId("threesea-la-web-removing"), function() {
             backend.call("webRemoveServer", { host: host }, function(ok, result, kind, message) {
                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
@@ -158,6 +167,18 @@ Page {
                     page.load()
                 })
             }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                visible: page.webOn && page.sessions.length > 0
+                bottomPadding: Theme.paddingMedium
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+                // A push wakes a disconnected browser's session again, as on Android.
+                //% "Tap a browser to connect or disconnect it. Threema Web must be open in the browser to connect. A disconnected browser can connect again when it is opened; removing it or turning off the switch above keeps it out."
+                text: qsTrId("threesea-la-web-tap-hint")
+            }
         }
 
         ViewPlaceholder {
@@ -175,9 +196,7 @@ Page {
                 MenuItem {
                     //% "Remove"
                     text: qsTrId("threesea-me-web-remove")
-                    onClicked: item.remorseDelete(function() {
-                        backend.call("webDelete", { session: modelData.id }, function() { page.load() })
-                    })
+                    onClicked: page.removeSession(item, modelData.id)
                 }
             }
             onClicked: backend.call(modelData.state === "stopped" ? "webStart" : "webStop",
