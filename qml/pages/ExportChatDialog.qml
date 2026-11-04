@@ -14,6 +14,9 @@ Dialog {
     property alias media: mediaSwitch.checked
     property alias password: passwordField.text
 
+    // No password, or a real one: the core asks the same (at least 8 characters).
+    canAccept: password.length === 0 || password.length >= 8
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
@@ -53,9 +56,11 @@ Dialog {
                 width: parent.width
                 //% "Password"
                 label: qsTrId("threesea-la-password")
-                //% "With a password the archive is encrypted (AES-256) and any ZIP program asks for it when opening. Empty: no password."
-                description: qsTrId("threesea-la-export-chat-password-description")
+                errorHighlight: !dialog.canAccept
+                //% "At least 8 characters. With a password the messages and files in the archive are encrypted (AES-256), and any ZIP program asks for it when opening them; the names of the files stay readable. Empty: no password."
+                description: qsTrId("threesea-la-export-chat-password-hint")
                 EnterKey.iconSource: "image://theme/icon-m-enter-accept"
+                EnterKey.enabled: dialog.canAccept
                 EnterKey.onClicked: dialog.accept()
             }
         }

@@ -2836,6 +2836,36 @@ mod tests {
         let file = std::fs::File::open(reply["path"].as_str().unwrap()).unwrap();
         let zip = zip::ZipArchive::new(file).unwrap();
         assert_eq!(zip.len(), 1, "messages.txt only");
+
+        // A password is a real one or none at all; nothing is written for a short one.
+        let before = std::fs::read_dir(&out).unwrap().count();
+        let short = Some(Zeroizing::new("1234567".to_owned()));
+        assert!(matches!(
+            rt.block_on(app.export_chat("ABCD1234", false, &out, short, None, None)),
+            Err(ApiError::PasswordTooShort)
+        ));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), before);
+        // Counted in characters, not bytes.
+        let short = Some(Zeroizing::new("äöüäöüä".to_owned()));
+        assert!(matches!(
+            rt.block_on(app.export_chat("ABCD1234", false, &out, short, None, None)),
+            Err(ApiError::PasswordTooShort)
+        ));
+        let long = Some(Zeroizing::new("12345678".to_owned()));
+        let reply = rt
+            .block_on(app.export_chat("ABCD1234", false, &out, long, None, None))
+            .unwrap();
+        let file = std::fs::File::open(reply["path"].as_str().unwrap()).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert!(matches!(
+            zip.by_name("messages.txt").map(|_| ()),
+            Err(zip::result::ZipError::UnsupportedArchive(_))
+        ));
+        let empty = Some(Zeroizing::new(String::new()));
+        assert!(
+            rt.block_on(app.export_chat("ABCD1234", false, &out, empty, None, None))
+                .is_ok()
+        );
     }
 
     /// The cover names the chat that still has something unread, not whoever wrote last: reading

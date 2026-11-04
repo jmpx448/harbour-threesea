@@ -63,6 +63,13 @@ impl App {
     ) -> Result<Value, ApiError> {
         let (key, conversation) = self.readable_conversation(identity)?;
         self.check_readable(&key)?;
+        // Same rule as the data backup; Android asks the same of this archive.
+        if password
+            .as_ref()
+            .is_some_and(|password| !password.is_empty() && password.chars().count() < 8)
+        {
+            return Err(ApiError::PasswordTooShort);
+        }
         let me = me.unwrap_or_else(|| "Me".to_owned());
         let offset = offset_minutes.unwrap_or(0);
         let title = match &conversation {
