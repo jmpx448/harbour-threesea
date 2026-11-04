@@ -84,9 +84,20 @@ void SecretStore::ensureCollection()
         if (m_replaceKey) {
             m_replaceKey = false;
             // A wrapped key goes the same way: the passphrase belonged to the removed ID. Either
-            // may be absent. One that stays makes the store fail: Secrets refuses to overwrite.
+            // may be absent, so what counts is that neither can be fetched afterwards: the old
+            // key must not stay behind while a new one works.
             remove(StagingName, [this](bool) {
-                remove(SecretName, [this](bool) { storeNewKey(); });
+                remove(SecretName, [this](bool) {
+                    fetch(StagingName, [this](bool stagedFound, const QByteArray &) {
+                        fetch(SecretName, [this, stagedFound](bool keyFound, const QByteArray &) {
+                            if (stagedFound || keyFound) {
+                                emit failed(QStringLiteral("old key still stored"));
+                                return;
+                            }
+                            storeNewKey();
+                        });
+                    });
+                });
             });
             return;
         }
