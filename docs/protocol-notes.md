@@ -307,6 +307,14 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Libre needs no auth token (only OnPrem does).
 - Sailjail: the pickers (`Sailfish.Pickers`) need `MediaIndexing` (Tracker) besides Pictures,
   Videos, Music, Documents, Downloads; without it the picker pages stay empty.
+- Deprecated image, audio and video messages (0x02, 0x13, 0x14, group 0x43–0x45), which nobody may send
+  any more: decoded into `FileMessage` as Android's `LegacyMessageTransformer` does, so they are
+  ordinary file messages from there on. A 1:1 image has no file key: its blob is sealed with the
+  contact's and our keys and a nonce from the message (`legacyNonce` in the body, kept from the UI). The
+  rest use their key with nonces `00..01` and `00..02` (video thumbnail). The file JSON is read
+  leniently, as Android's vendored `org.json` coerces: an optional field of another type counts as
+  absent, a size may be a float or a numeric string, a media type that isn't a text means none; name
+  and caption limits apply when sending only.
 
 ## Voice messages
 

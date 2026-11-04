@@ -194,6 +194,9 @@ pub(crate) fn shown_body(mut body: Value) -> Value {
         body["mediaType"].as_str().unwrap_or_default(),
     );
     body["fileType"] = class_of_name(&saved_name).as_str().into();
+    if let Some(body) = body.as_object_mut() {
+        body.remove(crate::app_media::LEGACY_NONCE);
+    }
     if let Some(name) = body["name"].as_str().map(without_bidi_controls) {
         body["name"] = name.into();
     }

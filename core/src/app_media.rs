@@ -58,6 +58,9 @@ pub struct OutgoingFile {
     pub encode: Option<String>,
 }
 
+/// In a file message's body: the blob's nonce, if it came as a deprecated image (hex).
+pub(crate) const LEGACY_NONCE: &str = "legacyNonce";
+
 /// The file message to send for a stored outgoing file message, once uploaded.
 pub fn outgoing_file_message(body: &Value, keys: &FileKeys) -> Option<FileMessage> {
     if body["uploadState"].as_i64() != Some(STATE_LOCAL) {
@@ -102,7 +105,7 @@ pub fn outgoing_file_message(body: &Value, keys: &FileKeys) -> Option<FileMessag
 
 /// The UI JSON of a received file message (blob keys go to the `files` table, not here).
 pub fn file_body(file: &FileMessage) -> Value {
-    json!({
+    let mut body = json!({
         "rendering": match file.rendering_type {
             FileRenderingType::File => "file",
             FileRenderingType::Media => "media",
@@ -120,7 +123,11 @@ pub fn file_body(file: &FileMessage) -> Value {
         "thumbnailMediaType": file.thumbnail_media_type.clone().unwrap_or_else(|| "image/jpeg".into()),
         "fileState": STATE_REMOTE,
         "thumbnailState": if file.thumbnail_blob_id.is_some() { STATE_REMOTE } else { STATE_FAILED },
-    })
+    });
+    if let Some(nonce) = file.metadata.legacy_nonce {
+        body[LEGACY_NONCE] = data_encoding::HEXLOWER.encode(&nonce).into();
+    }
+    body
 }
 
 /// The blob keys of a received file message.
@@ -414,11 +421,45 @@ fn done_scope(outgoing: bool, group: bool, multi_device: bool) -> Option<media::
     })
 }
 
+/// How a deprecated image's blob is encrypted: between sender and receiver, with its own nonce.
+struct LegacySeal {
+    key: Zeroizing<[u8; 32]>,
+    nonce: [u8; 24],
+}
+
+impl LegacySeal {
+    /// The seal of `message`'s file: `Ok(None)` if it has the usual file key, `Err` if it is sealed
+    /// and we can't open it (no contact left to derive the key with).
+    fn of(store: &Store, message: &Message) -> Result<Option<Self>, ()> {
+        let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
+        let Some(nonce) = body[LEGACY_NONCE].as_str() else {
+            return Ok(None);
+        };
+        let nonce = data_encoding::HEXLOWER
+            .decode(nonce.as_bytes())
+            .ok()
+            .and_then(|nonce| <[u8; 24]>::try_from(nonce).ok())
+            .ok_or(())?;
+        let identity = store.identity().ok().flatten().ok_or(())?;
+        let contact = store
+            .contact(&message.conversation)
+            .ok()
+            .flatten()
+            .ok_or(())?;
+        let key = libthreema::common::keys::ClientKey::from(*identity.client_key)
+            .derive_shared_secret(&contact.public_key)
+            .ok_or(())?;
+        Ok(Some(Self { key, nonce }))
+    }
+}
+
 /// One part to fetch: what the task needs, read before it starts.
 struct Download {
     message: i64,
     part: MediaPart,
     key: Zeroizing<[u8; 32]>,
+    /// Instead of `key`, for a deprecated image's file.
+    seal: Option<LegacySeal>,
     blob_id: libthreema::common::BlobId,
     scope: media::BlobScope,
     done_scope: Option<media::BlobScope>,
@@ -458,7 +499,10 @@ impl Download {
             return false;
         }
         let stored = fetched.and_then(|blob| {
-            let data = media::decrypt_blob(&self.key, self.part, &blob)?;
+            let data = match &self.seal {
+                Some(seal) => media::decrypt_blob_with_nonce(&seal.key, &seal.nonce, &blob)?,
+                None => media::decrypt_blob(&self.key, self.part, &blob)?,
+            };
             media.write(self.message, self.part, &data)?;
             if let Some(directory) = &self.save_to {
                 auto_save(store, self.message, &data, directory);
@@ -1043,16 +1087,32 @@ impl App {
             MediaPart::File => file.blob_id,
             MediaPart::Thumbnail => file.thumbnail_blob_id,
         }?;
+        let row = self.store.message(message).ok().flatten();
+        let seal = match &row {
+            Some(row) if part == MediaPart::File => match LegacySeal::of(&self.store, row) {
+                Ok(seal) => seal,
+                // Failed, not left waiting: a tap shows it, and no pass asks again by itself.
+                Err(()) => {
+                    tracing::warn!("no key for a deprecated image, not downloading");
+                    match self.store.set_media_state(message, part, STATE_FAILED) {
+                        Ok(Some(changed)) => {
+                            let _ = self
+                                .media_events
+                                .send(CoreEvent::MessagesChanged(vec![changed]));
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error, "marking a media download failed"),
+                    }
+                    return None;
+                }
+            },
+            _ => None,
+        };
         // Android's scopes: our own (reflected) messages' blobs are only on the mirror; others'
         // are public.
-        let (outgoing, group) = self
-            .store
-            .message(message)
-            .ok()
-            .flatten()
-            .map_or((false, false), |m| {
-                (m.outgoing, m.conversation.starts_with("g:"))
-            });
+        let (outgoing, group) = row.map_or((false, false), |m| {
+            (m.outgoing, m.conversation.starts_with("g:"))
+        });
         // Settings → Media: received photos and videos also go to the Gallery's folder.
         let save_to = (part == MediaPart::File
             && self
@@ -1068,6 +1128,7 @@ impl App {
             message,
             part,
             key: file.key,
+            seal,
             blob_id,
             scope: if outgoing {
                 media::BlobScope::Local
@@ -1531,10 +1592,100 @@ mod tests {
                 MediaPart::Thumbnail => keys.thumbnail_blob_id.unwrap(),
             },
             key: keys.key,
+            seal: None,
             scope: media::BlobScope::Public,
             done_scope: None,
             save_to: None,
         }
+    }
+
+    /// A deprecated image comes down like any file, but its blob opens with what sender and
+    /// receiver share, under the message's own nonce. The nonce stays away from the UI.
+    #[test]
+    fn a_deprecated_image_opens_with_the_key_between_sender_and_receiver() {
+        use libthreema::common::{BlobId, keys::ClientKey};
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ECHOECHO".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let sender = ClientKey::from([8; 32]);
+        let mut contact = crate::contacts::test_contact("ABCD1234");
+        contact.public_key = sender.public_key();
+        app.store.upsert_contact(&contact).unwrap();
+
+        let nonce = [0x4e; 24];
+        let file = FileMessage {
+            rendering_type: FileRenderingType::Media,
+            key: [0; 32],
+            blob_id: BlobId([1; 16]),
+            media_type: "image/jpeg".into(),
+            name: None,
+            size: 7,
+            thumbnail_blob_id: None,
+            thumbnail_media_type: None,
+            caption: None,
+            correlation_id: None,
+            metadata: libthreema::model::message::FileMetadata {
+                legacy_nonce: Some(nonce),
+                ..Default::default()
+            },
+        };
+        let stored = app
+            .store
+            .insert_incoming("ABCD1234", 5, "file", &file_body(&file).to_string(), 1)
+            .unwrap()
+            .unwrap();
+        app.store
+            .set_file_keys(stored.id, &file_keys(&file))
+            .unwrap();
+        assert_eq!(
+            stored.to_json()["body"].get(LEGACY_NONCE),
+            None,
+            "the UI has no use for it"
+        );
+
+        let own_public = ClientKey::from([7; 32]).public_key();
+        let shared = sender.derive_shared_secret(&own_public).unwrap();
+        let blob = {
+            use crypto_secretbox::{KeyInit as _, XSalsa20Poly1305, aead::Aead as _};
+            XSalsa20Poly1305::new((&*shared).into())
+                .encrypt((&nonce).into(), b"picture".as_slice())
+                .unwrap()
+        };
+
+        let download = app.download_job(stored.id, MediaPart::File).unwrap();
+        assert!(download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert_eq!(
+            app.media
+                .read(stored.id, MediaPart::File)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b"picture"
+        );
+
+        // A normal file has no seal, and one we can't open isn't fetched only to fail.
+        let usual = received_file(&app.store, 6, 1);
+        assert!(
+            app.download_job(usual, MediaPart::File)
+                .unwrap()
+                .seal
+                .is_none()
+        );
+        app.store.delete_contact("ABCD1234").unwrap();
+        let lost = app
+            .store
+            .insert_incoming("ABCD1234", 7, "file", &file_body(&file).to_string(), 1)
+            .unwrap()
+            .unwrap();
+        app.store.set_file_keys(lost.id, &file_keys(&file)).unwrap();
+        assert!(app.download_job(lost.id, MediaPart::File).is_none());
+        assert_eq!(state(&app.store, lost.id, "fileState"), Some(STATE_FAILED));
     }
 
     #[test]
