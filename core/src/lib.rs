@@ -39,6 +39,7 @@ pub mod demo;
 pub mod directory;
 pub mod distribution_lists;
 pub mod ffi;
+pub mod file_types;
 pub mod fs_store;
 pub mod gifs;
 pub mod group_call_frames;

@@ -245,17 +245,18 @@ function reactedWith(reactions, emoji) {
     return false
 }
 
-// Theme icon for a file by media type (a download icon while it is not on the device).
-function fileIcon(mediaType, state) {
+// Theme icon for a file by the core's checked `fileType` (a download icon while it is not on the
+// device).
+function fileIcon(fileType, state) {
     if (state === 0) return "icon-m-cloud-download"
     if (state === 3) return "icon-m-refresh"
-    var type = String(mediaType)
-    if (type.indexOf("image/") === 0) return "icon-m-file-image"
-    if (type.indexOf("audio/") === 0) return "icon-m-file-audio"
-    if (type.indexOf("video/") === 0) return "icon-m-file-video"
-    if (type === "application/pdf") return "icon-m-file-pdf"
-    if (type.indexOf("zip") >= 0 || type.indexOf("compressed") >= 0) return "icon-m-file-archive-folder"
-    if (type.indexOf("text/") === 0 || type.indexOf("document") >= 0) return "icon-m-file-document"
+    if (fileType === "image") return "icon-m-file-image"
+    if (fileType === "audio") return "icon-m-file-audio"
+    if (fileType === "video") return "icon-m-file-video"
+    if (fileType === "pdf") return "icon-m-file-pdf"
+    if (fileType === "archive") return "icon-m-file-archive-folder"
+    if (fileType === "document") return "icon-m-file-document"
+    if (fileType === "contact") return "icon-m-file-vcard"
     return "icon-m-file-other"
 }
 

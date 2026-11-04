@@ -107,7 +107,7 @@ pub fn file_body(file: &FileMessage) -> Value {
             FileRenderingType::Sticker => "sticker",
         },
         "mediaType": file.media_type,
-        "name": file.name,
+        "name": file.name.as_deref().map(crate::file_types::without_bidi_controls),
         "size": file.size,
         "caption": file.caption,
         "width": file.metadata.width,
@@ -392,14 +392,17 @@ fn auto_save(store: &Store, message: i64, data: &[u8], pictures: &std::path::Pat
         return;
     }
     let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
+    let Some(name) = crate::file_types::gallery_file_name(
+        body["name"].as_str(),
+        body["mediaType"].as_str().unwrap_or(""),
+    )
+    .filter(|_| crate::file_types::looks_like_gallery_media(data)) else {
+        return;
+    };
     let directory = pictures.join("Threesea");
     if std::fs::create_dir_all(&directory).is_err() {
         return;
     }
-    let name = safe_file_name(
-        body["name"].as_str(),
-        body["mediaType"].as_str().unwrap_or(""),
-    );
     let target = save_target(&directory, &name, data);
     if !target.exists()
         && let Err(error) = std::fs::write(&target, data)
@@ -892,10 +895,11 @@ impl App {
     }
 }
 
-/// A safe file name for saving: no directories or hidden files, not empty, at most 200 bytes.
+/// A safe file name for saving: no directories, hidden files or characters that reorder how it
+/// reads, not empty, at most 200 bytes before an extension from the media type (only if it has
+/// none of its own).
 pub fn safe_file_name(name: Option<&str>, media_type: &str) -> String {
-    let cleaned: String = name
-        .unwrap_or_default()
+    let cleaned: String = crate::file_types::without_bidi_controls(name.unwrap_or_default())
         .chars()
         .map(|c| {
             if matches!(c, '/' | '\\' | '\0') || c.is_control() {
@@ -905,20 +909,26 @@ pub fn safe_file_name(name: Option<&str>, media_type: &str) -> String {
             }
         })
         .collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').to_owned();
-    let mut name = if cleaned.is_empty() {
-        let extension = match media_type {
-            "image/jpeg" => ".jpg",
-            "image/png" => ".png",
-            "application/pdf" => ".pdf",
-            _ => "",
-        };
-        format!("threesea-file{extension}")
-    } else {
-        cleaned
-    };
+    let mut name = cleaned
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_owned();
+    if name.is_empty() {
+        name = "threesea-file".to_owned();
+    }
     while name.len() > 200 {
         name.pop();
+    }
+    // "report v1.2" and "Nr. 5" have no extension, whatever the path says.
+    let has_extension = std::path::Path::new(&name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            !extension.contains(' ') && !extension.chars().all(|c| c.is_ascii_digit())
+        });
+    if !has_extension && let Some(extension) = crate::file_types::extension_for(media_type) {
+        name = format!("{name}.{extension}");
     }
     name
 }
@@ -1041,7 +1051,11 @@ impl App {
             std::fs::write(&target, data.as_slice())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
-        Ok(json!({ "path": target.to_string_lossy() }))
+        let openable = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(crate::file_types::opens_externally);
+        Ok(json!({ "path": target.to_string_lossy(), "openable": openable }))
     }
 }
 
@@ -1072,11 +1086,49 @@ mod tests {
                 .unwrap_or(0)
         };
 
-        auto_save(&store, private.id, b"private bytes", &pictures);
+        auto_save(&store, private.id, b"\xff\xd8\xffprivate", &pictures);
         assert_eq!(saved(), 0);
 
-        auto_save(&store, open.id, b"open bytes", &pictures);
+        auto_save(&store, open.id, b"\xff\xd8\xffopen", &pictures);
         assert_eq!(saved(), 1);
+    }
+
+    /// The gallery's folder is indexed without anyone asking: a peer's name can't make something
+    /// else of a photo there, and what isn't a photo doesn't get there.
+    #[test]
+    fn auto_save_goes_by_the_checked_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let pictures = dir.path().join("Pictures");
+        let insert = |id, body: serde_json::Value| {
+            store
+                .insert_incoming("BBBBBBBB", id, "file", &body.to_string(), 1)
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        let saved = || {
+            let mut names: Vec<_> = std::fs::read_dir(pictures.join("Threesea"))
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+
+        let renamed = insert(1, json!({"mediaType": "image/jpeg", "name": "x.desktop"}));
+        auto_save(&store, renamed, b"\xff\xd8\xffphoto", &pictures);
+        assert_eq!(saved(), ["x.desktop.jpg"]);
+
+        // Bytes that aren't what the type says, and a type outside the list.
+        let mislabelled = insert(2, json!({"mediaType": "image/jpeg", "name": "y.jpg"}));
+        auto_save(&store, mislabelled, b"II*\0tiff", &pictures);
+        let unknown = insert(3, json!({"mediaType": "image/tiff", "name": "z.tiff"}));
+        auto_save(&store, unknown, b"\xff\xd8\xffphoto", &pictures);
+        assert_eq!(saved(), ["x.desktop.jpg"]);
     }
 
     #[test]
@@ -1380,6 +1432,32 @@ mod tests {
         );
         assert_eq!(safe_file_name(Some(".hidden"), ""), "hidden");
         assert_eq!(safe_file_name(None, "application/pdf"), "threesea-file.pdf");
+        assert_eq!(
+            safe_file_name(Some("report"), "application/pdf"),
+            "report.pdf"
+        );
+        assert_eq!(
+            safe_file_name(Some("report."), "application/pdf"),
+            "report.pdf"
+        );
+        assert_eq!(
+            safe_file_name(Some("Rechnung Nr. 5"), "application/pdf"),
+            "Rechnung Nr. 5.pdf"
+        );
+        assert_eq!(
+            safe_file_name(Some("report v1.2"), "application/pdf"),
+            "report v1.2.pdf"
+        );
+        // A real extension stays, and a name stays as it is when the type gives no other.
+        assert_eq!(
+            safe_file_name(Some("a.7z"), "application/x-7z-compressed"),
+            "a.7z"
+        );
+        assert_eq!(safe_file_name(Some("a.001"), ""), "a.001");
+        assert_eq!(
+            safe_file_name(Some("invoice\u{202E}fdp.desktop"), "application/pdf"),
+            "invoicefdp.desktop"
+        );
         assert_eq!(
             safe_file_name(Some("  "), "image/jpeg"),
             "threesea-file.jpg"

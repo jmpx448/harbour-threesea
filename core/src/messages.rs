@@ -442,6 +442,9 @@ impl Message {
             "body": match self.kind.as_str() {
                 "text" => Value::Null,
                 "status" => Value::from(self.body.clone()),
+                "file" => crate::file_types::shown_body(
+                    serde_json::from_str(&self.body).unwrap_or(Value::Null),
+                ),
                 _ => serde_json::from_str(&self.body).unwrap_or(Value::Null),
             },
             "createdAt": self.created_at,

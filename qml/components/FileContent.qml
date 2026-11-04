@@ -71,7 +71,7 @@ Item {
             Image {
                 anchors.centerIn: parent
                 visible: !voiceBusy.running
-                source: "image://theme/" + (!root.fileHere ? Fmt.fileIcon(root.body.mediaType,
+                source: "image://theme/" + (!root.fileHere ? Fmt.fileIcon(root.body.fileType,
                                                                            root.uploadFailed ? 3 : root.body.fileState)
                                             : root.active && voicePlayer.playing ? "icon-m-pause" : "icon-m-play")
                         + "?" + (root.highlighted || root.newVoice ? Theme.highlightColor : root.textColor)
@@ -234,7 +234,7 @@ Item {
             Image {
                 anchors.centerIn: parent
                 visible: !fileBusy.running
-                source: "image://theme/" + Fmt.fileIcon(root.body.mediaType,
+                source: "image://theme/" + Fmt.fileIcon(root.body.fileType,
                                                         root.uploadFailed ? 3 : root.body.fileState)
                         + "?" + (root.highlighted ? Theme.highlightColor : root.textColor)
             }

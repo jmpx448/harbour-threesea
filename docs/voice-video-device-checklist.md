@@ -555,3 +555,21 @@ Camera and QR scanner:
     - Expect: the screen stays on and the video is complete.
 13. Take a photo, tap send and go straight back to the chat list; the same with a video.
     - Expect: both arrive, and the capture folder is empty afterwards.
+
+## Files from other people in other apps
+
+Tapping a downloaded file saves it to Downloads, and hands documents, media and contact cards to
+the system's app. Send these from another phone as files.
+
+1. A contact card (`.vcf`, Android's "send contact"), then a calendar entry (`.ics`).
+   - Note what Sailfish does with each: which app opens, and whether it adds anything without
+     asking.
+2. A PDF, a JPG, an MP3 and a TIFF.
+   - Expect: each opens in its app, or nothing happens if the phone has none for it.
+3. A `.desktop`, a `.sh` and an `.rpm`, each with the media type `application/pdf`.
+   - Expect: the plain file icon and the real name; a tap saves it to Downloads and nothing opens.
+4. A `.txt` whose content is a desktop entry.
+   - Note what opens: the text or anything else.
+5. A BMP or HEIC photo sent as media, the way Android sends photos.
+   - Expect: a file row, or its preview if it came with one; a tap opens it like any other file,
+     no empty picture and no black page.

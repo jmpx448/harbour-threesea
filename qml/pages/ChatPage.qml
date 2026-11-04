@@ -443,8 +443,9 @@ Page {
             } else {
                 //% "Saved to Downloads"
                 Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
-                // Opens in the app registered for the type (e.g. Documents for PDFs), if any.
-                if (open) Qt.openUrlExternally("file://" + result.path)
+                // Documents and media open in the app registered for the type (e.g. Documents
+                // for PDFs), if any; the core decides by the name the file has now.
+                if (open && result.openable) Qt.openUrlExternally("file://" + result.path)
             }
         })
     }

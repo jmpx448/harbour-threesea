@@ -122,7 +122,8 @@ Page {
             } else {
                 //% "Saved to Downloads"
                 Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
-                if (open) Qt.openUrlExternally("file://" + result.path)
+                // Documents and media only; the core decides by the name the file has now.
+                if (open && result.openable) Qt.openUrlExternally("file://" + result.path)
             }
         })
     }
@@ -211,7 +212,7 @@ Page {
                     anchors.horizontalCenter: parent.horizontalCenter
                     source: "image://theme/" + (model.kind === "voice" && tile.body.fileState === 2
                                                 ? (tile.playing ? "icon-m-pause" : "icon-m-play")
-                                                : Fmt.fileIcon(tile.body.mediaType, tile.body.fileState))
+                                                : Fmt.fileIcon(tile.body.fileType, tile.body.fileState))
                             + (tile.highlighted ? "?" + Theme.highlightColor : "")
                 }
                 Label {

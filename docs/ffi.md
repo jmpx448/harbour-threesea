@@ -122,7 +122,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | (voice) | `backend.sendVoice(identity, path, durationMs, cb)` → `sendFile` with `audio/aac`, rendering `media`, `duration` (s) | QML context objects `voiceRecorder` (`available`, `recording`, `duration`, `start/stop/cancel`, `finished(path, duration)`) and `voicePlayer` (`messageId`, `playing`, `position`, `duration`, `play(id)/pause/stop/seek`) |
 | `retryUpload` | `message` (local id) | `{}` |
 | `downloadFile` | `message` (local id) | `{}`; fetch the file (or retry the thumbnail) |
-| `saveFile` | `message` (local id), `directory` (the UI passes `StandardPaths.download`) | `{path}`; decrypted copy outside the encrypted store, sanitised name, " (n)" if taken, an identical existing file is reused |
+| `saveFile` | `message` (local id), `directory` (the UI passes `StandardPaths.download`) | `{path, openable}`; decrypted copy outside the encrypted store, sanitised name, " (n)" if taken, an identical existing file is reused. `openable`: the saved name is a document, media type or contact card that may go to the system's app; anything else stays saved only |
 | `deleteConversation` | `identity` | `{}`; also `{"event": "conversationRead", "identity"}`, so the UI takes the notification away |
 | `connectionState` | – | `{state: disconnected\|connecting\|connected}` |
 | `reconnect` | – | `{}`; skip the backoff wait |
@@ -201,7 +201,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `callState` | – | `{call: {identity, callId, phase (calling\|ringing\|incoming\|active), outgoing, video, startedAt, acceptedAt} \| null}` |
 | `matchAddressBook` | `entries`: `[{firstName, lastName, emails, phones}]` | `{matched, added}`; hashed lookup (protocol-notes "Address book matching") |
 
-File message `body`: `{rendering, mediaType, name, size, caption, width, height, duration, animated, thumbnail, fileState, thumbnailState, uploadState}`, states 0 remote, 1 loading, 2 on the device, 3 failed. Media: `image://threesea/<id>/thumb|file` (bridge), `threesea_media_read` (FFI).
+File message `body`: `{rendering, mediaType, name, fileType, size, caption, width, height, duration, animated, thumbnail, fileState, thumbnailState, uploadState}`, states 0 remote, 1 loading, 2 on the device, 3 failed. `name` comes without characters that reorder text; `fileType` (image\|audio\|video\|pdf\|document\|contact\|archive\|other) follows from the name it would be saved under, not from `mediaType`, and is what the icon shows. Media: `image://threesea/<id>/thumb|file` (bridge), `threesea_media_read` (FFI).
 
 Message JSON: `{id (local), conversation, messageId (hex), outgoing, kind (text\|location), text,
 body, createdAt (ms), updatedAt, state, quoteId (hex or null), editedAt (ms or null; deletion time for kind `deleted`), sentAt, deliveredAt, readAt (outgoing; readAt also when we read an incoming one), receivedAt (incoming) — ms or null when unknown (older messages, skipped states), reactions: [{sender ("" = us), emoji}], mentions + mentionsMe (only if the text/caption has `@[…]`: `{ID: name}`, "" = us; see protocol-notes "Mentions")}`; outgoing state 0 pending, 1 sent, 2 delivered, 3 read,
