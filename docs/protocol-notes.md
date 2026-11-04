@@ -129,8 +129,15 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   in the nonce table, send, and mark the message "sent" on the server's message-ack. Delivery and
   read receipts are delivery-receipt messages handled by libthreema and surfaced through
   `add_or_update_incoming_message`.
-- Forward secrecy: see below. Not yet: groups (LIB-53), typing-indicator sending, nickname updates
-  to contacts, outgoing retries after server-side failures.
+- Our nickname goes in the metadata of messages that distribute the profile. Three answers:
+  a name; an empty string, which makes the receiver drop the name it knows (Android's
+  `setNicknameFromRemote("")`); or nothing, which leaves it alone. An ID backup holds no nickname,
+  so an ID restored from one, a new one, or one from a Threema Safe backup without a nickname says
+  nothing until its user is asked once
+  (`NICKNAME_UNANSWERED`, `NicknameDialog.qml`) and picks a name, or later takes one away. Android's
+  wizard defaults the nickname to the ID, which also replaces the name friends knew.
+- Forward secrecy: see below. Not yet: groups (LIB-53), typing-indicator sending, outgoing retries
+  after server-side failures.
 - Live-tested 2026-10-21 with the test ID: ECHOECHO echoes text; server ack → "sent",
   ECHOECHO also sends a "read" receipt.
 

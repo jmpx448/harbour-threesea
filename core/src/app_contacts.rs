@@ -767,6 +767,8 @@ impl App {
         Ok(json!({
             "identity": identity.threema_id,
             "nickname": self.store.setting(keys::NICKNAME)?,
+            "askNickname": self.store.setting(keys::NICKNAME)?.is_none()
+                && self.store.setting(keys::NICKNAME_UNANSWERED)?.as_deref() == Some("ask"),
             "publicKey": public_key.to_string(),
             "linkedEmail": self.store.setting(keys::LINKED_EMAIL)?,
             "linkedEmailPending": self.store.setting(keys::LINKED_EMAIL_PENDING)?.is_some(),
@@ -788,12 +790,26 @@ impl App {
             nickname.pop();
         }
         if nickname.is_empty() {
-            self.store.delete_setting(keys::NICKNAME)?;
+            // The profile page saves when its field loses focus: only taking a name away is an
+            // answer, and from there on contacts are told to drop it.
+            if self.store.setting(keys::NICKNAME)?.is_some() {
+                self.store.delete_setting(keys::NICKNAME)?;
+                self.store.delete_setting(keys::NICKNAME_UNANSWERED)?;
+            }
         } else {
             self.store.set_setting(keys::NICKNAME, &nickname)?;
+            self.store.delete_setting(keys::NICKNAME_UNANSWERED)?;
         }
         // The nickname rides along in the metadata of every message we send
         // (connection.rs), so contacts see it with the next one.
+        self.profile_json()
+    }
+
+    /// Not now: no more asking, and messages keep leaving contacts' stored name alone.
+    pub(crate) fn decline_nickname(&mut self) -> Result<Value, ApiError> {
+        if self.store.setting(keys::NICKNAME_UNANSWERED)?.is_some() {
+            self.store.set_setting(keys::NICKNAME_UNANSWERED, "asked")?;
+        }
         self.profile_json()
     }
 

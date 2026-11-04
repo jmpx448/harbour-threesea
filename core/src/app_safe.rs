@@ -488,7 +488,11 @@ impl App {
         self.store_adopted_identity(identity, client_key, private)?;
         match backup.user.nickname.as_deref().filter(|n| !n.is_empty()) {
             Some(nickname) => self.store.set_setting(keys::NICKNAME, nickname)?,
-            None => self.store.delete_setting(keys::NICKNAME)?,
+            // None in the backup: the same question as for an ID backup, which never holds one.
+            None => {
+                self.store.delete_setting(keys::NICKNAME)?;
+                self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
+            }
         }
         if picture_stored {
             self.store.bump_profile_picture_version()?;
@@ -1368,6 +1372,25 @@ mod tests {
             app.store.setting(keys::NICKNAME).unwrap().as_deref(),
             Some("julia")
         );
+    }
+
+    #[test]
+    fn a_restore_without_a_nickname_asks_instead_of_removing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, mut backup, key) = restore_material(dir.path());
+        backup.user.nickname = None;
+        let client_key = ClientKey::from([5; 32]);
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap();
+        assert_eq!(app.store.setting(keys::NICKNAME).unwrap(), None);
+        assert_eq!(app.profile_json().unwrap()["askNickname"], true);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (app, backup, key) = restore_material(dir.path());
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap();
+        assert_eq!(app.store.setting(keys::NICKNAME_UNANSWERED).unwrap(), None);
+        assert_eq!(app.profile_json().unwrap()["askNickname"], false);
     }
 
     #[test]

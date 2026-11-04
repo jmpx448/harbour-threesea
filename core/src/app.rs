@@ -217,6 +217,8 @@ pub enum Command {
     /// Own profile (ID, nickname, public key).
     Profile,
     /// Change the own nickname.
+    /// The user turned down the question for a nickname.
+    DeclineNickname,
     SetNickname {
         nickname: String,
     },
@@ -1660,6 +1662,7 @@ impl App {
                 self.set_revocation_password(&password).await
             }
             Command::SetNickname { nickname } => self.set_nickname(&nickname),
+            Command::DeclineNickname => self.decline_nickname(),
             Command::Settings => self.settings_json(),
             Command::SetSetting { name, value } => self.set_app_setting(&name, value),
             Command::DeleteAllData { pin } => {
@@ -2337,6 +2340,7 @@ impl App {
             client_key: Zeroizing::new(*client_key.as_bytes()),
             server_group: server_group.to_string(),
         })?;
+        self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
         tracing::info!("identity created");
         Ok(json!({ "identity": identity.to_string() }))
     }
@@ -2358,6 +2362,8 @@ impl App {
         .map_err(|_| ApiError::BackupDecrypt)?;
         let threema_id = data.threema_id.to_string();
         self.adopt_identity(&threema_id, &data.client_key).await?;
+        // An ID backup holds no nickname. Threema Safe has its own, if the backup had one.
+        self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
         tracing::info!("identity restored");
         Ok(json!({ "identity": threema_id }))
     }
@@ -3002,6 +3008,40 @@ mod tests {
             Err(ApiError::IdentityExists)
         ));
         assert_eq!(state(&mut app), "ready");
+    }
+
+    #[test]
+    fn a_new_or_restored_id_is_asked_for_a_nickname_once() {
+        fn ask(app: &App) -> bool {
+            app.profile_json().unwrap()["askNickname"] == true
+        }
+        let unanswered = |app: &App| app.store.setting(keys::NICKNAME_UNANSWERED).unwrap();
+
+        // No question for an ID from before there was one.
+        let (_dir, mut app) = licensed_app();
+        assert!(!ask(&app));
+
+        // Leaving the profile page's empty field is no answer.
+        app.store
+            .set_setting(keys::NICKNAME_UNANSWERED, "ask")
+            .unwrap();
+        assert!(ask(&app));
+        app.set_nickname("  ").unwrap();
+        assert_eq!(unanswered(&app).as_deref(), Some("ask"));
+
+        // Not now: not asked again, and still nothing is removed at contacts.
+        app.decline_nickname().unwrap();
+        assert!(!ask(&app));
+        assert_eq!(unanswered(&app).as_deref(), Some("asked"));
+
+        // A name answers it, and taking it away later is meant.
+        app.set_nickname("Tester").unwrap();
+        assert_eq!(unanswered(&app), None);
+        app.set_nickname("").unwrap();
+        assert_eq!(app.store.setting(keys::NICKNAME).unwrap(), None);
+        assert_eq!(unanswered(&app), None);
+        app.decline_nickname().unwrap();
+        assert_eq!(unanswered(&app), None, "nothing to decline any more");
     }
 
     /// Runs libthreema's real task against these answers: what comes out of it is what the user

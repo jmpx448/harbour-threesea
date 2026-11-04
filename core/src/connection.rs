@@ -426,9 +426,15 @@ fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Protocol(error.to_string())
 }
 
-/// What our messages say about our nickname.
-fn nickname_delta(nickname: Option<&str>) -> Delta<&str> {
-    nickname.map_or(Delta::Remove, Delta::Update)
+/// What our messages say about our nickname. Without one, they tell contacts to drop the name
+/// they know; for an ID whose user hasn't answered yet (restored from an ID backup, which holds no
+/// nickname), that would be the app's doing, so they say nothing.
+fn nickname_delta(nickname: Option<&str>, unanswered: bool) -> Delta<&str> {
+    match nickname {
+        Some(nickname) => Delta::Update(nickname),
+        None if unanswered => Delta::Unchanged,
+        None => Delta::Remove,
+    }
 }
 
 /// Like [`protocol_error`], but a rate limit stays what it is: it has its own wait.
@@ -1490,6 +1496,12 @@ impl<'a> Session<'a> {
             .store
             .setting(crate::store::keys::NICKNAME)
             .map_err(protocol_error)?;
+        let nickname_unanswered = self
+            .setup
+            .store
+            .setting(crate::store::keys::NICKNAME_UNANSWERED)
+            .map_err(protocol_error)?
+            .is_some();
         let client_key = ClientKey::from(*self.setup.client_key);
         let mut payloads = Vec::new();
 
@@ -1599,7 +1611,7 @@ impl<'a> Session<'a> {
             Some(envelope) => encode_outgoing_contact_message_encapsulated(
                 self.setup.identity,
                 &client_key,
-                nickname_delta(nickname.as_deref()),
+                nickname_delta(nickname.as_deref(), nickname_unanswered),
                 receiver_identity,
                 &receiver_key,
                 &message,
@@ -1609,7 +1621,7 @@ impl<'a> Session<'a> {
             None => encode_outgoing_contact_message(
                 self.setup.identity,
                 &client_key,
-                nickname_delta(nickname.as_deref()),
+                nickname_delta(nickname.as_deref(), nickname_unanswered),
                 receiver_identity,
                 &receiver_key,
                 &message,
@@ -3375,6 +3387,20 @@ mod backoff_tests {
     fn told_to_stay_away_holds_however_long_the_session_was() {
         assert_eq!(backoff_after_session(HOLD_OFF, LONG), HOLD_OFF);
         assert_eq!(backoff_after_session(HOLD_OFF, SHORT), HOLD_OFF);
+    }
+
+    #[test]
+    fn only_a_user_who_answered_tells_contacts_to_drop_the_name() {
+        assert_eq!(
+            nickname_delta(Some("Tester"), false),
+            Delta::Update("Tester")
+        );
+        assert_eq!(
+            nickname_delta(Some("Tester"), true),
+            Delta::Update("Tester")
+        );
+        assert_eq!(nickname_delta(None, false), Delta::Remove);
+        assert_eq!(nickname_delta(None, true), Delta::Unchanged);
     }
 
     #[test]

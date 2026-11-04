@@ -160,6 +160,9 @@ pub mod keys {
     pub const CONTACTS_REFRESHED_AT: &str = "contacts_refreshed_at";
     /// Public nickname.
     pub const NICKNAME: &str = "nickname";
+    /// A new or ID-backup-restored ID whose user hasn't said what to do about a nickname: messages
+    /// leave contacts' stored name alone. `ask`: to be asked; `asked`: declined for now.
+    pub const NICKNAME_UNANSWERED: &str = "nickname_unanswered";
     /// App lock: wrong PINs since the last pause, when the current pause ends (ms), and which
     /// pause is next (see `App::check_lock`).
     pub const PIN_FAILED_ATTEMPTS: &str = "pin_failed_attempts";

@@ -96,7 +96,8 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `addContact` | `identity` | contact (directory lookup, unverified) |
 | `updateContact` | `identity`, `firstName`, `lastName` | contact |
 | `deleteContact` | `identity` | `{}` |
-| `profile` | – | `{identity, nickname, publicKey, linkedEmail, linkedMobile, pictureVersion, pictureShare (everyone\|nobody\|selected), pictureRecipients: [ID]}` |
+| `declineNickname` | – | profile; the question for a nickname isn't asked again, messages keep leaving contacts' stored name alone |
+| `profile` | – | `{identity, nickname, askNickname (a new or ID-backup-restored ID: ask once), publicKey, linkedEmail, linkedMobile, pictureVersion, pictureShare (everyone\|nobody\|selected), pictureRecipients: [ID]}` |
 | `linkEmail` | `email` ("" unlinks) | profile (`linkedEmail`, `linkedEmailPending` until the link in the e-mail is opened; checked again on `profile` and in maintenance) |
 | `linkMobile` | `number` (with its country code, `+` or `00`; "" unlinks) | profile (`linkedMobilePending`: E.164 without `+` waiting for the SMS code; `linkedMobile` is empty meanwhile, as the server has dropped an old number); errors `phoneInvalid` |
 | `normalizeMobile` | `number` | `{number}`: what `linkMobile` would send, E.164 without `+`, or `null` if it can't be linked. No network |

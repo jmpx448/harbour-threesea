@@ -781,6 +781,8 @@ pub fn user_profile_sync(
         } else {
             store.set_setting(keys::NICKNAME, &nickname)?;
         }
+        // Answered on another device.
+        store.delete_setting(keys::NICKNAME_UNANSWERED)?;
     }
     if let Some(share) = profile.profile_picture_share_with.and_then(|s| s.policy) {
         use crate::profile_pictures::Share;

@@ -176,6 +176,20 @@ Page {
         pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: identity })
     }
 
+    // A new or restored ID is asked for a nickname once. If the update question is up first, at
+    // the next showing.
+    property bool nicknameChecked: false
+    function askNickname() {
+        backend.call("profile", {}, function(ok, profile) {
+            if (!ok || nicknameChecked) return
+            if (profile.askNickname) {
+                if (status !== PageStatus.Active || window.stackHeld || pageStack.busy) return
+                pageStack.push(Qt.resolvedUrl("NicknameDialog.qml"))
+            }
+            nicknameChecked = true
+        })
+    }
+
     // Shown at once when created; coming back to it (it was just loaded the first time) reloads.
     property bool wasActive: false
     Component.onCompleted: load()
@@ -185,6 +199,7 @@ Page {
             // The main list's first showing, after setup or unlocking: the one-time update question.
             else if (mainList) window.askUpdateCheck()
             wasActive = true
+            if (mainList && !nicknameChecked) askNickname()
             // Contacts are attached: swipe left (forward indicator top right), like Jolla apps.
             if (mainList && pageStack.nextPage(page) === null) pageStack.pushAttached(Qt.resolvedUrl("ContactsPage.qml"))
         }
