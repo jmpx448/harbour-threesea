@@ -152,9 +152,14 @@ impl App {
         self.media.set_hidden(hidden);
     }
 
-    /// A new or changed message of a hidden private chat: its media stay hidden too.
+    /// A new or changed message of a hidden private chat: its media stay hidden too. A chat
+    /// marked private (or not) takes its older messages along.
     pub(crate) fn gate_media(&self, event: &crate::providers::CoreEvent) {
         use crate::providers::CoreEvent;
+        if matches!(event, CoreEvent::PrivateChanged { .. }) {
+            self.update_media_gate();
+            return;
+        }
         if self.unlocked {
             return;
         }
@@ -276,6 +281,20 @@ impl App {
         Err(ApiError::PinLockout(pause))
     }
 
+    /// Store a private mark and let everyone who follows them know at once: the media readers
+    /// here, and through the event the UI's notifications and the browsers.
+    pub(crate) fn mark_private(&self, key: &str, private: bool) -> Result<(), ApiError> {
+        self.store.set_private(key, private)?;
+        self.update_media_gate();
+        let _ = self
+            .media_events
+            .send(crate::providers::CoreEvent::PrivateChanged {
+                conversation: key.to_owned(),
+                private,
+            });
+        Ok(())
+    }
+
     pub(crate) fn set_private(&mut self, identity: &str, private: bool) -> Result<Value, ApiError> {
         let (key, _) = self.conversation(identity)?;
         if self.store.lock()?.is_none() {
@@ -284,7 +303,7 @@ impl App {
         if !private {
             self.check_readable(&key)?;
         }
-        self.store.set_private(&key, private)?;
+        self.mark_private(&key, private)?;
         Ok(json!({ "identity": key, "private": private }))
     }
 

@@ -910,6 +910,9 @@ ApplicationWindow {
                 // Read in Threema Web, on another device, or from a notification.
                 window.clearNotification(data.identity)
                 backend.refreshUnread()
+            } else if (name === "privateChanged") {
+                // Marked here, on another device or by a restore: its text leaves Events too.
+                if (data.private) window.clearNotification(data.identity)
             } else if (name === "serverMessage") {
                 Notices.show(data.message, Notice.Long, Notice.Center)
             } else if (name === "licenseChanged") {

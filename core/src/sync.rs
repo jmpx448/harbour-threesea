@@ -65,13 +65,21 @@ fn apply_conversation(
     conversation: &str,
     visibility: Option<i32>,
     category: Option<i32>,
+    events: &mut Vec<CoreEvent>,
 ) -> Result<(), StoreError> {
     if let Some(visibility) = visibility.and_then(|v| ConversationVisibility::try_from(v).ok()) {
         store.set_pinned(conversation, visibility == ConversationVisibility::Pinned)?;
         store.set_archived(conversation, visibility == ConversationVisibility::Archived)?;
     }
     if let Some(category) = category.and_then(|c| ConversationCategory::try_from(c).ok()) {
-        store.set_private(conversation, category == ConversationCategory::Protected)?;
+        let private = category == ConversationCategory::Protected;
+        if store.is_private(conversation)? != private {
+            store.set_private(conversation, private)?;
+            events.push(CoreEvent::PrivateChanged {
+                conversation: conversation.to_owned(),
+                private,
+            });
+        }
     }
     Ok(())
 }
@@ -221,6 +229,7 @@ fn apply_contact(
         &id,
         synced.conversation_visibility,
         synced.conversation_category,
+        events,
     )?;
     Ok(true)
 }
@@ -296,6 +305,7 @@ fn apply_group(
         &key,
         synced.conversation_visibility,
         synced.conversation_category,
+        events,
     )?;
     Ok(true)
 }

@@ -1511,11 +1511,7 @@ impl App {
                 self.update_media_gate();
                 self.lock_status()
             }
-            Command::SetPrivate { identity, private } => {
-                let result = self.set_private(&identity, private);
-                self.update_media_gate();
-                result
-            }
+            Command::SetPrivate { identity, private } => self.set_private(&identity, private),
             Command::SetArchived { identity, archived } => {
                 let key = self.conversation(&identity)?.0;
                 self.store.set_archived(&key, archived)?;

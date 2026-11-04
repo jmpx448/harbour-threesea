@@ -44,7 +44,7 @@ Events (unsolicited): `{"event": "started", "version"}`, `{"event": "fatal", "ki
 also when synced from another device),
 `{"event": "connectionState", "state"}`, `{"event": "messageAdded", "message"}`,
 `{"event": "messagesChanged", "messages"}` (acks, receipts), `{"event": "typing", "identity",
-"typing"}`, `{"event": "serverMessage", "message", "canReconnect"}` (server alert / close). `{"event": "messageNotify", "message", "notify", "private"}`: a message another device received first (it leads) and that is still unread after a grace time, or at the end of the mediator's backlog — its `messageAdded` came with `notify: false`. `{"event": "deviceCookieChanged"}`: the chat server saw the ID log in with another device cookie (Android's rogue-device warning; the core has already cleared the server's flag).
+"typing"}`, `{"event": "serverMessage", "message", "canReconnect"}` (server alert / close). `{"event": "messageNotify", "message", "notify", "private"}`: a message another device received first (it leads) and that is still unread after a grace time, or at the end of the mediator's backlog — its `messageAdded` came with `notify: false`. `{"event": "privateChanged", "identity", "private"}`: a chat was marked private or unmarked, here, on a linked device or by a restore. `{"event": "deviceCookieChanged"}`: the chat server saw the ID log in with another device cookie (Android's rogue-device warning; the core has already cleared the server's flag).
 
 Call events (Full, ADR 0012): `callIncoming {identity, sdp (patched), video}`, `callRinging`,
 `callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record: {peer, outgoing, result,

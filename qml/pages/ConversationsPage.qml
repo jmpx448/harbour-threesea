@@ -191,7 +191,8 @@ Page {
         target: backend
         onCoreEvent: {
             if (name === "messageAdded" || name === "messagesChanged" || name === "contactsChanged"
-                    || name === "conversationRead" || name === "groupsChanged" || name === "chatsChanged") {
+                    || name === "conversationRead" || name === "groupsChanged" || name === "chatsChanged"
+                    || name === "privateChanged") {
                 page.reload()
             }
         }

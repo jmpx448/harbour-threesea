@@ -592,7 +592,7 @@ impl App {
             if self.store.group(&group.key)?.is_none() {
                 self.store.upsert_group(&group)?;
                 if entry.is_private {
-                    self.store.set_private(&group.key, true)?;
+                    self.mark_private(&group.key, true)?;
                 }
                 imported_groups += 1;
             }
@@ -602,7 +602,7 @@ impl App {
             if self.store.distribution_list(&list.key)?.is_none() {
                 self.store.upsert_distribution_list(&list)?;
                 if entry.is_private {
-                    self.store.set_private(&list.key, true)?;
+                    self.mark_private(&list.key, true)?;
                 }
                 imported_lists += 1;
             }
@@ -1162,7 +1162,20 @@ mod tests {
         assert_eq!(status["restore"]["pendingGroups"], 4);
         assert_eq!(status["restore"]["pendingLists"], 1);
         assert_eq!(new.build_backup().unwrap().groups.unwrap().len(), 4);
+        let mut events = new.take_media_events().unwrap();
         assert!(new.import_pending_groups().await.unwrap());
+        // The restored private marks reach the media gate, notifications and browsers too.
+        let mut marked = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let crate::providers::CoreEvent::PrivateChanged {
+                conversation,
+                private: true,
+            } = event
+            {
+                marked.push(conversation);
+            }
+        }
+        assert_eq!(marked, [groups[1].key.clone(), list.key.clone()]);
         // The status now reports the counts and that nothing waits any more.
         let status = new.safe_status().unwrap();
         assert_eq!(status["restore"]["pendingGroups"], 0);

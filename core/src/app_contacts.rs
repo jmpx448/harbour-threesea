@@ -775,7 +775,7 @@ impl App {
                 self.store
                     .upsert_contact(&contacts::apply_backup(*contact, entry))?;
                 if entry.is_private {
-                    self.store.set_private(&id, true)?;
+                    self.mark_private(&id, true)?;
                 }
                 imported += 1;
             }

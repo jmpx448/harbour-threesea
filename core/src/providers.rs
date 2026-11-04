@@ -53,6 +53,9 @@ pub enum CoreEvent {
     },
     /// Groups were created or changed.
     GroupsChanged,
+    /// A chat became private or stopped being private, from anywhere: the UI, a linked device,
+    /// a restore.
+    PrivateChanged { conversation: String, private: bool },
     /// Internal: something was queued in the outbox (group replies): send it.
     OutboxChanged,
     /// Internal: group members without a contact; fetch them from the directory.
@@ -157,6 +160,10 @@ impl CoreEvent {
             Self::Typing { .. } => json!({"event": "internal"}),
             Self::ContactsChanged => json!({"event": "contactsChanged"}),
             Self::GroupsChanged => json!({"event": "groupsChanged"}),
+            Self::PrivateChanged {
+                conversation,
+                private,
+            } => json!({"event": "privateChanged", "identity": conversation, "private": private}),
             Self::ProfileChanged => json!({"event": "profileChanged"}),
             Self::AndroidBackup(event) => event.clone(),
             Self::MultiDeviceChanged => json!({"event": "multiDeviceChanged"}),

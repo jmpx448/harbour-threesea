@@ -512,6 +512,75 @@ async fn private_content_stays_hidden_from_mutations_and_media() {
     assert!(app.media.shown(text.id) && app.media.shown(late.id));
 }
 
+/// A chat marked private on a linked device: its older media leave the UI's readers at once and
+/// the event tells the UI (which closes the chat's notification); the same mark again changes
+/// nothing.
+#[test]
+fn private_mark_from_a_linked_device_reaches_the_gate_and_the_ui() {
+    use libthreema::protobuf::{
+        d2d::{ContactSync, contact_sync},
+        d2d_sync::{self, ConversationCategory},
+    };
+    let (_dir, app) = fixture();
+    let old = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "older message", 1)
+        .unwrap()
+        .unwrap();
+    app.update_media_gate();
+    assert!(app.media.shown(old.id));
+    let sync = ContactSync {
+        action: Some(contact_sync::Action::Update(contact_sync::Update {
+            contact: Some(d2d_sync::Contact {
+                identity: "BBBBBBBB".into(),
+                conversation_category: Some(ConversationCategory::Protected as i32),
+                ..Default::default()
+            }),
+        })),
+    };
+    let marked = |events: &[CoreEvent]| -> Vec<serde_json::Value> {
+        events
+            .iter()
+            .filter(|event| matches!(event, CoreEvent::PrivateChanged { .. }))
+            .map(|event| event.to_json(&app.store, app.unlocked))
+            .collect()
+    };
+
+    let mut events = Vec::new();
+    crate::sync::contact_sync(&app.store, sync.clone(), &mut events).unwrap();
+    assert_eq!(
+        marked(&events),
+        [json!({"event": "privateChanged", "identity": "BBBBBBBB", "private": true})]
+    );
+    for event in &events {
+        app.gate_media(event);
+    }
+    assert!(!app.media.shown(old.id));
+
+    let mut events = Vec::new();
+    crate::sync::contact_sync(&app.store, sync, &mut events).unwrap();
+    assert!(marked(&events).is_empty());
+}
+
+/// Marking a chat in the UI goes the same way, so its notification closes there too.
+#[tokio::test(flavor = "current_thread")]
+async fn marking_a_chat_private_tells_the_ui() {
+    let (_dir, mut app) = fixture();
+    let mut events = app.take_media_events().unwrap();
+    let reply = app
+        .handle(
+            &json!({"id": 1, "cmd": "setPrivate", "identity": "BBBBBBBB", "private": true})
+                .to_string(),
+        )
+        .await;
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+    let event = events.try_recv().unwrap();
+    assert_eq!(
+        event.to_json(&app.store, app.unlocked),
+        json!({"event": "privateChanged", "identity": "BBBBBBBB", "private": true})
+    );
+}
+
 /// Deep audit D05: a browser's own text doesn't end up in the log, also for requests the app
 /// doesn't know.
 #[tokio::test(flavor = "current_thread")]
