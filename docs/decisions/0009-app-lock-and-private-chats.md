@@ -131,3 +131,7 @@ lock as well. Its token only starts its grace, as a tap may still be on its way.
 answer. A Reply or Mark as read tapped earlier and still on its way waits for the PIN in memory, as
 it does for the passphrase, and the notification says so. This is a matter for the window, not the
 core: the core has no app lock state of its own, its `unlocked` flag is the private chats'.
+
+A reply's token lives for 12 hours after its notification closed (a phone can stay locked that long
+with a reply typed), and a reply coming later or without a token gets "Your reply was not sent",
+without its words or chat, as any process on the session bus can make that call.

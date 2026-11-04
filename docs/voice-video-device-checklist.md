@@ -343,9 +343,14 @@ Notifications:
    - Both from the lock screen of a locked phone.
      Expect: the same after unlocking.
    - With a notification showing, end the app (`pkill harbour-threesea` over SSH) and open it
-     again, leave it running in the background, wait more than 15 minutes, then Reply from that
+     again, leave it running in the background, wait more than 12 hours, then Reply from that
      notification.
      Expect: the reply is sent.
+   - Type a reply in a notification on the lock screen, a new message arrives in that chat, the app
+     lock's grace time passes, then unlock the phone.
+     Expect: the reply waits for the PIN and goes out after it. If it arrives without a valid token
+     anyway: "Your reply was not sent", nothing silent. This timing is what lipstick's order of
+     closing and calling decides, so look at which of the two it is.
    - With "Encrypt stored data" on and a notification showing, end the app the same way, then
      Reply from the notification; again with Mark as read.
      Expect: after a Reply, "Threesea is locked" says that the reply waits. After entering the

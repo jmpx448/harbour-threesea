@@ -1200,6 +1200,21 @@ QtObject {
                 check("not a private chat's", window.notifications["private"], undefined)
             }, 0],
         ],
+        // Too late for its token: it says so, once, about no chat in particular.
+        replyLostSaysSo: [
+            [function() { ready(false) }, 100],
+            [function() {
+                fakes.dbus.replyLost()
+                var n = window.notifications["replyNotSent"]
+                check("says so", n.summary, "threesea-la-reply-not-sent")
+                check("why", n.body, "threesea-la-reply-not-sent-late")
+                check("opens the app", n.remoteActions[0].method, "activate")
+                root.kept = n
+                fakes.dbus.replyLost()
+                check("the same one", window.notifications["replyNotSent"] === root.kept, true)
+                check("nothing sent", countSent("sendText"), 0)
+            }, 0],
+        ],
         // Nowhere to keep it: it still says so.
         replyRefusedNotKept: [
             [function() {

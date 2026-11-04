@@ -68,6 +68,7 @@ QtObject {
         signal openUrlRequested(string url)
         signal markReadRequested(string identity)
         signal replyRequested(string identity, string text)
+        signal replyLost()
         function actionToken() { return "" }
         function retainTokens(identities) { }
         // Those whose grace started.

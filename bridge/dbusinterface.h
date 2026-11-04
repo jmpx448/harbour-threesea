@@ -18,8 +18,8 @@
 // service; lipstick makes the call through a short-lived helper (mliteremoteaction) the sandbox
 // can't identify. So these two actions carry a random token per chat, put into the
 // notification by us and kept in the app's private settings, under a salted hash of the chat, so
-// that the file doesn't list who one chats with; calls without it are ignored (security audits
-// 2026-10-27, S07/D04). A token lives as long as its notification and a grace period after it:
+// that the file doesn't list who one chats with; calls without it are ignored, and for a reply the
+// window says that it wasn't sent (security audits 2026-10-27, S07/D04). A token lives as long as its notification and a grace period after it:
 // lipstick closes the notification first and makes the call afterwards, also when that call starts
 // the app. Using it for an action ends it at once. The salt is in the same file and IDs are few
 // enough to try them all offline, so the hash only stops casual reading of the file: what limits
@@ -80,6 +80,8 @@ signals:
     void openChatRequested(const QString &identity);
     void replyRequested(const QString &identity, const QString &text);
     void markReadRequested(const QString &identity);
+    // A reply came without a valid token.
+    void replyLost();
     void activateRequested();
     void showUpdateRequested();
     void openUrlRequested(const QString &url);

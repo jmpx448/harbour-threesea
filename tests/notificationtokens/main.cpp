@@ -39,6 +39,9 @@ bool markRead(DBusInterface &dbus, const QString &token)
     return got;
 }
 
+// How many replies were lost on a token since the last look.
+int lostReplies = 0;
+
 bool reply(DBusInterface &dbus, const QString &token, const QString &text)
 {
     bool got = false;
@@ -87,6 +90,14 @@ void testWhileRunning()
     check(reply(dbus, second, QStringLiteral("hello")), "a reply after the notification closed");
     check(!reply(dbus, second, QStringLiteral("hello")), "the reply used the token up");
     check(graces() == 0, "nothing stays behind after the action");
+    lostReplies = 0;
+    QObject::connect(&dbus, &DBusInterface::replyLost, [] { ++lostReplies; });
+    check(!reply(dbus, second, QStringLiteral("hello")), "again without a token");
+    check(lostReplies == 1, "a reply without its token is said");
+    check(!reply(dbus, second, QStringLiteral("  ")), "a blank one without a token");
+    check(lostReplies == 1, "losing a blank reply loses nothing");
+    check(!markRead(dbus, second), "mark as read without a token");
+    check(lostReplies == 1, "nor does a mark as read");
 
     const QString third = dbus.actionToken(chat, true);
     dbus.releaseToken(chat);

@@ -1149,6 +1149,16 @@ ApplicationWindow {
         })
     }
 
+    // A reply without a valid token, after its grace or with its notification gone. Which chat is
+    // not known: anything on the session bus can make such a call, so it isn't taken from there,
+    // and that is also why this stays one notification.
+    function replyLost() {
+        if (notifications["replyNotSent"]) return
+        plainNotification("replyNotSent", qsTrId("threesea-la-reply-not-sent"),
+                          //% "It reached Threesea too late. Write it again in the chat."
+                          qsTrId("threesea-la-reply-not-sent-late"))
+    }
+
     // After what the chat's input holds already, there if the chat is open, otherwise in its draft.
     function keepReply(identity, text, done) {
         var chat = pageStack.find(function(page) { return page.identity === identity && page.inputField })
@@ -1323,6 +1333,7 @@ ApplicationWindow {
         onOpenUrlRequested: window.openLink(url, false)
         onMarkReadRequested: window.notificationAction({ identity: identity })
         onReplyRequested: window.notificationAction({ identity: identity, text: text })
+        onReplyLost: window.replyLost()
     }
 
     Connections {

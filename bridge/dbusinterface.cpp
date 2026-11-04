@@ -86,8 +86,10 @@ const QString oldTokenGroup = QStringLiteral("notificationTokens");
 
 // How long a token outlives its notification. Tapping Reply or Mark as read makes lipstick close
 // the notification first and call us afterwards, through a helper process, or after starting us;
-// the wait for a device unlock can come in between.
-const qint64 tokenGraceMs = 15 * 60 * 1000;
+// the wait for a device unlock can come in between, which may be a night. A token of a notification
+// still showing lives for as long as that, so this adds little, and the app lock holds back what
+// the action asks for (the window).
+const qint64 tokenGraceMs = 12 * 60 * 60 * 1000;
 
 QByteArray randomBytes(int count)
 {
@@ -275,6 +277,11 @@ void DBusInterface::reply(const QString &identity, const QString &token, const Q
 {
     if (!tokenValid(identity, token)) {
         qWarning("threesea: notification action without its token ignored");
+        // Someone may have typed this: the only copy of the words ends here. Not the caller's
+        // chat or text: without the token nothing says they are real.
+        if (!text.trimmed().isEmpty()) {
+            emit replyLost();
+        }
         return;
     }
     emit called();
