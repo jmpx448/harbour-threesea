@@ -6,7 +6,8 @@
 //!   other host fails the TLS handshake.
 //! - Normal WebPKI validation (Mozilla roots) **and** SPKI pinning of the server certificate,
 //!   using upstream's pin sets (`app/src/main/res/xml/network_security_config.xml`).
-//! - No redirects to other hosts are possible, because they would fail the same checks.
+//! - Redirects are followed only to Threema hosts, at most [`MAX_REDIRECTS`] of them: another
+//!   host doesn't even get a DNS lookup or a TLS greeting.
 
 use std::sync::Arc;
 
@@ -68,6 +69,14 @@ const PINS: &[(&str, &[&str])] = &[
 
 /// The largest response body read: an encrypted blob of the largest size, with room to spare.
 const MAX_RESPONSE: usize = crate::media::MAX_BLOB_SIZE + 64 * 1024;
+
+/// Redirects followed for one request (each to a Threema host).
+const MAX_REDIRECTS: usize = 5;
+
+/// May a request that was redirected `hops` times so far go on to `target`?
+fn redirect_allowed(target: &str, hops: usize) -> bool {
+    hops < MAX_REDIRECTS && is_threema_url(target)
+}
 
 /// Whether `url` (https:// or wss://) names a Threema host. Checked before connecting: the
 /// certificate check would refuse any other host too, but only after DNS, TCP and the TLS
@@ -332,6 +341,14 @@ impl HttpsClient {
             .tls_backend_preconfigured(tls)
             .user_agent(user_agent())
             .https_only(true)
+            // Stopping hands the redirect back as the response: an unexpected status for callers.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .map_err(|e| HttpsError::InvalidRequest(e.to_string()))?;
         Ok(Self { client })
@@ -440,6 +457,15 @@ mod tests {
         assert!(!is_threema_url("not a url"));
         assert!(pins_for_host("threema.ch.evil.example").is_none());
         assert!(pins_for_host("example.org").is_none());
+    }
+
+    #[test]
+    fn redirects_stay_on_threema_hosts() {
+        assert!(redirect_allowed("https://ds-blobp-1f.threema.ch/1f00", 0));
+        assert!(redirect_allowed("https://threema.com/", MAX_REDIRECTS - 1));
+        assert!(!redirect_allowed("https://threema.com/", MAX_REDIRECTS));
+        assert!(!redirect_allowed("https://example.com/", 0));
+        assert!(!redirect_allowed("https://threema.ch.example.com/", 0));
     }
 
     #[test]
