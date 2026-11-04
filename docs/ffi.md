@@ -74,6 +74,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `dismissSpam` | `identity` | `{}`; this chat offers no report any more |
 | `reportSpam` | `identity`, `block` | `{}`; reports to Threema's directory, then with `block` blocks the sender or group creator, leaves the group and deletes the chat. Nothing else happens if the report fails |
 | `licenseStatus` | – | `{key, refused}`: the stored key, and the directory's message if it refused it |
+| `forgetLicense` | – | status; removes the stored key to enter another; error `identityExists` on a device with an ID |
 | `createIdentity` | – | `{identity}` (uses the stored license); error `identityExists` on a device with an ID |
 | `restoreIdentityBackup` | `backup`, `password` | `{identity}` (needs a license first); error `identityExists` on a device with an ID |
 | `exportIdentityBackup` | `password` (≥ 8 chars), `pin` | `{backup}` |

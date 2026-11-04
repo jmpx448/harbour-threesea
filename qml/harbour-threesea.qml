@@ -531,7 +531,9 @@ ApplicationWindow {
             }
             if (mustWait()) return
             if (link.action === "license") {
-                var licensePage = pageStack.find(function(page) { return page.objectName === "license" })
+                var licensePage = pageStack.find(function(page) {
+                    return page.objectName === "license" || page.objectName === "identitySetup"
+                })
                 if (licensePage) licensePage.useKey(link.key)
                 activate()
                 return

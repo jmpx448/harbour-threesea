@@ -87,6 +87,8 @@ pub enum Command {
     },
     /// The stored license key and why Threema's directory refused it, if it did.
     LicenseStatus,
+    /// Forget the stored license key, to enter another. Only on a device without an ID.
+    ForgetLicense,
     /// Whether this chat offers a spam report.
     SpamPotential {
         identity: String,
@@ -1561,6 +1563,7 @@ impl App {
             Command::Status => self.status(),
             Command::CheckLicense { license_key } => self.check_license(&license_key).await,
             Command::LicenseStatus => self.license_status(),
+            Command::ForgetLicense => self.forget_license(),
             Command::SpamPotential { identity } => self.spam_potential(&identity),
             Command::DismissSpam { identity } => self.dismiss_spam(&identity),
             Command::ReportSpam { identity, block } => self.report_spam(&identity, block).await,
@@ -2204,6 +2207,16 @@ impl App {
             "key": self.store.setting(keys::LICENSE_KEY)?,
             "refused": self.store.setting(keys::LICENSE_REFUSED)?,
         }))
+    }
+
+    /// The way back from the ID step when the directory turns the key down there: until an ID
+    /// exists, nothing else depends on it.
+    fn forget_license(&mut self) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
+        self.store.delete_setting(keys::LICENSE_KEY)?;
+        self.store.delete_setting(keys::LICENSE_REFUSED)?;
+        self.store.delete_setting(keys::LICENSE_CHECKED_AT)?;
+        self.status()
     }
 
     /// Ask the directory about the stored license again, at most daily (Android: whenever its
@@ -2971,6 +2984,24 @@ mod tests {
             app.store.identity().unwrap().unwrap().threema_id,
             "ABCD1234"
         );
+    }
+
+    #[test]
+    fn the_license_key_can_be_changed_until_there_is_an_id() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_setting(keys::LICENSE_KEY, "ABCDE-12345")
+            .unwrap();
+        assert_eq!(state(&mut app), "needsIdentity");
+        assert_eq!(app.forget_license().unwrap()["state"], "needsLicense");
+        assert_eq!(app.store.setting(keys::LICENSE_KEY).unwrap(), None);
+
+        let (_dir, mut app) = licensed_app();
+        assert!(matches!(
+            app.forget_license(),
+            Err(ApiError::IdentityExists)
+        ));
+        assert_eq!(state(&mut app), "ready");
     }
 
     /// Runs libthreema's real task against these answers: what comes out of it is what the user
