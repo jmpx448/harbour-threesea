@@ -137,8 +137,14 @@ Page {
     }
 
     function load() {
-        backend.call("conversations", { archived: page.archived, private: page.privateList }, function(ok, result) {
-            if (!ok) return
+        backend.call("conversations", { archived: page.archived, private: page.privateList },
+                     function(ok, result, kind, message) {
+            // Locked: the page goes anyway, and has nothing to say about that.
+            if (!ok) {
+                if (kind !== "locked") page.loadError = Errors.text(kind, message)
+                return
+            }
+            page.loadError = ""
             page.archivedCount = result.archivedCount || 0
             page.privateCount = result.privateCount || 0
             if (page.privateList) window.clearNotification("private")
@@ -162,6 +168,8 @@ Page {
         })
     }
 
+    // Why the list could not be read: no chats and "no chats" are not the same.
+    property string loadError
     property int pinnedCount: 0
 
     function pin(identity, pinned) {
@@ -543,17 +551,23 @@ Page {
         }
 
         ViewPlaceholder {
-            enabled: listView.count === 0 && page.archived
+            enabled: listView.count === 0 && page.loadError.length > 0
+            //% "The chats could not be loaded"
+            text: qsTrId("threesea-la-chats-not-loaded")
+            hintText: page.loadError
+        }
+        ViewPlaceholder {
+            enabled: listView.count === 0 && page.loadError.length === 0 && page.archived
             //% "No archived chats"
             text: qsTrId("threesea-la-no-archived")
         }
         ViewPlaceholder {
-            enabled: listView.count === 0 && page.privateList
+            enabled: listView.count === 0 && page.loadError.length === 0 && page.privateList
             //% "No private chats"
             text: qsTrId("threesea-la-no-private")
         }
         ViewPlaceholder {
-            enabled: listView.count === 0 && page.mainList
+            enabled: listView.count === 0 && page.loadError.length === 0 && page.mainList
             //% "No chats yet"
             text: qsTrId("threesea-la-no-chats")
             //% "Pull down to write a message"

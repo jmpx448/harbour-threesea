@@ -192,6 +192,16 @@ Page {
 
     // Nothing of the chat is shown until its messages came (a private chat needs the PIN).
     property bool shown: false
+    // Why they didn't: a blank page says nothing about a history that can't be read.
+    property string loadError
+    // Messages of a chat already showing couldn't be read. The history would just end there and
+    // look deleted, so it is said, once; and scrolling doesn't ask again until the next load.
+    property bool readFailed: false
+    function readFailure(kind, message) {
+        if (kind === "locked") return
+        if (!readFailed) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+        readFailed = true
+    }
     // Leaving a private chat hides the private chats again (unless their list is underneath).
     property bool isPrivate: false
 
@@ -221,14 +231,22 @@ Page {
         // short of that the view stops at the window's end and the next page moves the target.
         var args = { identity: identity, limit: focusMessage >= 0 && page.focusMode === ListView.End ? 200 : 60 }
         if (focusMessage >= 0) args.around = focusMessage
-        backend.call("messages", args, function(ok, result, kind) {
+        backend.call("messages", args, function(ok, result, kind, message) {
             if (generation !== page.loadGeneration) return
             page.loadingOlder = false
             page.loadingNewer = false
             if (!ok) {
-                if (kind === "locked" && !page.shown) askPinLater.start()
+                if (kind === "locked") {
+                    if (!page.shown) askPinLater.start()
+                } else if (!page.shown) {
+                    page.loadError = Errors.text(kind, message)
+                } else {
+                    page.readFailure(kind, message)
+                }
                 return
             }
+            page.loadError = ""
+            page.readFailed = false
             // Something new goes before the place. The answer is the only one that says so:
             // opening marks it read.
             if (place !== undefined && result.firstUnread !== null && result.firstUnread !== undefined) {
@@ -525,12 +543,12 @@ Page {
     property int loadGeneration: 0
 
     function loadOlder() {
-        if (loadingOlder || olderExhausted || !shown || messages.count === 0) return
+        if (loadingOlder || olderExhausted || readFailed || !shown || messages.count === 0) return
         loadingOlder = true
         var generation = page.loadGeneration
         backend.call("messages",
                      { identity: identity, before: messages.get(messages.count - 1).id, limit: pageSize },
-                     function(ok, result) {
+                     function(ok, result, kind, message) {
             if (generation !== page.loadGeneration) return
             if (ok) {
                 var older = result.messages.reverse()
@@ -541,6 +559,8 @@ Page {
                 messages.insertAll(older, messages.count)
                 page.dropNewest()
                 page.updateStickyDay()
+            } else {
+                page.readFailure(kind, message)
             }
             page.loadingOlder = false
         })
@@ -548,12 +568,12 @@ Page {
 
     // Scrolling forward again after the newest messages were dropped.
     function loadNewer() {
-        if (loadingNewer || newerExhausted || !shown || messages.count === 0) return
+        if (loadingNewer || newerExhausted || readFailed || !shown || messages.count === 0) return
         loadingNewer = true
         var generation = page.loadGeneration
         backend.call("messages",
                      { identity: identity, after: messages.get(0).id, limit: pageSize },
-                     function(ok, result) {
+                     function(ok, result, kind, message) {
             if (generation !== page.loadGeneration) return
             if (ok) {
                 var newer = result.messages.reverse()
@@ -561,6 +581,8 @@ Page {
                 messages.insertAll(newer, 0)
                 page.dropOldest()
                 page.updateStickyDay()
+            } else {
+                page.readFailure(kind, message)
             }
             page.loadingNewer = false
         })
@@ -1759,6 +1781,12 @@ Page {
             anchors.fill: parent
             color: Theme.rgba(Theme.highlightDimmerColor, Fmt.alpha(0.55, backend.emulator))
         }
+    }
+
+    InfoLabel {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: !page.shown && page.loadError.length > 0
+        text: page.loadError
     }
 
     SilicaFlickable {
