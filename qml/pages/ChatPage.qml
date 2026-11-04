@@ -6,6 +6,7 @@ import Sailfish.Pickers 1.0
 // Registers the image://nemoThumbnail provider (video frames for sending). Its Thumbnail item is
 // not used: on SFOS 5.1 it repeats statusChanged without end (main thread at 100 %).
 import Nemo.Thumbnailer 1.0 as Nemo
+import Nemo.KeepAlive 1.2
 import harbour.threesea 1.0
 import "../components"
 import "../components/Errors.js" as Errors
@@ -541,7 +542,7 @@ Page {
     // The "@…" being typed before the cursor, or null.
     property var mentionQuery: null
     function updateMentionQuery() {
-        if (!isGroup || !inputField || voiceRecorder.recording) {
+        if (!isGroup || !inputField || recordingHere) {
             mentionQuery = null
             return
         }
@@ -802,9 +803,22 @@ Page {
     }
 
     // Voice messages: the send button records while the input is empty (Threema), a second tap
-    // sends; the recording bar's ✕ throws it away.
-    readonly property bool canRecord: voiceRecorder.available && !attachment && !quoting && editingMessageId === ""
+    // sends; the recording bar's ✕ throws it away. The recorder is the app's, the recording this
+    // page's: the bar and the button, and sending it, are for the chat it was started in.
+    readonly property bool recordingHere: voiceRecorder.owner === page
+    readonly property bool canRecord: voiceRecorder.available && !voiceRecorder.owner
+                                      && !attachment && !quoting && editingMessageId === ""
                                       && inputField && inputField.text.trim().length === 0
+    // A recording went while nobody was looking: said when the app is back.
+    property bool recordingDiscarded
+
+    // Talking for a long time without touching the phone must not blank it: that would leave the
+    // app, and a lock (or a recording's end) has nobody to ask then. Once the app has been left,
+    // the phone blanks and locks as usual.
+    DisplayBlanking {
+        preventBlanking: page.recordingHere && voiceRecorder.recording
+                         && Qt.application.state === Qt.ApplicationActive
+    }
 
     // ---- Voice messages at the ear, their queue and their "new" state (user requests
     // 2026-10-28, like Threema for Android) ----
@@ -931,19 +945,39 @@ Page {
         }
     }
 
+    function sendRecording(duration) {
+        backend.sendVoice(page.identity, duration, function(ok, result, kind, message) {
+            if (ok) {
+                page.addMessage(result)
+            } else {
+                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            }
+        })
+    }
+    function sayRecordingDiscarded() {
+        recordingDiscarded = false
+        //% "Recording stopped and discarded"
+        Notices.show(qsTrId("threesea-la-recording-discarded"), Notice.Long, Notice.Center)
+    }
+    function recordingWentUnasked() {
+        if (Qt.application.state === Qt.ApplicationActive) sayRecordingDiscarded()
+        else recordingDiscarded = true
+    }
+
     Connections {
         target: voiceRecorder
-        onFinished: {
-            if (duration < 1000) return  // a slip of the finger
-            backend.sendVoice(page.identity, duration, function(ok, result, kind, message) {
-                if (ok) {
-                    page.addMessage(result)
-                } else {
-                    Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                }
-            })
+        onFinished: if (page.recordingHere) page.sendRecording(duration)
+        onHeldChanged: {
+            if (voiceRecorder.held && page.recordingHere) {
+                //% "Recording stopped. Send it or discard it."
+                Notices.show(qsTrId("threesea-la-recording-held"), Notice.Long, Notice.Center)
+            }
+        }
+        onDiscarded: {
+            if (page.recordingHere) page.recordingWentUnasked()
         }
         onFailed: {
+            if (!page.recordingHere) return
             //% "Recording failed"
             Notices.show(qsTrId("threesea-la-recording-failed"), Notice.Long, Notice.Center)
         }
@@ -970,13 +1004,14 @@ Page {
     }
 
     function send() {
-        if (voiceRecorder.recording) {
-            voiceRecorder.stop()
+        if (recordingHere) {
+            if (voiceRecorder.held) sendRecording(voiceRecorder.duration)
+            else voiceRecorder.stop()
             return
         }
         if (canRecord) {
             voicePlayer.stop()
-            voiceRecorder.start()
+            voiceRecorder.start(page)
             return
         }
         if (attachment) {
@@ -1130,7 +1165,6 @@ Page {
         // so a waiting video goes as a file.
         for (var i = 0; i < sendQueue.length; ++i) sendNow(sendQueue[i])
         saveDraft()
-        voiceRecorder.cancel()
         stopTyping()
         if (window.openChat === identity) window.openChat = ""
         // The window of messages goes with the page; clearing it here gives those rows back
@@ -1144,6 +1178,13 @@ Page {
         if (status === PageStatus.Deactivating) {
             stopTyping()
             saveDraft()
+        }
+        // Whatever comes on top, it isn't this chat any more: nothing here shows the microphone
+        // is on, and nothing there could say where the recording would go. Nobody asked for that
+        // here, so it is said, at once: going back, this page is about to go.
+        if (status === PageStatus.Inactive && recordingHere) {
+            voiceRecorder.cancel()
+            recordingWentUnasked()
         }
         if (status === PageStatus.Active) {
             markRead()
@@ -1162,6 +1203,7 @@ Page {
         target: Qt.application
         onStateChanged: {
             if (Qt.application.state !== Qt.ApplicationActive) page.stopTyping()
+            else if (page.recordingDiscarded) page.sayRecordingDiscarded()
             page.markRead()
         }
     }
@@ -1827,10 +1869,11 @@ Page {
                     wrapMode: Text.Wrap
                 }
 
-                // While recording: time and cancel instead of the input.
+                // While recording, or with a recording that stopped by itself: time and cancel
+                // instead of the input.
                 Item {
                     id: recordingBar
-                    visible: voiceRecorder.recording
+                    visible: page.recordingHere
                     anchors.fill: input
                     z: 1
                     Label {
@@ -1839,8 +1882,11 @@ Page {
                             leftMargin: Theme.horizontalPageMargin
                             verticalCenter: parent.verticalCenter
                         }
-                        //% "Recording %1"
-                        text: qsTrId("threesea-la-recording").arg(Fmt.duration(voiceRecorder.duration / 1000))
+                        text: (voiceRecorder.held
+                               //% "Recorded %1"
+                               ? qsTrId("threesea-la-recorded")
+                               //% "Recording %1"
+                               : qsTrId("threesea-la-recording")).arg(Fmt.duration(voiceRecorder.duration / 1000))
                         color: Theme.highlightColor
                     }
                     IconButton {
@@ -1934,7 +1980,7 @@ Page {
                 TextArea {
                     id: input
                     inputMethodHints: window.incognitoHints
-                    opacity: voiceRecorder.recording || page.readOnly ? 0 : 1
+                    opacity: page.recordingHere || page.readOnly ? 0 : 1
                     enabled: !page.readOnly
                     y: parent.gap + attachmentBar.height + editBar.height + quoteBar.height + mentionBar.height
                        + Theme.paddingSmall
@@ -2061,16 +2107,16 @@ Page {
                         height: width
                         sourceSize.width: width
                         sourceSize.height: height
-                        source: "image://theme/" + (page.canRecord && !voiceRecorder.recording ? "icon-m-mic" : "icon-m-send")
-                                + "?" + (sendArea.pressed || voiceRecorder.recording ? Theme.highlightColor : Theme.primaryColor)
+                        source: "image://theme/" + (page.canRecord ? "icon-m-mic" : "icon-m-send")
+                                + "?" + (sendArea.pressed || page.recordingHere ? Theme.highlightColor : Theme.primaryColor)
                         opacity: input.text.trim().length > 0 || page.attachment || page.canRecord
-                                 || voiceRecorder.recording ? 1.0 : Theme.opacityLow
+                                 || page.recordingHere ? 1.0 : Theme.opacityLow
                     }
                     MouseArea {
                         id: sendArea
                         anchors.fill: parent
                         enabled: input.text.trim().length > 0 || page.attachment || page.canRecord
-                                 || voiceRecorder.recording
+                                 || page.recordingHere
                         onClicked: page.send()
                     }
                 }

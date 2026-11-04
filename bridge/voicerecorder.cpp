@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QGuiApplication>
 #include <QStandardPaths>
 #include <QUrl>
 
@@ -13,6 +14,8 @@ namespace {
 
 // Longest voice message (Threema Android caps by size; 15 minutes stays well below it).
 const int MaxDurationMs = 15 * 60 * 1000;
+// Shorter is a slip of the finger.
+const int MinDurationMs = 1000;
 
 // GStreamer names AAC "audio/mpeg, mpegversion=(int)4"; other backends say "aac".
 // The Opus fallback's input: what the core expects (voice.rs).
@@ -76,8 +79,8 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     m_tick.setInterval(200);
     connect(&m_tick, &QTimer::timeout, this, [this]() {
         emit durationChanged();
-        if (duration() >= MaxDurationMs) {
-            stop();
+        if (m_stop == Stop::ByItself && duration() >= MaxDurationMs) {
+            finish(Stop::Limit);
         }
     });
     connect(m_recorder, &QMediaRecorder::stateChanged, this, [this](QMediaRecorder::State state) {
@@ -87,37 +90,87 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     });
     connect(m_recorder, static_cast<void (QMediaRecorder::*)(QMediaRecorder::Error)>(&QMediaRecorder::error), this,
             [this](QMediaRecorder::Error) { fail(m_recorder->errorString()); });
+    // A plain file or the words in memory, with nobody looking: not kept on the off chance.
+    connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+        if (m_held && state != Qt::ApplicationActive) {
+            emit discarded();
+            clear();
+        }
+    });
 }
 
 void VoiceRecorder::stopped()
 {
+    const Stop how = m_stop;
+    if (how == Stop::ByItself) {
+        m_finalDuration = static_cast<int>(m_clock.elapsed());
+    }
     m_recording = false;
     m_tick.stop();
+    m_pcmBuffer.close();
     emit recordingChanged();
-    m_haveRecording = m_keep && (usePlatform() ? QFile::exists(outputPath()) : !m_pcm.isEmpty());
-    if (m_haveRecording) {
+    emit durationChanged();
+    const bool wanted = how != Stop::Discard && m_finalDuration >= MinDurationMs;
+    const bool complete = wanted && (usePlatform() ? QFile::exists(outputPath()) : !m_pcm.isEmpty());
+    if (complete && how == Stop::Send) {
+        m_haveRecording = true;
         emit finished(m_finalDuration);
-    } else {
-        QFile::remove(outputPath());
-        m_pcm.fill('\0');
-        m_pcm.clear();
+    } else if (complete && QGuiApplication::applicationState() == Qt::ApplicationActive) {
+        m_haveRecording = true;
+        setHeld(true);
+        return;
+    } else if (wanted) {
+        emit discarded();
     }
+    clear();
 }
 
 void VoiceRecorder::fail(const QString &error)
 {
     qWarning() << "voice recording failed:" << error;
     const bool wasRecording = m_recording;
-    m_keep = false;
     m_recording = false;
     m_tick.stop();
-    QFile::remove(outputPath());
-    m_pcm.fill('\0');
-    m_pcm.clear();
     if (wasRecording) {
         emit recordingChanged();
     }
     emit failed(error);
+    clear();
+}
+
+void VoiceRecorder::clear()
+{
+    m_haveRecording = false;
+    QFile::remove(outputPath());
+    m_pcm.fill('\0');
+    m_pcm.clear();
+    setHeld(false);
+    setOwner(nullptr);
+}
+
+void VoiceRecorder::setHeld(bool held)
+{
+    if (m_held != held) {
+        m_held = held;
+        emit heldChanged();
+    }
+}
+
+void VoiceRecorder::setOwner(QObject *owner)
+{
+    if (m_owner == owner) {
+        return;
+    }
+    disconnect(m_ownerGone);
+    m_owner = owner;
+    if (m_owner) {
+        m_ownerGone = connect(m_owner, &QObject::destroyed, this, [this]() {
+            m_owner = nullptr;
+            emit ownerChanged();
+            cancel();
+        });
+    }
+    emit ownerChanged();
 }
 
 QByteArray VoiceRecorder::takeRecording(bool *pcm)
@@ -139,12 +192,14 @@ QByteArray VoiceRecorder::takeRecording(bool *pcm)
         m_pcm.fill('\0');
         m_pcm.clear();
     }
+    setHeld(false);
+    setOwner(nullptr);
     return data;
 }
 
 VoiceRecorder::~VoiceRecorder()
 {
-    m_keep = false;
+    disconnect(m_ownerGone);
     m_recorder->stop();
     if (m_input) {
         m_input->stop();
@@ -163,14 +218,15 @@ QString VoiceRecorder::outputPath() const
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/voice-recording.m4a");
 }
 
-void VoiceRecorder::start()
+void VoiceRecorder::start(QObject *owner)
 {
-    if (!available() || m_recording) {
+    if (!available() || m_recording || m_held) {
         return;
     }
-    m_keep = false;
+    m_stop = Stop::ByItself;
     m_haveRecording = false;
     m_finalDuration = 0;
+    setOwner(owner);
     if (!usePlatform()) {
         m_pcm.clear();
         if (!m_input) {
@@ -218,27 +274,36 @@ void VoiceRecorder::start()
 
 void VoiceRecorder::stop()
 {
-    finish(true);
+    finish(Stop::Send);
 }
 
 void VoiceRecorder::cancel()
 {
-    finish(false);
+    if (m_held) {
+        clear();
+    } else {
+        finish(Stop::Discard);
+    }
 }
 
-void VoiceRecorder::finish(bool keep)
+void VoiceRecorder::finish(Stop how)
 {
     if (!m_recording) {
         return;
     }
-    m_keep = keep;
-    m_finalDuration = static_cast<int>(m_clock.elapsed());
-    // `finished` follows once the recording is complete (stateChanged).
+    // Stopping takes a moment on the platform's path. Only discarding can overrule what is under way.
+    if (m_stop != Stop::ByItself && how != Stop::Discard) {
+        return;
+    }
+    if (m_stop == Stop::ByItself) {
+        m_finalDuration = static_cast<int>(m_clock.elapsed());
+    }
+    m_stop = how;
+    // What it ends as follows once the recording is complete (stateChanged).
     if (usePlatform()) {
         m_recorder->stop();
     } else {
         m_input->stop();
-        m_pcmBuffer.close();
         if (m_recording) {
             stopped();
         }
