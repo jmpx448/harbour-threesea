@@ -25,7 +25,7 @@ use libthreema::protobuf::{
     },
 };
 use prost::Message as _;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     chat_notifications::Policy,
@@ -40,6 +40,9 @@ pub struct JoinData {
     pub blobs: Vec<Zeroizing<Vec<u8>>>,
     pub essential_data: Zeroizing<Vec<u8>>,
 }
+
+/// What ChaCha20-Poly1305 appends when the rendezvous link encrypts in place.
+const ENCRYPTION_TAG_LENGTH: usize = 16;
 
 /// `d2d_join.EdToNd { begin }`.
 #[must_use]
@@ -388,6 +391,9 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
         });
     }
 
+    // Before the secrets are copied into the message: nothing leaves early after that.
+    let csp_hashed_nonces = hashed_nonces(&identity.threema_id, store.all_nonces()?);
+    let d2d_hashed_nonces = hashed_nonces(&identity.threema_id, store.all_d2d_nonces()?);
     let essential = EssentialData {
         identity_data: Some(IdentityData {
             identity: identity.threema_id.clone(),
@@ -403,21 +409,68 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
         contacts,
         groups,
         distribution_lists: Vec::new(),
-        csp_hashed_nonces: hashed_nonces(&identity.threema_id, store.all_nonces()?),
-        d2d_hashed_nonces: hashed_nonces(&identity.threema_id, store.all_d2d_nonces()?),
+        csp_hashed_nonces,
+        d2d_hashed_nonces,
     };
-    let message = EdToNd {
+    let mut message = EdToNd {
         content: Some(ed_to_nd::Content::EssentialData(essential)),
     };
+    // Room for the tag from the start: the sending encrypts in place, so the buffer never moves
+    // and leaves no plain copy behind.
+    let mut essential_data = Zeroizing::new(Vec::with_capacity(
+        message.encoded_len() + ENCRYPTION_TAG_LENGTH,
+    ));
+    // Can't fail: a Vec always has the room.
+    let _ = message.encode(&mut *essential_data);
+    wipe_secrets(&mut message);
     Ok(JoinData {
         blobs: blobs.data,
-        essential_data: Zeroizing::new(message.encode_to_vec()),
+        essential_data,
     })
+}
+
+/// The ID's private key and the device group key are in plain `Vec`s of the message, only until
+/// it is encoded.
+fn wipe_secrets(message: &mut EdToNd) {
+    if let Some(ed_to_nd::Content::EssentialData(essential)) = &mut message.content {
+        if let Some(identity) = &mut essential.identity_data {
+            identity.ck.zeroize();
+        }
+        if let Some(group) = &mut essential.device_group_data {
+            group.dgk.zeroize();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_are_wiped_and_the_buffer_has_room_for_the_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db"), &[2; 32]).unwrap();
+        let media = MediaStore::open(dir.path(), &[2; 32]).unwrap();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "TESTTEST".into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "a".into(),
+            })
+            .unwrap();
+        let data = collect(&store, &media, &[5; 32]).unwrap();
+        assert!(
+            data.essential_data.capacity() - data.essential_data.len() >= ENCRYPTION_TAG_LENGTH
+        );
+
+        let mut message = EdToNd::decode(data.essential_data.as_slice()).unwrap();
+        wipe_secrets(&mut message);
+        let Some(ed_to_nd::Content::EssentialData(essential)) = message.content else {
+            panic!("not essential data");
+        };
+        assert!(essential.identity_data.unwrap().ck.is_empty());
+        assert!(essential.device_group_data.unwrap().dgk.is_empty());
+    }
 
     #[test]
     fn essential_data_from_the_store() {

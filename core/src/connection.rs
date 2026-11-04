@@ -1930,7 +1930,10 @@ impl<'a> Session<'a> {
             for blob in data.blobs {
                 link.send(blob.to_vec()).await?;
             }
-            link.send(data.essential_data.to_vec()).await?;
+            // Moved, not copied: the link encrypts this buffer in place (with room for the tag,
+            // see join::collect), and a plain copy would hold the ID's private key.
+            let mut essential_data = data.essential_data;
+            link.send(std::mem::take(&mut *essential_data)).await?;
             Ok::<_, crate::rendezvous::LinkError>(())
         }
         .await;
