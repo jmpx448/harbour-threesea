@@ -745,7 +745,8 @@ impl Store {
     }
 
     /// Put a sent outgoing message back into the queue (the peer rejected it, e.g. after a lost
-    /// forward security session). Returns the changed message.
+    /// forward security session). Returns the changed message; one deleted for everyone meanwhile
+    /// has nothing left to send and stays as it is.
     pub fn reset_outgoing(
         &self,
         conversation: &str,
@@ -754,7 +755,7 @@ impl Store {
         let changed = self.conn.execute(
             "UPDATE messages SET state = ?3, updated_at = ?4,
                  sent_at = NULL, delivered_at = NULL, read_at = NULL
-             WHERE conversation = ?1 AND outgoing = 1 AND message_id = ?2",
+             WHERE conversation = ?1 AND outgoing = 1 AND message_id = ?2 AND kind <> 'deleted'",
             params![
                 conversation,
                 message_id.cast_signed(),
@@ -785,7 +786,8 @@ impl Store {
     /// Outgoing messages that still need sending, oldest first.
     pub fn pending_outgoing(&self) -> Result<Vec<Message>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE outgoing = 1 AND state = 0 ORDER BY id",
+            "SELECT {} FROM messages WHERE outgoing = 1 AND state = 0 AND kind <> 'deleted'
+             ORDER BY id",
             columns()
         ))?;
         let rows = statement.query_map([], from_row)?;
@@ -1298,16 +1300,34 @@ impl Store {
             .execute("DELETE FROM reactions WHERE message = ?1", [id])?;
         self.conn
             .execute("DELETE FROM files WHERE message = ?1", [id])?;
+        // Nothing of it is left to send, to anyone.
         self.conn.execute(
-            "UPDATE messages SET kind = 'deleted', body = '', edited_at = ?2, updated_at = ?3
+            "DELETE FROM pending_receivers WHERE (conversation, message_id) IN
+                 (SELECT conversation, message_id FROM messages WHERE id = ?1 AND outgoing = 1)",
+            [id],
+        )?;
+        self.conn.execute(
+            "UPDATE messages SET kind = 'deleted', body = '', edited_at = ?2, updated_at = ?3,
+                 state = CASE WHEN outgoing = 1 AND state = ?4 THEN ?5 ELSE state END
              WHERE id = ?1",
-            params![id, deleted_at, now_ms()],
+            params![
+                id,
+                deleted_at,
+                now_ms(),
+                OutgoingState::Pending as i64,
+                OutgoingState::Sent as i64
+            ],
         )?;
         self.message(id)
     }
 
     /// Remove a message from this device only (or one that was never sent).
     pub fn remove_message(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM pending_receivers WHERE (conversation, message_id) IN
+                 (SELECT conversation, message_id FROM messages WHERE id = ?1 AND outgoing = 1)",
+            [id],
+        )?;
         self.conn
             .execute("DELETE FROM messages WHERE id = ?1", [id])?;
         Ok(())
@@ -2255,6 +2275,47 @@ mod tests {
             .map(|m| m.id)
             .collect();
         assert_eq!(picked, vec![ids[2], ids[0]]);
+    }
+
+    /// A message deleted for everyone while it was still going out takes nothing with it: no
+    /// clock, no queue entry, and a Reject of it stays without effect. Removing one leaves no
+    /// receivers behind.
+    #[test]
+    fn a_deleted_message_has_nothing_left_to_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let sent = store.insert_outgoing("ECHOECHO", 7, "text", "hi").unwrap();
+        store
+            .raise_outgoing_state("ECHOECHO", &[7], OutgoingState::Sent)
+            .unwrap();
+        store.mark_deleted(sent.id, 9).unwrap();
+        assert!(store.reset_outgoing("ECHOECHO", 7).unwrap().is_empty());
+        let row = store.message(sent.id).unwrap().unwrap();
+        assert_eq!(row.state, OutgoingState::Sent as i64);
+
+        let going = "g:ECHOECHO:0000000000000001";
+        let pending = store.insert_outgoing(going, 8, "text", "hi").unwrap();
+        store
+            .set_pending_receivers(going, 8, &["ABCD1234".to_owned()])
+            .unwrap();
+        let row = store.mark_deleted(pending.id, 9).unwrap().unwrap();
+        assert_eq!(row.state, OutgoingState::Sent as i64);
+        assert!(store.pending_receivers(going, 8).unwrap().is_empty());
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        // What an older version left: a placeholder back in the queue.
+        store
+            .conn
+            .execute("UPDATE messages SET state = 0 WHERE id = ?1", [pending.id])
+            .unwrap();
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        let removed = store.insert_outgoing(going, 10, "text", "hi").unwrap();
+        store
+            .set_pending_receivers(going, 10, &["ABCD1234".to_owned()])
+            .unwrap();
+        store.remove_message(removed.id).unwrap();
+        assert!(store.pending_receivers(going, 10).unwrap().is_empty());
     }
 
     #[test]

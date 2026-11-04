@@ -275,8 +275,8 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   from the original sender (we look up the message in the sender's direction only), and applies an
   edit to a text or a file's caption, as Android does. Editing our own captions isn't offered yet.
 - A deleted message becomes a placeholder (kind `deleted`, content and reactions removed,
-  `edited_at` = deletion time). Messages nobody received yet (pending/failed) are simply changed
-  or removed without telling the peer.
+  `edited_at` = deletion time). It has nothing left to send: a later Reject of it changes nothing.
+  Messages nobody received yet (pending/failed) are simply changed or removed without telling the peer.
 - "Delete" on its own removes a message from this device only (any message).
 - Editing must not trigger typing indicators.
 

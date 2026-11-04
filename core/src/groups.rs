@@ -556,6 +556,7 @@ impl Store {
         let mut statement = self.conn.prepare(
             "SELECT conversation FROM messages
                  WHERE outgoing = 1 AND message_id = ?1 AND conversation LIKE 'g:%'
+                     AND kind <> 'deleted'
              UNION SELECT conversation FROM outbox
                  WHERE message_id = ?1 AND conversation LIKE 'g:%'",
         )?;
@@ -568,27 +569,36 @@ impl Store {
                 .group(conversation)?
                 .is_some_and(|group| !group.left && group.members.iter().any(|m| m == peer));
             if member {
-                self.requeue_for(conversation, peer, message_id)?;
-                requeued = true;
+                requeued |= self.requeue_for(conversation, peer, message_id)?;
             }
         }
         Ok(requeued)
     }
 
-    /// Put a group message of ours back in the queue for `peer`.
+    /// Put a group message of ours back in the queue for `peer`; `false` if it was deleted for
+    /// everyone meanwhile, with nothing left to send.
     fn requeue_for(
         &self,
         conversation: &str,
         peer: &str,
         message_id: u64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
+        let deleted: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE conversation = ?1 AND outgoing = 1
+                 AND message_id = ?2 AND kind = 'deleted')",
+            params![conversation, message_id.cast_signed()],
+            |row| row.get(0),
+        )?;
+        if deleted {
+            return Ok(false);
+        }
         self.set_pending_receivers(conversation, message_id, &[peer.to_owned()])?;
         self.conn.execute(
             "UPDATE messages SET state = 0, sent_at = NULL WHERE conversation = ?1 AND outgoing = 1
                  AND message_id = ?2 AND state = 1",
             params![conversation, message_id.cast_signed()],
         )?;
-        Ok(())
+        Ok(true)
     }
 
     /// Whether `message_id` is in this group's chat or its outbox: `Some(true)` if we sent it.
@@ -1087,10 +1097,10 @@ pub fn message_rejected(
     };
     match store.group_message_is_ours(&key, message_id)? {
         Some(true) => {
-            store.requeue_for(&key, peer, message_id)?;
+            let resending = store.requeue_for(&key, peer, message_id)?;
             Ok(GroupReject {
-                send: true,
-                resending: true,
+                send: resending,
+                resending,
             })
         }
         // Someone else's: not for us to send.
@@ -2302,6 +2312,34 @@ mod tests {
         assert!(store.requeue_group_receiver(BOB, message_id).unwrap());
         assert_eq!(pending(&store, &group), vec![BOB.to_owned()]);
         assert_eq!(store.pending_outgoing().unwrap().len(), 1);
+    }
+
+    /// A message deleted for everyone has nothing left to send: a late Reject of it brings
+    /// back neither a queue entry nor the clock, and doesn't say it is sent again.
+    #[test]
+    fn a_reject_of_a_message_deleted_for_everyone_changes_nothing() {
+        let (_dir, store) = store();
+        let group = own_group(USER, &[BOB]);
+        store.upsert_group(&group).unwrap();
+        let message_id = sent_text(&store, &group);
+        let row = store
+            .message_by_id(&group.key, true, message_id)
+            .unwrap()
+            .unwrap();
+        store.mark_deleted(row.id, 5).unwrap();
+
+        assert!(!store.requeue_group_receiver(BOB, message_id).unwrap());
+        let reject = rejected(&store, BOB, USER, message_id);
+        assert!(!reject.send && !reject.resending);
+        assert!(
+            store
+                .pending_receivers(&group.key, message_id)
+                .unwrap()
+                .is_empty()
+        );
+        let row = store.message(row.id).unwrap().unwrap();
+        assert_eq!(row.state, crate::messages::OutgoingState::Sent as i64);
+        assert!(store.pending_outgoing().unwrap().is_empty());
     }
 
     #[test]
