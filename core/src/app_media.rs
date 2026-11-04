@@ -369,11 +369,16 @@ async fn download(
 }
 
 /// A received photo or video in `<Pictures>/Threesea` (Android's "Auto-save to gallery"),
-/// unencrypted, as the user asked. Voice messages and other files stay in the app.
+/// unencrypted, as the user asked. Voice messages and other files stay in the app, and so does
+/// everything of a private chat (ADR 0009): checked here, after the download, so a chat marked
+/// private meanwhile counts too; if the mark can't be read, nothing is written.
 fn auto_save(store: &Store, message: i64, data: &[u8], pictures: &std::path::Path) {
     let Ok(Some(message)) = store.message(message) else {
         return;
     };
+    if !matches!(store.is_private(&message.conversation), Ok(false)) {
+        return;
+    }
     if message.outgoing
         || !matches!(
             crate::messages::media_kind(&message.body),
@@ -1044,6 +1049,36 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A photo of a private chat must not land in the Gallery folder, unencrypted, while one of
+    /// an ordinary chat does.
+    #[test]
+    fn auto_save_leaves_private_chats_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let pictures = dir.path().join("Pictures");
+        let photo = serde_json::json!({"mediaType": "image/jpeg", "name": "photo.jpg"}).to_string();
+        let open = store
+            .insert_incoming("BBBBBBBB", 1, "file", &photo, 1)
+            .unwrap()
+            .unwrap();
+        let private = store
+            .insert_incoming("CCCCCCCC", 2, "file", &photo, 1)
+            .unwrap()
+            .unwrap();
+        store.set_private("CCCCCCCC", true).unwrap();
+        let saved = || {
+            std::fs::read_dir(pictures.join("Threesea"))
+                .map(Iterator::count)
+                .unwrap_or(0)
+        };
+
+        auto_save(&store, private.id, b"private bytes", &pictures);
+        assert_eq!(saved(), 0);
+
+        auto_save(&store, open.id, b"open bytes", &pictures);
+        assert_eq!(saved(), 1);
+    }
 
     #[test]
     fn deleting_old_messages_keeps_what_is_not_old_news() {
