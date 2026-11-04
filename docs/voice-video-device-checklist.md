@@ -329,7 +329,8 @@ Camera:
 4. Attachment menu → camera: a photo and a video, sent to ECHOECHO, then the same with the front
    camera.
    - Expect: both arrive upright and in focus, with sound on the video, also from the front
-     camera (`metaData.orientation` follows the sensor; the front one's sign is what to look at).
+     camera (`metaData.orientation` follows the sensor; the front one's sign is what to look at),
+     and the front camera's picture isn't mirrored.
 
 Notifications:
 
