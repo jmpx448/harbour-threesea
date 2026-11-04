@@ -919,6 +919,9 @@ pub enum ApiError {
     /// Threema Safe backup larger than the server allows.
     #[error("{0}")]
     SafeTooLarge(String),
+    /// Creating or restoring an ID while this device has one (removing it needs the PIN).
+    #[error("this device already has an ID")]
+    IdentityExists,
     /// Threema ID has the wrong format.
     #[error("invalid Threema ID")]
     IdentityFormat,
@@ -1081,6 +1084,7 @@ impl ApiError {
             Self::NoVerification => "noVerification",
             Self::PinTooShort => "pinTooShort",
             Self::LockNeeded => "lockNeeded",
+            Self::IdentityExists => "identityExists",
             Self::PrivateChatsExist => "privateChatsExist",
             Self::Internal(_) => "internal",
         }
@@ -2081,7 +2085,17 @@ impl App {
         })
     }
 
+    /// Creating or restoring replaces the stored ID, so it starts only on a device without one:
+    /// taking an ID off the device goes through the PIN (ADR 0009), not around it.
+    pub(crate) fn check_no_identity(&self) -> Result<(), ApiError> {
+        if self.store.identity()?.is_some() {
+            return Err(ApiError::IdentityExists);
+        }
+        Ok(())
+    }
+
     async fn create_identity(&mut self) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
         let mut task = CreateIdentityTask::new(CreateIdentityContext {
             client_info: self.version.client_info(),
             config: Arc::clone(&self.config),
@@ -2116,6 +2130,7 @@ impl App {
         backup: Zeroizing<String>,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
         // Libre requires a valid license before an ID can be used, also when restoring.
         let _ = self.license()?;
         // Key derivation is deliberately slow: keep it off the core loop.
@@ -2917,6 +2932,7 @@ mod tests {
         assert_eq!(data.client_key.as_bytes(), &[5; 32]);
 
         // Restoring needs a license first.
+        let (_fresh_dir, mut app) = self::app();
         let reply: Value = serde_json::from_str(&rt.block_on(app.handle(&json!({
             "id": 3, "cmd": "restoreIdentityBackup", "backup": backup, "password": "correct horse"
         }).to_string())))

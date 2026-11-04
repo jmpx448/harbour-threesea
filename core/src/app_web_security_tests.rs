@@ -960,3 +960,25 @@ async fn reading_tells_the_ui() {
         assert_ne!(event.to_json(&app.store, true)["event"], "conversationRead");
     }
 }
+
+/// Creating or restoring an ID doesn't replace the one on this device: that would take it off
+/// without the PIN. Refused before anything else happens, with a license or without.
+#[tokio::test(flavor = "current_thread")]
+async fn an_existing_id_is_not_replaced() {
+    let (_dir, mut app) = fixture();
+    app.store
+        .set_setting(crate::store::keys::LICENSE_KEY, "XXXXX-XXXXX")
+        .unwrap();
+    for command in [
+        json!({"id": 1, "cmd": "createIdentity"}),
+        json!({"id": 2, "cmd": "restoreIdentityBackup", "backup": "x", "password": "y"}),
+        json!({"id": 3, "cmd": "safeRestore", "identity": "ABCD1234", "password": "y"}),
+    ] {
+        let reply: serde_json::Value =
+            serde_json::from_str(&app.handle(&command.to_string()).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "identityExists", "{command}");
+    }
+    let identity = app.store.identity().unwrap().unwrap();
+    assert_eq!(identity.threema_id, "AAAAAAAA");
+    assert_eq!(*identity.client_key, [7; 32]);
+}

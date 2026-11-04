@@ -94,7 +94,8 @@ the grace time, like Android. The UI asks before opening those pages (`window.pu
 linking asks on `LinkDevicePage`, where every route ends. The app locking closes the page
 holding a PIN, the lock settings included. Scheduled backups run without it. So
 a forgotten PIN can't be reset from inside the app any more: that takes removing the app's data
-from the device, then restoring from a backup.
+from the device, then restoring from a backup. Creating or restoring an ID starts only on a
+device without one (`identityExists`), so those commands can't replace an ID around the PIN.
 
 A mark from anywhere (the UI, a linked device, a restore) goes out as `CoreEvent::PrivateChanged`:
 the media readers follow at once, the chat's notification closes, a connected browser loses the

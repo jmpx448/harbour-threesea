@@ -316,6 +316,7 @@ impl App {
         identity: &str,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
         let identity = normalize_identity(identity).ok_or(ApiError::IdentityFormat)?;
         // Libre: a valid license comes first, as in the Android wizard.
         let _ = self.license()?;
