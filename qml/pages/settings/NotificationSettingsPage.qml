@@ -24,8 +24,12 @@ Page {
             TextSwitch {
                 automaticCheck: false
                 checked: backend.notificationsEnabled
-                //% "Notify about new messages"
-                text: qsTrId("threesea-la-notifications")
+                // Calls are Full only.
+                text: backend.full
+                      //% "Notify about new messages and missed calls"
+                      ? qsTrId("threesea-la-notifications-calls")
+                      //% "Notify about new messages"
+                      : qsTrId("threesea-la-notifications")
                 onClicked: backend.notificationsEnabled = !checked
             }
 
@@ -35,8 +39,8 @@ Page {
                 checked: backend.notificationPreview
                 //% "Show message content"
                 text: qsTrId("threesea-la-notification-preview")
-                //% "Otherwise notifications only say that there is a new message, e.g. on the lock screen."
-                description: qsTrId("threesea-la-notification-preview-description")
+                //% "Otherwise notifications show who wrote, but not what, e.g. on the lock screen."
+                description: qsTrId("threesea-la-notification-preview-who-description")
                 onClicked: backend.notificationPreview = !checked
             }
 
@@ -110,13 +114,16 @@ Page {
                 text: qsTrId("threesea-se-notifications-inapp")
             }
 
+            // Between voice messages it plays with notifications off as well.
             TextSwitch {
                 automaticCheck: false
-                enabled: backend.notificationsEnabled
                 checked: backend.inAppSounds
                 text: qsTrId("threesea-la-notification-sound")
-                //% "A soft sound for a message arriving in the chat you are reading, and between two voice messages playing one after the other."
-                description: qsTrId("threesea-la-inapp-sound-description")
+                description: backend.notificationsEnabled
+                             //% "A soft sound for a message arriving in the chat you are reading, and between two voice messages playing one after the other."
+                             ? qsTrId("threesea-la-inapp-sound-description")
+                             //% "A soft sound between two voice messages playing one after the other."
+                             : qsTrId("threesea-la-inapp-sound-voice-description")
                 onClicked: backend.inAppSounds = !checked
             }
 
