@@ -435,6 +435,12 @@ impl App {
             if resolved.groups_changed {
                 let _ = events.send(CoreEvent::GroupsChanged);
             }
+            for message in resolved.lines {
+                let _ = events.send(CoreEvent::MessageAdded {
+                    message,
+                    send_delivery_receipt: false,
+                });
+            }
             // Reload contact names; the media/progress channel also triggers sending.
             let _ = events.send(CoreEvent::ContactsChanged);
         });
@@ -442,12 +448,14 @@ impl App {
 }
 
 /// What [`resolve_members`] changed.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default)]
 pub(crate) struct ResolvedMembers {
     /// Something went into the sync queue for the other devices.
     pub synced: bool,
     /// A group lost a member.
     pub groups_changed: bool,
+    /// "Added" lines of those the directory knows, for the UI.
+    pub lines: Vec<crate::messages::Message>,
 }
 
 /// Group members (and creators someone waits for) we have no contact for: look them up and store
@@ -455,14 +463,26 @@ pub(crate) struct ResolvedMembers {
 /// sent. Those the directory doesn't know leave their groups, so that nothing waits for them.
 /// What the other devices are owed of them goes out in the same store step
 /// (`sync::members_looked_up`). `None` if it failed: whoever is left without a contact is found
-/// again by [`crate::store::Store::unresolved_members`] on reconnect and in maintenance.
+/// again by [`crate::store::Store::unresolved_members`] on reconnect and in maintenance. So is
+/// whoever is over this hour's allowance, as they are not asked for now.
 pub(crate) async fn resolve_members(
     https: &crate::https::HttpsClient,
     config: &libthreema::common::config::Config,
     store: &crate::store::Store,
     identities: &[String],
 ) -> Option<ResolvedMembers> {
-    let results = match contacts::lookup(https, config, identities).await {
+    let allowed = store.member_lookup_allowance(identities.len());
+    if allowed < identities.len() {
+        tracing::info!(
+            wanted = identities.len(),
+            allowed,
+            "group member lookups limited for now"
+        );
+    }
+    if allowed == 0 {
+        return None;
+    }
+    let results = match contacts::lookup(https, config, &identities[..allowed]).await {
         Ok(results) => results,
         Err(error) => {
             if matches!(error, crate::directory::DirectoryError::RateLimited) {
@@ -477,18 +497,20 @@ pub(crate) async fn resolve_members(
         .filter(|(_, result)| matches!(result, contacts::Lookup::Invalid))
         .map(|(identity, _)| identity.clone())
         .collect();
+    store.note_invalid_ids(&invalid);
     let stored = crate::sync::members_looked_up(store, results)
-        .and_then(|synced| Ok((synced, store.drop_invalid_members(&invalid)?)));
+        .and_then(|looked_up| Ok((looked_up, store.drop_invalid_members(&invalid)?)));
     match stored {
-        Ok((synced, groups_changed)) => {
+        Ok((looked_up, groups_changed)) => {
             tracing::info!(
-                looked_up = identities.len(),
+                looked_up = allowed,
                 invalid = invalid.len(),
                 "group members looked up"
             );
             Some(ResolvedMembers {
-                synced,
+                synced: looked_up.queued,
                 groups_changed,
+                lines: looked_up.lines,
             })
         }
         Err(error) => {

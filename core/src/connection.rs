@@ -3119,6 +3119,12 @@ impl<'a> Session<'a> {
             self.emit(CoreEvent::GroupsChanged);
         }
         self.emit(CoreEvent::ContactsChanged);
+        for message in resolved.lines {
+            self.emit(CoreEvent::MessageAdded {
+                message,
+                send_delivery_receipt: false,
+            });
+        }
         self.send_pending().await
     }
 

@@ -2904,6 +2904,7 @@ mod tests {
                 ],
             )
             .unwrap()
+            .queued
         );
         assert!(app.store.contact("EFGH5678").unwrap().is_some());
         assert!(app.member_lookups_due().is_empty());

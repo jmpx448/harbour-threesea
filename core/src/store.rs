@@ -261,6 +261,11 @@ pub struct Store {
     /// Messages another device forwarded whose notification waits (multi-device): if they
     /// are read there meanwhile, the phone stays silent. In memory only.
     pub(crate) held_notifications: std::cell::RefCell<std::collections::HashSet<i64>>,
+    /// IDs the directory just said don't exist, with when (`groups::recently_invalid`). In memory
+    /// only: a day's worth, bounded by what may be looked up.
+    pub(crate) invalid_ids: std::cell::RefCell<std::collections::HashMap<String, i64>>,
+    /// The current hour's group member lookups: when it began, and how many so far.
+    pub(crate) member_lookups: std::cell::Cell<(i64, usize)>,
 }
 
 /// Below this share of free pages (in percent) a rewrite gives back too little to wait for.
@@ -310,6 +315,8 @@ impl Store {
         let mut store = Self {
             conn,
             held_notifications: std::cell::RefCell::default(),
+            invalid_ids: std::cell::RefCell::default(),
+            member_lookups: std::cell::Cell::default(),
         };
         store.migrate()?;
         Ok(store)
@@ -487,6 +494,7 @@ impl Store {
         transaction.execute_batch(&sql)?;
         transaction.commit()?;
         self.held_notifications.borrow_mut().clear();
+        self.invalid_ids.borrow_mut().clear();
         self.shrink();
         Ok(())
     }

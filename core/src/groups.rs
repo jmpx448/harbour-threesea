@@ -89,6 +89,18 @@ pub(crate) const MIGRATION_SYNC: &str = r#"
 const RESYNC_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// Outbox kinds of group control messages (`body` in brackets).
+/// Android's `MAX_GROUP_SIZE`. A setup listing more is no group anyone can make, and each ID in it
+/// would be one more for the directory.
+const SETUP_MEMBERS_MAX: usize = 256;
+/// How many IDs group lookups may ask the directory for within an hour: two groups of the largest
+/// size. Anyone can name any ID in a setup, sync request or group, and a contact can do so again
+/// and again; Threema tolerates clients that cause it no load. What is over waits for the next
+/// round, which it isn't lost for: the members stay noted, and libthreema looks up who writes.
+const MEMBER_LOOKUPS_PER_HOUR: usize = 2 * SETUP_MEMBERS_MAX;
+const MEMBER_LOOKUP_WINDOW_MS: i64 = 60 * 60 * 1000;
+/// How long an ID stays out of groups after the directory said it doesn't exist. They don't come
+/// back, but one may yet be created.
+const INVALID_ID_MEMORY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How many group sync requests wait at once at most; they normally leave with the next ack.
 const SYNC_REQUESTS_QUEUED_MAX: i64 = 64;
 pub const OUTBOX_GROUP_SETUP: &str = "groupSetup"; // {members: [id]}
@@ -392,6 +404,42 @@ impl Store {
             params![key, kicked],
         )?;
         Ok(())
+    }
+
+    /// The directory said these IDs don't exist: a setup listing them again changes nothing, and
+    /// they aren't asked for again.
+    pub(crate) fn note_invalid_ids(&self, identities: &[String]) {
+        let now = now_ms();
+        let mut noted = self.invalid_ids.borrow_mut();
+        noted.retain(|_, at| now - *at < INVALID_ID_MEMORY_MS);
+        for identity in identities {
+            noted.insert(identity.clone(), now);
+        }
+    }
+
+    pub(crate) fn recently_invalid(&self, identity: &str) -> bool {
+        self.invalid_ids
+            .borrow()
+            .get(identity)
+            .is_some_and(|at| now_ms() - *at < INVALID_ID_MEMORY_MS)
+    }
+
+    /// How many of `wanted` group member lookups may go to the directory now; they count as made.
+    pub(crate) fn member_lookup_allowance(&self, wanted: usize) -> usize {
+        self.member_lookup_allowance_at(wanted, now_ms())
+    }
+
+    fn member_lookup_allowance_at(&self, wanted: usize, now: i64) -> usize {
+        let (began, used) = self.member_lookups.get();
+        // A clock set back starts a new hour rather than stopping the lookups for however long.
+        let (began, used) = if (0..MEMBER_LOOKUP_WINDOW_MS).contains(&(now - began)) {
+            (began, used)
+        } else {
+            (now, 0)
+        };
+        let allowed = wanted.min(MEMBER_LOOKUPS_PER_HOUR.saturating_sub(used));
+        self.member_lookups.set((began, used + allowed));
+        allowed
     }
 
     /// Whom something waits for and has no contact to be sent or shown with: the members of the
@@ -1329,6 +1377,11 @@ fn sync_request(
     creator: &str,
     outcome: &mut GroupOutcome,
 ) -> Result<(), StoreError> {
+    // The directory told us there is no such creator a moment ago; asking them would mean asking
+    // it again.
+    if store.recently_invalid(creator) {
+        return Ok(());
+    }
     // Any contact can name any group ID and creator in a group message, and each new pair asks here.
     let queued: i64 = store.conn.query_row(
         "SELECT COUNT(*) FROM outbox WHERE kind = ?1",
@@ -1468,11 +1521,20 @@ fn receive_setup(
         tracing::info!("group-setup for a group we aren't in from a blocked creator, discarded");
         return Ok(());
     }
-    // Someone revoked isn't made a member, as nothing we send could ever reach them (Android).
+    if members.len() > SETUP_MEMBERS_MAX {
+        tracing::warn!(
+            members = members.len(),
+            "group-setup listing too many members, discarded"
+        );
+        return Ok(());
+    }
+    // Someone revoked isn't made a member, as nothing we send could ever reach them (Android). The
+    // same for whom the directory didn't know a moment ago, or each resend would list them anew.
     let mut listed = BTreeSet::new();
     for member in members {
         let member = member.to_string();
         if member != creator
+            && !store.recently_invalid(&member)
             && store
                 .contact(&member)?
                 .is_none_or(|c| c.activity_state != ActivityState::Invalid)
@@ -1585,21 +1647,31 @@ fn receive_setup(
             if rejoined {
                 status(store, key, "groupJoined", outcome)?;
             } else {
+                // Someone we have no contact for gets their line once the directory has said they
+                // exist (`sync::members_looked_up`). Until then they may be made up, and a line
+                // for each would be the sender's to fill the chat with. Without a contact they
+                // have had no line yet to answer with a "removed".
                 for member in added {
-                    status(
-                        store,
-                        key,
-                        &format!("groupMemberAdded|{}", name_of(&member)),
-                        outcome,
-                    )?;
+                    if contact_exists(&member) {
+                        status(
+                            store,
+                            key,
+                            &format!("groupMemberAdded|{}", name_of(&member)),
+                            outcome,
+                        )?;
+                    } else {
+                        store.add_member_lookup(key, &member, true)?;
+                    }
                 }
                 for member in removed {
-                    status(
-                        store,
-                        key,
-                        &format!("groupMemberRemoved|{}", name_of(&member)),
-                        outcome,
-                    )?;
+                    if contact_exists(&member) {
+                        status(
+                            store,
+                            key,
+                            &format!("groupMemberRemoved|{}", name_of(&member)),
+                            outcome,
+                        )?;
+                    }
                 }
             }
         }
@@ -3002,6 +3074,136 @@ mod tests {
         );
         assert!(not_a_member.send);
         assert!(not_a_member.state_sent_to.is_empty());
+    }
+
+    #[test]
+    fn a_setup_listing_more_than_a_group_can_hold_changes_nothing() {
+        let (_dir, store) = store();
+        let names: Vec<String> = (0..256).map(|n| format!("A{n:07}")).collect();
+        let mut listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        listed[0] = USER;
+
+        let too_many: Vec<&str> = listed.iter().copied().chain(["B0000000"]).collect();
+        let outcome = run(&store, CREATOR, CREATOR, setup(&too_many));
+        assert!(outcome.unknown_members.is_empty());
+        assert!(store.group(&key(&gid(CREATOR))).unwrap().is_none());
+
+        assert!(run(&store, CREATOR, CREATOR, setup(&listed)).groups_changed);
+    }
+
+    #[test]
+    fn an_id_the_directory_does_not_know_stays_out_of_a_resent_setup() {
+        let (_dir, store) = store();
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB, "UNKNOWN1"]));
+        let group_key = key(&gid(CREATOR));
+        store
+            .drop_invalid_members(&["UNKNOWN1".to_owned()])
+            .unwrap();
+        store.note_invalid_ids(&["UNKNOWN1".to_owned()]);
+
+        let lines = store.conversation_messages(&group_key, 100).unwrap().len();
+        let again = run(&store, CREATOR, CREATOR, setup(&[USER, BOB, "UNKNOWN1"]));
+        assert!(!again.groups_changed);
+        assert!(again.unknown_members.is_empty());
+        assert_eq!(
+            store.group(&group_key).unwrap().unwrap().members,
+            vec![CREATOR, BOB]
+        );
+        assert_eq!(
+            store.conversation_messages(&group_key, 100).unwrap().len(),
+            lines
+        );
+    }
+
+    #[test]
+    fn a_creator_the_directory_does_not_know_is_not_asked_again() {
+        let (_dir, store) = store();
+        store.note_invalid_ids(&[CREATOR.to_owned()]);
+        let outcome = run(
+            &store,
+            BOB,
+            CREATOR,
+            GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+        );
+        assert!(!outcome.send);
+        assert!(outcome.unknown_members.is_empty());
+        assert!(store.outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn someone_added_gets_their_line_once_the_directory_knows_them() {
+        let (_dir, store) = store();
+        let group_key = key(&gid(CREATOR));
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        let added_lines = || -> Vec<String> {
+            store
+                .conversation_messages(&group_key, 100)
+                .unwrap()
+                .into_iter()
+                .map(|message| message.body)
+                .filter(|body| body.starts_with("groupMemberAdded"))
+                .collect()
+        };
+
+        // The directory doesn't know them: no line, ever.
+        let outcome = run(&store, CREATOR, CREATOR, setup(&[USER, BOB, "UNKNOWN1"]));
+        assert!(outcome.added.is_empty());
+        let looked_up = crate::sync::members_looked_up(
+            &store,
+            vec![("UNKNOWN1".to_owned(), crate::contacts::Lookup::Invalid)],
+        )
+        .unwrap();
+        assert!(looked_up.lines.is_empty());
+        assert!(added_lines().is_empty());
+
+        // The directory knows them.
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB, "UNKNOWN1"]));
+        assert!(added_lines().is_empty());
+        let looked_up = crate::sync::members_looked_up(
+            &store,
+            vec![(
+                "UNKNOWN1".to_owned(),
+                crate::contacts::Lookup::Found(Box::new(crate::contacts::test_contact("UNKNOWN1"))),
+            )],
+        )
+        .unwrap();
+        assert_eq!(looked_up.lines.len(), 1);
+        assert_eq!(added_lines(), vec!["groupMemberAdded|UNKNOWN1"]);
+        assert!(store.outstanding_member_lookups().unwrap().is_empty());
+    }
+
+    #[test]
+    fn someone_gone_before_the_lookup_gets_no_line() {
+        let (_dir, store) = store();
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB, "UNKNOWN1"]));
+        run(&store, CREATOR, CREATOR, setup(&[USER, BOB]));
+        let looked_up = crate::sync::members_looked_up(
+            &store,
+            vec![(
+                "UNKNOWN1".to_owned(),
+                crate::contacts::Lookup::Found(Box::new(crate::contacts::test_contact("UNKNOWN1"))),
+            )],
+        )
+        .unwrap();
+        assert!(looked_up.lines.is_empty());
+    }
+
+    #[test]
+    fn member_lookups_are_limited_per_hour() {
+        let (_dir, store) = store();
+        let start = 1_000_000;
+        assert_eq!(store.member_lookup_allowance_at(300, start), 300);
+        assert_eq!(store.member_lookup_allowance_at(300, start + 1), 212);
+        assert_eq!(store.member_lookup_allowance_at(1, start + 2), 0);
+        // The next hour.
+        assert_eq!(
+            store.member_lookup_allowance_at(5, start + MEMBER_LOOKUP_WINDOW_MS),
+            5
+        );
+        // A clock set back doesn't hold them up.
+        assert_eq!(store.member_lookup_allowance_at(7, start), 7);
     }
 
     #[test]

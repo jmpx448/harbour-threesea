@@ -544,6 +544,15 @@ pub(crate) fn queue_received_group_change(
     Ok(true)
 }
 
+/// What [`members_looked_up`] did.
+#[derive(Debug, Default)]
+pub(crate) struct MembersLookedUp {
+    /// Something was queued for the other devices.
+    pub queued: bool,
+    /// "Added" lines of those the directory knows, for the UI.
+    pub lines: Vec<crate::messages::Message>,
+}
+
 /// What the directory said about group members, as one store step: their contacts, and for the
 /// lookups the other devices are owed, each contact as a `ContactSync.Create` and then, for each
 /// group waiting for it, the list with them in it. Someone the directory doesn't know stops being
@@ -552,17 +561,19 @@ pub(crate) fn queue_received_group_change(
 pub(crate) fn members_looked_up(
     store: &Store,
     results: Vec<(String, Lookup)>,
-) -> Result<bool, StoreError> {
+) -> Result<MembersLookedUp, StoreError> {
     use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
 
     let step = store.conn.unchecked_transaction()?;
     let device_group = store.multi_device()?.is_some();
     let mut queued = false;
+    let mut lines = Vec::new();
     let mut groups: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
     let answered: Vec<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
     store.member_lookups_answered(&answered)?;
     for (identity, result) in results {
         let waiting = store.take_member_lookups(&identity)?;
+        let found = matches!(result, Lookup::Found(_));
         if let Lookup::Found(contact) = result
             && store.contact(&identity)?.is_none()
         {
@@ -582,6 +593,21 @@ pub(crate) fn members_looked_up(
             }
         }
         for (key, added) in waiting {
+            if found
+                && added
+                && let Some(contact) = store.contact(&identity)?
+                && store
+                    .group(&key)?
+                    .is_some_and(|group| !group.left && group.members.contains(&identity))
+            {
+                lines.extend(store.insert_status(
+                    &key,
+                    &format!(
+                        "groupMemberAdded|{}",
+                        crate::contacts::display_name(&contact)
+                    ),
+                )?);
+            }
             groups
                 .entry(key)
                 .or_default()
@@ -624,7 +650,7 @@ pub(crate) fn members_looked_up(
         }
     }
     step.commit()?;
-    Ok(queued)
+    Ok(MembersLookedUp { queued, lines })
 }
 
 /// Once, after the update that brought this: contacts looked up for a group used to stay on this

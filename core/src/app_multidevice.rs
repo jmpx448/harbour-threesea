@@ -1146,6 +1146,7 @@ mod tests {
                 ],
             )
             .unwrap()
+            .queued
         );
         let (id, scope, content) = app.store.next_sync().unwrap().unwrap();
         assert_eq!(scope, Scope::ContactSync as i32);
@@ -1230,6 +1231,7 @@ mod tests {
                 )],
             )
             .unwrap()
+            .queued
         );
         assert!(app.store.contact("DDDDDDDD").unwrap().is_some());
         assert!(app.store.next_sync().unwrap().is_none());

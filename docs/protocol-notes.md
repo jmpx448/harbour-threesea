@@ -356,6 +356,11 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   setup's nonce is used by then, so a failed lookup can't count on redelivery. Someone the directory
   doesn't know, or a contact that is revoked when the setup comes, is not kept as a member (Android
   neither) and nothing waits for them. A sync request's creator is looked up the same way.
+- Anyone can name any ID in a setup or a group message, so what that makes us ask the directory is
+  bounded: a setup listing over 256 (Android's `MAX_GROUP_SIZE`) is discarded, at most 512 IDs go to
+  group lookups per hour (the rest wait for the next round), and an ID the directory didn't know is
+  remembered for a day (in memory) and left out of setups and sync requests. An "added" line for
+  someone with no contact waits for their lookup, so that no made-up ID gets one.
 - A group-setup creates its sender as a _direct_ contact (csp.struct.yml, Android), a stranger's
   too, also under _block unknown_ (ADR 0019). Its dedicated blocking steps run in libthreema before
   anything is created: a creator on the block list, for a group the user isn't in, is discarded.
