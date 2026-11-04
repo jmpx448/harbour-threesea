@@ -439,10 +439,7 @@ impl App {
                 let _ = events.send(CoreEvent::GroupsChanged);
             }
             for message in resolved.lines {
-                let _ = events.send(CoreEvent::MessageAdded {
-                    message,
-                    send_delivery_receipt: false,
-                });
+                let _ = events.send(CoreEvent::MessageAdded { message });
             }
             // Reload contact names; the media/progress channel also triggers sending.
             let _ = events.send(CoreEvent::ContactsChanged);

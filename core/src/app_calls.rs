@@ -150,10 +150,7 @@ impl App {
             record.call_id
         );
         if let Ok(Some(message)) = self.store.insert_status(&record.peer, &code) {
-            let _ = self.media_events.send(CoreEvent::MessageAdded {
-                message,
-                send_delivery_receipt: false,
-            });
+            let _ = self.media_events.send(CoreEvent::MessageAdded { message });
         }
     }
 

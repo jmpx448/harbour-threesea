@@ -68,6 +68,8 @@ pub const OUTBOX_LEGACY_REACTION: &str = "legacyReaction";
 pub const OUTBOX_EDIT: &str = "edit";
 /// `kind` of a deletion for everyone (`body`: `{messageId}`).
 pub const OUTBOX_DELETE: &str = "delete";
+/// A delivery receipt for a received message: `{messageId}` (hex).
+pub const OUTBOX_DELIVERY_RECEIPT: &str = "deliveryReceipt";
 
 /// The _Legacy Reaction Mapping Steps_: thumbs up/down (any skin tone) map to the
 /// acknowledge/decline delivery receipts that peers without `REACTION_SUPPORT` understand.
@@ -276,6 +278,23 @@ impl Store {
         self.conn
             .execute("DELETE FROM outbox WHERE conversation = ?1", [conversation])?;
         Ok(())
+    }
+
+    /// One outbox entry.
+    pub fn outbox_entry(
+        &self,
+        conversation: &str,
+        message_id: u64,
+    ) -> Result<Option<OutboxEntry>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, conversation, message_id, created_at, kind, body FROM outbox
+                     WHERE conversation = ?1 AND message_id = ?2",
+                params![conversation, message_id.cast_signed()],
+                outbox_entry,
+            )
+            .optional()?)
     }
 
     /// Remove a sent (acknowledged) or unsendable outbox entry.

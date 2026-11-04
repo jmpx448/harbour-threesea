@@ -283,10 +283,7 @@ impl App {
         }
         let id = reply["result"]["id"].as_i64().unwrap_or(0);
         if let Ok(Some(message)) = self.store.message(id) {
-            let _ = self.media_events.send(CoreEvent::MessageAdded {
-                message,
-                send_delivery_receipt: false,
-            });
+            let _ = self.media_events.send(CoreEvent::MessageAdded { message });
         }
         Ok(arp::message(
             "create",

@@ -640,10 +640,7 @@ impl App {
         {
             let _ = self
                 .media_events
-                .send(crate::providers::CoreEvent::MessageAdded {
-                    message,
-                    send_delivery_receipt: false,
-                });
+                .send(crate::providers::CoreEvent::MessageAdded { message });
         }
         Ok(())
     }

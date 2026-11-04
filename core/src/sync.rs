@@ -288,10 +288,7 @@ fn status_line(
     events: &mut Vec<CoreEvent>,
 ) -> Result<(), StoreError> {
     if let Some(message) = store.insert_status(key, code)? {
-        events.push(CoreEvent::MessageAdded {
-            message,
-            send_delivery_receipt: false,
-        });
+        events.push(CoreEvent::MessageAdded { message });
     }
     Ok(())
 }
@@ -1058,7 +1055,7 @@ mod tests {
         let events = create(&store, listing(CREATOR, &[BOB]));
         assert!(events.iter().any(|event| matches!(
             event,
-            CoreEvent::MessageAdded { message, send_delivery_receipt: false }
+            CoreEvent::MessageAdded { message }
                 if message.body == "groupJoined"
         )));
         update(

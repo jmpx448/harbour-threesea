@@ -504,11 +504,7 @@ fn private_rename_event_has_no_name() {
         .unwrap()
         .unwrap();
     app.store.set_private("BBBBBBBB", true).unwrap();
-    let event = CoreEvent::MessageAdded {
-        message: group,
-        send_delivery_receipt: false,
-    }
-    .to_json(&app.store, false);
+    let event = CoreEvent::MessageAdded { message: group }.to_json(&app.store, false);
     assert!(!event.to_string().contains("Secret plans"), "{event}");
 }
 
@@ -731,7 +727,6 @@ async fn private_content_stays_hidden_from_mutations_and_media() {
         .unwrap();
     app.gate_media(&CoreEvent::MessageAdded {
         message: late.clone(),
-        send_delivery_receipt: false,
     });
     assert!(!app.media.shown(late.id));
     // Unlocked: everything is readable again.

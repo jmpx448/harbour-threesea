@@ -1456,13 +1456,16 @@ impl<'a> Session<'a> {
             Some(body)
                 if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))? =>
             {
-                self.reflect_outgoing(
-                    &entry.conversation,
-                    entry.message_id,
-                    entry.created_at,
-                    &Outgoing::Contact(body.clone()),
-                )
-                .await?;
+                // A delivery receipt says nothing the other devices go by.
+                if entry.kind != reactions::OUTBOX_DELIVERY_RECEIPT {
+                    self.reflect_outgoing(
+                        &entry.conversation,
+                        entry.message_id,
+                        entry.created_at,
+                        &Outgoing::Contact(body.clone()),
+                    )
+                    .await?;
+                }
                 self.encode(
                     &entry.conversation,
                     entry.message_id,
@@ -1733,20 +1736,17 @@ impl<'a> Session<'a> {
         }
     }
 
-    async fn send_receipt(
+    async fn send_read_receipt(
         &mut self,
         receiver: &str,
-        receipt_type: DeliveryReceiptType,
         message_ids: Vec<u64>,
     ) -> Result<(), ConnectionError> {
         if message_ids.is_empty() {
             return Ok(());
         }
-        if matches!(receipt_type, DeliveryReceiptType::Read) {
-            self.reflect_read(receiver, &message_ids).await?;
-        }
+        self.reflect_read(receiver, &message_ids).await?;
         let body = ContactMessageBody::DeliveryReceipt(DeliveryReceiptMessage {
-            receipt_type,
+            receipt_type: DeliveryReceiptType::Read,
             message_ids: message_ids.into_iter().map(MessageId).collect(),
         });
         let created_at = crate::messages::now_ms();
@@ -1914,13 +1914,26 @@ impl<'a> Session<'a> {
                 Ok(store
                     .insert_status(&peer, code)
                     .map_err(storage_error)?
-                    .map(|message| CoreEvent::MessageAdded {
-                        message,
-                        send_delivery_receipt: false,
-                    }))
+                    .map(|message| CoreEvent::MessageAdded { message }))
             }
             CoreEvent::OutboxChanged => {
                 self.send_pending().await?;
+                Ok(None)
+            }
+            // This one alone: a burst of messages would otherwise go through all of the outbox for
+            // each of them.
+            CoreEvent::ReceiptQueued {
+                receiver,
+                receipt_id,
+            } => {
+                let entry = self
+                    .setup
+                    .store
+                    .outbox_entry(&receiver, receipt_id)
+                    .map_err(storage_error)?;
+                if let Some(entry) = entry {
+                    self.send_outbox_entry(entry).await?;
+                }
                 Ok(None)
             }
             other => Ok(Some(other)),
@@ -2075,10 +2088,7 @@ impl<'a> Session<'a> {
             .map_err(storage_error)?
             && let Some(message) = store.insert_status(peer, code).map_err(storage_error)?
         {
-            self.emit(CoreEvent::MessageAdded {
-                message,
-                send_delivery_receipt: false,
-            });
+            self.emit(CoreEvent::MessageAdded { message });
         }
         Ok(())
     }
@@ -2884,7 +2894,7 @@ impl<'a> Session<'a> {
                     None => return Err(ConnectionError::Stopped),
                     Some(ToConnection::SendPending) => self.send_pending().await?,
                     Some(ToConnection::ReadReceipts { identity, message_ids }) => {
-                        self.send_receipt(&identity, DeliveryReceiptType::Read, message_ids).await?;
+                        self.send_read_receipt(&identity, message_ids).await?;
                     },
                     // Queued while disconnected: stale by now, the contact's timer has expired anyway.
                     Some(ToConnection::Typing { identity, typing, at }) => if at.elapsed() < TYPING_MAX_AGE {
@@ -3170,10 +3180,7 @@ impl<'a> Session<'a> {
         }
         self.emit(CoreEvent::ContactsChanged);
         for message in resolved.lines {
-            self.emit(CoreEvent::MessageAdded {
-                message,
-                send_delivery_receipt: false,
-            });
+            self.emit(CoreEvent::MessageAdded { message });
         }
         self.send_pending().await
     }
@@ -3198,24 +3205,6 @@ impl<'a> Session<'a> {
             let Some(event) = Box::pin(self.handle_fs_event(event)).await? else {
                 continue;
             };
-            if let CoreEvent::MessageAdded {
-                message:
-                    Message {
-                        conversation,
-                        message_id,
-                        ..
-                    },
-                send_delivery_receipt: true,
-            } = &event
-            {
-                let (conversation, message_id) = (conversation.clone(), *message_id);
-                self.send_receipt(
-                    &conversation,
-                    DeliveryReceiptType::Received,
-                    vec![message_id],
-                )
-                .await?;
-            }
             self.emit(event);
         }
         Ok(())
@@ -3394,6 +3383,12 @@ fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
             text: entry.body["text"].as_str()?.to_owned(),
         })),
         reactions::OUTBOX_DELETE => Some(ContactMessageBody::Delete(DeleteMessage { message_id })),
+        reactions::OUTBOX_DELIVERY_RECEIPT => Some(ContactMessageBody::DeliveryReceipt(
+            DeliveryReceiptMessage {
+                receipt_type: DeliveryReceiptType::Received,
+                message_ids: vec![message_id],
+            },
+        )),
         crate::profile_pictures::OUTBOX_REQUEST_PICTURE => Some(
             ContactMessageBody::RequestProfilePicture(RequestProfilePictureMessage),
         ),
@@ -4337,6 +4332,26 @@ mod sync_order_tests {
         assert!(!goes_to_non_members(&GroupMessageBody::Text(TextMessage {
             text: "hi".into()
         })));
+    }
+
+    #[test]
+    fn a_queued_delivery_receipt_goes_out_as_a_received_receipt() {
+        let body = outbox_body(&reactions::OutboxEntry {
+            id: 1,
+            conversation: CREATOR.into(),
+            message_id: 2,
+            created_at: 3,
+            kind: reactions::OUTBOX_DELIVERY_RECEIPT.into(),
+            body: serde_json::json!({"messageId": "00000000000000ff"}),
+        });
+        let Some(ContactMessageBody::DeliveryReceipt(receipt)) = body else {
+            panic!("expected a receipt");
+        };
+        assert!(matches!(
+            receipt.receipt_type,
+            DeliveryReceiptType::Received
+        ));
+        assert_eq!(receipt.message_ids[0].0, 0xff);
     }
 
     #[test]

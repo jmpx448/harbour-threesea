@@ -13,7 +13,7 @@ use libthreema::{
         contact::{Contact, ContactUpdate},
         message::{
             ContactMessageBody, DeliveryReceiptType, IncomingMessage, IncomingMessageBody,
-            ReactionAction, WebSessionResumeMessage,
+            MessageOverrides, ReactionAction, WebSessionResumeMessage,
         },
         provider::{
             ContactProvider, ConversationProvider, NonceStorage, ProfilePicture, ProviderError,
@@ -34,10 +34,9 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
     /// A new incoming message was stored (incl. whether a "received" receipt should be sent).
-    MessageAdded {
-        message: Message,
-        send_delivery_receipt: bool,
-    },
+    MessageAdded { message: Message },
+    /// A delivery receipt waits in the outbox (see [`StoreConversations::queue_receipt`]).
+    ReceiptQueued { receiver: String, receipt_id: u64 },
     /// Outgoing messages changed state (receipts, server acks).
     MessagesChanged(Vec<Message>),
     /// A contact is typing (or stopped).
@@ -209,6 +208,7 @@ impl CoreEvent {
             Self::FsControl { .. }
             | Self::FsStatus { .. }
             | Self::OutboxChanged
+            | Self::ReceiptQueued { .. }
             | Self::UnknownMembers(_)
             | Self::SyncQueued
             | Self::RemoveGroupPicture(_)
@@ -688,10 +688,7 @@ impl StoreConversations {
                     events.push(CoreEvent::OutboxChanged);
                 }
                 for added in outcome.added {
-                    events.push(CoreEvent::MessageAdded {
-                        message: added,
-                        send_delivery_receipt: false,
-                    });
+                    events.push(CoreEvent::MessageAdded { message: added });
                 }
                 if !outcome.changed.is_empty() {
                     events.push(CoreEvent::MessagesChanged(outcome.changed));
@@ -805,13 +802,15 @@ impl StoreConversations {
                 )
                 .map_err(foreign)?;
                 let mut events = self.events.borrow_mut();
+                let queued = added.is_some();
                 if let Some(added) = added {
-                    events.push(CoreEvent::MessageAdded {
-                        message: added,
-                        send_delivery_receipt: !message.overrides.disable_delivery_receipts,
-                    });
+                    events.push(CoreEvent::MessageAdded { message: added });
                 }
                 events.extend(changed.map(|c| CoreEvent::MessagesChanged(vec![c])));
+                drop(events);
+                if queued {
+                    self.queue_receipt(&sender, &message.overrides, message.id.0)?;
+                }
                 return Ok(());
             }
             ContactMessageBody::PollVote(vote) => {
@@ -967,11 +966,39 @@ impl StoreConversations {
             if let Some(keys) = &file_keys {
                 self.store.set_file_keys(stored.id, keys).map_err(foreign)?;
             }
-            self.events.borrow_mut().push(CoreEvent::MessageAdded {
-                message: stored,
-                send_delivery_receipt: !message.overrides.disable_delivery_receipts,
-            });
+            self.events
+                .borrow_mut()
+                .push(CoreEvent::MessageAdded { message: stored });
+            self.queue_receipt(&sender, &message.overrides, message.id.0)?;
         }
+        Ok(())
+    }
+
+    /// The delivery receipt for a message just stored: in the same store step, as its delivery
+    /// won't come again. A connection that dies before it went out sends it after the next login.
+    /// Not for what another device received: that device has answered.
+    fn queue_receipt(
+        &self,
+        sender: &str,
+        overrides: &MessageOverrides,
+        message_id: u64,
+    ) -> Result<(), ProviderError> {
+        if self.from_sync || overrides.disable_delivery_receipts {
+            return Ok(());
+        }
+        let receipt_id = MessageId::random().0;
+        self.store
+            .outbox_add(
+                sender,
+                receipt_id,
+                reactions::OUTBOX_DELIVERY_RECEIPT,
+                &json!({ "messageId": format!("{message_id:016x}") }),
+            )
+            .map_err(foreign)?;
+        self.events.borrow_mut().push(CoreEvent::ReceiptQueued {
+            receiver: sender.to_owned(),
+            receipt_id,
+        });
         Ok(())
     }
 }
@@ -1214,6 +1241,63 @@ mod tests {
             store.outbox().unwrap()[0].kind,
             crate::profile_pictures::OUTBOX_REQUEST_PICTURE
         );
+    }
+
+    /// The server won't send a stored message again, so its receipt waits in the store, once. What
+    /// another device received, that device has answered.
+    #[test]
+    fn a_stored_message_leaves_its_receipt_in_the_store() {
+        let (_dir, store) = store();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        let store = Rc::new(store);
+        let events: EventSink = Rc::default();
+        let receive = |id: u64, from_sync: bool, no_receipt: bool| {
+            let overrides = MessageOverrides {
+                disable_delivery_receipts: no_receipt,
+            };
+            StoreConversations {
+                store: Rc::clone(&store),
+                events: Rc::clone(&events),
+                user: ThreemaId::try_from("USER0001").unwrap(),
+                from_sync,
+            }
+            .add_or_update_incoming_message(IncomingMessage {
+                sender_identity: ThreemaId::try_from(MEMBER).unwrap(),
+                id: MessageId(id),
+                overrides,
+                created_at: 1,
+                body: IncomingMessageBody::Contact(ContactMessageBody::Text(TextMessage {
+                    text: "hi".into(),
+                })),
+            })
+            .unwrap();
+        };
+        let receipts = || {
+            store
+                .outbox()
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.kind == reactions::OUTBOX_DELIVERY_RECEIPT)
+                .map(|entry| entry.body["messageId"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        receive(9, false, false);
+        assert_eq!(receipts(), ["0000000000000009"]);
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            CoreEvent::ReceiptQueued { receiver, .. } if receiver == MEMBER
+        )));
+        // A repeat isn't new.
+        receive(9, false, false);
+        receive(10, true, false);
+        receive(11, false, true);
+        assert_eq!(receipts(), ["0000000000000009"]);
     }
 
     /// `body` arriving from `sender`, as the connection hands it over.
@@ -1703,7 +1787,6 @@ mod tests {
             .unwrap();
         let added = CoreEvent::MessageAdded {
             message: message.clone(),
-            send_delivery_receipt: false,
         };
         assert_eq!(
             added.to_json(&store, true)["notify"],

@@ -289,7 +289,6 @@ mod tests {
         // Locked: only what the generic notification needs, never the content.
         let event = CoreEvent::MessageAdded {
             message: message.clone(),
-            send_delivery_receipt: false,
         };
         let locked = event.to_json(&store, false);
         assert_eq!(locked["private"], true);
@@ -326,10 +325,7 @@ mod tests {
             .insert_status("BBBBBBBB", "call|missed|0|0")
             .unwrap()
             .unwrap();
-        let event = CoreEvent::MessageAdded {
-            message: status,
-            send_delivery_receipt: false,
-        };
+        let event = CoreEvent::MessageAdded { message: status };
         assert_eq!(
             event.to_json(&store, false)["message"]["body"],
             "call|missed|0|0"

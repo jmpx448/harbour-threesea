@@ -213,16 +213,6 @@ pub fn apply(
                     crate::providers::storage_code(&error)
                         .map_or(ReflectedError::Decode(error), ReflectedError::StoreCode)
                 })?;
-            // The leader sent the delivery receipt already: none from here.
-            for event in events.borrow_mut().iter_mut() {
-                if let CoreEvent::MessageAdded {
-                    send_delivery_receipt,
-                    ..
-                } = event
-                {
-                    *send_delivery_receipt = false;
-                }
-            }
             Ok(())
         }
         Some(envelope::Content::IncomingMessageUpdate(update)) => {

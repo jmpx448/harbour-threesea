@@ -227,10 +227,7 @@ impl App {
             })?;
         // Our UI shows it like one sent on another device.
         if let Some(Ok(Some(message))) = result["id"].as_i64().map(|id| self.store.message(id)) {
-            let _ = self.media_events.send(CoreEvent::MessageAdded {
-                message,
-                send_delivery_receipt: false,
-            });
+            let _ = self.media_events.send(CoreEvent::MessageAdded { message });
         }
         let id = result["id"]
             .as_i64()
