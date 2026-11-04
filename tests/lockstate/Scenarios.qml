@@ -830,6 +830,67 @@ QtObject {
             }, 100],
             [function() { checkStack("conversations") }, 0],
         ],
+        // A private chat's PIN page (unlockChat) left open shows nothing of the chat, and stays:
+        // it still takes the PIN to get on.
+        privateChatPinLeftOpen: [
+            [function() { ready(false) }, 100],
+            [function() {
+                window.unlockChat(push("pages/ChatPage.qml", { identity: "ABCD1234" }), "ABCD1234")
+                window.lockNow()
+            }, 100],
+            [function() {
+                checkStack("conversations unlock")
+                page("unlock").unlocked("1234")
+                checkStack("conversations chat")
+            }, 0],
+        ],
+        // With a lock as well: the lock's PIN only leads back to that page.
+        privateChatPinLeftOpenUnderLock: [
+            [function() { ready(true) }, 100],
+            [function() {
+                window.unlockChat(push("pages/ChatPage.qml", { identity: "ABCD1234" }), "ABCD1234")
+                stack.currentPage.objectName = "chatPin"
+                window.lockNow()
+            }, 100],
+            [function() {
+                checkStack("conversations chatPin unlock")
+                unlock()
+            }, 100],
+            [function() {
+                checkStack("conversations chatPin")
+                check("not locked", window.locked, false)
+                stack.currentPage.unlocked("1234")
+                checkStack("conversations chat")
+            }, 0],
+        ],
+        // That page's answer comes when the lock is up: nothing follows from it, and it asks again.
+        privateChatPinAnsweredUnderLock: [
+            [function() { ready(true) }, 100],
+            [function() {
+                backend.hold("unlock")
+                var pinPage = push("pages/RealUnlockPage.qml", { privateChats: true })
+                pinPage.objectName = "chatPin"
+                pinPage.unlocked.connect(function() { handedOver = "chat" })
+                var entry = entryOf(pinPage)
+                entry._pin = "1234"
+                entry.accept()
+                window.lockNow()
+            }, 100],
+            [function() {
+                checkStack("conversations chatPin unlock")
+                backend.release("unlock")
+            }, 100],
+            [function() {
+                check("nothing follows", handedOver, "")
+                checkStack("conversations chatPin unlock")
+                unlock()
+            }, 100],
+            [function() {
+                checkStack("conversations chatPin")
+                check("still nothing", handedOver, "")
+                check("entry cleared", entryOf(stack.currentPage).pin, "")
+            }, 0],
+        ],
         // A running call's page survives closing the private chat beneath it.
         privateChatUnderCall: [
             [function() { ready(false) }, 100],
