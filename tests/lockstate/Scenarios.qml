@@ -1110,6 +1110,107 @@ QtObject {
                 check("nothing sent", countSent("sendText"), 0)
             }, 0],
         ],
+        // A reply that went out: read, and the notification gone.
+        replySent: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("sent", backend.lastArgs["sendText"].text, "a reply")
+                check("read", countSent("markRead"), 1)
+                check("gone", window.notifications[chat], undefined)
+                check("nothing about a refusal", window.notifications["replyNotSent:" + chat], undefined)
+            }, 0],
+        ],
+        // A refused reply: unread, the words kept, and a word about it without them.
+        replyRefused: [
+            [function() {
+                ready(true, 60)
+                backend.refused["sendText"] = "contactBlocked"
+                backend.results["draft"] = { text: "started earlier", quote: { messageId: "00ff" } }
+            }, 100],
+            [function() { incoming("the words") }, 50],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("not read", countSent("markRead"), 0)
+                check("the chat's notification stays", !!window.notifications[chat], true)
+                check("after the draft", backend.lastArgs["setDraft"].text, "started earlier\na reply")
+                check("for this chat", backend.lastArgs["setDraft"].identity, chat)
+                check("with its quote", backend.lastArgs["setDraft"].quote, "00ff")
+                var n = window.notifications["replyNotSent:" + chat]
+                check("says so", n.summary, "threesea-la-reply-not-sent")
+                check("not the words", (n.body + n.previewBody).indexOf("a reply"), -1)
+                check("kept", n.body.indexOf("threesea-la-reply-not-sent-kept"), 0)
+                check("opens the chat", n.remoteActions[0].method, "openChat")
+                check("that chat", n.remoteActions[0].arguments[0], chat)
+                // Still there behind the lock: nothing of who or what in it.
+                window.lockNow()
+                check("stays under the lock", !!window.notifications["replyNotSent:" + chat], true)
+                check("the chat's goes", window.notifications[chat], undefined)
+            }, 0],
+        ],
+        // One from the last run is about a chat, but isn't that chat's notification.
+        replyNotSentTakenOver: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var n = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { summary: \"threesea-la-reply-not-sent\"; body: \"the reason\" }", root)
+                n.remoteActions = [{ name: "default", displayName: "", service: "s", path: "/", iface: "i",
+                                     method: "openChat", arguments: [chat] }]
+                window.takeOver(n)
+                check("not the chat's", window.notifications[chat], undefined)
+                check("filed as what it is", window.notifications["replyNotSent:" + chat] === n, true)
+                changed({ id: "unknown", kind: "deleted" })
+                check("left alone by a deletion", n.body, "the reason")
+                incoming("the words")
+            }, 50],
+            [function() {
+                check("the chat's own", window.notifications[chat].body, "the words")
+                check("still there", !!window.notifications["replyNotSent:" + chat], true)
+                var plain = Qt.createQmlObject("import Nemo.Notifications 1.0; Notification { summary: \"threesea-la-reply-not-sent\" }", root)
+                plain.remoteActions = [{ name: "default", displayName: "", service: "s", path: "/", iface: "i",
+                                         method: "activate", arguments: [] }]
+                window.takeOver(plain)
+                check("nothing about a chat", window.notifications["replyNotSent"] === plain, true)
+                check("not a private chat's", window.notifications["private"], undefined)
+            }, 0],
+        ],
+        // Nowhere to keep it: it still says so.
+        replyRefusedNotKept: [
+            [function() {
+                ready(false)
+                backend.refused["sendText"] = "contactBlocked"
+                backend.refused["draft"] = "notFound"
+            }, 100],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("nothing saved", countSent("setDraft"), 0)
+                var n = window.notifications["replyNotSent:" + chat]
+                check("says so", n.summary, "threesea-la-reply-not-sent")
+                check("no promise", n.body.indexOf("threesea-la-reply-not-sent-kept"), -1)
+                check("not the words", n.body.indexOf("a reply"), -1)
+            }, 0],
+        ],
+        // The chat is open: into its input, after what is there, and from there into its draft.
+        replyRefusedChatOpen: [
+            [function() {
+                ready(false)
+                backend.refused["sendText"] = "contactBlocked"
+            }, 100],
+            [function() {
+                root.kept = push("pages/ChatPage.qml", { identity: chat })
+            }, 100],
+            [function() { fakes.dbus.replyRequested(chat, "a reply") }, 50],
+            [function() {
+                check("handed to the chat", root.kept.kept, "a reply")
+                check("saved", root.kept.draftsSaved, 1)
+                check("not over its draft", countSent("setDraft"), 0)
+                check("says so", window.notifications["replyNotSent:" + chat].body.indexOf("threesea-la-reply-not-sent-kept"), 0)
+                // Opening the chat ends it; here the chat is opened again after leaving.
+                window.openChat = ""
+                window.openChat = chat
+                check("gone with the chat opened", window.notifications["replyNotSent:" + chat], undefined)
+            }, 0],
+        ],
         // A failure of a running core with the lock up: no PIN page for a dead core.
         failsWhileLocked: [
             [function() { ready(true) }, 100],

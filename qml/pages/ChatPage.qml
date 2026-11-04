@@ -1119,6 +1119,15 @@ Page {
             setInput(text)
         }
     }
+    // A reply from a notification that wasn't sent, after what is typed already. While a message
+    // is being edited that's what comes back after the edit, as the input holds the edit.
+    function keepText(text) {
+        var editing = editingMessageId !== ""
+        var typed = editing ? beforeEdit.text : inputField.text
+        var kept = typed.length > 0 ? typed + "\n" + text : text
+        if (editing) beforeEdit.text = kept
+        else setInput(kept)
+    }
     // An answer can outlive the page: see window.fileAnswer.
     property var pageAlive: ({ yes: true })
     function sendNow(file) {

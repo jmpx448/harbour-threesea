@@ -10,6 +10,10 @@ Page {
     property var attached: []
     function attachAll(files) { attached = files }
     function setInput(text) { inputField.text = text }
+    function keepText(text) { kept = text }
+    property string kept
+    property int draftsSaved: 0
+    function saveDraft() { draftsSaved = draftsSaved + 1 }
     Component.onCompleted: window.openChat = identity
     Component.onDestruction: if (window.openChat === identity) window.openChat = ""
 }

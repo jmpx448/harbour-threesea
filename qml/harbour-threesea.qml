@@ -682,13 +682,15 @@ ApplicationWindow {
             readonly property bool own: true
             // Under this it is in `notifications`.
             property string key
+            // The chat tapping it opens; otherwise it opens the app.
+            property string chat
             onClosed: {
                 window.notificationClosed(key, plain)
                 plain.destroy()
             }
             appName: "Threesea"
             appIcon: "harbour-threesea"
-            remoteActions: [window.dbusAction("default", "", "activate")]
+            remoteActions: [window.dbusAction("default", "", chat ? "openChat" : "activate", chat)]
         }
     }
 
@@ -811,22 +813,25 @@ ApplicationWindow {
     Notification { id: notificationQuery }
     Component.onCompleted: {
         var existing = notificationQuery.notifications()
-        for (var i = 0; i < existing.length; ++i) {
-            var n = existing[i]
-            var actions = n.remoteActions || []
-            var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
-            // The private chats' notification opens the app only, and so does the one for the lock.
-            if (!identity && actions.length > 0 && actions[0].method === "activate") {
-                identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked" : "private"
-            }
-            if (identity && !notifications[identity]) {
-                notifications[identity] = n
-                watchClosed(identity, n)
-            } else {
-                n.close()
-            }
-        }
+        for (var i = 0; i < existing.length; ++i) takeOver(existing[i])
         dbus.retainTokens(Object.keys(notifications))
+    }
+    function takeOver(n) {
+        var actions = n.remoteActions || []
+        var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
+        if (n.summary === qsTrId("threesea-la-reply-not-sent")) {
+            // It opens the chat, but isn't that chat's notification.
+            identity = identity ? "replyNotSent:" + identity : "replyNotSent"
+        } else if (!identity && actions.length > 0 && actions[0].method === "activate") {
+            // The private chats' notification opens the app only, and so does the one for the lock.
+            identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked" : "private"
+        }
+        if (identity && !notifications[identity]) {
+            notifications[identity] = n
+            watchClosed(identity, n)
+        } else {
+            n.close()
+        }
     }
 
     // Dismissed on the lock screen or the events view, or one of its actions tapped, which then
@@ -939,7 +944,9 @@ ApplicationWindow {
     function hideNotifications() {
         var added = 0
         Object.keys(notifications).forEach(function(key) {
-            if (["appLocked", "locked", "license", "replyNotSent"].indexOf(key) >= 0) return
+            // Who wrote what isn't in these.
+            if (["appLocked", "locked", "license", "replyNotSent"].indexOf(key) >= 0
+                    || key.indexOf("replyNotSent:") === 0) return
             added += Math.max(notifications[key].itemCount, 1)
             if (closeNotification(key)) dbus.releaseToken(key)
         })
@@ -1035,7 +1042,11 @@ ApplicationWindow {
         if (linkedDevicesRemain) Notices.show(qsTrId("threesea-la-delete-data-linked-remain"), Notice.Long, Notice.Center)
     }
 
-    onOpenChatChanged: if (openChat.length > 0) clearNotification(openChat)
+    onOpenChatChanged: {
+        if (openChat.length === 0) return
+        clearNotification(openChat)
+        clearNotification("replyNotSent:" + openChat)
+    }
 
     // Reply and Mark as read from a notification. Such a tap can be what starts the app, so these
     // wait until the core is there (components/NotificationActions.js), and one made just before
@@ -1051,15 +1062,16 @@ ApplicationWindow {
         // Only these two states have an app lock (showLock); not known yet counts as locked.
         if ((backend.state === "ready" || backend.state === "needsLicense") && (!lockChecked || lockActive())) return
         NotificationActions.release(backend.state).forEach(function(action) {
-            if (action.text !== undefined) {
-                backend.call("sendText", { identity: action.identity, text: action.text },
-                             function(ok, result, kind, message) {
-                    if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                })
+            if (action.text === undefined) {
+                window.markNotifiedRead(action.identity)
+                return
             }
-            // Replying means it has been read.
-            backend.call("markRead", { identity: action.identity }, function() { backend.refreshUnread() })
-            window.clearNotification(action.identity)
+            backend.call("sendText", { identity: action.identity, text: action.text },
+                         function(ok, result, kind, message) {
+                // Replying means it has been read; one that didn't go out hasn't been answered.
+                if (ok) window.markNotifiedRead(action.identity)
+                else window.replyRefused(action, Errors.text(kind, message))
+            })
         })
         if (backend.state === "error" && NotificationActions.drop()) {
             //% "Your reply was not sent"
@@ -1067,6 +1079,52 @@ ApplicationWindow {
                               //% "Threesea could not start. Open it to see why."
                               qsTrId("threesea-la-reply-not-sent-body"))
         }
+    }
+
+    function markNotifiedRead(identity) {
+        backend.call("markRead", { identity: identity }, function() { backend.refreshUnread() })
+        clearNotification(identity)
+    }
+
+    // A reply from a notification that the core refused. A notice would be drawn in a window that
+    // isn't on screen, and the notification it was typed in has gone: this one says so, without
+    // the words, which go back into the chat and wait there.
+    function replyRefused(action, reason) {
+        keepReply(action.identity, action.text, function(kept) {
+            var key = "replyNotSent:" + action.identity
+            var n = notifications[key]
+            if (!n) {
+                // Tapping it opens the chat, where the words are.
+                n = plainNotificationComponent.createObject(window, { key: key, chat: action.identity })
+                notifications[key] = n
+            }
+            n.summary = qsTrId("threesea-la-reply-not-sent")
+            //% "%1 Your text is kept as a draft in the chat."
+            n.body = kept ? qsTrId("threesea-la-reply-not-sent-kept").arg(reason) : reason
+            n.previewSummary = n.summary
+            n.previewBody = n.body
+            n.publish()
+        })
+    }
+
+    // After what the chat's input holds already, there if the chat is open, otherwise in its draft.
+    function keepReply(identity, text, done) {
+        var chat = pageStack.find(function(page) { return page.identity === identity && page.inputField })
+        if (chat) {
+            chat.keepText(text)
+            chat.saveDraft()
+            done(true)
+            return
+        }
+        backend.call("draft", { identity: identity }, function(ok, draft) {
+            if (!ok) {
+                done(false)
+                return
+            }
+            var args = { identity: identity, text: draft.text ? draft.text + "\n" + text : text }
+            if (draft.quote) args.quote = draft.quote.messageId
+            backend.call("setDraft", args, function(saved) { done(saved) })
+        })
     }
 
     // Shared from other apps ("Share" → Threesea): pick the chat, then it opens with the content
@@ -1254,6 +1312,7 @@ ApplicationWindow {
                 if (data.private) {
                     window.clearNotification(data.identity)
                     delete window.readingPlaces[data.identity]
+                    window.clearNotification("replyNotSent:" + data.identity)
                 }
             } else if (name === "serverMessage") {
                 Notices.show(data.message, Notice.Long, Notice.Center)
