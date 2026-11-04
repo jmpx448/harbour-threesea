@@ -89,10 +89,16 @@ then doesn't compile on i486, whose SSE comes from there.
 
 ## Fuzzing (development only)
 
-`core/fuzz/` holds coverage-guided fuzz targets for the decoders that take input from outside:
-voice messages (`voice_decode`), call SDP (`sdp_patch`), Threema Web chunks and images
-(`web_chunks`, `web_images`), scanned codes (`codes`), data-backup CSV (`backup_csv`) and
-quotes/mentions (`message_text`). It is its own workspace and never part of the app.
+`core/fuzz/` holds coverage-guided fuzz targets for the decoders that take input from outside.
+It is its own workspace and never part of the app. From contacts and call peers: call signals
+(`call_signal`), the call's data channel (`call_channel`), group call handshakes and frames
+(`group_call_handshake`, `group_call_frames`), call SDP (`sdp_patch`), polls (`poll_json`), voice
+messages (`voice_decode`), quotes and mentions (`message_text`). From files: the data backup's
+container (`backup_archive`), CSV tables (`backup_csv`) and their typed records and conversion
+(`backup_records`, with the seeds of `backup_csv`), Threema Safe (`safe_backup`). From the browser:
+Threema Web (`web_arp`, `web_chunks`, `web_images`). From the user's other devices: reflected
+messages (`d2d_envelope`). Scanned and pasted: `codes`, `contact_codes`. From GitHub, when the
+update check is on: `update_check`.
 
 ```sh
 cargo install cargo-fuzz            # once; needs the nightly toolchain
@@ -103,6 +109,9 @@ cargo +nightly fuzz run voice_decode fuzz/corpus/voice_decode fuzz/seeds/voice_d
 ```
 
 `fuzz/seeds/` holds valid starting inputs (a voice message from our own encoder, an SDP offer,
-a PNG); without them the fuzzer stalls at the container headers. The voice seed is rewritten by
-`cargo test -p threesea-core --lib write_voice_seed -- --ignored`. Crashes land in
-`fuzz/artifacts/` (ignored by git).
+a PNG, the synthetic backup fixture and its tables, call signals, polls); without them the fuzzer
+stalls at the container headers. The voice seed is rewritten by
+`cargo test -p threesea-core --lib write_voice_seed -- --ignored`, the backup seeds by
+`write_backup_seeds`. Crashes land in `fuzz/artifacts/` (ignored by git). Where a seal stands in
+front of a decoder, the target seals the input itself (`group_call_handshake`) or starts behind it
+(`d2d_envelope`).

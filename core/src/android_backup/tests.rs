@@ -29,6 +29,34 @@ fn generate_identity_backup_string() {
     eprintln!("identity backup: {backup}");
 }
 
+/// Fuzzing seeds from the synthetic fixture, so the fuzzers start past the header row and the
+/// container's structure: `cargo test -p threesea-core --lib write_backup_seeds -- --ignored`
+#[test]
+#[ignore = "writes fuzzing seeds"]
+fn write_backup_seeds() {
+    let seeds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/seeds");
+    let csv = seeds.join("backup_csv");
+    std::fs::create_dir_all(&csv).unwrap();
+    let mut archive = Archive::open(&fixture("android-backup.zip"), "test-password").unwrap();
+    let names: Vec<String> = archive
+        .entries()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .filter(|name| name.ends_with(".csv"))
+        .collect();
+    for name in names {
+        let text = archive.read_text(&name, 1 << 20).unwrap();
+        std::fs::write(csv.join(name), text.as_bytes()).unwrap();
+    }
+    let zip = seeds.join("backup_archive");
+    std::fs::create_dir_all(&zip).unwrap();
+    std::fs::copy(
+        fixture("android-backup.zip"),
+        zip.join("android-backup.zip"),
+    )
+    .unwrap();
+}
+
 #[test]
 fn reads_a_winzip_aes_archive() {
     let mut archive = Archive::open(&fixture("android-backup.zip"), "test-password").unwrap();

@@ -1,0 +1,4 @@
+"id","aid","creator","ref","ref_id","name","state","assessment","type","choice_type","last_viewed_at","created_at","modified_at"
+"1","0102030405060708","B0B0B0B0","IdentityBallotModel","B0B0B0B0","Lunch?","OPEN","SINGLE_CHOICE","INTERMEDIATE","TEXT","","1700000009000","1700000009000"
+"2","1112131415161718","ANNANNAN","GroupBallotModel","g-17","Meeting day","CLOSED","MULTIPLE_CHOICE","RESULT_ON_CLOSE","TEXT","","1700000005000","1700000006000"
+"3","2122232425262728","ABCD1234","GroupBallotModel","g-17","draft","TEMPORARY","SINGLE_CHOICE","RESULT_ON_CLOSE","TEXT","","1700000005000","1700000005000"

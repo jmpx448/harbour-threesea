@@ -14,6 +14,12 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 threesea-core = { path = ".." }
+# Only what targets need to get past a seal or to build a message: versions as in the core.
+crypto_secretbox = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "salsa20"] }
+libthreema = { path = "../../third_party/libthreema/lib" }
+prost = "=0.14.4"
+serde_json = "1"
+rmpv = { version = "=1.3.1", default-features = false }
 
 # Its own workspace: fuzzing builds with nightly and sanitizers, never with the app.
 [workspace]
@@ -67,6 +73,90 @@ bench = false
 [[bin]]
 name = "message_text"
 path = "fuzz_targets/message_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_signal"
+path = "fuzz_targets/call_signal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_channel"
+path = "fuzz_targets/call_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group_call_handshake"
+path = "fuzz_targets/group_call_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group_call_frames"
+path = "fuzz_targets/group_call_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "poll_json"
+path = "fuzz_targets/poll_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backup_archive"
+path = "fuzz_targets/backup_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backup_records"
+path = "fuzz_targets/backup_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "safe_backup"
+path = "fuzz_targets/safe_backup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_arp"
+path = "fuzz_targets/web_arp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "d2d_envelope"
+path = "fuzz_targets/d2d_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contact_codes"
+path = "fuzz_targets/contact_codes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_check"
+path = "fuzz_targets/update_check.rs"
 test = false
 doc = false
 bench = false
