@@ -1490,12 +1490,9 @@ fn receive_setup(
             store.set_group_kicked(key, true)?;
             outcome.change.user_state = true;
         }
-        let code = if members.is_empty() {
-            "groupDisbanded"
-        } else {
-            "groupRemoved"
-        };
-        status(store, key, code, outcome)?;
+        // A list without us says no more than that: the spec has creators send removed members an
+        // empty list just like when dissolving, while the group may well go on.
+        status(store, key, "groupNoLongerMember", outcome)?;
         outcome.groups_changed = true;
         return Ok(());
     }

@@ -134,6 +134,7 @@ fn status_text(code: &str) -> String {
         "groupCreated" => "You created this group.".into(),
         "groupJoined" => "You were added to this group.".into(),
         "groupRemoved" => "You were removed from this group.".into(),
+        "groupNoLongerMember" => "You are no longer a member of this group.".into(),
         "groupDisbanded" => "This group was dissolved.".into(),
         "groupLeft" => "You left this group.".into(),
         "groupRenamed" => format!("Group renamed to {argument}."),

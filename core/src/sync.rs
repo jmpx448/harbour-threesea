@@ -414,7 +414,7 @@ fn apply_group(
             status_line(store, &key, "groupJoined", events)?;
         }
         Some(group::UserState::Kicked) if !was_left => {
-            status_line(store, &key, "groupRemoved", events)?;
+            status_line(store, &key, "groupNoLongerMember", events)?;
         }
         Some(group::UserState::Left) if !was_left => {
             let code = if user_is_creator {
@@ -1074,7 +1074,7 @@ mod tests {
                 format!("groupMemberAdded|{EVE}").as_str(),
                 format!("groupMemberLeft|{EVE}").as_str(),
                 "groupRenamed|Crew",
-                "groupRemoved",
+                "groupNoLongerMember",
             ]
         );
     }

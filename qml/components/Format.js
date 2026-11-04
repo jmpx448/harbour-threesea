@@ -91,6 +91,9 @@ function status(code) {
     case "groupRemoved":
         //% "You were removed from this group."
         return qsTrId("threesea-la-status-group-removed")
+    case "groupNoLongerMember":
+        //% "You are no longer a member of this group."
+        return qsTrId("threesea-la-status-group-no-longer-member")
     case "groupDisbanded":
         //% "This group was dissolved."
         return qsTrId("threesea-la-status-group-disbanded")
