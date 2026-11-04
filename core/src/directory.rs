@@ -34,6 +34,16 @@ pub enum DirectoryError {
     /// The server answered with an error message meant for the user (often localized).
     #[error("{0}")]
     Server(String),
+    /// The server said no, without saying why. Not a refusal to act on: nobody knows what it
+    /// was about.
+    #[error("the server gave no reason")]
+    Unexplained,
+    /// HTTP 429: too many requests from here, which says nothing about the request itself.
+    #[error("rate limited")]
+    RateLimited,
+    /// The directory didn't take a spam report.
+    #[error("report not accepted")]
+    ReportRefused,
     /// Unexpected HTTP status.
     #[error("unexpected HTTP status {0}")]
     Status(u16),
@@ -95,11 +105,16 @@ fn ensure_ok(
     let response = result?;
     match response.status {
         200 => Ok(response.body),
-        429 => Err(DirectoryError::Server(
-            "Too many requests, please try again later.".into(),
-        )),
+        429 => Err(DirectoryError::RateLimited),
         status => Err(DirectoryError::Status(status)),
     }
+}
+
+/// The directory's "no": its own words if it gave any.
+fn refusal(error: Option<String>) -> DirectoryError {
+    error
+        .filter(|error| !error.trim().is_empty())
+        .map_or(DirectoryError::Unexplained, DirectoryError::Server)
 }
 
 #[derive(Deserialize)]
@@ -114,11 +129,7 @@ fn check_success(body: &[u8]) -> Result<(), DirectoryError> {
     if response.success {
         Ok(())
     } else {
-        Err(DirectoryError::Server(
-            response
-                .error
-                .unwrap_or_else(|| "Unknown server error".into()),
-        ))
+        Err(refusal(response.error))
     }
 }
 
@@ -254,13 +265,7 @@ fn link_phase1(body: &[u8]) -> Result<bool, DirectoryError> {
         error: Option<String>,
     }
     let phase1: Phase1 = serde_json::from_slice(body)?;
-    phase1.linked.ok_or_else(|| {
-        DirectoryError::Server(
-            phase1
-                .error
-                .unwrap_or_else(|| "Unknown server error".into()),
-        )
-    })
+    phase1.linked.ok_or_else(|| refusal(phase1.error))
 }
 
 /// `POST identity/link_email` (`APIConnector.linkEmail`): link `email` (empty: unlink). The
@@ -415,9 +420,7 @@ fn check_report_status(body: &[u8]) -> Result<(), DirectoryError> {
     if response.status.as_deref() == Some("success") {
         Ok(())
     } else {
-        Err(DirectoryError::Server(
-            "The report was not accepted.".into(),
-        ))
+        Err(DirectoryError::ReportRefused)
     }
 }
 
@@ -568,6 +571,47 @@ fn parse_timestamp(text: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    fn answer(status: u16, body: &str) -> Result<libthreema::https::HttpsResponse, HttpsError> {
+        Ok(libthreema::https::HttpsResponse {
+            status,
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn too_many_requests_is_not_an_answer_to_the_request() {
+        assert!(matches!(
+            ensure_ok(answer(429, "")),
+            Err(DirectoryError::RateLimited)
+        ));
+        assert!(matches!(
+            ensure_ok(answer(500, "")),
+            Err(DirectoryError::Status(500))
+        ));
+    }
+
+    #[test]
+    fn only_the_directorys_own_words_make_a_refusal() {
+        assert!(matches!(
+            check_success(br#"{"success":false,"error":"Key expired"}"#),
+            Err(DirectoryError::Server(message)) if message == "Key expired"
+        ));
+        for body in [
+            &br#"{"success":false}"#[..],
+            br#"{"success":false,"error":null}"#,
+            br#"{"success":false,"error":"  "}"#,
+        ] {
+            assert!(matches!(
+                check_success(body),
+                Err(DirectoryError::Unexplained)
+            ));
+        }
+        assert!(matches!(
+            link_phase1(br#"{"success":false}"#),
+            Err(DirectoryError::Unexplained)
+        ));
+    }
+
     #[test]
     fn link_phase1_answers() {
         assert!(link_phase1(br#"{"linked":true}"#).unwrap());
@@ -629,7 +673,7 @@ mod tests {
         for body in [&br#"{"status":"error"}"#[..], br"{}"] {
             assert!(matches!(
                 check_report_status(body),
-                Err(DirectoryError::Server(_))
+                Err(DirectoryError::ReportRefused)
             ));
         }
         assert!(matches!(

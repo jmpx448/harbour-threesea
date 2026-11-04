@@ -215,7 +215,8 @@ workVerified, inactive, invalid, hidden, canEdit, canDelete (contact supports ed
 else only 👍/👎, which can't be withdrawn), canCall (O2O_AUDIO_CALL_SUPPORT), publicKey (hex)}`.
 
 Error kinds (mapped to translated text in `qml/components/Errors.js`): `noLicense`,
-`noIdentity`, `licenseFormat`, `server` (message from Threema, shown as-is), `serverTrouble` (a
+`noIdentity`, `licenseFormat`, `server` (message from Threema, shown as-is), `rateLimited` (the directory's 429),
+`serverUnexplained` (it said no without a reason), `reportRefused`, `identityExists`, `serverTrouble` (a
 Threema server's unexpected status or unreadable answer; its text stays out of the UI), `network`,
 `backupDecrypt`, `backupVersion`, `passwordTooShort`, `passwordTooLong`, `safeNotFound`,
 `safeTooLarge`, `safeDamaged`,

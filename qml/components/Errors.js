@@ -168,6 +168,18 @@ function text(kind, message) {
     case "serverTrouble":
         //% "Threema's server didn't accept this. Try again later."
         return qsTrId("threesea-la-error-server-trouble")
+    case "rateLimited":
+        //% "Threema's servers are busy. Try again in a few minutes."
+        return qsTrId("threesea-la-error-rate-limited")
+    case "serverUnexplained":
+        //% "Threema's servers turned this down and gave no reason. Try again later."
+        return qsTrId("threesea-la-error-server-unexplained")
+    case "reportRefused":
+        //% "Threema didn't accept the report. Try again later."
+        return qsTrId("threesea-la-error-report-refused")
+    case "identityExists":
+        //% "This device already has a Threema ID."
+        return qsTrId("threesea-la-error-identity-exists")
     case "server":
         // Message from the Threema server, possibly already localized. Stored errors keep only
         // the kind, so there may be none.

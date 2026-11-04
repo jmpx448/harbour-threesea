@@ -267,9 +267,7 @@ fn parse_fetch_bulk(result: HttpsResult) -> Result<Vec<FetchedIdentity>, Directo
     let response = result?;
     match response.status {
         200 => Ok(serde_json::from_slice::<Response>(&response.body)?.identities),
-        429 => Err(DirectoryError::Server(
-            "Too many requests, please try again later.".into(),
-        )),
+        429 => Err(DirectoryError::RateLimited),
         status => Err(DirectoryError::Status(status)),
     }
 }

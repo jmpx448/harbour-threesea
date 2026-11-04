@@ -1083,6 +1083,15 @@ pub enum ApiError {
     /// The lock can't be removed while there are private chats.
     #[error("there are private chats")]
     PrivateChatsExist,
+    /// The directory said too many requests.
+    #[error("rate limited")]
+    RateLimited,
+    /// The directory said no and gave no reason.
+    #[error("the server gave no reason")]
+    ServerUnexplained,
+    /// The directory didn't take a spam report.
+    #[error("report not accepted")]
+    ReportRefused,
     /// Bad request from the UI or internal failure.
     #[error("{0}")]
     Internal(String),
@@ -1150,6 +1159,9 @@ impl ApiError {
             Self::LockNeeded => "lockNeeded",
             Self::IdentityExists => "identityExists",
             Self::PrivateChatsExist => "privateChatsExist",
+            Self::RateLimited => "rateLimited",
+            Self::ServerUnexplained => "serverUnexplained",
+            Self::ReportRefused => "reportRefused",
             Self::Internal(_) => "internal",
         }
     }
@@ -1166,6 +1178,9 @@ impl From<DirectoryError> for ApiError {
         match error {
             DirectoryError::Network(e) => Self::Network(e.to_string()),
             DirectoryError::Server(message) => Self::Server(message),
+            DirectoryError::RateLimited => Self::RateLimited,
+            DirectoryError::Unexplained => Self::ServerUnexplained,
+            DirectoryError::ReportRefused => Self::ReportRefused,
             other @ (DirectoryError::Status(_) | DirectoryError::InvalidResponse(_)) => {
                 Self::ServerTrouble(other.to_string())
             }
@@ -1184,6 +1199,22 @@ pub fn normalize_license_key(input: &str) -> Option<String> {
             .enumerate()
             .all(|(i, b)| i == 5 || b.is_ascii_uppercase() || b.is_ascii_digit());
     valid.then_some(key)
+}
+
+/// Up to 0.2.0 a busy directory, or one that gave no reason, counted as refusing the license, and
+/// that stuck until the user checked the key. Those were our words, never the directory's.
+fn forget_false_refusal(store: &Store) -> Result<(), StoreError> {
+    const NOT_REFUSALS: [&str; 2] = [
+        "Too many requests, please try again later.",
+        "Unknown server error",
+    ];
+    if store
+        .setting(keys::LICENSE_REFUSED)?
+        .is_some_and(|refused| NOT_REFUSALS.contains(&refused.as_str()))
+    {
+        store.delete_setting(keys::LICENSE_REFUSED)?;
+    }
+    Ok(())
 }
 
 fn random_device_id() -> String {
@@ -1291,6 +1322,7 @@ impl App {
         std::fs::create_dir_all(&start.data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
         let (media_events, media_events_rx) = tokio::sync::mpsc::unbounded_channel();
         let store = std::rc::Rc::new(Store::open(&start.data_dir.join("threesea.db"), db_key)?);
+        forget_false_refusal(&store)?;
         let app = Self {
             store,
             https: HttpsClient::new().map_err(|e| ApiError::Internal(e.to_string()))?,
@@ -2185,6 +2217,7 @@ impl App {
                 self.stop_connection();
                 Ok(true)
             }
+            // Too many requests, a server without words for it: none of that is about the key.
             Err(error) => {
                 tracing::info!(%error, "license check not answered");
                 Ok(false)
@@ -2692,6 +2725,8 @@ mod tests {
         for answer in [
             DirectoryError::Status(500),
             DirectoryError::InvalidResponse("garbled".into()),
+            DirectoryError::RateLimited,
+            DirectoryError::Unexplained,
         ] {
             assert!(!app.apply_license_answer(Err(answer)).unwrap());
             assert_eq!(state(&mut app), "ready");
@@ -2718,6 +2753,53 @@ mod tests {
         let status = app.license_status().unwrap();
         assert_eq!(status["key"], "ABCDE-12345", "for the page to show");
         assert_eq!(status["refused"], "This license key is invalid or expired.");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn too_many_requests_leaves_the_connection_running() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                assert!(app.ensure_connection().is_some(), "licensed: connects");
+                assert!(
+                    !app.apply_license_answer(Err(DirectoryError::RateLimited))
+                        .unwrap()
+                );
+                assert!(app.connection.is_some(), "still running");
+                assert_eq!(app.store.setting(keys::LICENSE_REFUSED).unwrap(), None);
+                assert_eq!(app.store.setting(keys::LICENSE_CHECKED_AT).unwrap(), None);
+                assert_eq!(state(&mut app), "ready");
+            })
+            .await;
+    }
+
+    #[test]
+    fn a_refusal_that_was_never_the_directorys_is_forgotten() {
+        let (_dir, mut app) = licensed_app();
+        for text in [
+            "Too many requests, please try again later.",
+            "Unknown server error",
+        ] {
+            app.store.set_setting(keys::LICENSE_REFUSED, text).unwrap();
+            forget_false_refusal(&app.store).unwrap();
+            assert_eq!(state(&mut app), "ready", "{text}");
+        }
+        let real = "This license key is invalid or expired.";
+        app.store.set_setting(keys::LICENSE_REFUSED, real).unwrap();
+        forget_false_refusal(&app.store).unwrap();
+        assert_eq!(state(&mut app), "needsLicense");
+    }
+
+    #[test]
+    fn rate_limits_and_silence_have_their_own_kinds() {
+        for (error, kind) in [
+            (DirectoryError::RateLimited, "rateLimited"),
+            (DirectoryError::Unexplained, "serverUnexplained"),
+            (DirectoryError::ReportRefused, "reportRefused"),
+            (DirectoryError::Server("Its words".into()), "server"),
+        ] {
+            assert_eq!(ApiError::from(error).kind(), kind);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
