@@ -10,6 +10,7 @@ Upstream paths are relative to `third_party/threema-android`. "lt" = provided by
 | Identity creation (+ licenseKey, deviceId) | `UserServiceImpl.createIdentityRequestDataJSON` | lt `csp_e2e/identity/create.rs` (no license params for Consumer) | patch 0001 + `core::app::create_identity` | 🔨 (needs a real license to verify) |
 | ID backup export/import | `domain/…/identitybackup/IdentityBackup.kt` | lt `id_backup/` ✅ | `core::app` (+ `directory::fetch_identity_private`) | 🔨 export ✅, restore needs license |
 | Threema Safe | `ch.threema.app.threemasafe` | URL config only | `core::safe`, `core::app_safe` | ✅ backup + restore (contacts/groups imported once stored) |
+| Setup steps after a restore | `app/protocolsteps/ApplicationSetupSteps.kt` | – | `core::app_safe` (`restore_setup_step`), `groups::resync_restored`, `fs_store::start_session` | ✅ |
 | Directory lookup by ID (`identity/fetch_bulk`) | `APIConnector.fetchIdentities` | lt `csp_e2e/contacts/lookup.rs` (crate-private) | `core::contacts::lookup` | ✅ |
 | Contacts (storage, names, verification levels) | `ch.threema.app.services.ContactService` | lt `model/contact.rs` | `core::contacts` (stores lt's `Contact` model), `core::app_contacts` | ✅ add/edit/delete, Safe import/export |
 | Hashed phone/e-mail lookup, address-book sync | `ch.threema.app.services.SynchronizeContactsService` | — | `core::address_book`, `qml` `AddressBookReader` (opt-in) | ✅ |

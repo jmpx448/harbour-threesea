@@ -239,6 +239,9 @@ pub mod keys {
     /// What the pending Safe import did (JSON counts: imported, skipped and why), for the
     /// status page.
     pub const SAFE_IMPORT_SUMMARY: &str = "safe_import_summary";
+    /// A restore's setup steps still to run (`App::restore_setup_step`): `start`, or the JSON list
+    /// of contacts still to go.
+    pub const SAFE_RESTORE_SETUP: &str = "safe_restore_setup";
     /// Set by store migration 35: see `sync::reflect_group_contacts_once`.
     pub const GROUP_CONTACTS_TO_REFLECT: &str = "group_contacts_to_reflect";
 }

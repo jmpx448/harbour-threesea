@@ -1182,8 +1182,44 @@ fn sync_request(
     Ok(())
 }
 
-/// The creator sends a group's state to `receivers`: setup, name, picture.
-pub fn send_state(store: &Store, group: &Group, receivers: &[String]) -> Result<(), StoreError> {
+/// A group after a restore (Android's _Application Setup Steps_): the creator sends its state to
+/// everyone, a member asks the creator for it, and a group we left stays quiet. So does a creator
+/// on the block list (ADR 0019). A creator's picture isn't in the backup, so there is none to send
+/// and nothing to say about it: unlike Android, this doesn't delete it for all members. Returns
+/// whether something was queued.
+pub(crate) fn resync_restored(
+    store: &Store,
+    group: &Group,
+    user: &str,
+) -> Result<bool, StoreError> {
+    if group.left {
+        return Ok(false);
+    }
+    let creator = group.identity.creator_identity.to_string();
+    if creator != user {
+        if store.is_explicitly_blocked(&creator)? {
+            return Ok(false);
+        }
+        let mut outcome = GroupOutcome::default();
+        sync_request(store, &group.key, &creator, &mut outcome)?;
+        return Ok(outcome.send);
+    }
+    if group.members.is_empty() {
+        return Ok(false);
+    }
+    if group.picture.is_some() {
+        send_state(store, group, &group.members)?;
+    } else {
+        send_setup_and_name(store, group, &group.members)?;
+    }
+    Ok(true)
+}
+
+fn send_setup_and_name(
+    store: &Store,
+    group: &Group,
+    receivers: &[String],
+) -> Result<(), StoreError> {
     store.group_outbox_add(
         &group.key,
         receivers,
@@ -1195,7 +1231,12 @@ pub fn send_state(store: &Store, group: &Group, receivers: &[String]) -> Result<
         receivers,
         OUTBOX_GROUP_NAME,
         &json!({ "name": group.name }),
-    )?;
+    )
+}
+
+/// The creator sends a group's state to `receivers`: setup, name, picture.
+pub fn send_state(store: &Store, group: &Group, receivers: &[String]) -> Result<(), StoreError> {
+    send_setup_and_name(store, group, receivers)?;
     match &group.picture {
         Some(picture) => store.group_outbox_add(
             &group.key,

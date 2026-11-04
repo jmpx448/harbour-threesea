@@ -1745,6 +1745,13 @@ impl<'a> Session<'a> {
                 let Some(code) = fs_status_line(&status, supports_fs, requeued.resending) else {
                     return Ok(None);
                 };
+                // A session is no news where there is nothing else: after a restore, every
+                // contact's Accept would start a chat, or move a restored one to the top.
+                if code == "fsEstablished"
+                    && store.message_count(&peer).map_err(protocol_error)? == 0
+                {
+                    return Ok(None);
+                }
                 // A visible message adds a row and so gets its line, as on Android; a run of
                 // receipts or typing adds none and gets one.
                 if code == FS_MESSAGE_WITHOUT
@@ -3586,6 +3593,44 @@ mod sync_order_tests {
 
     fn text() -> Outgoing {
         Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_new_session_starts_no_chat_but_shows_in_one() {
+        let (_dir, app) = app();
+        let (setup, _peer) = contact_without_fs_support(&app);
+        let mut contact = setup.store.contact(CREATOR).unwrap().unwrap();
+        contact.feature_mask = libthreema::common::FeatureMask(
+            libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+        );
+        setup.store.upsert_contact(&contact).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let established = || CoreEvent::FsStatus {
+            peer: CREATOR.into(),
+            status: FsStatus::Established,
+        };
+        assert!(
+            session
+                .handle_fs_event(established())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
+
+        setup
+            .store
+            .insert_incoming(CREATOR, 1, "text", "hi", 5)
+            .unwrap();
+        assert!(
+            session
+                .handle_fs_event(established())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]

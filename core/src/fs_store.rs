@@ -323,6 +323,46 @@ pub fn end_sessions(
     Ok(envelopes)
 }
 
+/// Start a session with `peer` if there is none, for a device that lost the old ones: the peer
+/// learns at once instead of rejecting its next message (the new-session half of Android's
+/// `runFsRefreshSteps`; a session that exists was made after the restore, so it needs nothing).
+/// Returns the `Init` to send, if any.
+///
+/// # Errors
+///
+/// [`EncapsulationError`] if the session can't be made or stored.
+pub fn start_session(
+    store: &Rc<Store>,
+    my_identity: ThreemaId,
+    client_key: &ClientKey,
+    peer: ThreemaId,
+    peer_public_key: &PublicKey,
+    now_ms: u64,
+) -> Result<Vec<Vec<u8>>, EncapsulationError> {
+    // The envelope's own type is never encapsulated: nothing but the session's prelude comes out.
+    const NEVER_ENCAPSULATED: u8 = 0xa0;
+    let mut fs = StoreFs {
+        store: Rc::clone(store),
+        my_identity,
+        events: EventSink::default(),
+    };
+    if fs.get_best(peer)?.is_some() {
+        return Ok(Vec::new());
+    }
+    let encapsulation = encapsulate(
+        &mut fs,
+        my_identity,
+        client_key,
+        peer,
+        peer_public_key,
+        NEVER_ENCAPSULATED,
+        &[],
+        None,
+        now_ms,
+    )?;
+    Ok(encapsulation.prelude)
+}
+
 /// [`fs::encapsulate`] for the connection: a session that can't be used (not one of the states a
 /// session can be in) is ended, with a Terminate for the peer, and replaced by a new one, so that
 /// one bad session costs a reset line and not this contact's messages. With `true` if that
@@ -979,6 +1019,46 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_session_started_without_a_message_is_accepted_and_carries_the_next_one() {
+        let (mut alice, mut bob) = pair();
+        let bob_key = ClientKey::from(bob.key).public_key();
+        let inits = start_session(
+            &alice.store,
+            alice.id,
+            &ClientKey::from(alice.key),
+            bob.id,
+            &bob_key,
+            1,
+        )
+        .unwrap();
+        assert_eq!(inits.len(), 1, "the Init and nothing else");
+        // Nothing more with a session in place.
+        assert!(
+            start_session(
+                &alice.store,
+                alice.id,
+                &ClientKey::from(alice.key),
+                bob.id,
+                &bob_key,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(session_count(&alice, &bob), 1);
+
+        let init = alice.control(&bob, &inits[0]);
+        let (_, accept) = bob.receive(&alice, vec![init]);
+        assert_eq!(accept.len(), 1, "the Accept");
+        let _ = alice.receive(&bob, accept);
+        let (texts, _) = bob.receive(&alice, alice.send_text(&bob, "hi"));
+        assert_eq!(texts, ["hi"]);
+        let (texts, _) = alice.receive(&bob, bob.send_text(&alice, "hi too"));
+        assert_eq!(texts, ["hi too"]);
+        assert_eq!(session_count(&alice, &bob), 1);
     }
 
     #[test]

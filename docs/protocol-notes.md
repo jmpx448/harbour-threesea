@@ -160,9 +160,19 @@ Not in libthreema (only the URL template); implemented in `core/src/safe/` after
   everyone but the user). Restore: skip the legacy `deleted` flag and groups whose creator is
   unknown; look up unknown members once (group members as _group_ acquaintances, list members
   as direct contacts), drop those that don't exist; not a member → left; member but the creator
-  isn't → left (Android: kicked). Existing groups/lists are kept. No picture (not in Safe) and
-  no sync request after a restore (Android sends none either). Until 2026-10-22 our backups
-  only carried groups/lists from an earlier restore, never our own.
+  isn't → left (Android: kicked). Existing groups/lists are kept. No picture (not in Safe). Until
+  2026-10-22 our backups only carried groups/lists from an earlier restore, never our own.
+- After a restore (Android's _Application Setup Steps_, `ApplicationSetupSteps.kt`), once the import
+  is done and the connection up; the flag is stored with the restore, so a kill doesn't lose it:
+  the feature mask goes out first, then for each group not left the state to all members if it is
+  ours, else a `group-sync-request` to its creator (not one on the block list, ADR 0019). Then the
+  _solicited contacts_ (people in those groups, and those with a chat; no revoked IDs, and no
+  blocked ones) get an FS `Init` if they support FS (not with multi-device or FS off) and a request
+  for their picture, 20 per round (connect, hourly). Deviations from Android: a creator's restore
+  sends no `delete-profile-picture`, as Android does for a picture it merely lost; a contact we
+  already have a session with gets no empty message, as that session is newer than the restore. A
+  session's "established" line only appears in a chat with something in it: Android's doesn't list
+  the chat, ours would.
 - Passwords: 8–4096 chars; "weak" = single repeated char, ≤ 15 digits, or in upstream's
   `app/assets/passwords/bad_passwords.txt` (warning only, like Android).
 
@@ -344,7 +354,8 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Not yet: group calls, per-receiver legacy reactions.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We
-  sync only on the spec's triggers (unknown group, sync requests), like Android.
+  sync only on the spec's triggers (unknown group, sync requests) and once after a Safe restore,
+  like Android.
 
 ## Polls
 

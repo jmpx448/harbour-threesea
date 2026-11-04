@@ -52,6 +52,12 @@ fn now() -> i64 {
 /// How many missing contact pictures one recovery round (connect, maintenance) may request.
 const PICTURE_REQUEST_BATCH: usize = 20;
 
+/// How many contacts one round of a restore's setup steps writes to.
+const RESTORE_SETUP_BATCH: usize = 20;
+
+/// [`keys::SAFE_RESTORE_SETUP`] before the groups have been dealt with.
+const RESTORE_SETUP_START: &str = "start";
+
 /// Threema IDs: 8 characters, `*` allowed first (gateway IDs). Normalized to upper case.
 pub fn normalize_identity(input: &str) -> Option<String> {
     let id = input.trim().to_ascii_uppercase();
@@ -511,6 +517,8 @@ impl App {
         // A fresh restore starts a fresh import record.
         self.store.delete_setting(keys::SAFE_IMPORT_SUMMARY)?;
         self.store.delete_setting(keys::SAFE_IMPORT_ERROR)?;
+        self.store
+            .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)?;
         transaction.commit().map_err(StoreError::from)?;
         Ok(())
     }
@@ -811,10 +819,146 @@ impl App {
         if pending > 0 {
             events = self.try_pending_import().await;
         }
+        self.run_restore_setup().await;
         self.resume_picture_downloads();
         self.request_missing_pictures(PICTURE_REQUEST_BATCH);
         self.retry_failed_uploads();
         events
+    }
+
+    /// A restored device's _Application Setup Steps_ (Android `ApplicationSetupSteps.kt`), once
+    /// the import is done and the connection is up: its groups and sessions are as old as the
+    /// backup. Upstream's first step comes first here too: nothing is said about forward secrecy
+    /// before the directory knows our feature mask; if that fails, the next round tries again.
+    async fn run_restore_setup(&mut self) {
+        let waiting = self.store.setting(keys::SAFE_RESTORE_SETUP);
+        let imported = self
+            .pending_import_counts()
+            .is_ok_and(|counts| counts == (0, 0, 0));
+        if !matches!(waiting, Ok(Some(_))) || !imported || self.connection_state != "connected" {
+            return;
+        }
+        if let Err(error) = self.publish_feature_mask().await {
+            tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
+            return;
+        }
+        if let Err(error) = self.restore_setup_step() {
+            tracing::warn!(kind = error.kind(), "restore setup step failed");
+        }
+    }
+
+    /// One round of the setup steps. The first queues what the groups need, in the outbox, and
+    /// picks the contacts; each then starts forward secrecy with a bounded number of them and asks
+    /// them for their picture (their next message would do too, so nobody has to hurry, and the
+    /// servers don't get a burst). What is left waits in the setting for the next round.
+    fn restore_setup_step(&self) -> Result<(), ApiError> {
+        let Some(state) = self.store.setting(keys::SAFE_RESTORE_SETUP)? else {
+            return Ok(());
+        };
+        let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
+        let mut contacts: Vec<String> = if state == RESTORE_SETUP_START {
+            let transaction = self
+                .store
+                .conn
+                .unchecked_transaction()
+                .map_err(StoreError::from)?;
+            let mut queued = 0_usize;
+            for group in self.store.groups()? {
+                if crate::groups::resync_restored(&self.store, &group, &identity.threema_id)? {
+                    queued += 1;
+                }
+            }
+            let contacts = self.solicited_contacts(&identity.threema_id)?;
+            self.store.set_setting(
+                keys::SAFE_RESTORE_SETUP,
+                &serde_json::to_string(&contacts).map_err(|e| ApiError::Internal(e.to_string()))?,
+            )?;
+            transaction.commit().map_err(StoreError::from)?;
+            tracing::info!(
+                groups = queued,
+                total = contacts.len(),
+                "restore setup started"
+            );
+            contacts
+        } else {
+            serde_json::from_str(&state).unwrap_or_default()
+        };
+        let rest = contacts.split_off(contacts.len().min(RESTORE_SETUP_BATCH));
+        // As upstream: no sessions with multi-device (or forward secrecy off, the same thing here).
+        let fs_on =
+            self.store.multi_device()?.is_none() && !self.store.forward_security_disabled()?;
+        let own: libthreema::common::ThreemaId = identity
+            .threema_id
+            .parse()
+            .map_err(|_| ApiError::Internal("stored identity invalid".into()))?;
+        let client_key = ClientKey::from(*identity.client_key);
+        for id in contacts {
+            let Some(contact) = self.store.contact(&id)? else {
+                continue;
+            };
+            if self.store.is_explicitly_blocked(&id)? {
+                continue;
+            }
+            if fs_on && crate::contacts::has_fs_support(&contact) {
+                match crate::fs_store::start_session(
+                    &self.store,
+                    own,
+                    &client_key,
+                    contact.identity,
+                    &contact.public_key,
+                    u64::try_from(crate::messages::now_ms()).unwrap_or(0),
+                ) {
+                    Ok(inits) => {
+                        for envelope in inits {
+                            self.tell_connection(crate::connection::ToConnection::FsControl {
+                                peer: id.clone(),
+                                peer_key: Some(contact.public_key),
+                                envelope,
+                            });
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "cannot start a forward secrecy session"),
+                }
+            }
+            self.store.request_picture(&id)?;
+        }
+        if rest.is_empty() {
+            self.store.delete_setting(keys::SAFE_RESTORE_SETUP)?;
+            tracing::info!("restore setup done");
+        } else {
+            self.store.set_setting(
+                keys::SAFE_RESTORE_SETUP,
+                &serde_json::to_string(&rest).map_err(|e| ApiError::Internal(e.to_string()))?,
+            )?;
+        }
+        self.tell_connection(crate::connection::ToConnection::SendPending);
+        Ok(())
+    }
+
+    /// Upstream's _solicited contacts_: the people in groups we are in and those we have a chat
+    /// with, without revoked IDs. Blocked contacts aren't written to either.
+    fn solicited_contacts(&self, me: &str) -> Result<Vec<String>, ApiError> {
+        let mut candidates = std::collections::BTreeSet::new();
+        for group in self.store.groups()?.into_iter().filter(|group| !group.left) {
+            candidates.insert(group.identity.creator_identity.to_string());
+            candidates.extend(group.members);
+        }
+        for (last, _) in self.store.conversations()? {
+            if normalize_identity(&last.conversation).is_some() {
+                candidates.insert(last.conversation);
+            }
+        }
+        let mut contacts = Vec::new();
+        for id in candidates {
+            let valid = self.store.contact(&id)?.is_some_and(|contact| {
+                contact.activity_state
+                    != libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid
+            });
+            if valid && id != me && !self.store.is_explicitly_blocked(&id)? {
+                contacts.push(id);
+            }
+        }
+        Ok(contacts)
     }
 
     /// The backup as it would be uploaded now.
@@ -947,6 +1091,7 @@ impl App {
             Err(error) => tracing::warn!(kind = error.kind(), "license check failed"),
         }
         events.extend(self.try_pending_import().await);
+        self.run_restore_setup().await;
         self.resume_picture_downloads();
         self.request_missing_pictures(PICTURE_REQUEST_BATCH);
         if self.check_email_link().await.unwrap_or(false) {
@@ -1315,6 +1460,204 @@ mod tests {
             .map(|chat| chat["identity"].as_str().unwrap())
             .collect();
         assert_eq!(listed, ["BBBBBBBB"]);
+    }
+
+    /// A restored app, connected: a group of ours, one of someone else's, one left; `DDDDDDDD`
+    /// is only in the left group and `FFFFFFFF` is blocked.
+    fn restored_app() -> (
+        tempfile::TempDir,
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<crate::connection::ToConnection>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.connection = Some(tx);
+        app.connection_state = "connected";
+        for id in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE", "FFFFFFFF"] {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.feature_mask = libthreema::common::FeatureMask(
+                libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+            );
+            app.store.upsert_contact(&contact).unwrap();
+        }
+        let group = |creator: &str, id: u64, members: &[&str], left: bool| {
+            let identity = libthreema::common::GroupIdentity {
+                creator_identity: libthreema::common::ThreemaId::try_from(creator).unwrap(),
+                group_id: id,
+            };
+            crate::groups::Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: format!("Group {id}"),
+                members: members.iter().map(|m| (*m).to_owned()).collect(),
+                left,
+                created_at: 1000,
+                picture: None,
+                picture_version: 0,
+            }
+        };
+        for g in [
+            group("AAAAAAAA", 1, &["BBBBBBBB"], false),
+            group("CCCCCCCC", 2, &["CCCCCCCC"], false),
+            group("DDDDDDDD", 3, &["DDDDDDDD"], true),
+        ] {
+            app.store.upsert_group(&g).unwrap();
+        }
+        app.store
+            .note_restored_chat("EEEEEEEE", Some(3000))
+            .unwrap();
+        app.store
+            .note_restored_chat("FFFFFFFF", Some(3000))
+            .unwrap();
+        app.store
+            .set_setting(keys::APP_SETTINGS, r#"{"blockedContacts":["FFFFFFFF"]}"#)
+            .unwrap();
+        app.store
+            .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)
+            .unwrap();
+        (dir, app, rx)
+    }
+
+    fn inits_to(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::connection::ToConnection>,
+    ) -> Vec<String> {
+        let mut peers = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let crate::connection::ToConnection::FsControl { peer, .. } = message {
+                peers.push(peer);
+            }
+        }
+        peers
+    }
+
+    #[test]
+    fn a_restore_brings_groups_and_sessions_up_to_date_once() {
+        let (_dir, app, mut rx) = restored_app();
+        let queued = |key: &str| -> Vec<String> {
+            let mut statement = app
+                .store
+                .conn
+                .prepare("SELECT kind FROM outbox WHERE conversation = ?1 ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([key], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        app.restore_setup_step().unwrap();
+        // Our group: its state, without saying anything about a picture we don't have.
+        let ours = app.store.groups().unwrap();
+        let key_of = |creator: &str| {
+            ours.iter()
+                .find(|g| g.identity.creator_identity.as_str() == creator)
+                .unwrap()
+                .key
+                .clone()
+        };
+        assert_eq!(
+            queued(&key_of("AAAAAAAA")),
+            [
+                crate::groups::OUTBOX_GROUP_SETUP,
+                crate::groups::OUTBOX_GROUP_NAME
+            ]
+        );
+        // Someone else's: a request. One we left: nothing.
+        assert_eq!(
+            queued(&key_of("CCCCCCCC")),
+            [crate::groups::OUTBOX_GROUP_SYNC_REQUEST]
+        );
+        assert!(queued(&key_of("DDDDDDDD")).is_empty());
+        // Sessions: group people and those with a chat; not the blocked, not a left group's.
+        assert_eq!(inits_to(&mut rx), ["BBBBBBBB", "CCCCCCCC", "EEEEEEEE"]);
+        assert!(app.store.fs_peers().unwrap().len() == 3);
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_none(),
+            "done, and not again"
+        );
+        app.restore_setup_step().unwrap();
+        assert!(inits_to(&mut rx).is_empty());
+        assert_eq!(queued(&key_of("CCCCCCCC")).len(), 1);
+    }
+
+    #[test]
+    fn a_restores_contacts_go_in_batches() {
+        let (_dir, app, mut rx) = restored_app();
+        let many: Vec<String> = (0..RESTORE_SETUP_BATCH + 5)
+            .map(|n| format!("ZZZZ{n:04}"))
+            .collect();
+        for id in &many {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.feature_mask = libthreema::common::FeatureMask(
+                libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+            );
+            app.store.upsert_contact(&contact).unwrap();
+        }
+        app.store
+            .set_setting(
+                keys::SAFE_RESTORE_SETUP,
+                &serde_json::to_string(&many).unwrap(),
+            )
+            .unwrap();
+        app.restore_setup_step().unwrap();
+        assert_eq!(inits_to(&mut rx).len(), RESTORE_SETUP_BATCH);
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_some()
+        );
+        app.restore_setup_step().unwrap();
+        assert_eq!(inits_to(&mut rx).len(), 5);
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn with_forward_secrecy_off_a_restore_starts_no_sessions() {
+        let (_dir, app, mut rx) = restored_app();
+        app.store.set_setting(keys::FORWARD_SECURITY, "0").unwrap();
+        app.restore_setup_step().unwrap();
+        assert!(inits_to(&mut rx).is_empty());
+        assert!(app.store.fs_peers().unwrap().is_empty());
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_setup_steps_wait_for_the_import_and_the_connection() {
+        let (_dir, mut app, mut rx) = restored_app();
+        app.store
+            .set_setting(
+                keys::SAFE_PENDING_IMPORT,
+                r#"{"contacts":[{"identity":"ABCD1234","verification":0}]}"#,
+            )
+            .unwrap();
+        app.run_restore_setup().await;
+        assert!(inits_to(&mut rx).is_empty(), "the import comes first");
+        assert_eq!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .as_deref(),
+            Some(RESTORE_SETUP_START)
+        );
+        app.store.delete_setting(keys::SAFE_PENDING_IMPORT).unwrap();
+        app.connection_state = "connecting";
+        app.run_restore_setup().await;
+        assert!(inits_to(&mut rx).is_empty(), "the connection too");
     }
 
     #[test]
