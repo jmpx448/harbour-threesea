@@ -560,6 +560,7 @@ impl App {
         events.push("contactsChanged");
         events.push("groupsChanged");
         self.note_ui_events(&events);
+        // log-ok: counts
         tracing::info!(
             contacts = contacts_summary["added"].as_i64().unwrap_or(0),
             groups = groups_summary["added"].as_i64().unwrap_or(0),

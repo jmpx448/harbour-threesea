@@ -374,6 +374,7 @@ impl App {
         // on request.
         let events = self.try_pending_import().await;
         self.note_ui_events(&events);
+        // log-ok: counts
         tracing::info!(
             contacts = backup.contacts.as_ref().map_or(0, Vec::len),
             groups = backup.groups.as_ref().map_or(0, Vec::len),
