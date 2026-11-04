@@ -1291,6 +1291,8 @@ impl App {
 
     /// Startup: clean up and resume.
     pub(crate) fn resume_media(&mut self) {
+        // First of all: the tasks started below write under the same temporary names.
+        self.media.remove_temporary_files();
         match self.store.unfinished_uploads() {
             Ok(uploads) => {
                 for message in uploads {

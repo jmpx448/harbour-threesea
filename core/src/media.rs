@@ -225,13 +225,19 @@ impl MediaStore {
             .encrypt(&nonce, data)
             .map_err(|_| MediaError::Decrypt)?;
         let temporary = path.with_extension("tmp");
-        let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(MEDIA_MAGIC)?;
-        file.write_all(&nonce)?;
-        file.write_all(&ciphertext)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)?;
-        Ok(())
+        let written = (|| {
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(MEDIA_MAGIC)?;
+            file.write_all(&nonce)?;
+            file.write_all(&ciphertext)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)
+        })();
+        // A full disk would stay full by what the failed write left.
+        if written.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        Ok(written?)
     }
 
     /// The decrypted content, `None` if not (yet) on the device.
@@ -295,6 +301,20 @@ impl MediaStore {
         };
         for entry in entries.flatten() {
             let _ = std::fs::remove_file(entry.path());
+        }
+    }
+
+    /// Remove what writes cut short by the end of the process. Only at startup, before anything
+    /// writes: later on a temporary file may be a write in progress.
+    pub fn remove_temporary_files(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "tmp") {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
@@ -707,6 +727,35 @@ mod tests {
         assert!(media.has(2, MediaPart::File));
         media.remove(2);
         assert!(!media.has(2, MediaPart::File));
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = MediaStore::open(dir.path(), &[7; 32]).unwrap();
+        // The last step of the write can't work: a directory is in the way.
+        std::fs::create_dir(dir.path().join("media/1.file")).unwrap();
+        assert!(media.write(1, MediaPart::File, b"picture").is_err());
+        assert!(!dir.path().join("media/1.tmp").exists());
+    }
+
+    #[test]
+    fn a_write_cut_short_is_removed_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = MediaStore::open(dir.path(), &[7; 32]).unwrap();
+        media.write(1, MediaPart::File, b"picture").unwrap();
+        media.write_picture("group:x", b"group picture").unwrap();
+        let stored = media.size();
+        std::fs::write(dir.path().join("media/1.tmp"), b"cut short").unwrap();
+        std::fs::write(dir.path().join("media/pic-0123.tmp"), b"cut short").unwrap();
+        assert!(media.size() > stored);
+        media.remove_temporary_files();
+        assert_eq!(media.size(), stored);
+        assert_eq!(
+            media.read(1, MediaPart::File).unwrap().unwrap().as_slice(),
+            b"picture"
+        );
+        assert!(media.read_picture("group:x").unwrap().is_some());
     }
 
     #[test]
