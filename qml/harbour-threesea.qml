@@ -316,7 +316,12 @@ ApplicationWindow {
         case "needsIdentity": page = Qt.resolvedUrl("pages/IdentitySetupPage.qml"); break
         case "ready": page = Qt.resolvedUrl("pages/ConversationsPage.qml"); break
         case "locked": page = Qt.resolvedUrl("pages/UnlockPage.qml"); break
-        default: return // starting / error are shown by StartupPage
+        case "error":
+            // After the passphrase or later: StartupPage again, which says what happened.
+            if (shownState === "starting") return
+            page = Qt.resolvedUrl("pages/StartupPage.qml")
+            break
+        default: return // starting is shown by StartupPage or the page before it
         }
         // Under a lock the new page never shows by itself.
         var immediate = shownState === "starting" || locked

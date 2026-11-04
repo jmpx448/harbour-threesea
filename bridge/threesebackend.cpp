@@ -157,6 +157,10 @@ QString ThreeseBackend::startConfigJson() const
 void ThreeseBackend::unlockDatabase(const QString &passphrase, const QJSValue &callback)
 {
     if (m_state != QLatin1String("locked")) {
+        // Nothing to open any more; the page waiting for this answer must not wait forever.
+        if (callback.isCallable()) {
+            QJSValue(callback).call(QJSValueList() << false);
+        }
         return;
     }
     const quint64 id = m_nextId++;

@@ -65,7 +65,8 @@ Page {
                 busy = true
                 var check = page.database ? backend.unlockDatabase : backend.checkPassphrase
                 check(pin, function(ok) {
-                    entry.busy = false
+                    // The right passphrase: opening the data now, the state's page replaces this one.
+                    entry.busy = ok && page.database
                     entry.clear()
                     if (ok) {
                         page.unlocked(pin)
