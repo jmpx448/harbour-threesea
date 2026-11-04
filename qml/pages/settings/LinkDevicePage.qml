@@ -177,10 +177,18 @@ Page {
 
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
-                visible: page.step === "done" || page.step === "failed"
+                visible: page.step === "done"
                 //% "Done"
                 text: qsTrId("threesea-me-done")
                 onClicked: pageStack.pop()
+            }
+
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: page.step === "failed"
+                //% "Scan again"
+                text: qsTrId("threesea-me-link-scan-again")
+                onClicked: pageStack.replace(Qt.resolvedUrl("../ScanQrPage.qml"), { deviceLink: true })
             }
         }
     }
