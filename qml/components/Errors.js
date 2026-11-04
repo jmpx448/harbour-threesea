@@ -61,6 +61,9 @@ function text(kind, message) {
     case "qrMismatch":
         //% "The code does not match this contact's key. Ask them to show their code again."
         return qsTrId("threesea-la-error-qr-mismatch")
+    case "qrExpired":
+        //% "This code has expired. Scan it directly from the other person's app."
+        return qsTrId("threesea-la-error-qr-expired")
     case "groupLeft":
         //% "You are no longer in this group."
         return qsTrId("threesea-la-error-group-left")

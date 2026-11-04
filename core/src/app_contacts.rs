@@ -872,7 +872,11 @@ impl App {
     /// `verifyQrCode`: a scanned `3mid:` code. The key must be the one we have (or, for someone
     /// new, the directory's): then the contact is _fully verified_ (and added if new).
     pub(crate) async fn verify_qr_code(&mut self, text: &str) -> Result<Value, ApiError> {
-        let (id, key) = crate::qr::parse(text).ok_or(ApiError::QrInvalid)?;
+        let code = crate::qr::parse(text).ok_or(ApiError::QrInvalid)?;
+        if code.is_expired(crate::messages::now_ms() / 1000) {
+            return Err(ApiError::QrExpired);
+        }
+        let (id, key) = (code.identity, code.public_key);
         let own = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         if own.threema_id == id {
             return Err(ApiError::ContactIsSelf);
@@ -1054,6 +1058,28 @@ mod contact_policy_tests {
         .await;
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(answer["result"]["number"], Value::Null, "{answer}");
+    }
+
+    // Before anything else, so also here where there is no identity and no network.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_expired_code_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let key = "09".repeat(32);
+        let answer = call(
+            &mut app,
+            json!({"cmd": "verifyQrCode", "text": format!("3mid:BBBBBBBB,{key},1700000000")}),
+        )
+        .await;
+        assert_eq!(answer["error"]["kind"], "qrExpired", "{answer}");
+        let stored = app.store.contact("BBBBBBBB").unwrap().expect("kept");
+        assert_eq!(
+            stored.verification_level,
+            libthreema::protobuf::d2d_sync::contact::VerificationLevel::Unverified
+        );
     }
 
     // Deleting a contact who is in one of our groups keeps it as a group acquaintance, like

@@ -321,9 +321,10 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 
 ## Contact verification (QR)
 
-- `3mid:<ID>,<public key hex>[,<expiry>]` (Android `ContactUrlUtil`). Scanning it: the key must
-  equal the stored (or, for a new contact, the directory's) key → verification level _fully
-  verified_; a new contact is added as direct contact.
+- `3mid:<ID>,<public key hex>[,<expiry>]` (Android `ContactUrlUtil`, `ContactUrlResult`): the
+  expiry is epoch seconds, a past one is refused (`qrExpired`), one that isn't a number means
+  none. Scanning it: the key must equal the stored (or, for a new contact, the directory's) key
+  → verification level _fully verified_; a new contact is added as direct contact.
 - Generated with `qrcode`, decoded with `rqrr` (pure Rust); the camera viewfinder is grabbed
   (`VideoOutput.grabToImage`) every 600 ms and decoded as greyscale; a picture works too.
 

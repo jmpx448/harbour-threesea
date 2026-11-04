@@ -186,7 +186,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `exportChat` | `identity`, `media`, `directory`, `password?`, `me?`, `offsetMinutes?` | `{path, name, messages, files}`; a non-empty `password` under 8 characters: `passwordTooShort` |
 | `parseLink` | `url` | `{action: contact\|compose\|add\|license, identity, text, key}` or error `linkInvalid` (protocol-notes "Threema links") |
 | `myQrCode` | – | `{text, size, modules}`: `3mid:<ID>,<public key hex>` and its QR modules (`size`² chars `0`/`1`) |
-| `verifyQrCode` | `text` | contact JSON; adds the contact if new, fully verified if the key matches (errors `qrInvalid`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |
+| `verifyQrCode` | `text` | contact JSON; adds the contact if new, fully verified if the key matches (errors `qrInvalid`, `qrExpired`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |
 | `callTurnServers` | `identity` (who the call is with) | `{urls, username, password, relayOnly}` for the media engine (`identity/turn_cred`, cached until expiry; `relayOnly`: the peer is unverified or not a contact, or the setting `relayThreemaCalls` is on; then the dual-stack servers, like Android) |
 | `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012) |
 | `callAccept` | `callId`, `sdp` (engine's answer), `video` | `{}` |

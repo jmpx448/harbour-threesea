@@ -974,6 +974,9 @@ pub enum ApiError {
     /// The code's key isn't the contact's: not the right person or device.
     #[error("the code does not match this contact")]
     QrMismatch,
+    /// The contact code carries an expiry that has passed.
+    #[error("the code has expired")]
+    QrExpired,
     /// No such group.
     #[error("no such group")]
     GroupNotFound,
@@ -1094,6 +1097,7 @@ impl ApiError {
             Self::ContactBlocked => "contactBlocked",
             Self::NotForwardable => "notForwardable",
             Self::QrMismatch => "qrMismatch",
+            Self::QrExpired => "qrExpired",
             Self::GroupLeft => "groupLeft",
             Self::NotGroupCreator => "notGroupCreator",
             Self::ReactionNotSupported => "reactionNotSupported",
