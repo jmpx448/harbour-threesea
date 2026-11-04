@@ -9,6 +9,7 @@ Page {
     property QtObject inputField: QtObject { property string text }
     property var attached: []
     function attachAll(files) { attached = files }
+    function setInput(text) { inputField.text = text }
     Component.onCompleted: window.openChat = identity
     Component.onDestruction: if (window.openChat === identity) window.openChat = ""
 }

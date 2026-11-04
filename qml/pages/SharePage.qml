@@ -62,7 +62,7 @@ Page {
         var chat = pageStack.replaceAbove(pageStack.previousPage(page), Qt.resolvedUrl("ChatPage.qml"),
                                           { identity: identity })
         chat.attachAll(files)
-        if (text.length > 0 && chat.inputField) chat.inputField.text = text
+        if (text.length > 0 && chat.inputField) chat.setInput(text)
     }
 
     JsonListModel {

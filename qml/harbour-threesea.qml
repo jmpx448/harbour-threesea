@@ -318,7 +318,7 @@ ApplicationWindow {
         }, PageStackAction.Immediate)
         unlock.unlocked.connect(function() {
             var chat = pageStack.replace(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity })
-            if (text.length > 0 && chat.inputField) chat.inputField.text = text
+            if (text.length > 0 && chat.inputField) chat.setInput(text)
         })
     }
 
@@ -409,7 +409,7 @@ ApplicationWindow {
         }
         if (text) {
             var chat = pageStack.find(function(page) { return page.identity === identity && page.inputField })
-            if (chat) chat.inputField.text = text
+            if (chat) chat.setInput(text)
         }
         activate()
     }

@@ -608,22 +608,30 @@ Page {
         return text
     }
 
+    // Text put into the input by the app rather than typed: nobody is told "typing" for it, and
+    // the cursor goes to its end, for typing on or the emoji panel.
+    property bool settingInput: false
+    function setInput(text) {
+        settingInput = true
+        inputField.text = text
+        settingInput = false
+        inputField.cursorPosition = text.length
+    }
+
     // Editing pulls the message back into the input box; the draft comes back afterwards.
     function startEdit(messageId, raw, mentions) {
+        stopTyping()
         quoting = null
         if (editingMessageId === "") draftBeforeEdit = inputField.text
         editingMessageId = messageId
         rememberMentions(raw, mentions)
-        var text = Fmt.withMentions(raw, mentions)
-        inputField.text = text
-        inputField.cursorPosition = text.length
+        setInput(Fmt.withMentions(raw, mentions))
         refocus.restart()
     }
 
     function endEdit() {
         editingMessageId = ""
-        inputField.text = draftBeforeEdit
-        inputField.cursorPosition = draftBeforeEdit.length
+        setInput(draftBeforeEdit)
         draftBeforeEdit = ""
     }
 
@@ -772,7 +780,7 @@ Page {
         }
         sendQueue = queue
         attachments = []
-        page.inputField.text = ""
+        setInput("")
         // Sent: no draft left, even if the app ends before the page saves it.
         saveDraft()
         if (!sendingQueue) sendNext()
@@ -1039,7 +1047,7 @@ Page {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             }
         })
-        page.inputField.text = ""
+        setInput("")
         // Sent: no draft left, even if the app ends before the page saves it.
         saveDraft()
         // Keep writing, like Jolla Messages: refocus once the list has inserted the message.
@@ -1144,9 +1152,7 @@ Page {
         // The unsent text from last time (a shared/linked text set before wins).
         backend.call("draft", { identity: identity }, function(ok, result) {
             if (ok && result.text && page.inputField && page.inputField.text.length === 0) {
-                page.inputField.text = result.text
-                // At its end, for typing on or the emoji panel (without a tap into the input first).
-                page.inputField.cursorPosition = result.text.length
+                page.setInput(result.text)
             }
         })
     }
@@ -1249,12 +1255,14 @@ Page {
     // 10 s while typing goes on; "stopped" after 5 s without a keystroke, when the input is
     // emptied (also by sending) or when the chat is left.
     function userTyped() {
-        // Editing a message must not show "typing" (spec); lists have nobody to tell.
-        if (editingMessageId !== "" || isList) return
+        // Editing a message must not show "typing" (spec); lists have nobody to tell, and a
+        // chat without an input has nobody typing.
+        if (editingMessageId !== "" || isList || readOnly) return
         if (page.inputField.text.length === 0) {
             stopTyping()
             return
         }
+        if (settingInput) return
         typingIdle.restart()
         if (!typingRepeat.running) {
             backend.call("setTyping", { identity: identity, typing: true })
