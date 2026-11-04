@@ -34,7 +34,8 @@ use crate::{
     model::{
         contact::{CommunicationPermission, ContactOrInit, ContactUpdate, PredefinedContact},
         message::{
-            ContactMessageBody, IncomingMessage, IncomingMessageBody, MessageOverrides, MessageProperties,
+            ContactMessageBody, GroupMessageBody, IncomingMessage, IncomingMessageBody, MessageOverrides,
+            MessageProperties,
         },
         provider::ProviderError,
     },
@@ -734,6 +735,29 @@ impl State {
             }
         }
 
+        // The dedicated blocking steps of a group-setup, while nothing has been created for it yet:
+        // someone on the block list can't bring the user into a group the user isn't in, and doesn't
+        // become a contact by trying. The user's other implicit block, _block unknown_, plays no part
+        // (as on Android, and ADR 0019 of the application).
+        if let IncomingMessageBody::Group(group) = &message.inner.body
+            && matches!(group.body, GroupMessageBody::Setup(_))
+            && matches!(
+                sender.communication_permission(
+                    &context.config,
+                    &*context.settings.borrow(),
+                    &*context.contacts.borrow(),
+                )?,
+                CommunicationPermission::BlockExplicit
+            )
+            && !context.conversations.borrow().is_in_group(group.group_identity)?
+        {
+            info!("Discarding group-setup of a blocked creator for a group the user is not in");
+            return Ok(ProcessingOutcome::Discard {
+                reason: DiscardReason::MessageSenderIsBlocked,
+                acknowledge: AcknowledgeContext::from(&*payload),
+            });
+        }
+
         // A message that should have arrived in the forward security session we have with its
         // sender
         if message.outer.message_type != CspE2eMessageType::ForwardSecurityEnvelope
@@ -780,9 +804,16 @@ impl State {
                 .map(ProcessingOutcome::Ok);
         }
 
-        // Check if we should discard the message if the sender is not already a contact
+        // Check if we should discard the message if the sender is not already a contact. A group
+        // message of someone who shares a group with the user is not: they should have a contact
+        // already, but its lookup after the group-setup can have failed or still be running.
         if !effective_message_properties.requires_direct_contact
             && matches!(sender, ContactOrInit::NewContact(_))
+            && !(matches!(message.inner.body, IncomingMessageBody::Group(_))
+                && context
+                    .contacts
+                    .borrow()
+                    .is_member_of_active_group(sender.inner().identity)?)
         {
             info!(
                 ?inner_type,
@@ -843,11 +874,13 @@ impl State {
 
             // Create new contact
             ContactOrInit::NewContact(mut sender) => {
-                // Raise the acquaintance level to _direct_ and update the nickname accordingly
-                //
-                // Note: This only works as intended for groups because each member is added as part of the
-                // `group-setup` receive steps with the acquaintance level _group_.
-                sender.acquaintance_level = protobuf_contact::AcquaintanceLevel::Direct;
+                // Raise the acquaintance level to _direct_, unless this is a group member who only
+                // wrote in the group, and update the nickname accordingly
+                sender.acquaintance_level = if effective_message_properties.requires_direct_contact {
+                    protobuf_contact::AcquaintanceLevel::Direct
+                } else {
+                    protobuf_contact::AcquaintanceLevel::GroupOrDeleted
+                };
                 sender.nickname.apply(sender_nickname);
 
                 // Create the contact in the next state
@@ -1341,7 +1374,8 @@ mod tests {
     use super::*;
     use crate::{
         common::{
-            ClientInfo, ConversationId, D2xDeviceId, FeatureMask, MessageFlags, MessageId, Nonce, ThreemaId,
+            ClientInfo, ConversationId, D2xDeviceId, FeatureMask, GroupIdentity, MessageFlags, MessageId,
+            Nonce, ThreemaId,
             config::{Config, Flavor, WorkContext, WorkCredentials, WorkFlavor},
             keys::{ClientKey, DeviceGroupKey, PublicKey, RawClientKey},
         },
@@ -1361,9 +1395,9 @@ mod tests {
         model::{
             contact::Contact,
             message::{
-                DeliveryReceiptMessage, DeliveryReceiptType, LocationMessage, MessageLifetime,
-                OutgoingContactMessageBody, OutgoingMessage, OutgoingMessageBody, TextMessage,
-                WebSessionResumeMessage,
+                DeliveryReceiptMessage, DeliveryReceiptType, GroupSetupMessage, LocationMessage,
+                MessageLifetime, OutgoingContactMessageBody, OutgoingGroupMessageBody, OutgoingMessage,
+                OutgoingMessageBody, TextMessage, WebSessionResumeMessage,
             },
             provider::{
                 ShortcutProvider,
@@ -1761,6 +1795,9 @@ mod tests {
 
         #[builder(default = "Vec::default()")]
         contact_lookup_cache: Vec<(ThreemaId, CachedContactResult)>,
+
+        #[builder(default = "Vec::default()")]
+        groups: Vec<(GroupIdentity, Vec<ThreemaId>)>,
     }
     impl ContextInitBuilder {
         fn with_multi_device(mut self) -> Self {
@@ -1805,6 +1842,7 @@ mod tests {
                 settings: init.settings,
                 contacts: init.contacts,
                 blocked_identities: init.blocked_identities,
+                groups: init.groups,
             });
 
             // Add predefined contacts
@@ -2551,6 +2589,193 @@ mod tests {
             }
         );
 
+        Ok(())
+    }
+
+    const GROUP_OF_THE_SENDER: GroupIdentity = GroupIdentity {
+        group_id: 0x1234,
+        creator_identity: StaticTestSender::IDENTITY,
+    };
+
+    /// A group message from [`StaticTestSender`], run through to the end.
+    fn receive_group_message(
+        context: &mut Context,
+        group_identity: GroupIdentity,
+        body: GroupMessageBody,
+    ) -> anyhow::Result<MessageId> {
+        let message = StaticTestSender::create_message_from_body(
+            &context.context.csp_e2e,
+            OutgoingMessageBody::Group(OutgoingGroupMessageBody { group_identity, body }),
+        );
+        let message_id = message.id;
+        let state = FetchSenderState {
+            payload: IncomingMessageWithMetadataBox::try_from(MessageWithMetadataBox::try_from(message)?)?,
+            fetch_sender_task: ContactsLookupSubtask::new(
+                vec![StaticTestSender::IDENTITY],
+                CacheLookupPolicy::Allow,
+            ),
+        };
+        let (state, result) = State::poll_fetch_sender(&mut context.context, state)?;
+        assert_matches!(state, State::Done);
+        assert_matches!(result, IncomingMessageLoop::Done(result) => {
+            assert_eq!(result.outgoing_message_ack.map(|ack| ack.id), Some(message_id));
+        });
+        Ok(message_id)
+    }
+
+    fn group_setup(context: &Context) -> GroupMessageBody {
+        GroupMessageBody::Setup(GroupSetupMessage {
+            members: vec![context.database.user_identity],
+        })
+    }
+
+    fn stored_acquaintance(context: &Context) -> Option<protobuf_contact::AcquaintanceLevel> {
+        context
+            .database
+            .contacts
+            .borrow()
+            .get(&StaticTestSender::IDENTITY)
+            .map(|(contact, _)| contact.acquaintance_level)
+    }
+
+    // A stranger under _block unknown_ too: that setting plays no part for a group-setup, as on Android.
+    #[rstest]
+    #[case(InMemoryDbSettings::default())]
+    #[case(InMemoryDbSettings { block_unknown_identities: true })]
+    fn group_setup_from_a_stranger_creates_the_contact_and_reaches_the_provider(
+        #[case] settings: InMemoryDbSettings,
+    ) -> anyhow::Result<()> {
+        let mut context = Context::from(
+            ContextInitBuilder::default()
+                .settings(settings)
+                .contact_lookup_cache(vec![StaticTestSender::cached()])
+                .build()?,
+        );
+
+        let body = group_setup(&context);
+        let message_id = receive_group_message(&mut context, GROUP_OF_THE_SENDER, body)?;
+
+        assert_eq!(
+            stored_acquaintance(&context),
+            Some(protobuf_contact::AcquaintanceLevel::Direct)
+        );
+        assert!(
+            context
+                .database
+                .conversations
+                .borrow()
+                .get(&ConversationId::Group(GROUP_OF_THE_SENDER))
+                .is_some_and(|messages| messages.contains_key(&(StaticTestSender::IDENTITY, message_id)))
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(ContextInitBuilder::default().contact_lookup_cache(vec![StaticTestSender::cached()]))]
+    #[case(ContextInitBuilder::default().contacts(vec![StaticTestSender::contact()]))]
+    fn group_setup_from_a_blocked_creator_for_a_group_the_user_is_not_in_changes_nothing(
+        #[case] context_builder: ContextInitBuilder,
+    ) -> anyhow::Result<()> {
+        let mut context = Context::from(
+            context_builder
+                .blocked_identities(vec![StaticTestSender::IDENTITY])
+                .build()?,
+        );
+        let before = stored_acquaintance(&context);
+
+        let body = group_setup(&context);
+        let _ = receive_group_message(&mut context, GROUP_OF_THE_SENDER, body)?;
+
+        // Neither a contact where there was none, nor a contact raised to _direct_, nor a group.
+        assert_eq!(stored_acquaintance(&context), before);
+        assert!(context.database.conversations.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn group_setup_from_a_blocked_creator_still_counts_for_a_group_the_user_is_in() -> anyhow::Result<()> {
+        let mut context = Context::from(
+            ContextInitBuilder::default()
+                .contacts(vec![StaticTestSender::contact()])
+                .blocked_identities(vec![StaticTestSender::IDENTITY])
+                .groups(vec![(GROUP_OF_THE_SENDER, vec![StaticTestSender::IDENTITY])])
+                .build()?,
+        );
+
+        let body = group_setup(&context);
+        let _ = receive_group_message(&mut context, GROUP_OF_THE_SENDER, body)?;
+
+        assert!(
+            context
+                .database
+                .conversations
+                .borrow()
+                .contains_key(&ConversationId::Group(GROUP_OF_THE_SENDER))
+        );
+        Ok(())
+    }
+
+    // Also under _block unknown_: members of a group the user is in may write, contact or not.
+    #[rstest]
+    #[case(InMemoryDbSettings::default())]
+    #[case(InMemoryDbSettings { block_unknown_identities: true })]
+    fn group_message_of_a_member_without_a_contact_is_kept(
+        #[case] settings: InMemoryDbSettings,
+    ) -> anyhow::Result<()> {
+        let group = GroupIdentity {
+            group_id: 0x1234,
+            creator_identity: ThreemaId::predefined(*b"ABCD1234"),
+        };
+        let mut context = Context::from(
+            ContextInitBuilder::default()
+                .settings(settings)
+                .contact_lookup_cache(vec![StaticTestSender::cached()])
+                .groups(vec![(group, vec![StaticTestSender::IDENTITY])])
+                .build()?,
+        );
+
+        let message_id = receive_group_message(
+            &mut context,
+            group,
+            GroupMessageBody::Text(TextMessage {
+                text: "meow".to_owned(),
+            }),
+        )?;
+
+        // A group acquaintance: writing in the group doesn't make them one of the user's contacts.
+        assert_eq!(
+            stored_acquaintance(&context),
+            Some(protobuf_contact::AcquaintanceLevel::GroupOrDeleted)
+        );
+        assert!(
+            context
+                .database
+                .conversations
+                .borrow()
+                .get(&ConversationId::Group(group))
+                .is_some_and(|messages| messages.contains_key(&(StaticTestSender::IDENTITY, message_id)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn group_message_of_a_stranger_who_shares_no_group_is_discarded() -> anyhow::Result<()> {
+        let mut context = Context::from(
+            ContextInitBuilder::default()
+                .contact_lookup_cache(vec![StaticTestSender::cached()])
+                .build()?,
+        );
+
+        let _ = receive_group_message(
+            &mut context,
+            GROUP_OF_THE_SENDER,
+            GroupMessageBody::Text(TextMessage {
+                text: "meow".to_owned(),
+            }),
+        )?;
+
+        assert_eq!(stored_acquaintance(&context), None);
+        assert!(context.database.conversations.borrow().is_empty());
         Ok(())
     }
 

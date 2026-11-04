@@ -24,3 +24,6 @@ group-setup isn't lost in it.
 
 A blocked creator's invitation disappears without a trace, as with anything else they send. After
 unblocking, the group comes back with their next group-setup or the next message in it.
+
+libthreema runs this check before the setup can create a contact (a group-setup makes its sender a
+direct contact), so a stranger on the block list doesn't become one by trying.

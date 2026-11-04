@@ -173,9 +173,14 @@ impl ContactOrInit {
         }
 
         Ok(match &self {
-            ContactOrInit::NewContact(_) => {
-                // The contact does not exist and block unknown is active
-                CommunicationPermission::BlockUnknown
+            ContactOrInit::NewContact(inner) => {
+                // The contact does not exist and block unknown is active. A member of an active group
+                // counts like one with a contact (whose lookup can have failed), see below.
+                if contact_provider.is_member_of_active_group(inner.identity)? {
+                    CommunicationPermission::Allow
+                } else {
+                    CommunicationPermission::BlockUnknown
+                }
             },
 
             ContactOrInit::ExistingContact(inner) => {

@@ -351,6 +351,12 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   member → empty setup or sync request) and each control message's own steps, in
   `core/src/groups.rs` (unit-tested). Members we don't know are looked up and stored with
   acquaintance level _group_ (not shown as contacts).
+- A group-setup creates its sender as a _direct_ contact (csp.struct.yml, Android), a stranger's
+  too, also under _block unknown_ (ADR 0019). Its dedicated blocking steps run in libthreema before
+  anything is created: a creator on the block list, for a group the user isn't in, is discarded.
+- A group message from someone with no contact row who is a member of a group we are in isn't
+  discarded: libthreema just looked up their key to decrypt it, so it creates the contact at level
+  _group_ (or keeps the message unacknowledged if that lookup failed). Anyone else is discarded.
 - Creator: create (setup + name + delete-picture to all), rename, change members (setup to all
   old and new, name/picture to added), dissolve (empty setup). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.

@@ -8,7 +8,7 @@ use core::cell::RefCell;
 use std::rc::Rc;
 
 use libthreema::{
-    common::{Delta, MessageId, Nonce, ThreemaId, config::Config},
+    common::{Delta, GroupIdentity, MessageId, Nonce, ThreemaId, config::Config},
     model::{
         contact::{Contact, ContactUpdate},
         message::{
@@ -577,6 +577,14 @@ impl ConversationProvider for StoreConversations {
             .map_err(foreign)
     }
 
+    fn is_in_group(&self, group_identity: GroupIdentity) -> Result<bool, ProviderError> {
+        Ok(self
+            .store
+            .group(&crate::groups::key(&group_identity))
+            .map_err(foreign)?
+            .is_some_and(|group| !group.left))
+    }
+
     fn set_typing_indicator(
         &mut self,
         sender: ThreemaId,
@@ -917,7 +925,7 @@ impl ConversationProvider for StoreConversations {
 
 #[cfg(test)]
 mod tests {
-    use libthreema::common::{GroupIdentity, config::ConfigEnvironment};
+    use libthreema::common::config::ConfigEnvironment;
 
     use super::*;
 
