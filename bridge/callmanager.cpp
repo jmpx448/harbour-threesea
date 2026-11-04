@@ -153,7 +153,10 @@ void CallManager::setState(const QString &state)
 
 void CallManager::withTurnServers(std::function<void(const QVariantMap &)> then)
 {
-    m_backend->request(QStringLiteral("callTurnServers"), QVariantMap(),
+    QVariantMap args;
+    // The core decides per call whether it goes only through TURN (unverified peers do).
+    args.insert(QStringLiteral("identity"), m_identity);
+    m_backend->request(QStringLiteral("callTurnServers"), args,
                        [this, then](bool ok, const QVariantMap &turn, const QString &) {
                            if (ok) {
                                m_relayOnly = turn.value(QStringLiteral("relayOnly")).toBool();

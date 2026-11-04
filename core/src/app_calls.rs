@@ -6,7 +6,7 @@
 //! Events to the UI: `callIncoming {identity, sdp, video}`, `callRinging`,
 //! `callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record}`.
 
-use libthreema::common::keys::ClientKey;
+use libthreema::{common::keys::ClientKey, protobuf::d2d_sync::contact as pc};
 use serde_json::{Value, json};
 
 use data_encoding::BASE64;
@@ -186,12 +186,25 @@ impl App {
         self.apply_call_effects(effects);
     }
 
-    /// `callTurnServers`: for the media engine (`{urls, username, password, relayOnly}`).
-    /// `relayOnly` (Settings → Calls "Always relay calls"): the call goes only through TURN
-    /// (hides the IP address), where the dual-stack servers are needed in case the device has
-    /// IPv6 only (Android's `PeerConnectionClient.getIceServers`).
-    pub(crate) async fn call_turn_servers(&mut self) -> Result<Value, ApiError> {
-        let relay_only = self.app_settings()?.relay_threema_calls;
+    /// A call with `peer` goes only through TURN, which hides our IP address from them: always
+    /// for someone unverified or not a contact, so that a stranger can't learn it just by calling
+    /// (Android's `VoipCallService`), else if the user asked for it (Settings → Calls "Always
+    /// relay calls").
+    fn call_relay_only(&self, peer: &str) -> Result<bool, ApiError> {
+        if self.app_settings()?.relay_threema_calls {
+            return Ok(true);
+        }
+        Ok(self
+            .store
+            .contact(peer)?
+            .is_none_or(|contact| contact.verification_level == pc::VerificationLevel::Unverified))
+    }
+
+    /// `callTurnServers {identity}`: for the media engine's call with `identity` (`{urls,
+    /// username, password, relayOnly}`). `relayOnly` needs the dual-stack servers in case the
+    /// device has IPv6 only (Android's `PeerConnectionClient.getIceServers`).
+    pub(crate) async fn call_turn_servers(&mut self, peer: &str) -> Result<Value, ApiError> {
+        let relay_only = self.call_relay_only(peer)?;
         let now = crate::messages::now_ms();
         if let Some((servers, until)) = &self.turn_servers
             && *until > now + 60_000
@@ -522,6 +535,34 @@ mod tests {
             video: false,
         }
         .encode()
+    }
+
+    #[test]
+    fn strangers_and_unverified_contacts_only_get_the_relay() {
+        let (_dir, app, _rx) = app(true);
+        assert!(app.call_relay_only("ABCD1234").unwrap(), "not a contact");
+
+        let mut contact = crate::contacts::test_contact("ABCD1234");
+        contact.verification_level = pc::VerificationLevel::Unverified;
+        app.store.upsert_contact(&contact).unwrap();
+        assert!(app.call_relay_only("ABCD1234").unwrap(), "unverified");
+
+        for level in [
+            pc::VerificationLevel::ServerVerified,
+            pc::VerificationLevel::FullyVerified,
+        ] {
+            contact.verification_level = level;
+            app.store.upsert_contact(&contact).unwrap();
+            assert!(!app.call_relay_only("ABCD1234").unwrap(), "{level:?}");
+
+            // The setting asks for the relay with everyone.
+            let mut settings = app.app_settings().unwrap();
+            settings.relay_threema_calls = true;
+            app.save_app_settings(&settings).unwrap();
+            assert!(app.call_relay_only("ABCD1234").unwrap(), "{level:?}");
+            settings.relay_threema_calls = false;
+            app.save_app_settings(&settings).unwrap();
+        }
     }
 
     #[test]

@@ -642,7 +642,9 @@ pub enum Command {
     ConfirmLinking,
     CancelLinking,
     /// Calls (ADR 0012, see app_calls.rs and docs/ffi.md).
-    CallTurnServers,
+    CallTurnServers {
+        identity: String,
+    },
     CallStart {
         identity: String,
         sdp: String,
@@ -1754,7 +1756,7 @@ impl App {
                 }
                 Ok(json!({}))
             }
-            Command::CallTurnServers => self.call_turn_servers().await,
+            Command::CallTurnServers { identity } => self.call_turn_servers(&identity).await,
             Command::CallStart {
                 identity,
                 sdp,
