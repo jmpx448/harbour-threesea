@@ -278,7 +278,11 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   and its close refer to.
 - A deleted message becomes a placeholder (kind `deleted`, content, reactions and poll entry removed,
   `edited_at` = deletion time). It has nothing left to send: a later Reject of it changes nothing.
-  Messages nobody received yet (pending/failed) are simply changed or removed without telling the peer.
+  A message whose send hasn't begun, or that failed, is simply changed or removed without telling
+  the peer. Pending but with its send begun (`written_out`, on record before the first byte goes out,
+  as the ack may be lost or a group's members acknowledge one by one), someone may have it: it takes
+  an edit or deletion like a sent one, and may need the feature for that, while a resend carries the
+  new text to whoever doesn't have it yet (Android allows neither until the message is sent).
 - "Delete" on its own removes a message from this device only (any message).
 - Notes groups (a group of one, not left): every feature counts as supported, no age limit, and
   reactions, edits, deletions and votes still go through the outbox so that linked devices hear of

@@ -85,7 +85,7 @@ ListItem {
 
     readonly property bool isDeleted: model.kind === "deleted"
     readonly property bool isEdited: (model.kind === "text" || isFile) && !!model.editedAt
-    // Ours, sent and young enough; never-sent messages are simply changed or removed.
+    // Ours, sent and young enough; messages nobody can have yet are simply changed or removed.
     readonly property bool unsent: outgoing && (model.state === 0 || model.state === 4)
     readonly property bool recent: noAgeLimit || Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
 
@@ -223,8 +223,11 @@ ListItem {
             MenuItem {
                 //% "Edit"
                 text: qsTrId("threesea-me-edit")
+                // Nobody can have it yet: simply changed. Otherwise, like a sent one, it takes an
+                // edit message, as someone may have it (the core's edit_message).
                 visible: item.outgoing && model.kind === "text"
-                         && (model.state === 0 || (!item.unsent && item.canEdit && item.recent))
+                         && ((model.state === 0 && !model.writtenOut)
+                             || (model.state !== 4 && item.canEdit && item.recent))
                 onClicked: item.editRequested()
             }
             MenuItem {

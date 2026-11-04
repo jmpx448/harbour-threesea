@@ -1019,6 +1019,16 @@ impl<'a> Session<'a> {
             {
                 continue;
             }
+            // As it is now: the awaits below let a command run, an edit or a removal among them.
+            let Some(message) = self
+                .setup
+                .store
+                .message(message.id)
+                .map_err(protocol_error)?
+                .filter(|now| now.state == OutgoingState::Pending as i64 && now.kind != "deleted")
+            else {
+                continue;
+            };
             let body = match message.kind.as_str() {
                 "text" => ContactMessageBody::Text(TextMessage {
                     text: message.body.clone(),
@@ -1084,6 +1094,7 @@ impl<'a> Session<'a> {
                 let Some(body) = to_group_body(body) else {
                     continue;
                 };
+                self.note_written_out(message.id)?;
                 if self
                     .send_to_group(
                         &message.conversation,
@@ -1124,6 +1135,7 @@ impl<'a> Session<'a> {
                 }
                 continue;
             }
+            self.note_written_out(message.id)?;
             if matches!(
                 &body,
                 Outgoing::Contact(
@@ -1174,6 +1186,20 @@ impl<'a> Session<'a> {
             }
         }
         self.send_outbox().await
+    }
+
+    /// Before a message's first byte goes out: someone may have it from here on, and the chat hears
+    /// so, as offering Edit depends on it.
+    fn note_written_out(&self, id: i64) -> Result<(), ConnectionError> {
+        if let Some(changed) = self
+            .setup
+            .store
+            .set_written_out(id)
+            .map_err(protocol_error)?
+        {
+            self.emit(CoreEvent::MessagesChanged(vec![changed]));
+        }
+        Ok(())
     }
 
     /// The _Profile Picture Distribution Steps_ for `receiver`: our picture (uploaded once per
@@ -3690,6 +3716,61 @@ mod sync_order_tests {
 
     fn text() -> Outgoing {
         Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    /// The mark that someone may have a message is on record before the first byte goes out, and
+    /// not for what stays home: a file still uploading, a contact no longer to be written to.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_send_is_on_record_as_begun_before_anything_goes_out() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        let group_key = "g:USER0001:0000000000000001";
+        store
+            .upsert_group(&crate::groups::Group {
+                key: group_key.to_owned(),
+                identity: crate::groups::parse_key(group_key).unwrap(),
+                name: "Crew".into(),
+                members: vec![CREATOR.to_owned()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let text = store.insert_outgoing(CREATOR, 1, "text", "hi").unwrap();
+        let in_group = store.insert_outgoing(group_key, 2, "text", "hi").unwrap();
+        store
+            .set_pending_receivers(group_key, 2, &[CREATOR.to_owned()])
+            .unwrap();
+        let file = store
+            .insert_outgoing(CREATOR, 3, "file", r#"{"uploadState": 1}"#)
+            .unwrap();
+        let written = |id: i64| store.message(id).unwrap().unwrap().written_out;
+        assert!(!written(text.id) && !written(in_group.id) && !written(file.id));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        // No handshake was made in this test, so the first payload ends the pass.
+        let _ = session.send_pending().await;
+        assert!(written(text.id));
+        assert!(!written(file.id));
+        // The chat hears of it, once: Edit depends on it.
+        let mut told = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let FromConnection::Event(event) = event
+                && let CoreEvent::MessagesChanged(changed) = *event
+            {
+                told.extend(changed.iter().filter(|m| m.written_out).map(|m| m.id));
+            }
+        }
+        assert_eq!(told, [text.id]);
+        assert!(store.set_written_out(text.id).unwrap().is_none());
+
+        // The group's turn, once the text is out of the way.
+        store.remove_message(text.id).unwrap();
+        let _ = session.send_pending().await;
+        assert!(written(in_group.id));
     }
 
     #[tokio::test(flavor = "current_thread")]

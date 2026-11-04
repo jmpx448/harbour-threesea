@@ -1083,8 +1083,11 @@ impl App {
         Ok((id, contact, message))
     }
 
-    /// The edit submit steps. A message nobody has received yet is just changed. Notes have no age
-    /// limit, here and in `delete_message` (Android's `canBeEdited`, `canDeleteRemotely`).
+    /// The edit submit steps. A message whose send hasn't begun is just changed. One whose send has
+    /// may be with anyone already, and a resend under its ID is dropped by those who have it, so it
+    /// is edited like a sent one: a resend carries the new text to those who don't have it, the edit
+    /// message to those who do. Notes have no age limit, here and in `delete_message` (Android's
+    /// `canBeEdited`, `canDeleteRemotely`).
     pub(crate) fn edit_message(
         &mut self,
         identity: &str,
@@ -1102,7 +1105,7 @@ impl App {
         if text == crate::messages::split_quote(&message.body).1 {
             return Ok(self.store.message_json(&message));
         }
-        let changed = if message.state == OutgoingState::Pending as i64 {
+        let changed = if message.state == OutgoingState::Pending as i64 && !message.written_out {
             self.store.edit_message(message.id, text, None)?
         } else {
             if message.state == OutgoingState::Failed as i64 {
@@ -1132,8 +1135,8 @@ impl App {
         Ok(changed.map_or(Value::Null, |message| self.store.message_json(&message)))
     }
 
-    /// Delete a message on this device, or (ours, the 1:1 delete submit steps) for everyone:
-    /// replaced by a placeholder; a message nobody has received yet is just removed.
+    /// Delete a message on this device, or (ours, the delete submit steps) for everyone: replaced
+    /// by a placeholder; a message nobody can have yet is just removed.
     pub(crate) fn delete_message(
         &mut self,
         identity: &str,
@@ -1155,7 +1158,7 @@ impl App {
         if !crate::messages::delete_applies_to(&message.kind) {
             return Err(ApiError::Internal("not a deletable message".into()));
         }
-        if message.state == OutgoingState::Pending as i64
+        if (message.state == OutgoingState::Pending as i64 && !message.written_out)
             || message.state == OutgoingState::Failed as i64
         {
             self.store.remove_message(message.id)?;
@@ -1576,5 +1579,105 @@ mod tests {
             Conversation::Group(group).supports(&app.store, FeatureMask::EDIT_MESSAGE_SUPPORT),
             Ok(false)
         ));
+    }
+
+    /// Before its send has begun a message is simply another message; nobody hears of it.
+    #[test]
+    fn a_message_not_written_out_is_just_changed_or_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let id = format!("{:x}", 7);
+        let stored = app.store.insert_outgoing(PEER, 7, "text", "helo").unwrap();
+        app.edit_message(PEER, &id, "hello").unwrap();
+        let edited = app.store.message(stored.id).unwrap().unwrap();
+        assert_eq!((edited.body.as_str(), edited.edited_at), ("hello", None));
+        assert!(app.store.outbox().unwrap().is_empty());
+        app.delete_message(PEER, &id, true, true).unwrap();
+        assert!(app.store.message(stored.id).unwrap().is_none());
+        assert!(app.store.outbox().unwrap().is_empty());
+    }
+
+    /// Once its send has begun someone may have it: a resend under the same ID would reach only
+    /// those who don't, so everyone who can take an edit gets one. It stays in the queue with the
+    /// new text for the others.
+    #[test]
+    fn a_message_written_out_is_edited_for_those_who_have_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), FeatureMask::EDIT_MESSAGE_SUPPORT);
+        let key = notes_group(&app);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        group.members = vec![PEER.to_owned()];
+        app.store.upsert_group(&group).unwrap();
+        let id = format!("{:x}", 7);
+
+        for conversation in [PEER, key.as_str()] {
+            let stored = app
+                .store
+                .insert_outgoing(conversation, 7, "text", "helo")
+                .unwrap();
+            app.store.set_written_out(stored.id).unwrap();
+            app.edit_message(conversation, &id, "hello").unwrap();
+            let edited = app.store.message(stored.id).unwrap().unwrap();
+            assert_eq!(edited.state, OutgoingState::Pending as i64);
+            assert_eq!(edited.body, "hello");
+            assert!(edited.edited_at.is_some());
+            assert!(
+                app.store
+                    .pending_outgoing()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.id == stored.id)
+            );
+
+            let outbox = app.store.outbox().unwrap();
+            let edit = outbox
+                .iter()
+                .find(|e| e.conversation == conversation)
+                .unwrap();
+            assert_eq!(edit.kind, reactions::OUTBOX_EDIT);
+            assert_eq!(edit.body["text"], "hello");
+        }
+        let group_edit = app.store.outbox().unwrap();
+        let group_edit = group_edit.iter().find(|e| e.conversation == key).unwrap();
+        assert_eq!(
+            app.store
+                .pending_receivers(&key, group_edit.message_id)
+                .unwrap(),
+            vec![PEER.to_owned()]
+        );
+    }
+
+    /// A contact who can't take an edit keeps what they may have: changing only our copy is what
+    /// this is there to prevent.
+    #[test]
+    fn a_message_written_out_stays_for_a_contact_without_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let stored = app.store.insert_outgoing(PEER, 7, "text", "helo").unwrap();
+        app.store.set_written_out(stored.id).unwrap();
+        assert!(matches!(
+            app.edit_message(PEER, &format!("{:x}", 7), "hello"),
+            Err(ApiError::NotSupportedByContact)
+        ));
+        assert_eq!(app.store.message(stored.id).unwrap().unwrap().body, "helo");
+    }
+
+    /// Deleting for everyone goes the same way, and what is left has nothing more to send.
+    #[test]
+    fn a_message_written_out_is_deleted_for_everyone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), FeatureMask::DELETE_MESSAGE_SUPPORT);
+        let stored = app.store.insert_outgoing(PEER, 7, "text", "helo").unwrap();
+        app.store.set_written_out(stored.id).unwrap();
+        app.delete_message(PEER, &format!("{:x}", 7), true, true)
+            .unwrap();
+        let deleted = app.store.message(stored.id).unwrap().unwrap();
+        assert_eq!(deleted.kind, "deleted");
+        assert_eq!(deleted.state, OutgoingState::Sent as i64);
+        assert_eq!(
+            app.store.outbox().unwrap()[0].kind,
+            reactions::OUTBOX_DELETE
+        );
+        assert!(app.store.pending_outgoing().unwrap().is_empty());
     }
 }

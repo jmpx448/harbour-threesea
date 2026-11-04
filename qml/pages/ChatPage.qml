@@ -139,7 +139,7 @@ Page {
         id: messages
         keyField: "id"
         roles: ["id", "messageId", "outgoing", "kind", "text", "body", "createdAt", "state",
-                "editedAt", "sender", "reactions", "quoteId", "mentions", "starred"]
+                "editedAt", "sender", "reactions", "quoteId", "mentions", "starred", "writtenOut"]
     }
 
     // The contact, or for groups the group info shaped like one (title as name, member names).

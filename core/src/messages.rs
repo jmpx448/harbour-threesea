@@ -260,12 +260,16 @@ pub struct Message {
     /// arrival order, imported history slotted between them. Internal; not part of the UI
     /// JSON.
     pub sort_key: i64,
+    /// Outgoing: a send has begun, so someone may have it even while it is pending (see
+    /// [`MIGRATION_WRITTEN_OUT`]).
+    pub written_out: bool,
 }
 
 fn columns() -> String {
     format!(
         "id, conversation, message_id, outgoing, kind, body, created_at, updated_at, state, \
-         edited_at, sender, {}, starred, sent_at, delivered_at, read_at, received_at, sort_key",
+         edited_at, sender, {}, starred, sent_at, delivered_at, read_at, received_at, sort_key, \
+         written_out",
         crate::reactions::REACTIONS_COLUMN
     )
 }
@@ -290,8 +294,21 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         read_at: row.get(15)?,
         received_at: row.get(16)?,
         sort_key: row.get(17)?,
+        written_out: row.get(18)?,
     })
 }
+
+/// Store migration 36. `written_out`: a send of this outgoing message has begun, so someone may
+/// have it although it isn't acknowledged. The queue doesn't survive a reconnect, and a resend
+/// under the same ID is dropped by whoever has the message, so this has to be on record for edits
+/// to know who may hold the old text. What was waiting during the upgrade counts as begun. And
+/// placeholders an older version put back into the queue come out of it.
+pub(crate) const MIGRATION_WRITTEN_OUT: &str = "
+    ALTER TABLE messages ADD COLUMN written_out INTEGER NOT NULL DEFAULT 0;
+    UPDATE messages SET written_out = 1 WHERE outgoing = 1 AND state = 0;
+    UPDATE messages SET state = 1 WHERE outgoing = 1 AND state = 0 AND kind = 'deleted';
+    DELETE FROM pending_receivers WHERE (conversation, message_id) IN
+        (SELECT conversation, message_id FROM messages WHERE outgoing = 1 AND kind = 'deleted');";
 
 /// Whether a received edit applies to this kind of message (the proto's _Edit applies to_): a
 /// text, or a file's caption.
@@ -432,6 +449,7 @@ fn marker(conversation: String, kind: &str, at: i64) -> Message {
         read_at: None,
         received_at: None,
         sort_key: 0,
+        written_out: false,
     }
 }
 
@@ -474,6 +492,8 @@ impl Message {
             // The history position: the chat page tells by it whether a row outside its window
             // is new. Fits a JavaScript number: a row id shifted by 20 bits (see the migration).
             "sortKey": self.sort_key,
+            // Pending, but someone may have it already: changing it takes an edit message.
+            "writtenOut": self.written_out,
         })
     }
 }
@@ -779,6 +799,19 @@ impl Store {
         let rows =
             statement.query_map(params![conversation, message_id.cast_signed()], from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A send of this outgoing message begins: from here on someone may have it. Returns the
+    /// message the first time, for the chat: changing it now takes more than it did.
+    pub fn set_written_out(&self, id: i64) -> Result<Option<Message>, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET written_out = 1 WHERE id = ?1 AND written_out = 0",
+            [id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.message(id)
     }
 
     pub fn set_outgoing_failed(&self, id: i64) -> Result<Option<Message>, StoreError> {
@@ -1129,7 +1162,7 @@ impl Store {
              ORDER BY COALESCE(m.received_at, m.created_at) DESC, m.id DESC",
             columns()
         ))?;
-        let rows = statement.query_map([], |row| Ok((from_row(row)?, row.get::<_, i64>(18)?)))?;
+        let rows = statement.query_map([], |row| Ok((from_row(row)?, row.get::<_, i64>(19)?)))?;
         let mut list: Vec<(Message, i64)> = rows.collect::<Result<_, _>>()?;
         let mut markers: Vec<Message> = Vec::new();
         let mut statement = self.conn.prepare(
@@ -2325,6 +2358,39 @@ mod tests {
             .unwrap();
         store.remove_message(removed.id).unwrap();
         assert!(store.pending_receivers(going, 10).unwrap().is_empty());
+    }
+
+    /// Upgrading: what is waiting may be out already, what was sent needn't say so, and a
+    /// placeholder an older version put back into the queue comes out of it.
+    #[test]
+    fn the_written_out_migration_is_careful_with_whats_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let (waiting, sent, stuck) = {
+            let store = Store::open(&path, &[1; 32]).unwrap();
+            let waiting = store.insert_outgoing("ECHOECHO", 1, "text", "a").unwrap();
+            let sent = store.insert_outgoing("ECHOECHO", 2, "text", "b").unwrap();
+            store
+                .raise_outgoing_state("ECHOECHO", &[2], OutgoingState::Sent)
+                .unwrap();
+            let stuck = store.insert_outgoing("ECHOECHO", 3, "deleted", "").unwrap();
+            store
+                .set_pending_receivers("ECHOECHO", 3, &["ABCD1234".to_owned()])
+                .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "ALTER TABLE messages DROP COLUMN written_out; PRAGMA user_version = 35;",
+                )
+                .unwrap();
+            (waiting.id, sent.id, stuck.id)
+        };
+        let store = Store::open(&path, &[1; 32]).unwrap();
+        let row = |id| store.message(id).unwrap().unwrap();
+        assert!(row(waiting).written_out);
+        assert!(!row(sent).written_out);
+        assert_eq!(row(stuck).state, OutgoingState::Sent as i64);
+        assert!(store.pending_receivers("ECHOECHO", 3).unwrap().is_empty());
     }
 
     #[test]

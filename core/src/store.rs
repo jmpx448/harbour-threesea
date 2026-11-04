@@ -119,6 +119,8 @@ const MIGRATIONS: &[&str] = &[
     crate::chat_notifications::MIGRATION_TONES,
     // 35: groups say whether we were removed; the creator back where a group sync dropped them
     crate::groups::MIGRATION_SYNC,
+    // 36: outgoing messages say whether a send has begun
+    crate::messages::MIGRATION_WRITTEN_OUT,
 ];
 
 /// Setting keys.
