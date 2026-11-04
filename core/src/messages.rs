@@ -351,12 +351,18 @@ pub fn location_message(body: &str) -> Option<libthreema::model::message::Locati
     let longitude = value["longitude"]
         .as_f64()
         .filter(|l| (-180.0..=180.0).contains(l))?;
+    // The wire format's single line after the coordinates is the address; libthreema's encoder
+    // drops a name that comes without one. The place's name is what the recipient has to see.
+    let (name, address) = match (text("name"), text("address")) {
+        (Some(name), None) => (None, Some(name)),
+        fields => fields,
+    };
     Some(libthreema::model::message::LocationMessage {
         latitude,
         longitude,
         accuracy_m: value["accuracy"].as_f64().filter(|a| *a >= 0.0),
-        name: text("name"),
-        address: text("address"),
+        name,
+        address,
     })
 }
 
@@ -1473,10 +1479,37 @@ mod tests {
         .unwrap();
         assert_eq!(location.latitude, 49.61);
         assert_eq!(location.accuracy_m, Some(12.5));
-        assert_eq!(location.name.as_deref(), Some("Place"));
-        assert_eq!(location.address, None);
+        // A name alone goes out as the address, the one line the recipient gets.
+        assert_eq!(location.name, None);
+        assert_eq!(location.address.as_deref(), Some("Place"));
+        let both = location_message(
+            r#"{"latitude":49.61,"longitude":6.13,"name":"Place","address":"Street 1"}"#,
+        )
+        .unwrap();
+        assert_eq!(both.name.as_deref(), Some("Place"));
+        assert_eq!(both.address.as_deref(), Some("Street 1"));
+        let none = location_message(r#"{"latitude":49.61,"longitude":6.13}"#).unwrap();
+        assert_eq!((none.name, none.address), (None, None));
         assert!(location_message(r#"{"latitude":91,"longitude":0}"#).is_none());
         assert!(location_message(r#"{"latitude":1}"#).is_none());
+    }
+
+    /// The place's name reaches the recipient: it is in the bytes that are sent.
+    #[test]
+    fn location_name_is_sent() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody},
+        };
+        let location =
+            location_message(r#"{"latitude":49.61,"longitude":6.13,"name":"Place"}"#).unwrap();
+        let (_, data) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: "ABCD1234".parse().unwrap(),
+                body: libthreema::model::message::ContactMessageBody::Location(location),
+            }));
+        let data = String::from_utf8(data).unwrap();
+        assert_eq!(data.lines().nth(1), Some("Place"), "{data}");
     }
 
     #[test]
