@@ -988,6 +988,8 @@ fn receive_steps(
                 &mut outcome,
             )?;
             outcome.groups_changed = true;
+            // What was queued for them doesn't go now: something may have nobody else left.
+            outcome.send = true;
             outcome.change.members = true;
             outcome
                 .change
@@ -1564,6 +1566,8 @@ fn receive_setup(
             group.members = new_members;
             group.left = false;
             store.upsert_group(&group)?;
+            // What was queued for those gone doesn't go now: something may have nobody else left.
+            outcome.send |= !removed.is_empty();
             outcome.change.members = true;
             outcome.change.user_state = true;
             for member in &added {

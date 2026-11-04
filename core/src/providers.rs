@@ -324,17 +324,27 @@ pub fn control_receiver(
 
 /// The group members `message_id` still has to go to. Whoever may not receive it is taken off the
 /// list for good, so that a message queued before the block doesn't reach them and doesn't wait
-/// for them either.
+/// for them either. So is whoever is no member any more, if `members_only`: they left or were
+/// removed after it was queued. Not for what goes to someone outside by its nature, nor once the
+/// group is gone: then only such things are left.
 pub fn group_receivers(
     store: &Store,
     config: &Config,
     key: &str,
     message_id: u64,
     exempt: bool,
+    members_only: bool,
 ) -> Result<Vec<String>, StoreError> {
+    let group = if members_only {
+        store.group(key)?
+    } else {
+        None
+    };
     let mut kept = Vec::new();
     for receiver in store.pending_receivers(key, message_id)? {
-        if may_receive(store, config, &receiver, exempt)? {
+        if may_receive(store, config, &receiver, exempt)?
+            && group.as_ref().is_none_or(|g| g.members.contains(&receiver))
+        {
             kept.push(receiver);
         } else {
             store.receiver_done(&receiver, message_id)?;
@@ -1173,6 +1183,45 @@ mod tests {
     }
 
     #[test]
+    fn someone_no_longer_in_the_group_gets_only_what_says_so() {
+        let (_dir, store) = store();
+        let config = Config::from(ConfigEnvironment::Production);
+        for id in [MEMBER, OTHER] {
+            contact(
+                &store,
+                id,
+                pc::AcquaintanceLevel::Direct,
+                pc::ActivityState::Active,
+            );
+        }
+        // OTHER left or was removed after these were queued.
+        let key = group(&store, &[MEMBER], false);
+        let both = [MEMBER.to_owned(), OTHER.to_owned()];
+
+        store.set_pending_receivers(&key, 1, &both).unwrap();
+        assert_eq!(
+            group_receivers(&store, &config, &key, 1, false, true).unwrap(),
+            vec![MEMBER]
+        );
+        assert_eq!(store.pending_receivers(&key, 1).unwrap(), vec![MEMBER]);
+
+        // An empty setup, say.
+        store.set_pending_receivers(&key, 2, &both).unwrap();
+        assert_eq!(
+            group_receivers(&store, &config, &key, 2, true, false).unwrap(),
+            vec![MEMBER, OTHER]
+        );
+
+        // The group is gone: what is left is the farewell, by the key alone.
+        store.delete_group(&key).unwrap();
+        store.set_pending_receivers(&key, 3, &both).unwrap();
+        assert_eq!(
+            group_receivers(&store, &config, &key, 3, true, true).unwrap(),
+            vec![MEMBER, OTHER]
+        );
+    }
+
+    #[test]
     fn a_group_change_received_as_leader_is_reflected_and_its_new_members_looked_up() {
         use libthreema::model::message::{
             GroupMessageBody, GroupSetupMessage, IncomingGroupMessageBody,
@@ -1349,7 +1398,7 @@ mod tests {
         // A group-name, say: the blocked member stays in step, the revoked one is gone.
         store.set_pending_receivers(&key, 1, &all).unwrap();
         assert_eq!(
-            group_receivers(&store, &config, &key, 1, true).unwrap(),
+            group_receivers(&store, &config, &key, 1, true, true).unwrap(),
             vec![MEMBER, OTHER]
         );
         assert_eq!(
@@ -1360,7 +1409,7 @@ mod tests {
         // A text queued before the block: off the list, so it doesn't wait for them.
         store.set_pending_receivers(&key, 2, &all).unwrap();
         assert_eq!(
-            group_receivers(&store, &config, &key, 2, false).unwrap(),
+            group_receivers(&store, &config, &key, 2, false, true).unwrap(),
             vec![MEMBER]
         );
         assert_eq!(store.pending_receivers(&key, 2).unwrap(), vec![MEMBER]);
@@ -1368,7 +1417,7 @@ mod tests {
         // Nobody left: the caller counts it as sent.
         settings(&store, &json!({ "blockedContacts": [MEMBER, OTHER] }));
         assert!(
-            group_receivers(&store, &config, &key, 2, false)
+            group_receivers(&store, &config, &key, 2, false, true)
                 .unwrap()
                 .is_empty()
         );

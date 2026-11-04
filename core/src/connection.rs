@@ -1317,6 +1317,7 @@ impl<'a> Session<'a> {
             key,
             message_id,
             body.is_exempt_from_blocking(),
+            !goes_to_non_members(body),
         )
         .map_err(protocol_error)?;
         // Before the members: our own other devices want it even when there are none — a notes
@@ -3165,6 +3166,16 @@ impl<'a> Session<'a> {
     }
 }
 
+/// Group messages that aren't for the members: to say that someone is out of the group (leave,
+/// empty setup), or to the creator, who needn't be listed in a damaged group (sync request).
+fn goes_to_non_members(body: &GroupMessageBody) -> bool {
+    match body {
+        GroupMessageBody::Leave(_) | GroupMessageBody::SyncRequest(_) => true,
+        GroupMessageBody::Setup(setup) => setup.members.is_empty(),
+        _ => false,
+    }
+}
+
 /// Messages that distribute the user profile (nickname, picture) to their receivers.
 fn distributes_profile(body: &GroupMessageBody) -> bool {
     matches!(
@@ -4102,6 +4113,23 @@ mod sync_order_tests {
             tx,
             awaiting_ack: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_farewells_and_sync_requests_go_to_non_members() {
+        use libthreema::model::message::{GroupLeaveMessage, GroupSyncRequestMessage};
+        let setup = |members| GroupMessageBody::Setup(GroupSetupMessage { members });
+        assert!(goes_to_non_members(&GroupMessageBody::Leave(
+            GroupLeaveMessage
+        )));
+        assert!(goes_to_non_members(&GroupMessageBody::SyncRequest(
+            GroupSyncRequestMessage
+        )));
+        assert!(goes_to_non_members(&setup(vec![])));
+        assert!(!goes_to_non_members(&setup(vec![CREATOR.parse().unwrap()])));
+        assert!(!goes_to_non_members(&GroupMessageBody::Text(TextMessage {
+            text: "hi".into()
+        })));
     }
 
     #[test]
