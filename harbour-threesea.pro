@@ -16,6 +16,14 @@ isEmpty(RUST_TRIPLE): RUST_TRIPLE = x86_64-unknown-linux-gnu
 CORE_LIB = $$PWD/target/$$RUST_TRIPLE/release/libthreesea_core.a
 !exists($$CORE_LIB): error("Missing $$CORE_LIB - run scripts/build-core.sh first")
 
+# Hardening beyond the SDK's optflags (plain -fstack-protector, no RELRO flags): full RELRO for the
+# binary, which parses network data and media through native libraries, the stronger stack
+# protection, and checked libc calls also where optflags don't reach (the AEC wrapper below). The
+# core (scripts/build-core.sh) and the bundled echo canceller (rpm/harbour-threesea.spec) get the same.
+HARDENING_FLAGS = -fstack-protector-strong -D_FORTIFY_SOURCE=2
+QMAKE_CXXFLAGS += $$HARDENING_FLAGS
+QMAKE_LFLAGS += -Wl,-z,relro,-z,now
+
 QT += dbus multimedia network sensors
 
 INCLUDEPATH += $$PWD/core/include
@@ -120,7 +128,7 @@ full {
     AEC_SOURCES = bridge/aec/echocanceller.cpp
     aec.input = AEC_SOURCES
     aec.output = ${QMAKE_FILE_BASE}.o
-    aec.commands = $$QMAKE_CXX -c -std=c++17 -O2 -fPIC $$WAP_CFLAGS ${QMAKE_FILE_IN} -o ${QMAKE_FILE_OUT}
+    aec.commands = $$QMAKE_CXX -c -std=c++17 -O2 -fPIC $$HARDENING_FLAGS $$WAP_CFLAGS ${QMAKE_FILE_IN} -o ${QMAKE_FILE_OUT}
     aec.variable_out = OBJECTS
     QMAKE_EXTRA_COMPILERS += aec
     LIBS += $$system($$WAP_PC --static --libs webrtc-audio-processing-2)

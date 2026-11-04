@@ -67,6 +67,18 @@ docker run --rm -v $PWD/RPMS:/rpms:ro harbour-threesea-sdk:5.1.0.11 \
 Enable developer mode, then `scp RPMS/harbour-threesea-*.aarch64.rpm defaultuser@<phone>:` and
 `devel-su pkcon install-local harbour-threesea-*.rpm` (or `rpm -U`).
 
+## Hardening
+
+Full RELRO for the binary (`-Wl,-z,relro,-z,now`), and `-fstack-protector-strong
+-D_FORTIFY_SOURCE=2` for all C and C++ we compile: the bridge and the AEC wrapper
+(`harbour-threesea.pro`), webrtc-audio-processing (`rpm/harbour-threesea.spec`) and the bundled
+SQLCipher (`scripts/build-core.sh`). Check a build with `readelf -d` on the binary (`BIND_NOW`, flag
+`NOW`) and `readelf -l` (`GNU_RELRO`), `nm -D` for `__stack_chk_fail` and `__*_chk`, and `-O2` in
+the bridge's compile lines of the build log. rpm's `%build` starts with `CFLAGS` and `CXXFLAGS`
+exported as `%{optflags}`, and `%qmake5` uses them for the bridge: the spec adds to them for the
+`meson setup` command alone. Replacing them loses `-O2` and the target's CPU flags, and the library
+then doesn't compile on i486, whose SSE comes from there.
+
 ## Gotchas
 
 - Opening the repo in RustRover while rustup installs the pinned toolchain can corrupt the

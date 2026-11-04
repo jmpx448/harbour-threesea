@@ -42,7 +42,9 @@ export "CARGO_TARGET_${TRIPLE_ENV}_LINKER=$WRAP"
 TRIPLE_US=$(echo "$TRIPLE" | tr '-' '_')
 export "CC_$TRIPLE_US=$WRAP"
 export "AR_$TRIPLE_US=/opt/cross/bin/${GCC%gcc}ar"
-# Bundled SQLCipher builds against the target's OpenSSL (libcrypto).
+# Bundled SQLCipher is the core's C code: the hardening flags the Rust around it doesn't need.
+export "CFLAGS_$TRIPLE_US=-fstack-protector-strong -D_FORTIFY_SOURCE=2"
+# It builds against the target's OpenSSL (libcrypto).
 case "$ARCH" in aarch64) LIBDIR=usr/lib64 ;; *) LIBDIR=usr/lib ;; esac
 export OPENSSL_INCLUDE_DIR="$SYSROOT/usr/include" OPENSSL_LIB_DIR="$SYSROOT/$LIBDIR"
 export PROTOC="${PROTOC:-$("$ROOT/scripts/fetch-protoc.sh")}"

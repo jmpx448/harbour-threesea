@@ -81,6 +81,11 @@ Threema Shop. Not affiliated with or supported by Threema AG.
 %define rust_triple i686-unknown-linux-gnu
 %endif
 %if %{with full}
+# On top of what rpm has exported (%%{optflags}: the optimisation and the target's CPU, which also
+# selects SSE on i486 and NEON on armv7hl), for this command alone: %%qmake5 below takes $CXXFLAGS
+# for the bridge.
+CFLAGS="$CFLAGS -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
+CXXFLAGS="$CXXFLAGS -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
 meson setup target/wap-build third_party/webrtc-audio-processing --prefix=$PWD/target/wap \
     --libdir=lib --default-library=static --buildtype=release
 meson install -C target/wap-build
