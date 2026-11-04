@@ -1,0 +1,475 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+import QtQuick 2.6
+import Sailfish.Silica 1.0
+
+// One scenario per process: steps with the time to wait after each.
+QtObject {
+    id: root
+
+    readonly property var stack: window.pageStack
+    property int failures: 0
+    property int step: 0
+
+    readonly property var backend: fakes.backend
+    readonly property var calls: fakes.calls
+    readonly property var voice: fakes.voicePlayer
+
+    function names() {
+        var list = []
+        stack.find(function(page) {
+            list.unshift(page.objectName)
+            return false
+        })
+        return list.join(" ")
+    }
+    function page(name) {
+        return stack.find(function(p) { return p.objectName === name })
+    }
+    function check(what, actual, expected) {
+        if (String(actual) === String(expected)) return
+        console.warn("FAILED", scenario, what, "got:", actual, "expected:", expected)
+        failures = failures + 1
+    }
+    function checkStack(expected) {
+        check("stack", names(), expected)
+    }
+    function push(url, properties, animated) {
+        return stack.push(Qt.resolvedUrl(url), properties || {},
+                          animated ? PageStackAction.Animated : PageStackAction.Immediate)
+    }
+    function unlock() {
+        window.lockPage.unlocked("1234")
+    }
+
+    // The usual start: ready, with a lock (or without) as the core reports it.
+    function ready(appLock, graceSecs) {
+        harness.setActive(true)
+        backend.results["lockStatus"] = { lock: { appLock: appLock, graceSecs: graceSecs || 0, keyboard: false } }
+        backend.unlockedAtStart = true
+        backend.state = "ready"
+    }
+
+    readonly property var scenarios: ({
+        // Leaving during a page transition: the lock comes anyway.
+        lockDuringTransition: [
+            [function() { ready(true) }, 100],
+            [function() {
+                push("pages/PlainPage.qml", {}, true)
+                check("transition running", stack.busy, true)
+                window.lockNow()
+                check("locked", window.locked, true)
+            }, 200],
+            [function() { checkStack("conversations plain unlock") }, 0],
+        ],
+        // What the cover's new message action, or any late reply, does to the stack.
+        lockPagePopped: [
+            [function() {
+                ready(true)
+            }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                checkStack("conversations unlock")
+                stack.pop(page("conversations"), PageStackAction.Immediate)
+            }, 200],
+            [function() {
+                checkStack("conversations unlock")
+                check("still locked", window.locked, true)
+                unlock()
+            }, 100],
+            [function() {
+                checkStack("conversations")
+                check("unlocked", window.locked, false)
+            }, 0],
+        ],
+        // A plain push from a late reply: gone again, and one PIN is enough.
+        pagePushedOverLock: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { push("pages/PlainPage.qml") }, 200],
+            [function() {
+                checkStack("conversations unlock")
+                unlock()
+            }, 100],
+            [function() {
+                checkStack("conversations")
+                check("unlocked", window.locked, false)
+            }, 0],
+        ],
+        // The same with a call's page over the lock: that one stays.
+        pagePushedOverCallOverLock: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                calls.identity = "ABCD1234"
+                calls.state = "incoming"
+            }, 700],
+            [function() { push("pages/PlainPage.qml") }, 800],
+            [function() {
+                checkStack("conversations unlock call")
+                check("locked", window.locked, true)
+            }, 0],
+        ],
+        // The directory's reply to a link comes after the lock: nothing moves, it waits for the PIN.
+        linkWhileLocking: [
+            [function() {
+                backend.results["parseLink"] = { action: "add", identity: "ABCD1234" }
+                ready(true)
+            }, 100],
+            [function() {
+                backend.hold("addContact")
+                window.openLink("https://threema.id/ABCD1234", false)
+            }, 50],
+            [function() {
+                window.lockNow()
+                backend.release("addContact")
+            }, 200],
+            [function() {
+                checkStack("conversations unlock")
+                check("kept", window.pendingLink, "https://threema.id/ABCD1234")
+                unlock()
+            }, 500],
+            [function() {
+                checkStack("conversations contact")
+                check("done", window.pendingLink, "")
+            }, 0],
+        ],
+        // Tapped in a message: after the PIN the contact opens over the chat being read, which
+        // stays open.
+        linkFromMessageWhileLocking: [
+            [function() {
+                backend.results["parseLink"] = { action: "add", identity: "ABCD1234" }
+                ready(true)
+            }, 100],
+            [function() { push("pages/ChatPage.qml", { identity: "EFGH5678" }) }, 50],
+            [function() {
+                backend.hold("addContact")
+                window.openLink("https://threema.id/ABCD1234", true)
+            }, 50],
+            [function() {
+                window.lockNow()
+                backend.release("addContact")
+            }, 200],
+            [function() {
+                checkStack("conversations chat unlock")
+                unlock()
+            }, 900],
+            [function() {
+                checkStack("conversations chat contact")
+                check("done", window.pendingLink, "")
+            }, 0],
+        ],
+        chatTappedWhileLocked: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                fakes.dbus.openChatRequested("ABCD1234")
+                checkStack("conversations unlock")
+                unlock()
+            }, 500],
+            [function() { checkStack("conversations chat") }, 0],
+        ],
+        shareWhileLocked: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                window.pendingShare = { files: [], text: "hello" }
+                window.showShare()
+                checkStack("conversations unlock")
+                unlock()
+            }, 500],
+            [function() {
+                checkStack("conversations share")
+                check("text", page("share").text, "hello")
+            }, 0],
+        ],
+        // The license refused under the lock: the lock stays over the license page, and a new key
+        // doesn't ask twice.
+        licenseRefused: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { backend.state = "needsLicense" }, 300],
+            [function() {
+                checkStack("license unlock")
+                check("locked", window.locked, true)
+                unlock()
+            }, 100],
+            [function() {
+                checkStack("license")
+                backend.state = "ready"
+            }, 800],
+            [function() {
+                checkStack("conversations")
+                check("not locked again", window.locked, false)
+            }, 0],
+        ],
+        // Started with the license refused: the stored key is behind the PIN too.
+        licenseRefusedAtStart: [
+            [function() {
+                backend.results["lockStatus"] = { lock: { appLock: true, graceSecs: 0, keyboard: false } }
+                backend.state = "needsLicense"
+            }, 300],
+            [function() {
+                checkStack("license unlock")
+                unlock()
+            }, 100],
+            [function() {
+                checkStack("license")
+                backend.state = "ready"
+            }, 800],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // An import ending behind the lock: the result waits for the PIN.
+        importBehindLock: [
+            [function() { ready(true) }, 100],
+            [function() { push("pages/DataBackupImportPage.qml", { filePath: "/x", password: "x" }) }, 100],
+            [function() {
+                window.lockNow()
+                page("").finish({}, "")
+            }, 400],
+            [function() {
+                checkStack("conversations  unlock")
+                unlock()
+            }, 400],
+            [function() { checkStack("conversations backupResult") }, 0],
+        ],
+        // A call ending behind the lock leaves no page behind.
+        callEndsBehindLock: [
+            [function() { ready(true) }, 100],
+            [function() {
+                calls.identity = "ABCD1234"
+                calls.state = "active"
+            }, 700],
+            [function() {
+                checkStack("conversations call")
+                window.lockNow()
+            }, 50],
+            [function() {
+                checkStack("conversations call unlock")
+                calls.state = "ended"
+                calls.state = "idle"
+            }, 200],
+            [function() {
+                checkStack("conversations call unlock")
+                unlock()
+            }, 500],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // Under the lock the running call's state changes push no second page.
+        callChangesBehindLock: [
+            [function() { ready(true) }, 100],
+            [function() {
+                calls.identity = "ABCD1234"
+                calls.state = "connecting"
+            }, 700],
+            [function() { window.lockNow() }, 50],
+            [function() { calls.state = "active" }, 300],
+            [function() {
+                checkStack("conversations call unlock")
+                unlock()
+            }, 100],
+            [function() { checkStack("conversations call") }, 0],
+        ],
+        // A call coming in while locked goes over the lock; afterwards the PIN is still asked.
+        callOverLock: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                calls.identity = "ABCD1234"
+                calls.state = "incoming"
+            }, 700],
+            [function() {
+                checkStack("conversations unlock call")
+                calls.state = "ended"
+                calls.state = "idle"
+            }, 500],
+            [function() {
+                checkStack("conversations unlock")
+                check("locked", window.locked, true)
+            }, 0],
+        ],
+        // A tap during a call: the call stays, the chat opens afterwards.
+        tapDuringCall: [
+            [function() { ready(false) }, 100],
+            [function() {
+                calls.identity = "ABCD1234"
+                calls.state = "active"
+            }, 700],
+            [function() {
+                fakes.dbus.openChatRequested("EFGH5678")
+                window.openLink("https://threema.id/ABCD1234", false)
+            }, 500],
+            [function() {
+                checkStack("conversations call")
+                check("chat waits", window.pendingChat, "EFGH5678")
+                calls.state = "ended"
+            }, 800],
+            [function() {
+                check("opened", names().indexOf("call"), -1)
+                check("nothing waits", window.pendingChat + window.pendingLink, "")
+            }, 0],
+        ],
+        // Anything else popping a running call's page: it comes back.
+        callPagePopped: [
+            [function() { ready(false) }, 100],
+            [function() {
+                calls.identity = "ABCD1234"
+                calls.state = "active"
+            }, 700],
+            [function() { stack.pop(page("conversations"), PageStackAction.Immediate) }, 800],
+            [function() { checkStack("conversations call") }, 0],
+        ],
+        // A private chat from the contacts, without any app lock.
+        privateChatClosed: [
+            [function() { ready(false) }, 100],
+            [function() {
+                push("pages/ContactsPage.qml")
+                push("pages/ChatPage.qml", { identity: "ABCD1234", isPrivate: true })
+                push("pages/PlainPage.qml")
+                push("pages/ChatPage.qml", { identity: "EFGH5678", isPrivate: true })
+                window.lockNow()
+                checkStack("conversations contacts")
+            }, 0],
+        ],
+        privateChatClosedDuringTransition: [
+            [function() { ready(false) }, 100],
+            [function() {
+                push("pages/ChatPage.qml", { identity: "ABCD1234", isPrivate: true })
+                push("pages/PlainPage.qml", {}, true)
+                window.lockNow()
+            }, 300],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // With a lock as well: the chat doesn't come back after the PIN.
+        privateChatUnderLock: [
+            [function() { ready(true) }, 100],
+            [function() {
+                push("pages/ChatPage.qml", { identity: "ABCD1234", isPrivate: true })
+                window.lockNow()
+                checkStack("conversations unlock")
+                unlock()
+            }, 100],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // A running call's page survives closing the private chat beneath it.
+        privateChatUnderCall: [
+            [function() { ready(false) }, 100],
+            [function() {
+                push("pages/ChatPage.qml", { identity: "ABCD1234", isPrivate: true })
+                calls.identity = "ABCD1234"
+                calls.state = "active"
+            }, 700],
+            [function() { window.lockNow() }, 700],
+            [function() { checkStack("conversations call") }, 0],
+        ],
+        // The grace time runs out while away.
+        graceRunsOut: [
+            [function() { ready(true, 1) }, 100],
+            [function() {
+                voice.active = true
+                voice.messageId = 7
+                voice.playing = true
+                harness.setActive(false)
+                check("not yet", window.locked, false)
+                backend.sent = []
+            }, 1300],
+            [function() {
+                check("locked while away", window.locked, true)
+                checkStack("conversations unlock")
+                check("the core locked", backend.sent.indexOf("lock") >= 0, true)
+                check("voice plays on", voice.playing, true)
+                check("not stopped", voice.stops, 0)
+                voice.playing = false
+            }, 1300],
+            [function() {
+                check("paused while locked: gone", voice.active, false)
+                harness.setActive(true)
+            }, 100],
+            [function() { checkStack("conversations unlock") }, 0],
+        ],
+        // Coming back in time.
+        backWithinGrace: [
+            [function() { ready(true, 1) }, 100],
+            [function() {
+                voice.active = true
+                voice.messageId = 7
+                voice.playing = true
+                harness.setActive(false)
+            }, 300],
+            [function() { harness.setActive(true) }, 1200],
+            [function() {
+                check("not locked", window.locked, false)
+                checkStack("conversations")
+                check("voice untouched", voice.stops, 0)
+            }, 0],
+        ],
+        // Immediately: locked on leaving, and what plays stops.
+        graceImmediately: [
+            [function() { ready(true, 0) }, 100],
+            [function() {
+                voice.active = true
+                voice.messageId = 7
+                voice.playing = true
+                harness.setActive(false)
+                check("locked at once", window.locked, true)
+                checkStack("conversations unlock")
+                check("voice stopped", voice.playing, false)
+            }, 0],
+        ],
+        // The store fails after the passphrase: the failure shows.
+        failsAfterPassphrase: [
+            [function() { backend.state = "locked" }, 100],
+            [function() {
+                checkStack("unlock")
+                backend.state = "starting"
+            }, 100],
+            [function() {
+                checkStack("unlock")
+                backend.errorText = "store"
+                backend.state = "error"
+            }, 800],
+            [function() { checkStack("") }, 0],
+        ],
+        // A failure of a running core with the lock up: no PIN page for a dead core.
+        failsWhileLocked: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                backend.errorText = "store"
+                backend.state = "error"
+            }, 800],
+            [function() {
+                checkStack("")
+                check("no lock", window.locked, false)
+            }, 0],
+        ],
+    })
+
+    readonly property var runner: Timer {
+        id: runner
+        running: true
+        interval: 300
+        onTriggered: {
+            // For the test script: which scenarios there are.
+            if (scenario === "--list") {
+                console.warn("SCENARIOS", Object.keys(root.scenarios).join(" ")) // log-ok: the names of this file's scenarios
+                harness.finish(0)
+                return
+            }
+            var steps = root.scenarios[scenario]
+            if (!steps) {
+                console.warn("no such scenario:", scenario)
+                harness.finish(2)
+                return
+            }
+            if (root.step >= steps.length) {
+                harness.finish(root.failures > 0 ? 1 : 0)
+                return
+            }
+            var current = steps[root.step]
+            root.step = root.step + 1
+            current[0]()
+            runner.interval = Math.max(current[1], 1)
+            runner.restart()
+        }
+    }
+}

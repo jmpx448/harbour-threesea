@@ -9,7 +9,7 @@
 #   lints, tests   cargo clippy (no warnings; twice, the emulator's `demo` feature too),
 #                  cargo test
 #   advisories     cargo audit, if installed
-#   libthreema     its library tests, and the list models' and GIF decoder's tests in the SDK
+#   libthreema     its library tests, and the list models', GIF decoder's and app lock's tests in the SDK
 #                  if its image is there (--full only: they take a while)
 # --quick: private data, logging and format only (the pre-commit hook, scripts/hooks).
 set -eu
@@ -90,6 +90,8 @@ if $full; then
         scripts/test-models.sh >/dev/null 2>&1 || fail "list models (scripts/test-models.sh)"
         step "GIF decoder (SDK)"
         scripts/test-gifdecoder.sh >/dev/null 2>&1 || fail "GIF decoder (scripts/test-gifdecoder.sh)"
+        step "app lock (SDK)"
+        scripts/test-lockstate.sh >/dev/null 2>&1 || fail "app lock (scripts/test-lockstate.sh)"
     fi
     step "libthreema"
     CARGO_TARGET_DIR="$PWD/target" cargo test -q --manifest-path third_party/libthreema/Cargo.toml \

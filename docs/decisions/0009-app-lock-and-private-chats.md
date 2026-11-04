@@ -65,3 +65,18 @@ other. The lock no longer records anything about the key (`keyEncrypted` removed
 key is encrypted is what Secrets holds (the bridge keeps the encrypted key to check the passphrase
 before changing or removing it). The keypad/keyboard kind of the passphrase is read from the
 stored blob. Minimum length stays 8 (Android's master key passphrase).
+
+## Update 2026-11-04: the lock is a state, the page follows it
+
+The lock used to be just its page: any pop or replace could remove it, and whether it was due was
+only decided when the app came back. Now `window.locked` stands from the moment the app locks
+until the PIN was accepted, and `settleStack()` (`qml/harbour-threesea.qml`) keeps the page on top,
+also after a transition or when anything else took it away. The license page goes under it, since
+it shows the stored key. Links, notifications and shares wait until after the PIN.
+
+The grace time runs on a timer while away, so the cover, the media controls and the private chats
+close when it ends; coming back and each background wake-up also compare the clock, because timers
+sleep with the device. A voice message playing at that moment plays to its end without the name
+and nothing follows it (with the phone in a pocket it would otherwise end after the grace time);
+coming back past the grace time stops it, and "Immediately" stops it on leaving. A running call's
+page is the one page allowed above the lock: it shows only who calls.

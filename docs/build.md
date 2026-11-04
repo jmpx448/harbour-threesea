@@ -31,8 +31,10 @@ cargo test -- --ignored              # live tests against the real Threema serve
 ```
 
 All checks in one go (what CI is to run): `scripts/check.sh` (private data, logging rules,
-format, clippy, tests, `cargo audit` if installed); `--full` adds libthreema's tests, `--quick`
-does only the first three. `git config core.hooksPath scripts/hooks` runs the quick checks on
+format, clippy, tests, `cargo audit` if installed); `--full` adds libthreema's tests and the
+tests in the SDK, `--quick` does only the first three. `scripts/test-lockstate.sh` runs the real
+window QML on the real Silica with a fake backend and no window system (`tests/lockstate`): the
+app lock, calls and the page stack, one scenario per process, no device or emulator needed. `git config core.hooksPath scripts/hooks` runs the quick checks on
 what is about to be committed, before every commit. The private-data check reads
 `.local/private-patterns` (local, ignored by git: one extended regex per line, e.g. test
 credentials) and reports only file names, never the match.

@@ -382,3 +382,32 @@ address only.
    - Expect: the same notice.
 8. With no network, pull to refresh.
    - Expect: an error notice.
+
+## V. The app lock
+
+Settings → Security → App lock on, with a PIN. `tests/lockstate` covers the page stack without a
+device; what is left here is the real cover, the real window manager and the real sleep.
+
+1. Lock after "Immediately". Put the app aside and look at the cover.
+   - Expect: no + on the cover, and no name. Tap the cover: the PIN page.
+2. Lock after "30 seconds". Put the app aside for a minute, with the screen on, and look at the
+   cover without opening the app.
+   - Expect: no + and no name once the 30 seconds are over.
+3. The same, with the phone sleeping for ten minutes and the screen locked, then wake it.
+   - Expect: no name on the cover at the latest when you come back to the app, and with "Keep
+     running in the background" on already within five minutes.
+4. Play a long voice message, put the app aside and lock the phone.
+   - Expect: it plays on past the 30 seconds, without the chat's name on the lock screen. Pause
+     it there: the controls go away after a second.
+5. Lock after "30 seconds", put the app aside for a minute, open https://threema.id/ with a
+   made-up ID in the browser.
+   - Expect: the PIN page stays up, and after the PIN the contact (or the error) shows.
+6. During a call (Full), tap a message's notification.
+   - Expect: the call stays on screen, a short notice says the chat opens when the call is over,
+     and it does.
+7. During a call with lock "Immediately": put the app aside, hang up on the cover, come back and
+   enter the PIN.
+   - Expect: the chat list or the chat, no empty call page.
+8. App lock switched off, but with a PIN set for the private chats. Mark a chat private, open it
+   from the contacts, enter the PIN and put the app aside past the grace time.
+   - Expect: coming back, the chat is closed.
