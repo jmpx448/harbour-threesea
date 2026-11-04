@@ -786,6 +786,9 @@ pub enum Command {
     WebAcceptCertificate {
         session: i64,
     },
+    WebDeclineCertificate {
+        session: i64,
+    },
     WebRemoveServer {
         host: String,
     },
@@ -2040,6 +2043,7 @@ impl App {
             Command::WebStop { session } => Ok(self.web_stop(session)),
             Command::WebDelete { session } => self.web_delete(session),
             Command::WebAcceptCertificate { session } => self.web_accept_certificate(session),
+            Command::WebDeclineCertificate { session } => Ok(self.web_decline_certificate(session)),
             Command::WebRemoveServer { host } => self.web_remove_server(&host),
             Command::GifFavourites => self.gif_favourites_json(),
             Command::RecentEmoji => self.recent_emoji_json(),

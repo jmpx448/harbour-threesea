@@ -1263,3 +1263,94 @@ fn web_allowed_server_can_be_removed() {
         true
     );
 }
+
+/// A changed certificate reported for this session's running task.
+async fn web_certificate_changed(app: &mut App, session: i64, spki: &str) {
+    let (_rx, task) = app.web_test_session(session);
+    app.on_web_event((
+        task,
+        FromWeb::CertificateChanged {
+            session,
+            spki: spki.into(),
+        },
+    ))
+    .await;
+    app.on_web_event((
+        task,
+        FromWeb::Ended {
+            session,
+            delete: false,
+            error: Some(WebFailure::CertificateChanged),
+        },
+    ))
+    .await;
+}
+
+/// A freshly scanned session is deleted when it ends, before the user answers: the new pin must
+/// still reach the store, or every further scan runs into the same dead end.
+#[tokio::test(flavor = "current_thread")]
+async fn web_new_certificate_of_a_scanned_session_is_pinned() {
+    let (_dir, mut app) = fixture();
+    let host = "web.example.org";
+    app.store.set_web_host(host, Some("old")).unwrap();
+    let id = stored_web_session(&app, 1, host, false);
+    web_certificate_changed(&mut app, id, "new").await;
+    assert!(app.store.web_session(id).unwrap().is_none());
+    assert_eq!(
+        app.web_sessions_json().unwrap()["certificates"],
+        json!([{ "id": id, "host": host }])
+    );
+
+    let answer = app.web_accept_certificate(id).unwrap();
+
+    assert_eq!(answer["scanAgain"], true);
+    assert_eq!(app.store.web_host(host).unwrap(), Some(Some("new".into())));
+    assert_eq!(app.web_sessions_json().unwrap()["certificates"], json!([]));
+    assert!(matches!(
+        app.web_accept_certificate(id),
+        Err(ApiError::WebSessionNotFound)
+    ));
+}
+
+/// A session the browser stored connects again with the new pin, and the answer also goes for
+/// the same server's other sessions.
+#[tokio::test(flavor = "current_thread")]
+async fn web_new_certificate_of_a_stored_session_connects_again() {
+    let (_dir, mut app) = fixture();
+    let host = "web.example.org";
+    app.store.set_web_host(host, Some("old")).unwrap();
+    let id = stored_web_session(&app, 1, host, true);
+    let other = stored_web_session(&app, 2, host, true);
+    web_certificate_changed(&mut app, id, "new").await;
+    web_certificate_changed(&mut app, other, "new").await;
+    // Nothing here waits, so the session's task never gets to connect.
+    let answer = tokio::task::LocalSet::new()
+        .run_until(async { app.web_accept_certificate(id) })
+        .await
+        .unwrap();
+    assert_eq!(answer, json!({}));
+    assert_eq!(app.store.web_host(host).unwrap(), Some(Some("new".into())));
+    assert!(app.web.running.contains_key(&id));
+    assert!(app.web.changed.is_empty());
+}
+
+/// Declining keeps the pin and leaves nothing waiting, and a question doesn't outlive the
+/// session's next attempt or reach a later session with the same ID.
+#[tokio::test(flavor = "current_thread")]
+async fn web_declined_certificate_is_forgotten() {
+    let (_dir, mut app) = fixture();
+    let host = "web.example.org";
+    app.store.set_web_host(host, Some("old")).unwrap();
+    let id = stored_web_session(&app, 1, host, true);
+    web_certificate_changed(&mut app, id, "new").await;
+    app.web_decline_certificate(id);
+    assert_eq!(app.store.web_host(host).unwrap(), Some(Some("old".into())));
+    assert!(app.web.changed.is_empty());
+
+    web_certificate_changed(&mut app, id, "new").await;
+    tokio::task::LocalSet::new()
+        .run_until(async { app.web_start(id) })
+        .await
+        .unwrap();
+    assert!(app.web.changed.is_empty());
+}

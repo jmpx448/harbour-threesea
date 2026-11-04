@@ -66,6 +66,13 @@ void DBusInterface::showUpdate()
     emit showUpdateRequested();
 }
 
+void DBusInterface::showWebSessions()
+{
+    emit called();
+    emit activateRequested();
+    emit showWebSessionsRequested();
+}
+
 void DBusInterface::activate(const QStringList &urls)
 {
     emit called();

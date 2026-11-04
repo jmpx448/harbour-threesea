@@ -8,20 +8,59 @@ import "../../components/Format.js" as Fmt
 // the code web.threema.ch shows; tap a session to connect or disconnect it; long press to remove.
 Page {
     id: page
+    // The window opens this page from its notifications, unless it is on top already.
+    objectName: "webSessions"
     allowedOrientations: Orientation.All
 
     property var sessions: []
     // The self-hosted servers the user allowed.
     property var servers: []
+    // New certificates of those servers, waiting for the user's word.
+    property var certificates: []
+    property bool reviewing: false
 
     function load(done) {
         backend.call("webSessions", {}, function(ok, result) {
             if (ok) {
                 page.sessions = result.sessions
                 page.servers = result.servers
+                page.certificates = result.certificates
             }
             if (done) done()
         })
+    }
+
+    function reviewCertificate() {
+        var certificate = certificates[0]
+        reviewing = true
+        window.webCertificateSeen()
+        var answered = function() {
+            page.reviewing = false
+            page.load()
+        }
+        var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"), { host: certificate.host })
+        dialog.accepted.connect(function() {
+            backend.call("webAcceptCertificate", { session: certificate.id }, function(ok, result, kind, message) {
+                if (!ok) {
+                    Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                } else if (result.scanAgain) {
+                    //% "The new certificate is trusted. Scan the code in the browser again to connect it."
+                    Notices.show(qsTrId("threesea-la-web-scan-again"), Notice.Long, Notice.Center)
+                }
+                answered()
+            })
+        })
+        dialog.rejected.connect(function() {
+            backend.call("webDeclineCertificate", { session: certificate.id }, answered)
+        })
+    }
+    // One at a time, and only once this page is on top: a push may have woken the session, or
+    // the scanner may still be closing.
+    Timer {
+        running: page.certificates.length > 0 && !page.reviewing
+                 && page.status === PageStatus.Active && !pageStack.busy
+        interval: 100
+        onTriggered: page.reviewCertificate()
     }
 
     // A session the browser never stored is gone from the list by now.
@@ -74,12 +113,7 @@ Page {
                 var failed = data.state === "stopped" && data.error && data.error !== "certificateChanged"
                 page.load(failed ? function() { page.showDisconnected(data.id) } : undefined)
             } else if (name === "webCertificateChanged") {
-                var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"), { host: data.host })
-                dialog.accepted.connect(function() {
-                    backend.call("webAcceptCertificate", { session: data.id }, function(ok, result, kind, message) {
-                        if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                    })
-                })
+                page.load()
             }
         }
     }

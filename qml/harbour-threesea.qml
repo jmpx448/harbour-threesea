@@ -586,7 +586,8 @@ ApplicationWindow {
     Timer {
         // After start-up or a page transition.
         running: !window.stackHeld && (window.pendingLink.length > 0 || window.pendingChat.length > 0
-                                       || window.pendingUpdate || window.pendingShare !== null)
+                                       || window.pendingUpdate || window.pendingWebSessions
+                                       || window.pendingShare !== null)
         interval: 300
         repeat: true
         onTriggered: {
@@ -597,6 +598,7 @@ ApplicationWindow {
                 window.pendingChat = ""
                 window.pendingShare = null
                 window.pendingUpdate = false
+                window.pendingWebSessions = false
                 return
             }
             // Also wait while the stored data is locked (passphrase).
@@ -613,6 +615,10 @@ ApplicationWindow {
             if (window.pendingUpdate && backend.state === "ready") {
                 window.pendingUpdate = false
                 window.showUpdate()
+            }
+            if (window.pendingWebSessions && backend.state === "ready") {
+                window.pendingWebSessions = false
+                window.showWebSessions()
             }
         }
     }
@@ -769,6 +775,37 @@ ApplicationWindow {
             "method": "showUpdate",
             "arguments": []
         }]
+    }
+
+    // A self-hosted Threema Web server shows a new certificate, perhaps for a session a push woke
+    // while Threema Web's page is closed: that page asks about it.
+    Notification {
+        id: webCertificateNotification
+        appName: "Threesea"
+        appIcon: "harbour-threesea"
+        //% "Threema Web server has a new certificate"
+        summary: qsTrId("threesea-la-web-certificate-notification")
+        //% "Tap to decide whether to trust it."
+        body: qsTrId("threesea-la-web-certificate-notification-body")
+        previewSummary: summary
+        previewBody: body
+        remoteActions: [window.dbusAction("default", "", "showWebSessions", "")]
+    }
+    function webCertificateSeen() {
+        webCertificateNotification.close()
+    }
+
+    // Starting, locked or mid-transition: once that is over (the timer below).
+    property bool pendingWebSessions: false
+    function showWebSessions() {
+        if (backend.state !== "ready" || shownState !== "ready" || window.stackHeld || pageStack.busy) {
+            pendingWebSessions = true
+            return
+        }
+        var top = pageStack.currentPage
+        if (!top || top.objectName !== "webSessions") {
+            pageStack.push(Qt.resolvedUrl("pages/settings/WebSessionsPage.qml"))
+        }
     }
 
     // Once, after setup, in builds for GitHub: may Threesea check for updates?
@@ -1426,6 +1463,7 @@ ApplicationWindow {
         }
         onActivateRequested: window.activate()
         onShowUpdateRequested: window.showUpdate()
+        onShowWebSessionsRequested: window.showWebSessions()
         onOpenUrlRequested: window.openLink(url, false)
         onMarkReadRequested: window.notificationAction({ identity: identity })
         onReplyRequested: window.notificationAction({ identity: identity, text: text })
@@ -1486,6 +1524,12 @@ ApplicationWindow {
                 window.licenseNotification()
             } else if (name === "deviceCookieChanged") {
                 deviceCookieNotification.publish()
+            } else if (name === "webCertificateChanged") {
+                // Not when the page is there to ask at once.
+                var page = pageStack.currentPage
+                if (Qt.application.state !== Qt.ApplicationActive || !page || page.objectName !== "webSessions") {
+                    webCertificateNotification.publish()
+                }
             } else if (name === "updateAvailable") {
                 //% "Threesea %1 is available"
                 updateNotification.summary = qsTrId("threesea-la-update-notification").arg(data.version)

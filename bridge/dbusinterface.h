@@ -66,6 +66,8 @@ public slots:
     Q_SCRIPTABLE void background();
     // The update notification's action: show the window with the update (ADR 0014).
     Q_SCRIPTABLE void showUpdate();
+    // The Threema Web notifications' action: show the window with the sessions page.
+    Q_SCRIPTABLE void showWebSessions();
 #ifdef THREESEA_DEMO
     // Emulator builds only (`qmake CONFIG+=demo`): fill the store with made-up chats, or take
     // them away again (scripts/emulator-demo.sh). Not compiled into any build for a phone, so
@@ -84,6 +86,7 @@ signals:
     void replyLost();
     void activateRequested();
     void showUpdateRequested();
+    void showWebSessionsRequested();
     void openUrlRequested(const QString &url);
 #ifdef THREESEA_DEMO
     void demoDataRequested(bool remove);

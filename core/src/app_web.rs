@@ -3,8 +3,8 @@
 //! (WebSocket, SaltyRTC responder, ARP connection layer), and the app's answers to the browser.
 //!
 //! Commands: `webSessions`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
-//! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`, `webRemoveServer
-//! {host}`. Events: `webSession {id, state, error?}`
+//! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`, `webDeclineCertificate
+//! {session}`, `webRemoveServer {host}`. Events: `webSession {id, state, error?}`
 //! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
 //! code), `webCertificateChanged {id, host}`.
 
@@ -143,6 +143,13 @@ impl StopReason {
     }
 }
 
+/// A self-hosted server's new certificate, waiting for the user's word. It has to name the host
+/// itself: a session the browser never stored is gone by the time the user answers.
+struct ChangedCertificate {
+    host: String,
+    spki: String,
+}
+
 /// A session's task as the core knows it.
 struct Running {
     tx: UnboundedSender<ToWeb>,
@@ -176,8 +183,8 @@ const EVENT_QUEUE: usize = 16;
 pub(crate) struct WebSessions {
     running: HashMap<i64, Running>,
     next_task: u64,
-    /// A changed certificate per session, until the user accepts it.
-    changed: HashMap<i64, String>,
+    /// A changed certificate per session, until the user answers or the session starts again.
+    changed: HashMap<i64, ChangedCertificate>,
     /// What each connected browser subscribed to (app_web_data).
     pub(crate) subscriptions: HashMap<i64, crate::app_web_data::Subscriptions>,
     /// `request/blob`s waiting for a download.
@@ -248,7 +255,8 @@ impl App {
     }
 
     /// `webSessions`: `{sessions: [{id, host, selfHosted, persistent, client, createdAt,
-    /// lastConnection, state}], servers: [host]}` (`servers`: the self-hosted ones allowed).
+    /// lastConnection, state}], servers: [host], certificates: [{id, host}]}` (`servers`: the
+    /// self-hosted ones allowed; `certificates`: new ones waiting for the user's word).
     pub(crate) fn web_sessions_json(&self) -> Result<serde_json::Value, ApiError> {
         let sessions: Vec<serde_json::Value> = self
             .store
@@ -265,7 +273,17 @@ impl App {
                 value
             })
             .collect();
-        Ok(json!({ "sessions": sessions, "servers": self.store.web_hosts()? }))
+        let mut certificates: Vec<_> = self.web.changed.iter().collect();
+        certificates.sort_unstable_by_key(|(id, _)| **id);
+        let certificates: Vec<serde_json::Value> = certificates
+            .into_iter()
+            .map(|(id, changed)| json!({ "id": id, "host": changed.host }))
+            .collect();
+        Ok(json!({
+            "sessions": sessions,
+            "servers": self.store.web_hosts()?,
+            "certificates": certificates,
+        }))
     }
 
     /// `webPair {qr, allowHost}`: a new session from Threema Web's code. A server outside
@@ -420,28 +438,47 @@ impl App {
                 self.web_delete(session.id)?;
             }
         }
+        // Also those of sessions that are gone already.
+        self.web.changed.retain(|_, changed| changed.host != host);
         self.store.remove_web_host(host)?;
         self.web_sessions_json()
     }
 
-    /// `webAcceptCertificate {session}`: the self-hosted server's new certificate is fine; pin it and
-    /// connect again.
+    /// `webAcceptCertificate {session}`: the self-hosted server's new certificate is fine; pin it
+    /// and connect again. `{scanAgain: true}`: the session was one the browser hadn't stored, so
+    /// its auth token is gone with it and the next connection needs the browser's code again.
     pub(crate) fn web_accept_certificate(
         &mut self,
         id: i64,
     ) -> Result<serde_json::Value, ApiError> {
-        let spki = self
+        let changed = self
             .web
             .changed
             .remove(&id)
             .ok_or(ApiError::WebSessionNotFound)?;
-        let session = self
+        self.store
+            .set_web_host(&changed.host, Some(&changed.spki))?;
+        // The pin is the server's, so this answers for its other sessions too.
+        self.web
+            .changed
+            .retain(|_, other| other.host != changed.host);
+        if self
             .store
             .web_session(id)?
-            .ok_or(ApiError::WebSessionNotFound)?;
-        self.store.set_web_host(&session.host, Some(&spki))?;
-        self.start_web_session(id, None)?;
-        Ok(json!({}))
+            .is_some_and(|session| session.persistent && session.host == changed.host)
+        {
+            self.start_web_session(id, None)?;
+            Ok(json!({}))
+        } else {
+            Ok(json!({ "scanAgain": true }))
+        }
+    }
+
+    /// `webDeclineCertificate {session}`: not this certificate; the pin stays, and the session
+    /// asks again the next time it connects.
+    pub(crate) fn web_decline_certificate(&mut self, id: i64) -> serde_json::Value {
+        self.web.changed.remove(&id);
+        json!({})
     }
 
     fn start_web_session(
@@ -456,6 +493,9 @@ impl App {
             .store
             .web_session(id)?
             .ok_or(ApiError::WebSessionNotFound)?;
+        // Any question about an earlier attempt, perhaps of a session that had this ID before,
+        // is asked anew if it still applies.
+        self.web.changed.remove(&id);
         // Threema's hosts: their built-in pins only. Others: allowed by the user, pinned on
         // first use.
         let pin = if qr::is_threema_host(&session.host) {
@@ -568,14 +608,22 @@ impl App {
                 let _ = self.store.set_web_host(&host, Some(&spki));
             }
             FromWeb::CertificateChanged { session, spki } => {
-                let host = self
+                let Some(host) = self
                     .store
                     .web_session(session)
                     .ok()
                     .flatten()
                     .map(|stored| stored.host)
-                    .unwrap_or_default();
-                self.web.changed.insert(session, spki);
+                else {
+                    return;
+                };
+                self.web.changed.insert(
+                    session,
+                    ChangedCertificate {
+                        host: host.clone(),
+                        spki,
+                    },
+                );
                 let _ = self.media_events.send(CoreEvent::Call(
                     json!({ "event": "webCertificateChanged", "id": session, "host": host }),
                 ));

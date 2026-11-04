@@ -29,7 +29,8 @@ The QR code of a self-hosted Threema Web can name any signalling server.
   certificate pins; a mismatch fails, and there is no way to override it. Any other host (a
   self-hosted Threema Web) is shown to the user once; if allowed, it is added to an allowlist and
   its certificate is pinned on first use. A later connection with a different certificate asks
-  again: accept the new certificate (and pin it) or abort.
+  again: accept the new certificate (and pin it) or abort. A session the browser never stored is
+  gone by then, so accepting pins the certificate and asks for the code again.
   The sessions page lists the allowed servers; removing one takes its permission, its pin and its
   sessions, and the next code naming it asks again.
 - New dependency: `rmpv` (msgpack values), pinned; SaltyRTC and its crypto are our own code on
