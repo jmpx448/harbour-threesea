@@ -1296,6 +1296,7 @@ impl App {
         let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let done = std::rc::Rc::new(std::cell::Cell::new(false));
         self.android_export = Some(std::rc::Rc::clone(&done));
+        self.android_export_cancel = std::sync::Arc::default();
         let job = crate::android_backup::export::Export {
             store: std::rc::Rc::clone(&self.store),
             media: std::sync::Arc::clone(&self.media),
@@ -1306,6 +1307,7 @@ impl App {
             password,
             keep,
             done,
+            cancel: std::sync::Arc::clone(&self.android_export_cancel),
         };
         tokio::task::spawn_local(job.run());
         Ok(json!({ "started": true }))
@@ -1371,6 +1373,7 @@ mod export_tests {
             password: Zeroizing::new("round-trip-pw".into()),
             keep,
             done: std::rc::Rc::new(std::cell::Cell::new(false)),
+            cancel: std::sync::Arc::default(),
         };
         job.run().await;
         let mut done = Value::Null;

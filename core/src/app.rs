@@ -1226,6 +1226,8 @@ pub struct App {
     pub(crate) android_import: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// A running Android-format export's done flag.
     pub(crate) android_export: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    /// Tells the running export to give up (the ID is being removed).
+    pub(crate) android_export_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// When the pending Safe import was last tried automatically (reconnect rate limit).
     pub(crate) last_import_attempt: Option<tokio::time::Instant>,
     /// When this device last looked whether it is alone in its device group.
@@ -1296,6 +1298,7 @@ impl App {
             pending_ui_events: Vec::new(),
             android_import: None,
             android_export: None,
+            android_export_cancel: Arc::default(),
             last_import_attempt: None,
             last_group_check: None,
             unlocked: false,

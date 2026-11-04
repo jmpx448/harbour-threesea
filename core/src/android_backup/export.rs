@@ -9,7 +9,15 @@
 //! than 1:1 calls, and polls in distribution lists (Android links polls to a contact or a
 //! group only). Nonces go out hashed, exactly like Android's (`nonces.rs`).
 
-use std::{io::Write as _, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    io::Write as _,
+    path::PathBuf,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -98,18 +106,36 @@ pub struct Export {
     pub keep: usize,
     /// Set true when the job ends (one export at a time).
     pub done: Rc<std::cell::Cell<bool>>,
+    /// Set true to give up (the ID is being removed): the partial file goes, nothing else is
+    /// touched. Atomic: the blocking thread writing an entry looks at it too.
+    pub cancel: Arc<AtomicBool>,
 }
 
 type Writer = zip::ZipWriter<std::fs::File>;
+
+/// How much of an entry is compressed before looking at the cancel flag again.
+const ADD_CHUNK_BYTES: usize = 1 << 20;
+
+fn export_cancelled() -> ApiError {
+    ApiError::Internal("backup cancelled".into())
+}
 
 impl Export {
     fn emit(&self, value: Value) {
         let _ = self.events.send(CoreEvent::AndroidBackup(value));
     }
 
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     pub async fn run(self) {
         let result = self.run_inner().await;
         self.done.set(true);
+        if self.cancelled() {
+            tracing::info!("Android-format backup cancelled");
+            return;
+        }
         match result {
             Ok((summary, path)) => {
                 tracing::info!(
@@ -176,6 +202,14 @@ impl Export {
             .map_err(|e| ApiError::Internal(e.to_string()))?,
             Err(error) => Err(error),
         };
+        // Last look: past this the archive is a finished backup.
+        let finished = finished.and_then(|()| {
+            if self.cancelled() {
+                Err(export_cancelled())
+            } else {
+                Ok(())
+            }
+        });
         if let Err(error) = finished {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
@@ -219,15 +253,27 @@ impl Export {
         name: String,
         data: Zeroizing<Vec<u8>>,
     ) -> Result<Writer, ApiError> {
+        if self.cancelled() {
+            return Err(export_cancelled());
+        }
         let password = self.password.clone();
+        let cancel = Arc::clone(&self.cancel);
         tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
                 .with_aes_encryption(zip::AesMode::Aes256, &password);
             writer
                 .start_file(name, options)
-                .and_then(|()| writer.write_all(&data).map_err(zip::result::ZipError::Io))
                 .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+            // In pieces: one big video must not hold up whoever waits for the cancel.
+            for piece in data.chunks(ADD_CHUNK_BYTES) {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(export_cancelled());
+                }
+                writer
+                    .write_all(piece)
+                    .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+            }
             Ok(writer)
         })
         .await
