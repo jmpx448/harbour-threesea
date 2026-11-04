@@ -903,6 +903,8 @@ Page {
         // Another message was started by hand during the chime: that one goes first.
         onMessageIdChanged: if (voicePlayer.messageId >= 0) page.voiceQueueNext = -1
         onFinished: {
+            // The next one waits behind the lock.
+            if (window.locked) return
             var index = page.indexOfLocalId(message)
             if (index <= 0) return
             var next = messages.get(index - 1)

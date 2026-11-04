@@ -192,15 +192,36 @@ ApplicationWindow {
             // The license page shows the stored key: behind the lock like the rest.
             if ((backend.state !== "ready" && backend.state !== "needsLicense")
                     || !window.lockInfo || !window.lockInfo.lock) return
+            var grace = window.lockInfo.lock.graceSecs * 1000
             if (Qt.application.state !== Qt.ApplicationActive) {
-                if (window.leftAt === 0) window.leftAt = Date.now()
-                // Immediately: hide everything before the switcher's snapshot.
-                if (window.lockInfo.lock.graceSecs === 0) window.lockNow()
+                if (window.leftAt > 0) return
+                window.leftAt = Date.now()
+                if (grace === 0) {
+                    // Immediately: hide everything before the switcher's snapshot.
+                    window.lockNow()
+                } else {
+                    graceTimer.interval = grace
+                    graceTimer.restart()
+                }
             } else {
+                graceTimer.stop()
                 var away = window.leftAt > 0 ? Date.now() - window.leftAt : 0
                 window.leftAt = 0
-                if (away > window.lockInfo.lock.graceSecs * 1000) window.lockNow()
+                if (away > grace) window.lockNow()
             }
+        }
+    }
+    // The grace time is over while away: the cover, the media controls and the private chats
+    // close now, not only when the app comes back. Timers sleep with the device, so coming back
+    // still compares the clock, and so does every wake-up (wakeJob).
+    Timer {
+        id: graceTimer
+        onTriggered: window.lockNow(true)
+    }
+    function checkGrace() {
+        if (graceTimer.running && Date.now() - leftAt >= graceTimer.interval) {
+            graceTimer.stop()
+            lockNow(true)
         }
     }
 
@@ -216,16 +237,24 @@ ApplicationWindow {
         })
     }
 
-    function lockNow() {
+    // `letVoiceFinish`: the grace time ran out while away. A voice message being listened to
+    // (phone in the pocket, screen locked) plays to its end, without the name; nothing follows it.
+    function lockNow(letVoiceFinish) {
         backend.call("lock")
         closePrivate()
         if (lockInfo && lockInfo.lock && lockInfo.lock.appLock) {
             // What's playing is behind the lock too. Only then: this also runs on coming back
             // after the grace time without any app lock (a private chat stops with its page).
-            voicePlayer.stop()
+            if (!letVoiceFinish || !voicePlayer.playing) voicePlayer.stop()
             videoPlayer.stop()
             showLock()
         }
+    }
+    // Paused on the lock screen while locked: gone, so that it can't be started again from there.
+    Timer {
+        interval: 1000
+        running: window.locked && voicePlayer.active && !voicePlayer.playing
+        onTriggered: voicePlayer.stop()
     }
 
     function showStatePage() {
@@ -378,6 +407,7 @@ ApplicationWindow {
         enabled: backend.state === "ready" && backend.keepRunning
         frequency: BackgroundJob.FiveMinutes
         onTriggered: {
+            window.checkGrace()
             backend.call("reconnect")
             finishLater.restart()
         }
