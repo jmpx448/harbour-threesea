@@ -376,6 +376,23 @@ impl App {
         Ok(self.store.chat_notifications_json(&key))
     }
 
+    /// Hidden private chats stay out, as their chats do (ADR 0009).
+    pub(crate) fn chat_tones(&self) -> Result<Value, ApiError> {
+        let mut tones = self.store.chat_tones()?;
+        tones.retain(|conversation, _| self.check_readable(conversation).is_ok());
+        Ok(json!({ "tones": tones }))
+    }
+
+    pub(crate) fn set_chat_tone(
+        &mut self,
+        identity: &str,
+        tone: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let (key, _) = self.readable_conversation(identity)?;
+        self.store.set_chat_tone(&key, tone)?;
+        Ok(json!({}))
+    }
+
     pub(crate) async fn add_contact(&mut self, identity: &str) -> Result<Value, ApiError> {
         let id = contacts::parse_identity(identity)
             .ok_or(ApiError::IdentityFormat)?

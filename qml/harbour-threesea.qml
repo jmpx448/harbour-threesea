@@ -544,6 +544,7 @@ ApplicationWindow {
     Component {
         id: notificationComponent
         Notification {
+            id: chatNotification
             property string identity
             // A new token for every new notification; one taken over after a restart keeps its
             // chat's token, which lipstick still holds (bridge/dbusinterface.h).
@@ -551,6 +552,7 @@ ApplicationWindow {
             property string token
             // Once both are set (a binding would run before them and renew too early).
             Component.onCompleted: token = dbus.actionToken(identity, renewToken)
+            onClosed: window.notificationClosed(identity, chatNotification)
             appName: "Threesea"
             appIcon: "harbour-threesea"
             // Lipstick delivers actions via D-Bus only (bridge/dbusinterface.cpp).
@@ -694,10 +696,26 @@ ApplicationWindow {
             if (!identity && actions.length > 0 && actions[0].method === "activate") identity = "private"
             if (identity && !notifications[identity]) {
                 notifications[identity] = n
+                watchClosed(identity, n)
             } else {
                 n.close()
             }
         }
+        dbus.retainTokens(Object.keys(notifications))
+    }
+
+    // Dismissed on the lock screen or the events view, or one of its actions tapped, which then
+    // reaches us after this: its token stays for a little while. Not when a newer notification
+    // has taken its place.
+    function notificationClosed(identity, n) {
+        if (notifications[identity] === n) {
+            delete notifications[identity]
+            dbus.releaseToken(identity)
+        }
+    }
+
+    function watchClosed(identity, n) {
+        n.closed.connect(function() { window.notificationClosed(identity, n) })
     }
 
     function publish(identity, title, sender, message) {
@@ -773,7 +791,14 @@ ApplicationWindow {
         if (n) {
             n.close()
             delete notifications[identity]
+            dbus.forgetToken(identity)
         }
+    }
+
+    // The ID was removed from this device.
+    function forgetNotifications() {
+        Object.keys(notifications).forEach(clearNotification)
+        dbus.forgetAllTokens()
     }
 
     onOpenChatChanged: if (openChat.length > 0) clearNotification(openChat)
@@ -919,7 +944,6 @@ ApplicationWindow {
             window.clearNotification(identity)
         }
         onReplyRequested: {
-            if (text.trim().length === 0) return
             backend.call("sendText", { identity: identity, text: text }, function(ok, result, kind, message) {
                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             })

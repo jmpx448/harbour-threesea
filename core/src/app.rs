@@ -540,6 +540,17 @@ pub enum Command {
         policy: Option<String>,
         until: Option<i64>,
     },
+    /// The chats with a tone of their own, `{tones: {key: path}}`; hidden private chats not.
+    ChatTones,
+    /// A chat's own tone; `tone` empty or none: the tone of all chats.
+    SetChatTone {
+        identity: String,
+        tone: Option<String>,
+    },
+    /// Tones the app kept in its settings file before: taken over whatever the lock's state.
+    ImportChatTones {
+        tones: std::collections::HashMap<String, String>,
+    },
     /// A Threema link (`threema://…`, `threema.id/…`): what it asks for (`links::Link`).
     ParseLink {
         url: String,
@@ -1716,6 +1727,16 @@ impl App {
                 policy,
                 until,
             } => self.set_chat_notifications(&identity, policy.as_deref(), until),
+            Command::ChatTones => self.chat_tones(),
+            Command::SetChatTone { identity, tone } => {
+                self.set_chat_tone(&identity, tone.as_deref())
+            }
+            Command::ImportChatTones { tones } => {
+                for (conversation, tone) in &tones {
+                    self.store.set_chat_tone(conversation, Some(tone))?;
+                }
+                Ok(json!({}))
+            }
             Command::ParseLink { url } => crate::links::parse(&url)
                 .map(|link| link.to_json())
                 .ok_or(ApiError::LinkInvalid),
@@ -2709,6 +2730,20 @@ mod tests {
                 "a command takes `{field}`, which the request's own fields overwrite"
             );
         }
+    }
+
+    /// A deleted chat's notification goes too, and with it the token of its actions.
+    #[test]
+    fn deleting_a_chat_tells_the_ui() {
+        let (_dir, mut app) = app();
+        let mut events = app.take_media_events().unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        app.delete_conversation("ABCD1234").unwrap();
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "conversationRead");
+        assert_eq!(event["identity"], "ABCD1234");
     }
 
     /// Exporting a chat: the messages as text and, if wanted, the media that are here

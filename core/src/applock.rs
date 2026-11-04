@@ -474,6 +474,17 @@ mod app_tests {
                 "{command}"
             );
         }
+        // Tones: the hidden chat's stays hidden and can't be changed; the old settings file's
+        // are taken over all the same (and then the file holds no chat any more).
+        let tone = json!({"cmd": "setChatTone", "identity": "BBBBBBBB", "tone": "/b.ogg"});
+        assert_eq!(error(&call(&mut app, tone).await), "locked");
+        let tone = json!({"cmd": "setChatTone", "identity": "CCCCCCCC", "tone": "/c.ogg"});
+        assert!(call(&mut app, tone).await["ok"].as_bool().unwrap());
+        let import = json!({"cmd": "importChatTones", "tones": {"BBBBBBBB": "/b.ogg"}});
+        assert!(call(&mut app, import).await["ok"].as_bool().unwrap());
+        let tones = call(&mut app, json!({"cmd": "chatTones"})).await;
+        assert_eq!(tones["result"]["tones"], json!({"CCCCCCCC": "/c.ogg"}));
+
         let search = json!({"cmd": "searchMessages", "query": "secret"});
         let results = call(&mut app, search.clone()).await;
         assert_eq!(results["result"]["results"].as_array().unwrap().len(), 1);
@@ -493,6 +504,11 @@ mod app_tests {
 
         let open = json!({"cmd": "unlock", "pin": "2468", "privateChats": true});
         assert_eq!(call(&mut app, open).await["result"]["unlocked"], true);
+        let tones = call(&mut app, json!({"cmd": "chatTones"})).await;
+        assert_eq!(
+            tones["result"]["tones"],
+            json!({"BBBBBBBB": "/b.ogg", "CCCCCCCC": "/c.ogg"})
+        );
         let list = call(&mut app, private).await;
         assert_eq!(list["result"]["conversations"][0]["identity"], "BBBBBBBB");
         let results = call(&mut app, search).await;

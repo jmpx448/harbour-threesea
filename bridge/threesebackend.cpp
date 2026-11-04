@@ -443,18 +443,50 @@ QString ThreeseBackend::toneTitle(const QString &path) const
 
 QString ThreeseBackend::chatTone(const QString &identity) const
 {
-    return QSettings().value(QStringLiteral("chatTones/") + identity).toString();
+    return m_chatTones.value(identity).toString();
 }
 
 void ThreeseBackend::setChatTone(const QString &identity, const QString &path)
 {
-    QSettings settings;
     if (path.isEmpty()) {
-        settings.remove(QStringLiteral("chatTones/") + identity);
+        m_chatTones.remove(identity);
     } else {
-        settings.setValue(QStringLiteral("chatTones/") + identity, path);
+        m_chatTones.insert(identity, path);
     }
+    call(QStringLiteral("setChatTone"),
+         QVariantMap{{QStringLiteral("identity"), identity}, {QStringLiteral("tone"), path}}, QJSValue());
     emit notificationSettingsChanged();
+}
+
+void ThreeseBackend::refreshChatTones()
+{
+    request(QStringLiteral("chatTones"), QVariantMap(), [this](bool ok, const QVariantMap &result, const QString &) {
+        if (ok) {
+            m_chatTones = result.value(QStringLiteral("tones")).toMap();
+        }
+    });
+}
+
+void ThreeseBackend::importOldChatTones()
+{
+    // Until 0.2.0 the tones lay in the plain settings file, under the chat's ID or group key.
+    const QString group = QStringLiteral("chatTones");
+    QSettings settings;
+    settings.beginGroup(group);
+    QVariantMap tones;
+    for (const QString &identity : settings.allKeys()) {
+        tones.insert(identity, settings.value(identity));
+    }
+    settings.endGroup();
+    if (tones.isEmpty()) {
+        return;
+    }
+    request(QStringLiteral("importChatTones"), QVariantMap{{QStringLiteral("tones"), tones}},
+            [group](bool ok, const QVariantMap &, const QString &) {
+                if (ok) {
+                    QSettings().remove(group);
+                }
+            });
 }
 
 void ThreeseBackend::addGifFavourite(const QString &path, const QJSValue &callback)
@@ -739,6 +771,11 @@ void ThreeseBackend::call(const QString &command, const QVariantMap &args, const
     QByteArray json = QJsonDocument(request).toJson(QJsonDocument::Compact);
     threesea_core_send(m_core, json.constData());
     json.fill('\0'); // may contain a license key or password
+    // Private chats' tones are known only while those chats are readable.
+    if (command == QLatin1String("unlock") || command == QLatin1String("lock")
+        || command == QLatin1String("setPrivate")) {
+        refreshChatTones();
+    }
 }
 
 void ThreeseBackend::refresh()
@@ -886,6 +923,10 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         if (m_state == QLatin1String("ready") && previous != m_state) {
             refreshContacts();
             reportNetwork();
+            importOldChatTones();
+            refreshChatTones();
+        } else if (m_state != QLatin1String("ready")) {
+            m_chatTones.clear();
         }
     }
     // Conversation list replies (from any caller) keep the unread total and the name on the cover

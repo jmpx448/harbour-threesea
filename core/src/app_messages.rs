@@ -1035,6 +1035,10 @@ impl App {
         let store = Rc::clone(&self.store);
         self.media
             .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
+        // The UI takes its notification, and with it the notification's action token, away.
+        let _ = self.media_events.send(crate::providers::CoreEvent::Call(
+            json!({ "event": "conversationRead", "identity": id }),
+        ));
         Ok(json!({}))
     }
 }

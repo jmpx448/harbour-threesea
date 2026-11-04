@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 
 // Session-bus entry points for notification actions (lipstick only delivers them via D-Bus):
 // "default" calls openChat() so tapping opens the chat, "reply" (an input action: lipstick appends
@@ -16,8 +17,13 @@
 // Reply and Mark as read change the chat, and any process on the session bus can call this
 // service; lipstick makes the call through a short-lived helper (mliteremoteaction) the sandbox
 // can't identify. So these two actions carry a random token per chat, put into the
-// notification by us and kept in the app's private settings; calls without it are ignored
-// (security audits 2026-10-27, S07/D04).
+// notification by us and kept in the app's private settings, under a salted hash of the chat, so
+// that the file doesn't list who one chats with; calls without it are ignored (security audits
+// 2026-10-27, S07/D04). A token lives as long as its notification and a grace period after it:
+// lipstick closes the notification first and makes the call afterwards, also when that call starts
+// the app. Using it for an action ends it at once. The salt is in the same file and IDs are few
+// enough to try them all offline, so the hash only stops casual reading of the file: what limits
+// a copy of the file is that it holds just the chats with a token alive at that moment.
 class DBusInterface : public QObject
 {
     Q_OBJECT
@@ -32,9 +38,24 @@ public:
     bool registerOnBus();
     // The token for this chat's notification actions; `renew`: a new one (a new notification).
     Q_INVOKABLE QString actionToken(const QString &identity, bool renew = false);
+    // The chat's notification closed, by a tap on one of its actions as well: the grace starts.
+    Q_INVOKABLE void releaseToken(const QString &identity);
+    // We took the chat's notification away ourselves, so no action can be on its way.
+    Q_INVOKABLE void forgetToken(const QString &identity);
+    // At startup: the chats whose notifications are still there keep their token. For the others
+    // the grace starts, unless it already runs: dismissed while we weren't running, or tapped,
+    // and that tap is what started us.
+    Q_INVOKABLE void retainTokens(const QStringList &identities);
+    // The ID was removed from this device.
+    Q_INVOKABLE void forgetAllTokens();
 
 private:
+    void migrateTokens();
+    // Removes tokens past their grace; the timer comes back for the next one.
+    void pruneTokens();
     bool tokenValid(const QString &identity, const QString &token) const;
+
+    QTimer m_tokenPrune;
 
 public slots:
     Q_SCRIPTABLE void openChat(const QString &identity);

@@ -276,6 +276,8 @@ public:
     // The same for C++ callers (e.g. CallManager): `done(ok, result, errorKind)`.
     using NativeCallback = std::function<void(bool, const QVariantMap &, const QString &)>;
     void request(const QString &command, const QVariantMap &args, NativeCallback done = NativeCallback());
+    void refreshChatTones();
+    void importOldChatTones();
     // This build makes and takes calls (Full, ADR 0012).
     static bool callsSupported();
     // Send a picked file to a contact (`asPhoto`: re-encoded picture with thumbnail, else the
@@ -375,6 +377,8 @@ private:
     // Scaled-down videos waiting for their send to finish (id -> file in the capture cache).
     QHash<quint64, QString> m_tempSources;
     QHash<quint64, NativeCallback> m_nativeCallbacks;
+    // The chats' own tones (from the core, while it runs): the notifications ask for them at once.
+    QVariantMap m_chatTones;
     QSet<quint64> m_statusRequests;
     QString m_state = QStringLiteral("starting");
     QString m_identity;

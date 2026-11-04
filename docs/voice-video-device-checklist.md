@@ -333,6 +333,17 @@ Notifications:
 
 5. Message arrives with the app in the background: tap it; then reply from the notification.
    - Expect: the tap opens that chat; the reply is sent and appears in the chat.
+   - Mark as read from the notification, also with the app in the background.
+     Expect: the chat is read and the notification gone.
+   - Close the app (Full: background running off) with a notification showing, then Reply from
+     it; again with Mark as read.
+     Expect: the app starts without a window, the reply is sent, the chat is read.
+   - Both from the lock screen of a locked phone.
+     Expect: the same after unlocking.
+   - With a notification showing, end the app (`pkill harbour-threesea` over SSH) and open it
+     again, leave it running in the background, wait more than 15 minutes, then Reply from that
+     notification.
+     Expect: the reply is sent.
 
 Threema Web:
 

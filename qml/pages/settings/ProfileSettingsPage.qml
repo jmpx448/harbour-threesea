@@ -75,6 +75,7 @@ Page {
                         //% "Removing ID and data"
                         Remorse.popupAction(page, qsTrId("threesea-la-removing-data"), function() {
                             backend.call("deleteAllData", { pin: pin }, function() {
+                                window.forgetNotifications()
                                 backend.refreshContacts()
                                 backend.refresh()
                             })

@@ -115,6 +115,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_MARKED_UNREAD,
     // 33: per-chat summary (newest message, unread count), kept by triggers
     crate::messages::MIGRATION_CHAT_SUMMARIES,
+    // 34: per-chat notification tones (until now in the plain settings file)
+    crate::chat_notifications::MIGRATION_TONES,
 ];
 
 /// Setting keys.

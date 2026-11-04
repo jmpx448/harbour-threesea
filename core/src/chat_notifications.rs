@@ -21,6 +21,14 @@ pub(crate) const MIGRATION: &str = "
         until         INTEGER
     ) WITHOUT ROWID;";
 
+/// Schema (store migration 34): the sound of a chat. A table of its own: a row in the one above
+/// goes as soon as the chat's notifications are back on, and comes with a policy.
+pub(crate) const MIGRATION_TONES: &str = "
+    CREATE TABLE chat_tones (
+        conversation  TEXT PRIMARY KEY NOT NULL,
+        tone          TEXT NOT NULL
+    ) WITHOUT ROWID;";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     /// No notifications (until a time, if set).
@@ -100,6 +108,30 @@ impl Store {
         Ok(())
     }
 
+    /// `""` or none: the tone of all chats.
+    pub fn set_chat_tone(&self, conversation: &str, tone: Option<&str>) -> Result<(), StoreError> {
+        match tone.filter(|tone| !tone.is_empty()) {
+            Some(tone) => self.conn.execute(
+                "INSERT OR REPLACE INTO chat_tones (conversation, tone) VALUES (?1, ?2)",
+                params![conversation, tone],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM chat_tones WHERE conversation = ?1",
+                [conversation],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// The chats with a tone of their own.
+    pub fn chat_tones(&self) -> Result<std::collections::HashMap<String, String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT conversation, tone FROM chat_tones")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// `{policy: "never"|"mentioned"|null, until: ms|null}` for the UI.
     pub fn chat_notifications_json(&self, conversation: &str) -> Value {
         match self.chat_notifications(conversation).ok().flatten() {
@@ -166,6 +198,27 @@ mod tests {
         );
         store.set_chat_notifications("g:abc", None).unwrap();
         assert_eq!(store.chat_notifications("g:abc").unwrap(), None);
+    }
+
+    #[test]
+    fn tones_are_kept_apart_from_the_mute_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        assert!(store.chat_tones().unwrap().is_empty());
+        store.set_chat_tone("00000BOB", Some("/tone.ogg")).unwrap();
+        store
+            .set_chat_notifications("00000BOB", Some((Policy::Never, None)))
+            .unwrap();
+        store.set_chat_notifications("00000BOB", None).unwrap();
+        assert_eq!(store.chat_tones().unwrap()["00000BOB"], "/tone.ogg");
+        assert_eq!(store.chat_notifications("00000BOB").unwrap(), None);
+        store.set_chat_tone("00000BOB", Some("/other.ogg")).unwrap();
+        assert_eq!(store.chat_tones().unwrap()["00000BOB"], "/other.ogg");
+        store.set_chat_tone("00000BOB", Some("")).unwrap();
+        assert!(store.chat_tones().unwrap().is_empty());
+        store.set_chat_tone("g:abc", Some("/tone.ogg")).unwrap();
+        store.wipe().unwrap();
+        assert!(store.chat_tones().unwrap().is_empty());
     }
 
     #[test]

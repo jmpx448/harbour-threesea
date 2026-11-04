@@ -118,7 +118,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `retryUpload` | `message` (local id) | `{}` |
 | `downloadFile` | `message` (local id) | `{}`; fetch the file (or retry the thumbnail) |
 | `saveFile` | `message` (local id), `directory` (the UI passes `StandardPaths.download`) | `{path}`; decrypted copy outside the encrypted store, sanitised name, " (n)" if taken, an identical existing file is reused |
-| `deleteConversation` | `identity` | `{}` |
+| `deleteConversation` | `identity` | `{}`; also `{"event": "conversationRead", "identity"}`, so the UI takes the notification away |
 | `connectionState` | – | `{state: disconnected\|connecting\|connected}` |
 | `reconnect` | – | `{}`; skip the backoff wait |
 | `searchMessages` | `query` (≥ 2 characters), optional `identity` (one chat) | `{results: [message JSON + snippet (the matching raw text/caption/name), displayName (chat), group, senderName]}`, newest first, at most 100; mentions match by name |
@@ -175,6 +175,10 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `forwardMessage` | `message` (local id), `identity` (target chat) | the new message JSON; texts without their quote, files re-uploaded from the encrypted store with a new key (errors `fileNotDownloaded`, `notForwardable`) |
 | `forwardMessages` | `messages` (local ids, in order), `identity` | `{forwarded, failed}` |
 | `setChatNotifications` | `identity` (ID or group key), `policy` (`never`\|`mentioned`\|null), `until` (ms or null) | `{policy, until}`; also in contact/group JSON as `notifications`, conversations carry `muted`, `messageAdded` events `notify` (the setting allows a notification) |
+| `chatTones` | – | `{tones: {key: path}}`: the chats with a tone of their own, without hidden private chats (the bridge caches these for `alert`) |
+| `setChatTone` | `identity` (ID or group key), `tone` (path, empty or null: the tone of all chats) | `{}`; `locked` for a hidden private chat |
+| `importChatTones` | `tones` `{key: path}` | `{}`; the tones the app kept in its settings file until 0.2.0, also those of hidden private chats |
+| `exportChat` | `identity`, `media`, `directory`, `password?`, `me?`, `offsetMinutes?` | `{path, name, messages, files}`; a non-empty `password` under 8 characters: `passwordTooShort` |
 | `parseLink` | `url` | `{action: contact\|compose\|add\|license, identity, text, key}` or error `linkInvalid` (protocol-notes "Threema links") |
 | `myQrCode` | – | `{text, size, modules}`: `3mid:<ID>,<public key hex>` and its QR modules (`size`² chars `0`/`1`) |
 | `verifyQrCode` | `text` | contact JSON; adds the contact if new, fully verified if the key matches (errors `qrInvalid`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |

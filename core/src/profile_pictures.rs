@@ -750,7 +750,8 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;
+                    "DROP TABLE chat_tones;
+                     DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;
                      DROP TRIGGER messages_search_delete; DROP INDEX messages_mentions;
                      DROP TABLE messages_search; DROP TABLE marked_unread_chats;
                      DROP TRIGGER chat_summaries_insert; DROP TRIGGER chat_summaries_sort;
