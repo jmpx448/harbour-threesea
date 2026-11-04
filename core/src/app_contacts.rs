@@ -660,6 +660,9 @@ impl App {
         .await?;
         match verification {
             Some(id) => {
+                // The server has dropped the old number as of now (Android:
+                // `linkWithMobileNumber`, "it is removed immediately").
+                self.store.delete_setting(keys::LINKED_MOBILE)?;
                 self.store
                     .set_setting(keys::LINKED_MOBILE_PENDING, &format!("{normalized} {id}"))?;
             }

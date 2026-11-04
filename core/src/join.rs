@@ -136,8 +136,9 @@ pub fn profile_sync(store: &Store) -> Result<UserProfile, StoreError> {
             })
         }
     };
+    let (email, mobile) = store.confirmed_links()?;
     let mut links = Vec::new();
-    if let Some(email) = store.setting(keys::LINKED_EMAIL)? {
+    if let Some(email) = email {
         links.push(user_profile::identity_links::IdentityLink {
             r#type: Some(user_profile::identity_links::identity_link::Type::Email(
                 email,
@@ -145,7 +146,7 @@ pub fn profile_sync(store: &Store) -> Result<UserProfile, StoreError> {
             description: String::new(),
         });
     }
-    if let Some(mobile) = store.setting(keys::LINKED_MOBILE)? {
+    if let Some(mobile) = mobile {
         links.push(user_profile::identity_links::IdentityLink {
             r#type: Some(user_profile::identity_links::identity_link::Type::PhoneNumber(mobile)),
             description: String::new(),

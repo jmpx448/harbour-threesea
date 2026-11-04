@@ -777,15 +777,16 @@ impl App {
             .setting(keys::SAFE_PENDING_IMPORT)?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(Value::Null);
+        let (email, mobile) = self.store.confirmed_links()?;
         let mut links = Vec::new();
-        if let Some(mobile) = self.store.setting(keys::LINKED_MOBILE)? {
+        if let Some(mobile) = mobile {
             links.push(backup::Link {
                 kind: "mobile".into(),
                 value: mobile.trim_start_matches('+').to_owned(),
                 name: None,
             });
         }
-        if let Some(email) = self.store.setting(keys::LINKED_EMAIL)? {
+        if let Some(email) = email {
             links.push(backup::Link {
                 kind: "email".into(),
                 value: email,
@@ -1064,6 +1065,41 @@ mod tests {
         damaged[30] ^= 1;
         let error = key.decrypt(&damaged).unwrap_err();
         assert_eq!(ApiError::from(error).kind(), "safeDamaged");
+    }
+
+    #[test]
+    fn only_confirmed_links_leave_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let links = |app: &App| -> Vec<String> {
+            let backup = app.build_backup().unwrap();
+            let synced = crate::join::profile_sync(&app.store)
+                .unwrap()
+                .identity_links
+                .unwrap()
+                .links;
+            assert_eq!(synced.len(), backup.user.links.len(), "the same for both");
+            backup.user.links.into_iter().map(|l| l.value).collect()
+        };
+        app.store
+            .set_setting(keys::LINKED_EMAIL, "ab@example.org")
+            .unwrap();
+        app.store
+            .set_setting(keys::LINKED_MOBILE, "41791234567")
+            .unwrap();
+        assert_eq!(links(&app), ["41791234567", "ab@example.org"]);
+        // Both waiting for their confirmation: neither may go anywhere.
+        app.store
+            .set_setting(keys::LINKED_EMAIL_PENDING, "1")
+            .unwrap();
+        app.store
+            .set_setting(keys::LINKED_MOBILE_PENDING, "41790000000 v1")
+            .unwrap();
+        assert!(links(&app).is_empty());
+        app.store
+            .delete_setting(keys::LINKED_EMAIL_PENDING)
+            .unwrap();
+        assert_eq!(links(&app), ["ab@example.org"]);
     }
 
     #[test]

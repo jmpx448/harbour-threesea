@@ -139,6 +139,10 @@ Not in libthreema (only the URL template); implemented in `core/src/safe/` after
 - Upload policy (`upload_due`): unchanged JSON → refresh after half the retention; changed →
   at most every 23 h; after an error or "Back up now" → immediately. Checked at core start and
   hourly while running. Change detection: SHA-256 of the JSON.
+- Links: only confirmed ones go into a backup, or to a linked device (Android:
+  `LinkingState_LINKED`), since a restore on Android links them again, with a mail or an SMS. An
+  address waiting for its confirmation stays out, and starting a number's change drops the old
+  number at once, as the server does.
 - Restore: license first (Libre), derive, download, decrypt, parse (reject version > 1),
   `identity/fetch_priv` for the server group, keep nickname/links. Contacts, then groups and
   lists, wait in `safe_pending_import` until imported (directory lookups) **and are carried into

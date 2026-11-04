@@ -408,6 +408,21 @@ impl Store {
         Ok(())
     }
 
+    /// The own e-mail address and number as far as they are confirmed: what backups and linked
+    /// devices may hold (Android: only `LinkingState_LINKED`). One still waiting for its
+    /// confirmation may be a typo, and a restore would link it again, with a mail or an SMS.
+    pub fn confirmed_links(&self) -> Result<(Option<String>, Option<String>), StoreError> {
+        let email = match self.setting(keys::LINKED_EMAIL_PENDING)? {
+            Some(_) => None,
+            None => self.setting(keys::LINKED_EMAIL)?,
+        };
+        let mobile = match self.setting(keys::LINKED_MOBILE_PENDING)? {
+            Some(_) => None,
+            None => self.setting(keys::LINKED_MOBILE)?,
+        };
+        Ok((email, mobile))
+    }
+
     /// The own identity, if one exists.
     pub fn identity(&self) -> Result<Option<StoredIdentity>, StoreError> {
         Ok(self

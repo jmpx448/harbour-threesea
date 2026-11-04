@@ -97,7 +97,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `deleteContact` | `identity` | `{}` |
 | `profile` | – | `{identity, nickname, publicKey, linkedEmail, linkedMobile, pictureVersion, pictureShare (everyone\|nobody\|selected), pictureRecipients: [ID]}` |
 | `linkEmail` | `email` ("" unlinks) | profile (`linkedEmail`, `linkedEmailPending` until the link in the e-mail is opened; checked again on `profile` and in maintenance) |
-| `linkMobile` | `number` (with its country code, `+` or `00`; "" unlinks) | profile (`linkedMobilePending`: E.164 without `+` waiting for the SMS code); errors `phoneInvalid` |
+| `linkMobile` | `number` (with its country code, `+` or `00`; "" unlinks) | profile (`linkedMobilePending`: E.164 without `+` waiting for the SMS code; `linkedMobile` is empty meanwhile, as the server has dropped an old number); errors `phoneInvalid` |
 | `normalizeMobile` | `number` | `{number}`: what `linkMobile` would send, E.164 without `+`, or `null` if it can't be linked. No network |
 | `verifyMobile` | `code` | profile (`linkedMobile`); errors `noVerification`, server message for a wrong code |
 | `callMobile` | – | profile; Threema calls and reads the code |
