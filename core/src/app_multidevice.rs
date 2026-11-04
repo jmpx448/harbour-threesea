@@ -20,6 +20,8 @@ const DEVICES_REPLY_LIMIT: Duration = Duration::from_secs(50);
 /// Removing devices: the transaction's start, the list, the mediator's acks; past this the
 /// answer counts as missing, and what the connection still does arrives as an event.
 const DROP_REPLY_LIMIT: Duration = Duration::from_secs(200);
+/// Removing the ID: how long to wait for the device group; past this the ID goes all the same.
+const REMOVAL_DROP_LIMIT: Duration = Duration::from_secs(60);
 /// How often to look whether this device is alone in its group (Android: hourly, and a removal on
 /// another device gives no other signal); a little under the hourly maintenance.
 const ALONE_CHECK_INTERVAL: Duration = Duration::from_secs(50 * 60);
@@ -321,6 +323,22 @@ impl App {
             self.tell_failed_removal(outcome)?;
         }
         self.multi_device_json()
+    }
+
+    /// The ID is being removed: take the linked devices out of the group first (Android's
+    /// `ResetAppTask` does too), because afterwards this phone can't reach them any more. True
+    /// if some may have stayed: no connection, or no answer in time. That doesn't stop the
+    /// removal; the user asked for it and is told.
+    pub(crate) async fn drop_linked_devices_for_removal(&mut self) -> bool {
+        if !matches!(self.store.multi_device(), Ok(Some(_))) {
+            return false;
+        }
+        let dropped = timeout(REMOVAL_DROP_LIMIT, self.drop_from_group(None)).await;
+        let remain = !matches!(dropped, Ok(Ok(_)));
+        if remain {
+            tracing::warn!("removing the ID without dropping the linked devices");
+        }
+        remain
     }
 
     /// The reply can take minutes and the page that asked may be gone by then, so a failed
@@ -851,6 +869,69 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    fn with_identity(app: &App) {
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([7; 32]),
+                server_group: "a".into(),
+            })
+            .unwrap();
+    }
+
+    /// Removing the ID leaves the group first, while the ID is still there for the connection,
+    /// and its mirror stops being used.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_the_id_drops_the_linked_devices_first() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let mut rx = in_a_group(&mut app);
+        app.apply_multi_device();
+        let group = app
+            .store
+            .multi_device()
+            .unwrap()
+            .and_then(|properties| properties.device_group_key())
+            .unwrap()
+            .device_group_id();
+        let store = std::rc::Rc::clone(&app.store);
+        let local = tokio::task::LocalSet::new();
+        let result = local
+            .run_until(async {
+                let connection = tokio::task::spawn_local(async move {
+                    let Some(ToConnection::DropDevices { ids: None, reply }) = rx.recv().await
+                    else {
+                        panic!("no request to remove all the others");
+                    };
+                    assert!(store.identity().unwrap().is_some(), "not wiped yet");
+                    let _ = reply.send(Ok(DropOutcome {
+                        remaining: vec![device(1, true)],
+                        left_group: true,
+                    }));
+                });
+                let result = app.delete_all_data().await.unwrap();
+                connection.await.unwrap();
+                result
+            })
+            .await;
+        assert_eq!(result["linkedDevicesRemain"], false);
+        assert!(app.store.identity().unwrap().is_none());
+        assert!(app.store.multi_device().unwrap().is_none());
+        assert_ne!(crate::media::mirror_device_group(), Some(group));
+    }
+
+    /// Without a connection the ID goes all the same, and the UI gets to say what stayed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_the_id_offline_says_the_devices_stay() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let rx = in_a_group(&mut app);
+        tokio::spawn(offline(rx));
+        let result = app.delete_all_data().await.unwrap();
+        assert_eq!(result["linkedDevicesRemain"], true);
+        assert!(app.store.identity().unwrap().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

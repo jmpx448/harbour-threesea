@@ -1026,6 +1026,13 @@ impl App {
         json!({})
     }
 
+    /// The ID is being removed: the call's state and frame keys go, without the refresh a
+    /// leave asks for (nothing is left to show it).
+    pub(crate) fn group_call_forget(&mut self) {
+        crate::group_call_frames::reset([0; 32]);
+        self.group_call = None;
+    }
+
     fn emit_group_call(&self, event: Value) {
         let _ = self.media_events.send(CoreEvent::Call(event));
     }
@@ -1074,6 +1081,28 @@ mod app_tests {
             },
         );
         assert_eq!(app.group_call_refresh("group"), json!({}));
+    }
+
+    /// The old ID's token would go out with the next ID's requests while it lasts, and its call
+    /// would go on in memory.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_the_id_forgets_the_group_call_and_the_sfu_token() {
+        let (_dir, mut app) = app(true);
+        app.group_call = Some(super::tests::call());
+        app.sfu.borrow_mut().0 = Some((
+            SfuCredentials {
+                sfu_base_url: "https://sfu.example.org".into(),
+                allowed_sfu_hostname_suffixes: Vec::new(),
+                sfu_token: "token".into(),
+                expiration: 3600,
+            },
+            i64::MAX,
+        ));
+
+        app.delete_all_data().await.unwrap();
+
+        assert!(app.group_call.is_none());
+        assert!(app.sfu.borrow().0.is_none());
     }
 
     /// In a call, at the point where the SFU's Hello arrives with `others` participants: what

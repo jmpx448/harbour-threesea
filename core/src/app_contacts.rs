@@ -176,21 +176,43 @@ impl App {
         self.settings_json()
     }
 
-    /// Remove the ID and all data from this device (Android: "Delete ID and data" without
+    /// Remove the ID and all data from this device (Android's `ResetAppTask`, without
     /// revocation). The Threema Safe backup on the server stays and expires by itself.
-    pub(crate) fn delete_all_data(&mut self) -> Result<Value, ApiError> {
+    ///
+    /// The core's part of one ordered wipe (ADR 0018): what runs stops, the device group is
+    /// left while a connection can still do that, the store empties in one transaction, then
+    /// media and logs go and nothing of the old identity stays in memory. If the store refuses,
+    /// the ID is still there and this says so; the core loop then connects again. On success the
+    /// bridge stops the core and replaces the database and its key.
+    ///
+    /// `{linkedDevicesRemain}`: linked devices could not be removed and keep the ID.
+    pub(crate) async fn delete_all_data(&mut self) -> Result<Value, ApiError> {
+        self.stop_backups().await;
+        // Both while the connection can still tell the others.
+        self.call_end_for_removal();
+        self.group_call_forget();
         // Paired browsers belong to this identity: none may carry over to the next one.
         self.web_stop_all();
+        let linked_devices_remain = self.drop_linked_devices_for_removal().await;
         self.stop_connection();
         self.store.wipe()?;
         self.media.remove_all();
         // The next identity starts locked; its private marks wait for its own PIN.
         self.unlocked = false;
         self.update_media_gate();
-        // TURN credentials belong to the deleted identity.
+        // Credentials and links belong to the deleted identity, and the empty store switches
+        // off what was read from it into process-wide state.
         self.turn_servers = None;
+        self.sfu.take();
+        self.pending_link = None;
+        self.last_group_check = None;
+        self.last_import_attempt = None;
+        self.apply_multi_device();
+        contacts::LAST_NAME_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
         tracing::info!("all local data deleted");
-        Ok(json!({}))
+        // Last: anything logged after this would be the first line of the next identity's log.
+        crate::runtime::log_clear(&self.data_dir);
+        Ok(json!({ "linkedDevicesRemain": linked_devices_remain }))
     }
 
     pub(crate) fn contacts_json(&self) -> Result<Value, ApiError> {

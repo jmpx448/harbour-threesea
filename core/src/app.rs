@@ -1571,7 +1571,7 @@ impl App {
             Command::SetSetting { name, value } => self.set_app_setting(&name, value),
             Command::DeleteAllData { pin } => {
                 self.check_pin(pin)?;
-                self.delete_all_data()
+                self.delete_all_data().await
             }
             Command::Conversations { archived, private } => {
                 self.conversations_json(archived, private)

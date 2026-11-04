@@ -390,6 +390,16 @@ pub fn set_mirror(device_group: Option<(&libthreema::common::keys::DeviceGroupKe
     }
 }
 
+/// The device group whose mirror is in use.
+#[cfg(test)]
+pub(crate) fn mirror_device_group() -> Option<[u8; 32]> {
+    MIRROR
+        .read()
+        .ok()?
+        .as_ref()
+        .map(|mirror| mirror.device_group_id)
+}
+
 /// `path` on the mirror (`upload`, `{blob}`, `{blob}/done`) with Android's query parameters,
 /// or `None` without multi-device.
 fn mirror_url(path: &str, scope: BlobScope) -> Option<String> {

@@ -346,13 +346,71 @@ async fn core_commands_respect_hidden_private_chats() {
     assert!(!app.store.message(message.id).unwrap().unwrap().starred);
 }
 
+/// Removing the ID takes its logs and media along, and the old private chats' gate doesn't block
+/// the media of the next ID, whose message ids start over.
+#[tokio::test(flavor = "current_thread")]
+async fn removing_the_id_leaves_no_media_log_or_gate() {
+    let (dir, mut app) = fixture();
+    app.store.set_private("BBBBBBBB", true).unwrap();
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "private words", 1)
+        .unwrap()
+        .unwrap();
+    app.media
+        .write(message.id, MediaPart::File, b"private picture")
+        .unwrap();
+    app.media
+        .write_picture("group:x", b"group picture")
+        .unwrap();
+    std::fs::write(dir.path().join("threesea.log"), b"old lines").unwrap();
+    std::fs::write(dir.path().join("threesea.log.0"), b"older lines").unwrap();
+    app.unlocked = true;
+    app.update_media_gate();
+    app.unlocked = false;
+    app.update_media_gate();
+    assert!(!app.media.shown(message.id));
+
+    app.delete_all_data().await.unwrap();
+
+    assert_eq!(app.media.size(), 0);
+    assert!(app.media.read_picture("group:x").unwrap().is_none());
+    assert!(app.media.shown(message.id), "the gate is gone");
+    assert!(!app.unlocked);
+    assert_eq!(crate::runtime::log_text(dir.path(), usize::MAX), "");
+}
+
+/// The store refuses (a full disk, say): the ID and its media are all still there, the core says
+/// so, and the loop connects again because the connection has stopped.
+#[tokio::test(flavor = "current_thread")]
+async fn removal_that_fails_changes_nothing() {
+    let (_dir, mut app) = fixture();
+    app.store.set_setting("anything", "x").unwrap();
+    app.store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER refuse BEFORE DELETE ON settings
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    app.media.write(1, MediaPart::File, b"picture").unwrap();
+
+    let reply = app
+        .handle(&json!({"id": 1, "cmd": "deleteAllData", "pin": "2468"}).to_string())
+        .await;
+
+    assert!(reply.contains("\"ok\":false"), "{reply}");
+    assert!(app.store.identity().unwrap().is_some());
+    assert!(app.media.size() > 0);
+}
+
 /// S01: deleting the identity ends its browser sessions; nothing of the next identity reaches
 /// them.
 #[tokio::test(flavor = "current_thread")]
 async fn web_sessions_end_with_identity_deletion() {
     let (_dir, mut app) = fixture();
     let mut rx = browser(&mut app);
-    app.delete_all_data().unwrap();
+    app.delete_all_data().await.unwrap();
     assert!(app.web.running.is_empty());
     assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop)));
     app.store

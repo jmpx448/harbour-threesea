@@ -1209,6 +1209,8 @@ mod history_tests {
 }
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How long a running export may take to stop: it looks at the flag every megabyte.
+const EXPORT_STOP_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl App {
     /// `androidBackupExportStatus`: the automatic-backup settings and the last run.
@@ -1313,6 +1315,29 @@ impl App {
         Ok(json!({ "started": true }))
     }
 
+    /// The ID is being removed: no import goes on, and a running export gives up and takes its
+    /// partial file with it. Waits for that: once the core stops the job can't clean up any more,
+    /// and it holds the ID's key and writes to the user's own folder.
+    pub(crate) async fn stop_backups(&mut self) {
+        if let Some(cancel) = &self.android_import {
+            cancel.set(true);
+        }
+        self.android_export_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let Some(done) = self.android_export.clone() else {
+            return;
+        };
+        let finished = tokio::time::timeout(EXPORT_STOP_LIMIT, async {
+            while !done.get() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if finished.is_err() {
+            tracing::warn!("the running backup did not stop in time");
+        }
+    }
+
     /// Called by maintenance: start a scheduled backup when one is due and configured.
     pub(crate) fn android_export_scheduled(&mut self) {
         use crate::store::keys;
@@ -1385,6 +1410,55 @@ mod export_tests {
         }
         assert_eq!(done["ok"], true, "{done}");
         done
+    }
+
+    /// The ID goes while a backup runs: no archive, no partial file, nothing written into the
+    /// emptied store.
+    #[test]
+    fn removing_the_id_stops_a_running_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            &crate::app::StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "test".into(),
+                language: "en".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "test".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "AAAAAAAA".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a".into(),
+            })
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+            app.android_backup_export(
+                Some(folder.path().to_str().unwrap().to_owned()),
+                Some(Zeroizing::new("round-trip-pw".into())),
+            )
+            .unwrap();
+            app.delete_all_data().await.unwrap();
+        });
+        assert!(app.android_export.as_ref().unwrap().get(), "the job ended");
+        let left: Vec<_> = std::fs::read_dir(folder.path()).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+        use crate::store::keys;
+        assert_eq!(app.store.setting(keys::ANDROID_EXPORT_LAST).unwrap(), None);
+        assert_eq!(app.store.setting(keys::ANDROID_EXPORT_ERROR).unwrap(), None);
     }
 
     #[test]

@@ -337,6 +337,15 @@ impl App {
         json!({})
     }
 
+    /// The ID is being removed: whatever call there is ends, the other side is told, and
+    /// nothing of it stays for the next identity's first call.
+    pub(crate) fn call_end_for_removal(&mut self) {
+        let effects = self.calls.hang_up(crate::messages::now_ms());
+        self.apply_call_effects(effects);
+        self.call_patcher = None;
+        self.call_media = CallMedia::default();
+    }
+
     /// `callFailed`: the media side gave up (`reason`: `certificate`, else `connection`).
     pub(crate) fn call_failed(&mut self, call_id: u32, reason: &str) -> Value {
         if self.is_current_call(call_id) {
@@ -773,6 +782,35 @@ mod tests {
             [Signal::Reject { call_id: 7, .. }]
         ));
         assert!(app.call_state()["call"].is_null());
+    }
+
+    /// Removing the ID ends the call, tells the caller and the UI's engine, and the next ID's
+    /// first call isn't refused because of the old one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_the_id_ends_the_call() {
+        let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert!(app.call_patcher.is_some());
+        sent(&mut rx);
+        while events.try_recv().is_ok() {}
+
+        app.delete_all_data().await.unwrap();
+
+        assert!(matches!(
+            sent(&mut rx)[..],
+            [Signal::Reject { call_id: 7, .. }]
+        ));
+        assert!(app.calls.current.is_none());
+        assert!(app.call_patcher.is_none());
+        assert!(
+            call_events(&mut events)
+                .iter()
+                .any(|event| event["event"] == "callEnded"),
+            "the UI is told"
+        );
+        assert!(app.connection.is_none());
     }
 
     #[test]
