@@ -39,6 +39,16 @@ pub(crate) const REACTIONS_COLUMN: &str = "(SELECT json_group_array(json_object(
      'emoji', emoji)) FROM (SELECT sender, emoji FROM reactions WHERE message = id \
      ORDER BY reacted_at, emoji))";
 
+/// A message's reactions from [`REACTIONS_COLUMN`]; those that aren't an emoji stay out (older
+/// versions stored whatever a peer sent).
+pub(crate) fn shown_reactions(json: Option<&str>) -> Value {
+    let mut reactions: Vec<Value> = json
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    reactions.retain(|reaction| reaction["emoji"].as_str().is_some_and(is_emoji));
+    Value::Array(reactions)
+}
+
 /// A message waiting in the outbox.
 #[derive(Debug, Clone)]
 pub struct OutboxEntry {
@@ -80,6 +90,61 @@ pub fn legacy_reaction(emoji: &str) -> Option<LegacyReactionType> {
     }
 }
 
+/// Most elements a joined emoji has (a kiss or a family has four).
+const MAX_JOINED_EMOJI: usize = 4;
+
+/// Whether `text` is one emoji and nothing else: a reaction shows under someone's message as if
+/// the app said it, so a peer's arbitrary text must not get there (Android sends only real
+/// emoji). By form rather than from a list, so emoji newer than our pictures still count: a flag,
+/// a keycap, or pictographs with their skin tones and variation selectors, joined.
+pub fn is_emoji(text: &str) -> bool {
+    const JOINER: char = '\u{200D}';
+    const KEYCAP: char = '\u{20E3}';
+    const VARIATION: char = '\u{FE0F}';
+    let regional = |c: char| matches!(c, '\u{1F1E6}'..='\u{1F1FF}');
+    let modifier = |c: char| matches!(c, '\u{FE0E}' | VARIATION | '\u{1F3FB}'..='\u{1F3FF}' | '\u{E0020}'..='\u{E007F}');
+    let pictograph = |c: char| {
+        !regional(c)
+            && !modifier(c)
+            && matches!(c,
+                '\u{1F000}'..='\u{1FAFF}'
+                | '\u{2190}'..='\u{21FF}'
+                | '\u{2300}'..='\u{23FF}'
+                | '\u{25A0}'..='\u{25FF}'
+                | '\u{2600}'..='\u{27BF}'
+                | '\u{2B00}'..='\u{2BFF}'
+                | '\u{A9}' | '\u{AE}' | '\u{203C}' | '\u{2049}' | '\u{2122}' | '\u{2139}'
+                | '\u{24C2}' | '\u{2934}' | '\u{2935}' | '\u{3030}' | '\u{303D}' | '\u{3297}'
+                | '\u{3299}')
+    };
+    let chars: Vec<char> = text.chars().collect();
+    match chars.as_slice() {
+        [a, b] if regional(*a) && regional(*b) => return true,
+        ['0'..='9' | '#' | '*', rest @ ..] => {
+            return matches!(rest, [KEYCAP] | [VARIATION, KEYCAP]);
+        }
+        _ => {}
+    }
+    // Enclosed letters stand alone: a joiner would string them into a word.
+    let joinable = !chars.iter().any(|c| matches!(c, '\u{1F100}'..='\u{1F1FF}'));
+    let mut elements = 0;
+    let mut base_next = true;
+    for c in chars {
+        if base_next {
+            if !pictograph(c) {
+                return false;
+            }
+            elements += 1;
+            base_next = false;
+        } else if c == JOINER {
+            base_next = true;
+        } else if !modifier(c) {
+            return false;
+        }
+    }
+    !base_next && (elements == 1 || (joinable && elements <= MAX_JOINED_EMOJI))
+}
+
 /// The emoji shown for a received legacy reaction.
 pub fn legacy_emoji(reaction: LegacyReactionType) -> &'static str {
     match reaction {
@@ -108,7 +173,8 @@ impl Store {
             .optional()?)
     }
 
-    /// Apply (`apply`) or withdraw a reaction; returns the changed message.
+    /// Apply (`apply`) or withdraw a reaction; returns the changed message. What isn't an emoji
+    /// is dropped (`None`).
     pub fn set_reaction(
         &self,
         message: i64,
@@ -117,6 +183,10 @@ impl Store {
         apply: bool,
         reacted_at: i64,
     ) -> Result<Option<Message>, StoreError> {
+        if !is_emoji(emoji) {
+            tracing::debug!("reaction that isn't an emoji dropped");
+            return Ok(None);
+        }
         if apply {
             self.conn.execute(
                 "INSERT INTO reactions (message, sender, emoji, reacted_at) VALUES (?1, ?2, ?3, ?4)
@@ -210,6 +280,98 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn only_a_single_emoji_is_a_reaction() {
+        for emoji in [
+            "\u{1F44D}",                                                    // thumbs up
+            "\u{1F44D}\u{1F3FF}",                                           // with a skin tone
+            "\u{2764}\u{FE0F}",                                             // heart
+            "\u{1F1E8}\u{1F1ED}",                                           // flag
+            "1\u{FE0F}\u{20E3}",                                            // keycap
+            "\u{1F17F}\u{FE0F}",                                            // enclosed letter
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E007F}",                         // tag flag
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}", // family
+        ] {
+            assert!(is_emoji(emoji), "{emoji}");
+        }
+        for text in [
+            "",
+            "Paid in full",
+            "Verified",
+            "OK",
+            "1",
+            "\u{1F44D}\u{1F44D}",          // two
+            "\u{1F44D} ",                  // with a space
+            "\u{1F44D}x",                  // with a letter
+            "\u{1F3FF}",                   // a skin tone alone
+            "\u{1F1E8}",                   // half a flag
+            "\u{1F1E8}\u{1F1ED}\u{1F1E9}", // a flag and a half
+            "\u{200D}\u{1F44D}",           // starting with a joiner
+            "\u{1F44D}\u{200D}",           // ending with one
+            // "PAID" and "OK" in enclosed letters, joined so they would count as one.
+            "\u{1F17F}\u{200D}\u{1F170}\u{200D}\u{1F178}\u{200D}\u{1F173}",
+            "\u{1F17E}\u{200D}\u{1F17A}",
+            // More joined than any real emoji.
+            "\u{1F44D}\u{200D}\u{1F44D}\u{200D}\u{1F44D}\u{200D}\u{1F44D}\u{200D}\u{1F44D}",
+        ] {
+            assert!(!is_emoji(text), "{text}");
+        }
+    }
+
+    /// Every emoji the app has a picture for (Threema's own list) can be reacted with.
+    #[test]
+    fn every_emoji_of_the_table_counts() {
+        let table = include_str!("../../qml/components/EmojiTable.js");
+        let table = table.split_once("var table = {").unwrap().1;
+        let mut seen = 0;
+        for entry in table.split(",\"").map(|e| e.trim_start_matches('"')) {
+            let Some((key, _)) = entry.split_once("\":\"") else {
+                continue;
+            };
+            let emoji: String = key
+                .split('-')
+                .map(|c| char::from_u32(u32::from_str_radix(c, 16).unwrap()).unwrap())
+                .collect();
+            assert!(is_emoji(&emoji), "{key}");
+            seen += 1;
+        }
+        assert!(seen > 3000, "{seen}");
+    }
+
+    /// A peer's text: nothing stored, and what an older version stored doesn't come back out.
+    #[test]
+    fn text_as_a_reaction_is_dropped_and_old_ones_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let id = store
+            .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        assert!(
+            store
+                .set_reaction(id, "BBBBBBBB", "Paid in full", true, 2)
+                .unwrap()
+                .is_none()
+        );
+        let thumbs = store
+            .set_reaction(id, "BBBBBBBB", "\u{1F44D}", true, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(thumbs.reactions.as_array().unwrap().len(), 1);
+        store
+            .conn
+            .execute(
+                "INSERT INTO reactions (message, sender, emoji, reacted_at)
+                 VALUES (?1, 'BBBBBBBB', 'Verified', 4)",
+                [id],
+            )
+            .unwrap();
+        let message = store.message(id).unwrap().unwrap();
+        assert_eq!(message.reactions.as_array().unwrap().len(), 1);
+        assert_eq!(message.reactions[0]["emoji"], "\u{1F44D}");
+    }
 
     #[test]
     fn legacy_mapping() {

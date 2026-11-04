@@ -877,7 +877,7 @@ impl App {
     ) -> Result<Value, ApiError> {
         let (id, conversation) = self.readable_conversation(identity)?;
         conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
-        if emoji.is_empty() || emoji.len() > 64 {
+        if emoji.len() > 64 || !reactions::is_emoji(emoji) {
             return Err(ApiError::Internal("invalid emoji".into()));
         }
         let referred = u64::from_str_radix(message_id, 16)

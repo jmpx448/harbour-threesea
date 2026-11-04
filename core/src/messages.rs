@@ -283,10 +283,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         state: row.get(8)?,
         edited_at: row.get(9)?,
         sender: row.get(10)?,
-        reactions: row
-            .get::<_, Option<String>>(11)?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_else(|| Value::Array(Vec::new())),
+        reactions: crate::reactions::shown_reactions(row.get::<_, Option<String>>(11)?.as_deref()),
         starred: row.get(12)?,
         sent_at: row.get(13)?,
         delivered_at: row.get(14)?,
