@@ -84,6 +84,8 @@ Page {
                     if (ok) {
                         page.accepted(pin)
                     } else {
+                        // The busy field gave up its focus, and the keyboard with it.
+                        entry.focusField()
                         entry.errorText = page.keyboard
                                 //% "Wrong passphrase"
                                 ? qsTrId("threesea-la-wrong-passphrase")
@@ -92,12 +94,18 @@ Page {
                 })
                 return
             }
+            // Until the reply: a second tap would be a second attempt.
+            busy = true
             backend.call("unlock", { pin: pin, privateChats: page.privateChats },
                          function(ok, result, kind, message) {
+                entry.busy = false
                 entry.clear()
                 if (ok) {
                     page.accepted(pin)
-                } else if (kind === "pinLockout") {
+                    return
+                }
+                entry.focusField()
+                if (kind === "pinLockout") {
                     page.pausedUntil = Date.now() + parseInt(message, 10) * 1000
                     page.showPause()
                     pauseTimer.restart()

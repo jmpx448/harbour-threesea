@@ -239,6 +239,31 @@ QtObject {
                 check("no X on the keyboard", !!cancelButton(keypad), false)
             }, 0],
         ],
+        // The second tap comes before the core's reply: one attempt, not two.
+        pinCheckIsOneAttempt: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.hold("unlock")
+                backend.refused["unlock"] = "wrongPin"
+                var unlockPage = push("pages/RealUnlockPage.qml", { cancellable: false })
+                var entry = entryOf(unlockPage)
+                entry._pin = "1234"
+                entry.accept()
+                entry.accept()
+                check("busy", entry.busy, true)
+                check("attempts", countSent("unlock"), 1)
+            }, 50],
+            [function() {
+                check("attempts after a while", countSent("unlock"), 1)
+                backend.release("unlock")
+            }, 50],
+            [function() {
+                var entry = entryOf(stack.currentPage)
+                check("busy afterwards", entry.busy, false)
+                check("entry cleared", entry.pin, "")
+                check("says so", entry.errorText, qsTrId("threesea-la-wrong-pin"))
+            }, 0],
+        ],
         // The license refused under the lock: the lock stays over the license page, and a new key
         // doesn't ask twice.
         licenseRefused: [
