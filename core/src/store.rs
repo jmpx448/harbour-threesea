@@ -327,6 +327,11 @@ pub struct Store {
     pub(crate) member_lookups: std::cell::Cell<(i64, usize)>,
 }
 
+/// What the WAL may keep of its file once its contents are in the database: SQLite would otherwise
+/// keep its largest size so far until the last connection closes, and on the Full flavour that is
+/// never. Several times the 4 MiB at which SQLite checkpoints by itself.
+const WAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
+
 /// Below this share of free pages (in percent) a rewrite gives back too little to wait for.
 const SHRINK_MIN_FREE_PERCENT: i64 = 25;
 /// VACUUM's copy of the live pages lies in memory: SQLCipher builds keep temporary data out of
@@ -386,7 +391,10 @@ impl Store {
                     StoreError::Sqlite(error)
                 }
             })?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
+             PRAGMA journal_size_limit = {WAL_SIZE_LIMIT};"
+        ))?;
         let mut store = Self {
             conn,
             held_notifications: std::cell::RefCell::default(),
@@ -418,6 +426,18 @@ impl Store {
                 }
                 other => other,
             })?;
+        // A row-rewriting migration leaves a WAL about as large as the data it touched, and the
+        // file would otherwise stay that large for as long as the app runs.
+        if let Err(error) = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        {
+            // The upgrade itself is committed; the next checkpoint gets another go at it.
+            let code = StoreError::Sqlite(error).code();
+            tracing::warn!(code, "checkpoint after the store upgrade failed");
+        }
         Ok(())
     }
 
@@ -1054,6 +1074,30 @@ mod tests {
             store.conn.prepare("SELECT a FROM later").is_err(),
             "rolled back"
         );
+    }
+
+    #[test]
+    fn an_upgrade_leaves_no_large_wal_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let mut store = Store::open(&path, &[1; 32]).unwrap();
+        let limit: i64 = store
+            .conn
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(limit, WAL_SIZE_LIMIT);
+
+        let mut next = MIGRATIONS.to_vec();
+        next.push(
+            "CREATE TABLE later (a BLOB);
+             INSERT INTO later VALUES (zeroblob(30000000));",
+        );
+        store.migrate(&next, &|| {}).unwrap();
+
+        let wal = std::fs::metadata(dir.path().join("t.db-wal"))
+            .unwrap()
+            .len();
+        assert_eq!(wal, 0);
     }
 
     /// VACUUM can't run (here: a statement in progress; on the phone: no space left) and the
