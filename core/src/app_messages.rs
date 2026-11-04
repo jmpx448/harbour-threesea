@@ -1108,8 +1108,9 @@ impl App {
                 reactions::OUTBOX_EDIT,
                 &json!({
                     "messageId": format!("{:016x}", message.message_id),
-                    // Keep the quote: receivers replace the whole text.
-                    "text": crate::messages::with_quote(crate::messages::split_quote(&message.body).0, text),
+                    // The bare text: receivers keep the original's quote, and Android would show
+                    // a quote marker in here as text.
+                    "text": text,
                 }),
             )?;
             self.store.edit_message(message.id, text, Some(now_ms()))?
@@ -1394,5 +1395,76 @@ mod live_tests {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app::StartConfig, contacts::test_contact, store::StoredIdentity};
+
+    const PEER: &str = "ABCD1234";
+
+    fn app(dir: &std::path::Path) -> App {
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "ECHOECHO".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        app
+    }
+
+    /// A contact with `features`, and an unlocked app to talk to them.
+    fn app_with_contact(dir: &std::path::Path, features: u64) -> App {
+        let app = app(dir);
+        let mut contact = test_contact(PEER);
+        contact.feature_mask = FeatureMask(features);
+        app.store.upsert_contact(&contact).unwrap();
+        app
+    }
+
+    fn sent_message(app: &App, conversation: &str, message_id: u64, body: &str) -> Message {
+        let stored = app
+            .store
+            .insert_outgoing(conversation, message_id, "text", body)
+            .unwrap();
+        app.store
+            .raise_outgoing_state(conversation, &[message_id], OutgoingState::Sent)
+            .unwrap();
+        stored
+    }
+
+    /// The edit goes out as the bare text, as Android sends it and shows it; the quote stays with
+    /// the message on either side.
+    #[test]
+    fn an_edit_of_a_quoting_message_sends_no_quote_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), FeatureMask::EDIT_MESSAGE_SUPPORT);
+        let quoting = crate::messages::with_quote(Some(5), "Yes");
+        let stored = sent_message(&app, PEER, 7, &quoting);
+        app.edit_message(PEER, &format!("{:x}", 7), "No").unwrap();
+        let outbox = app.store.outbox().unwrap();
+        assert_eq!(outbox[0].kind, reactions::OUTBOX_EDIT);
+        assert_eq!(outbox[0].body["text"], "No");
+        let edited = app.store.message(stored.id).unwrap().unwrap();
+        assert_eq!(edited.body, crate::messages::with_quote(Some(5), "No"));
     }
 }

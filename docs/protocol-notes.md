@@ -392,8 +392,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 
 - A quote is a text message starting with `> quote #<quoted message id, 16 lowercase hex>\n\n`
   (Android `QuoteUtil` "quote v2"); the quoted message is looked up only within the same
-  conversation. The core strips the prefix (`text`) and reports `quoteId`; edits keep the
-  prefix (receivers replace the whole text), incoming edits without it keep the original quote.
+  conversation. The core strips the prefix (`text`) and reports `quoteId`; an edit goes out as the
+  bare new text, as on Android (which would show a prefix in it as text), and the receiver keeps the
+  original's quote. An incoming edit that does carry a prefix (older versions of this app) replaces it.
 
 ## Blocking and revoked IDs
 
