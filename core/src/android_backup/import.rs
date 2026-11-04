@@ -669,15 +669,10 @@ impl HistoryImport {
             thumbnail_entries.contains_key(&(plan.family.name(), message.uid.clone()));
         if kind == "file" {
             let mut value: Value = serde_json::from_str(&body).unwrap_or_default();
-            let keys_present = file
-                .as_ref()
-                .is_some_and(|f| f.key.is_some() && f.blob_id.is_some());
-            let remote_or_failed = if keys_present {
-                crate::app_media::STATE_REMOTE
-            } else {
-                crate::app_media::STATE_FAILED
-            };
-            value["fileState"] = remote_or_failed.into();
+            // Failed until the media job has written the bytes; not "on the server", which would
+            // send every old file of a backup without media to the blob server by itself. A tap
+            // still tries, with the blob key kept from the backup.
+            value["fileState"] = crate::app_media::STATE_FAILED.into();
             value["thumbnail"] = has_thumbnail.into();
             value["thumbnailState"] = crate::app_media::STATE_FAILED.into();
             if message.outgoing {

@@ -938,6 +938,52 @@ mod history_tests {
         text
     }
 
+    /// A backup without media, years of history: nothing of it goes to the blob server by itself.
+    /// The keys are kept, so a tap can still try one whose blob is there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_backup_without_media_downloads_nothing_by_itself() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
+        let body = format!(
+            r#"["{}","{}","image/jpeg",1000,"a.jpg",1,true,"","image/jpeg",{{}}]"#,
+            "01".repeat(16),
+            "02".repeat(32),
+        );
+        let messages = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"])
+            + &write_row(&["u-1", "B0B0B0B0", "0", "FILE", &body, "1700000000000"]);
+        let path = backup_with(
+            dir.path(),
+            &[("contacts.csv", contacts), ("message_17.csv", messages)],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["imported"], 1, "{summary}");
+
+        let page = app.store.conversation_messages("B0B0B0B0", 50).unwrap();
+        let file = page.iter().find(|m| m.kind == "file").unwrap();
+        let parsed: Value = serde_json::from_str(&file.body).unwrap();
+        assert_eq!(parsed["fileState"], crate::app_media::STATE_FAILED);
+        assert_eq!(parsed["thumbnailState"], crate::app_media::STATE_FAILED);
+        let every_kind = ["image", "audio", "video", "file"].map(str::to_owned);
+        assert!(
+            app.store
+                .media_to_download(&every_kind, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let keys = app.store.file_keys(file.id).unwrap().unwrap();
+        assert_eq!(keys.blob_id.unwrap().0, [1; 16]);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn hints_at_files_that_were_moved_around() {
         use crate::android_backup::csv::write_row;
