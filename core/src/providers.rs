@@ -811,13 +811,13 @@ impl ConversationProvider for StoreConversations {
                     .map_err(foreign)?;
                 return Ok(());
             }
-            // Common Edit Message Receive Steps: only the original sender's text messages.
+            // Common Edit Message Receive Steps: only the original sender's texts and captions.
             ContactMessageBody::Edit(edit) => {
                 if let Some(original) = self
                     .store
                     .message_by_id(&sender, false, edit.message_id.0)
                     .map_err(foreign)?
-                    .filter(|original| original.kind == "text")
+                    .filter(|original| crate::messages::edit_applies_to(&original.kind))
                 {
                     let changed = self
                         .store
@@ -967,6 +967,73 @@ mod tests {
             })
             .unwrap();
         key
+    }
+
+    /// `body` arriving from `sender`, as the connection hands it over.
+    fn deliver(store: &Rc<Store>, sender: &str, id: u64, body: IncomingMessageBody) {
+        let mut conversations = StoreConversations {
+            store: Rc::clone(store),
+            events: Rc::default(),
+            user: ThreemaId::try_from("USER0001").unwrap(),
+            from_sync: false,
+        };
+        conversations
+            .add_or_update_incoming_message(IncomingMessage {
+                sender_identity: ThreemaId::try_from(sender).unwrap(),
+                id: MessageId(id),
+                overrides: libthreema::model::message::MessageOverrides::default(),
+                created_at: 50,
+                body,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_received_edit_reaches_a_caption_in_a_chat_and_in_a_group() {
+        use libthreema::model::message::{EditMessage, GroupMessageBody, IncomingGroupMessageBody};
+        let (_dir, store) = store();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        let key = group(&store, &["ABCD1234", MEMBER], false);
+        let file = json!({"mediaType": "image/jpeg", "size": 1, "caption": "old"}).to_string();
+        let direct = store
+            .insert_incoming(MEMBER, 1, "file", &file, 1)
+            .unwrap()
+            .unwrap();
+        let in_group = store
+            .insert_incoming_group(&key, MEMBER, 2, "file", &file, 1)
+            .unwrap()
+            .unwrap();
+        let store = Rc::new(store);
+        let edit = |id, text: &str| EditMessage {
+            message_id: MessageId(id),
+            text: text.to_owned(),
+        };
+        deliver(
+            &store,
+            MEMBER,
+            10,
+            IncomingMessageBody::Contact(ContactMessageBody::Edit(edit(1, "one"))),
+        );
+        deliver(
+            &store,
+            MEMBER,
+            11,
+            IncomingMessageBody::Group(IncomingGroupMessageBody {
+                group_identity: crate::groups::parse_key(&key).unwrap(),
+                body: GroupMessageBody::Edit(edit(2, "two")),
+            }),
+        );
+        for (id, caption) in [(direct.id, "one"), (in_group.id, "two")] {
+            let edited = store.message(id).unwrap().unwrap();
+            let body: serde_json::Value = serde_json::from_str(&edited.body).unwrap();
+            assert_eq!(body["caption"], caption);
+            assert_eq!(edited.edited_at, Some(50));
+        }
     }
 
     #[test]

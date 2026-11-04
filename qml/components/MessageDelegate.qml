@@ -82,7 +82,7 @@ ListItem {
                                                                                     : isFile ? model.body.caption : ""))
 
     readonly property bool isDeleted: model.kind === "deleted"
-    readonly property bool isEdited: model.kind === "text" && !!model.editedAt
+    readonly property bool isEdited: (model.kind === "text" || isFile) && !!model.editedAt
     // Ours, sent and young enough; never-sent messages are simply changed or removed.
     readonly property bool unsent: outgoing && (model.state === 0 || model.state === 4)
     readonly property bool recent: Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS

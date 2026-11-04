@@ -293,6 +293,12 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
+/// Whether a received edit applies to this kind of message (the proto's _Edit applies to_): a
+/// text, or a file's caption.
+pub fn edit_applies_to(kind: &str) -> bool {
+    matches!(kind, "text" | "file")
+}
+
 /// Threema's quote format (Android `QuoteUtil`, "quote v2"): `> quote #<message id hex>\n\n`
 /// before the text. Returns the quoted message id and the text without the prefix. The hex is
 /// the id's 8 bytes in wire order (little endian, as Android's `MessageId.toString()` and
@@ -1248,23 +1254,41 @@ impl Store {
         )?)
     }
 
-    /// Replace a text message's text; `edited_at` `None` for a message nobody has seen yet.
+    /// Replace a message's text, or a file's caption; `edited_at` `None` for a message nobody has
+    /// seen yet. Other kinds stay as they are.
     pub fn edit_message(
         &self,
         id: i64,
         text: &str,
         edited_at: Option<i64>,
     ) -> Result<Option<Message>, StoreError> {
-        // An edit without the quote prefix keeps the quote of the original.
-        let text = match (self.message(id)?, split_quote(text).0) {
-            (Some(original), None) => with_quote(split_quote(&original.body).0, text),
-            _ => text.to_owned(),
+        let Some(original) = self.message(id)? else {
+            return Ok(None);
         };
-        self.conn.execute(
-            "UPDATE messages SET body = ?2, edited_at = coalesce(?3, edited_at), updated_at = ?4
-             WHERE id = ?1 AND kind = 'text'",
-            params![id, text, edited_at, now_ms()],
-        )?;
+        match original.kind.as_str() {
+            "text" => {
+                // An edit without the quote prefix keeps the quote of the original.
+                let text = match split_quote(text).0 {
+                    None => with_quote(split_quote(&original.body).0, text),
+                    Some(_) => text.to_owned(),
+                };
+                self.conn.execute(
+                    "UPDATE messages SET body = ?2, edited_at = coalesce(?3, edited_at),
+                         updated_at = ?4
+                     WHERE id = ?1",
+                    params![id, text, edited_at, now_ms()],
+                )?;
+            }
+            "file" => {
+                self.conn.execute(
+                    "UPDATE messages SET body = json_set(body, '$.caption', ?2),
+                         edited_at = coalesce(?3, edited_at), updated_at = ?4
+                     WHERE id = ?1 AND json_valid(body)",
+                    params![id, text, edited_at, now_ms()],
+                )?;
+            }
+            _ => {}
+        }
         self.message(id)
     }
 
@@ -2323,6 +2347,54 @@ mod tests {
 
         store.remove_message(incoming.id).unwrap();
         assert!(store.message(incoming.id).unwrap().is_none());
+    }
+
+    /// Another client's edit of a caption takes the caption's place, with the edited mark and in
+    /// the search; the rest of the file stays. Nothing else about a message can be edited.
+    #[test]
+    fn an_edit_changes_a_files_caption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let body = serde_json::json!({"mediaType": "image/jpeg", "size": 5, "caption": "old"});
+        let file = store
+            .insert_incoming("ECHOECHO", 7, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap();
+        let edited = store
+            .edit_message(file.id, "the right date", Some(5))
+            .unwrap()
+            .unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&edited.body).unwrap();
+        assert_eq!(stored["caption"], "the right date");
+        assert_eq!(stored["size"], 5);
+        assert_eq!(edited.edited_at, Some(5));
+        assert_eq!(
+            store
+                .search_messages("right", None, 10, |_| None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .search_messages("old", None, 10, |_| None)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(edit_applies_to("text") && edit_applies_to("file"));
+        for kind in ["location", "poll", "pollClosed", "status", "deleted"] {
+            assert!(!edit_applies_to(kind), "{kind}");
+        }
+        let location = store
+            .insert_incoming("ECHOECHO", 8, "location", "{}", 1)
+            .unwrap()
+            .unwrap();
+        let same = store
+            .edit_message(location.id, "x", Some(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!((same.body.as_str(), same.edited_at), ("{}", None));
     }
 
     #[test]

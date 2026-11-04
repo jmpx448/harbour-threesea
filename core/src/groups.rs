@@ -941,8 +941,8 @@ fn receive_steps(
             }
         }
         GroupMessageBody::Edit(edit) => {
-            if let Some(original) =
-                own_message_of(store, &key, sender, edit.message_id.0)?.filter(|m| m.kind == "text")
+            if let Some(original) = own_message_of(store, &key, sender, edit.message_id.0)?
+                .filter(|m| crate::messages::edit_applies_to(&m.kind))
             {
                 outcome.changed.extend(store.edit_message(
                     original.id,

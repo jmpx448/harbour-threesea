@@ -272,8 +272,8 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   `EDIT_MESSAGE_SUPPORT` (0x100) / `DELETE_MESSAGE_SUPPORT` (0x200) on both sides; we announce
   both. Push, replay protected, no delivery receipts.
 - Sender side only: own messages, at most 6 hours old. The receiver accepts any age but only
-  from the original sender (we look up the message in the sender's direction only), edits only
-  text messages (captions later), never status lines.
+  from the original sender (we look up the message in the sender's direction only), and applies an
+  edit to a text or a file's caption, as Android does. Editing our own captions isn't offered yet.
 - A deleted message becomes a placeholder (kind `deleted`, content and reactions removed,
   `edited_at` = deletion time). Messages nobody received yet (pending/failed) are simply changed
   or removed without telling the peer.

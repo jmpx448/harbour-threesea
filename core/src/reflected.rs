@@ -360,7 +360,7 @@ fn outgoing_message(
         ContactMessageBody::Edit(edit) => {
             if let Some(original) = store
                 .message_by_id(&conversation, true, edit.message_id.0)?
-                .filter(|original| original.kind == "text")
+                .filter(|original| crate::messages::edit_applies_to(&original.kind))
             {
                 let changed = store.edit_message(original.id, &edit.text, Some(created_at))?;
                 push_changed(events, changed.into_iter().collect());
@@ -541,6 +541,32 @@ mod tests {
             rows.iter()
                 .any(|m| m.kind == crate::polls::KIND_CLOSED && m.outgoing)
         );
+    }
+
+    /// A caption edited on another device changes here too.
+    #[test]
+    fn a_caption_edited_elsewhere_is_edited_here() {
+        use libthreema::model::message::EditMessage;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let file = serde_json::json!({"size": 1, "caption": "old"}).to_string();
+        let stored = store.insert_outgoing("B0B0B0B0", 5, "file", &file).unwrap();
+        let events: EventSink = Rc::new(RefCell::new(Vec::new()));
+        let edit = ContactMessageBody::Edit(EditMessage {
+            message_id: libthreema::common::MessageId(5),
+            text: "new".into(),
+        });
+        apply(
+            &store,
+            "ABCD1234".parse().unwrap(),
+            reflected_outgoing("B0B0B0B0", 6, edit),
+            &events,
+        )
+        .unwrap();
+        let edited = store.message(stored.id).unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&edited.body).unwrap();
+        assert_eq!(body["caption"], "new");
+        assert!(edited.edited_at.is_some());
     }
 
     #[test]
