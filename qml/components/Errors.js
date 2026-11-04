@@ -122,6 +122,9 @@ function text(kind, message) {
     case "groupCallConnection":
         //% "The connection to the group call failed."
         return qsTrId("threesea-la-error-group-call-connection")
+    case "groupCallAudio":
+        //% "The microphone or the speaker stopped working, so the group call ended."
+        return qsTrId("threesea-la-error-group-call-audio")
     case "notGif":
         //% "This picture is not a GIF."
         return qsTrId("threesea-la-error-not-gif")

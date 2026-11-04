@@ -260,7 +260,9 @@ void GroupCallManager::onChannelMessage(const QByteArray &data)
 void GroupCallManager::onFailed(const QString &reason)
 {
     qWarning() << "group call failed:" << reason; // log-ok: the engine's own codes
-    m_error = QStringLiteral("groupCallConnection");
+    // ("media": the engine's microphone or speaker; everything else is about getting connected.)
+    m_error = reason == QLatin1String("media") ? QStringLiteral("groupCallAudio")
+                                               : QStringLiteral("groupCallConnection");
     m_errorMessage.clear();
     leave();
 }

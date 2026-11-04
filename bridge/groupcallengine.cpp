@@ -596,8 +596,10 @@ void GroupCallEngine::linkMicrophone()
     }
     GstPad *sink = gst_element_request_pad_simple(m_webrtc, "sink_0");
     GstPad *src = gst_element_get_static_pad(m_sendTail, "src");
+    bool working = true;
     if (!sink || gst_pad_link(src, sink) != GST_PAD_LINK_OK) {
         qWarning() << "group call audio: cannot link the microphone";
+        working = false;
     }
     gst_object_unref(src);
     if (sink) {
@@ -605,9 +607,16 @@ void GroupCallEngine::linkMicrophone()
     }
     gst_object_unref(m_sendTail);
     m_sendTail = nullptr;
-    gst_element_sync_state_with_parent(m_sendBin);
+    if (!gst_element_sync_state_with_parent(m_sendBin)) {
+        qWarning() << "group call audio: the microphone doesn't start";
+        working = false;
+    }
     gst_object_unref(m_sendBin);
     m_sendBin = nullptr;
+    // Without the microphone the call only seems to run; queued, this is in the middle of the setup.
+    if (!working) {
+        QMetaObject::invokeMethod(this, "onError", Qt::QueuedConnection, Q_ARG(QString, QStringLiteral("media")));
+    }
     // The branch joined a playing pipeline: without the latency rtpsession knows no running
     // time, so it can't make sender reports and sends no RTCP at all.
     gst_bin_recalculate_latency(GST_BIN(m_pipeline));
