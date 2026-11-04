@@ -546,6 +546,7 @@ impl State {
         // Decrypt and decode the payload according to its type
         let payload = state.cipher.decrypt_payload(payload)?;
         let payload = IncomingPayload::try_from(payload)?;
+        // log-ok: its Debug prints the variant's name only
         debug!(?payload, "Received payload");
 
         // Set and return the next state and instruction

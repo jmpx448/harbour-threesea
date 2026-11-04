@@ -271,7 +271,7 @@ impl From<protobuf::TransactionEnded> for TransactionEnded {
 }
 
 /// An incoming payload received from the mediator server during the post-handshake phase.
-#[derive(Debug, Name, VariantNames)]
+#[derive(DebugVariantNames, Name, VariantNames)]
 pub enum IncomingPayload {
     /// Proxied message from the chat server.
     Proxy(Vec<u8>),

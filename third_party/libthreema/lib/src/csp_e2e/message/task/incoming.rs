@@ -499,13 +499,12 @@ impl State {
                 },
             }
         };
-        trace!(?payload, "Decoded message");
+        trace!(id = ?payload.id, "Decoded message");
 
         // Add tracing span
         let _span = tracing::info_span! {
             "message",
             id = ?payload.id,
-            sender = ?payload.sender_identity,
         }
         .entered();
 
@@ -572,7 +571,6 @@ impl State {
         let _span = tracing::info_span! {
             "message",
             id = ?payload.id,
-            sender = ?payload.sender_identity,
         }
         .entered();
 
@@ -594,8 +592,8 @@ impl State {
                         acknowledge: AcknowledgeContext::from(&*payload),
                     });
                 },
-                ContactResult::Invalid(identity) => {
-                    warn!(?identity, "Discarding message from an invalid/revoked identity");
+                ContactResult::Invalid(_) => {
+                    warn!("Discarding message from an invalid/revoked identity");
                     return Ok(ProcessingOutcome::Discard {
                         reason: DiscardReason::SenderIsInvalid,
                         acknowledge: AcknowledgeContext::from(&*payload),
@@ -962,6 +960,7 @@ impl State {
         }
 
         // Prepare the update
+        // log-ok: the sender's acquaintance level, no identity
         warn!(
             sender_acquaintance_level = ?sender.acquaintance_level,
             n_retries,

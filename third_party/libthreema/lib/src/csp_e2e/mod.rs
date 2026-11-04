@@ -413,7 +413,7 @@ impl CspE2eProtocol {
     /// TODO(LIB-16): Describe errors.
     #[expect(clippy::unused_self, reason = "TODO(LIB-16)")]
     #[must_use]
-    #[tracing::instrument(skip_all, fields(?payload))]
+    #[tracing::instrument(skip_all, fields(id = ?payload.id))]
     pub fn handle_incoming_message(&self, payload: MessageWithMetadataBox) -> IncomingMessageTask {
         // TODO(LIB-16): Check for leading state!
         debug!("Creating incoming message task");

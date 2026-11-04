@@ -85,7 +85,7 @@ impl State {
         // Add tracing span
         //
         // TODO(LIB-16): This should be applied to the whole task somehow
-        let _span = tracing::info_span! { "contacts", contacts = ?identities }.entered();
+        let _span = tracing::info_span! { "contacts", n_contacts = identities.len() }.entered();
 
         // Non-MD: Update contacts and done
         if context.d2x.is_none() {

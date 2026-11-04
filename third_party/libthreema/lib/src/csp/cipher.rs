@@ -68,6 +68,7 @@ pub(super) fn decrypt_server_challenge_response(
                 return Ok((*permanent_server_key, server_challenge_response_box));
             },
             Err(_) => {
+                // log-ok: the chat server's public key
                 info!(mismatching_permanent_server_key = ?permanent_server_key,
                     "Decrypting server-challenge-response with server public key failed. \
                      Trying next one (if any)."

@@ -234,11 +234,8 @@ impl InternalCspMessageEncoder for LocationMessage {
                 writer.write("\n".as_bytes())?;
                 writer.write(address.as_bytes())?;
             },
-            (Some(name), None) => {
-                warn!(
-                    name,
-                    "Discarding name in location message without an associated address"
-                );
+            (Some(_), None) => {
+                warn!("Discarding name in location message without an associated address");
             },
             (Some(name), Some(address)) => {
                 writer.write("\n".as_bytes())?;

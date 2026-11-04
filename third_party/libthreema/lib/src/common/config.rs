@@ -159,6 +159,7 @@ fn map_placeholders<F: Fn(&'_ str) -> Option<String>>(string: &str, map_fn: F) -
                 .expect("Template regex should have one unnamed capture group")
                 .as_str();
             map_fn(key).unwrap_or_else(|| {
+                // log-ok: a server URL template from our own config and its placeholder
                 warn!(string, placeholder = key, "Ignoring unknown placeholder");
                 format!("{{{key}}}")
             })

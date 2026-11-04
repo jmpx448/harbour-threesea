@@ -345,6 +345,7 @@ impl State {
                             actual_remote_secret_hash.derive_for_identity(*user_identity);
                         if actual_remote_secret_hash_for_identity != *expected_remote_secret_hash_for_identity
                         {
+                            // log-ok: hashes; Threema Work's remote secret isn't used by this app
                             warn!(
                                 expected = ?expected_remote_secret_hash_for_identity,
                                 actual = ?actual_remote_secret_hash_for_identity,

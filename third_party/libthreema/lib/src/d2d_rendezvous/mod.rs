@@ -1120,6 +1120,7 @@ impl RendezvousProtocol {
             let path = racing_paths
                 .remove(&pid)
                 .ok_or(RendezvousProtocolError::UnknownOrDroppedPath(pid))?;
+            // log-ok: the hash map's keys are path IDs
             debug!(
                 dropped_pids = ?racing_paths.keys(),
                 "Remote nominated, dropping all other paths"
@@ -1156,6 +1157,7 @@ impl RendezvousProtocol {
                     .remove(&pid)
                     .ok_or(RendezvousProtocolError::UnknownOrDroppedPath(pid))?;
                 let result = path.nominate()?;
+                // log-ok: the hash map's keys are path IDs
                 debug!(
                     dropped_pids = ?racing_paths.keys(),
                     "Local nominated, dropping all other paths"

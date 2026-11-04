@@ -398,6 +398,7 @@ fn handle_encapsulated(
     let dh_type = dh_type_of(encapsulated);
     let reject_and_delete =
         |store: &mut dyn FsSessionStore, reason: &str| -> Result<IncomingFsOutcome, ProviderError> {
+            // log-ok: `reason` is one of this file's fixed texts
             warn!(?session_id, reason, "Rejecting FS message");
             store.delete(peer, session_id)?;
             send_reject(
