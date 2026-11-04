@@ -79,8 +79,11 @@ use crate::{
     websocket::WebSocketError,
 };
 
-/// Send an echo request after this much silence; give up if nothing arrives for twice as long.
+/// Send an echo request after this much silence; give up if it isn't answered in as long again.
 const ECHO_INTERVAL: Duration = Duration::from_secs(60);
+/// A handler that reads nothing can outlast an echo's deadline with the answer already in the
+/// socket: this long to read it before the connection counts as dead.
+const ECHO_LAST_LOOK: Duration = Duration::from_secs(1);
 /// How long the notification of a message another device received first waits for that
 /// device's "read": long enough for a reply typed there, short enough to still feel live.
 const NOTIFY_GRACE: Duration = Duration::from_secs(8);
@@ -377,9 +380,56 @@ pub async fn run(
     }
 }
 
+/// Whether the connection is alive: anything read counts, wherever it was read, and an echo gets
+/// its full time from when it went out. Time a long handler spent without reading says nothing
+/// about the connection.
+#[derive(Debug, Clone, Copy)]
+struct Liveness {
+    last_received: Instant,
+    /// An echo is out and this is when it must have been answered by.
+    echo_deadline: Option<Instant>,
+}
+
+impl Liveness {
+    const fn new(now: Instant) -> Self {
+        Self {
+            last_received: now,
+            echo_deadline: None,
+        }
+    }
+
+    const fn received(&mut self, now: Instant) {
+        self.last_received = now;
+        self.echo_deadline = None;
+    }
+
+    const fn awaiting_echo(&self) -> bool {
+        self.echo_deadline.is_some()
+    }
+
+    /// An echo went out, to be answered within `time`.
+    fn echo_sent(&mut self, now: Instant, time: Duration) {
+        self.echo_deadline = Some(now + time);
+    }
+
+    /// When to act: send an echo after the silence, or give up on the one that is out.
+    fn deadline(&self) -> Instant {
+        self.echo_deadline
+            .unwrap_or(self.last_received + ECHO_INTERVAL)
+    }
+}
+
+/// An echo's time ran out: what the read brings within [`ECHO_LAST_LOOK`], or the timeout.
+async fn last_look_for_echo<T>(read: impl Future<Output = T>) -> Result<T, ConnectionError> {
+    tokio::time::timeout(ECHO_LAST_LOOK, read)
+        .await
+        .map_err(|_| ConnectionError::Timeout)
+}
+
 struct Session<'a> {
     setup: &'a ConnectionSetup,
     transport: Transport,
+    liveness: Liveness,
     /// Mediator payloads that arrived during the CSP handshake or while waiting for a
     /// specific one, handled in order afterwards.
     d2m_queue: std::collections::VecDeque<D2mIncoming>,
@@ -599,6 +649,7 @@ impl<'a> Session<'a> {
         let mut session = Session {
             setup,
             transport,
+            liveness: Liveness::new(Instant::now()),
             d2m_queue: std::collections::VecDeque::new(),
             multi_device,
             fs_disabled,
@@ -619,6 +670,13 @@ impl<'a> Session<'a> {
         Ok(session)
     }
 
+    /// The next thing from the server; whichever step reads it, it shows the connection works.
+    async fn read_inbound(&mut self, buffer: &mut [u8]) -> Result<Inbound, TransportError> {
+        let inbound = self.transport.read(buffer).await?;
+        self.liveness.received(Instant::now());
+        Ok(inbound)
+    }
+
     /// client-hello → server-hello → login → login-ack (through the mediator: proxied, while
     /// mediator payloads are queued for later).
     async fn handshake(&mut self, client_hello: Vec<u8>) -> Result<(), ConnectionError> {
@@ -636,7 +694,7 @@ impl<'a> Session<'a> {
                     return Ok(());
                 }
             }
-            match self.transport.read(&mut buffer).await? {
+            match self.read_inbound(&mut buffer).await? {
                 Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
                 Inbound::D2m(payload) => self.d2m_queue.push_back(payload),
             }
@@ -1773,7 +1831,7 @@ impl<'a> Session<'a> {
         let mut buffer = vec![0_u8; 8192];
         timeout(Duration::from_secs(30), async {
             loop {
-                match self.transport.read(&mut buffer).await? {
+                match self.read_inbound(&mut buffer).await? {
                     Inbound::Csp(bytes) => {
                         self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?
                     }
@@ -1964,7 +2022,7 @@ impl<'a> Session<'a> {
                         }
                         return Err(ConnectionError::Protocol("unexpected message from the new device".into()));
                     }
-                    read = self.transport.read(&mut buffer) => match read? {
+                    read = self.read_inbound(&mut buffer) => match read? {
                         Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
                         Inbound::D2m(payload) => self.d2m_queue.push_back(payload),
                     },
@@ -2034,13 +2092,19 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    async fn handle_inbound(&mut self, inbound: Inbound) -> Result<(), ConnectionError> {
+        match inbound {
+            Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
+            Inbound::D2m(payload) => self.handle_d2m(payload).await?,
+        }
+        Ok(())
+    }
+
     async fn payload_loop(
         &mut self,
         rx: &mut mpsc::UnboundedReceiver<ToConnection>,
     ) -> Result<(), ConnectionError> {
         let mut read_buffer = vec![0_u8; 8192];
-        let mut last_received = Instant::now();
-        let mut echo_sent = false;
         loop {
             // Process everything libthreema can already do before waiting.
             while let Some(instruction) = self.csp.poll().map_err(protocol_error)? {
@@ -2049,12 +2113,7 @@ impl<'a> Session<'a> {
             while let Some(payload) = self.d2m_queue.pop_front() {
                 self.handle_d2m(payload).await?;
             }
-            let idle_deadline = last_received
-                + if echo_sent {
-                    ECHO_INTERVAL * 2
-                } else {
-                    ECHO_INTERVAL
-                };
+            let idle_deadline = self.liveness.deadline();
             // The next held notification (live forwarded messages; the backlog waits for the
             // end of the mediator's queue instead).
             let next_held = (!self.reflection_backlog)
@@ -2067,14 +2126,7 @@ impl<'a> Session<'a> {
                         None => std::future::pending().await,
                     }
                 } => self.release_held_notifications(false),
-                read = self.transport.read(&mut read_buffer) => {
-                    last_received = Instant::now();
-                    echo_sent = false;
-                    match read? {
-                        Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
-                        Inbound::D2m(payload) => self.handle_d2m(payload).await?,
-                    }
-                },
+                read = self.read_inbound(&mut read_buffer) => self.handle_inbound(read?).await?,
                 message = rx.recv() => match message {
                     None => return Err(ConnectionError::Stopped),
                     Some(ToConnection::SendPending) => self.send_pending().await?,
@@ -2115,20 +2167,22 @@ impl<'a> Session<'a> {
                         }
                     },
                     // Woken up (e.g. after the device slept): check the connection is still alive.
-                    Some(ToConnection::Wake) => if !echo_sent {
+                    Some(ToConnection::Wake) => if !self.liveness.awaiting_echo() {
                         self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
-                        echo_sent = true;
                         // Give the echo 15 s (instead of the usual interval) to come back.
-                        let grace = ECHO_INTERVAL * 2 - Duration::from_secs(15);
-                        last_received = Instant::now().checked_sub(grace).unwrap_or(last_received);
+                        self.liveness.echo_sent(Instant::now(), Duration::from_secs(15));
                     },
                 },
                 () = tokio::time::sleep_until(idle_deadline) => {
-                    if echo_sent {
-                        return Err(ConnectionError::Timeout);
+                    if self.liveness.awaiting_echo() {
+                        // select! picks at random among what is ready, so a read that is ready
+                        // too doesn't settle it by itself.
+                        let read = last_look_for_echo(self.read_inbound(&mut read_buffer)).await?;
+                        self.handle_inbound(read?).await?;
+                    } else {
+                        self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
+                        self.liveness.echo_sent(Instant::now(), ECHO_INTERVAL);
                     }
-                    self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
-                    echo_sent = true;
                 },
             }
         }
@@ -2488,5 +2542,72 @@ mod backoff_tests {
     fn told_to_stay_away_holds_however_long_the_session_was() {
         assert_eq!(backoff_after_session(HOLD_OFF, LONG), HOLD_OFF);
         assert_eq!(backoff_after_session(HOLD_OFF, SHORT), HOLD_OFF);
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn silence_asks_with_an_echo_and_its_time_runs_out() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        assert!(!liveness.awaiting_echo());
+        assert_eq!(liveness.deadline(), start + ECHO_INTERVAL);
+        liveness.echo_sent(start + ECHO_INTERVAL, ECHO_INTERVAL);
+        assert!(liveness.awaiting_echo());
+        assert_eq!(liveness.deadline(), start + ECHO_INTERVAL * 2);
+    }
+
+    #[test]
+    fn data_read_inside_a_long_handler_counts() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        // A link's registration ran for 3 minutes, reading the mediator all along.
+        let later = start + Duration::from_secs(180);
+        liveness.received(later);
+        assert_eq!(liveness.deadline(), later + ECHO_INTERVAL);
+        assert!(!liveness.awaiting_echo());
+    }
+
+    #[test]
+    fn a_handler_that_read_nothing_gets_an_echo_before_any_timeout() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        // Past the old limit of twice the interval: still only time to ask.
+        let later = start + ECHO_INTERVAL * 3;
+        assert!(liveness.deadline() <= later);
+        assert!(!liveness.awaiting_echo(), "the first thing due is an echo");
+        liveness.echo_sent(later, ECHO_INTERVAL);
+        assert_eq!(
+            liveness.deadline(),
+            later + ECHO_INTERVAL,
+            "the echo has its full time"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_answer_in_the_socket_beats_the_passed_deadline() {
+        let read = last_look_for_echo(std::future::ready(7)).await;
+        assert!(matches!(read, Ok(7)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_answer_within_the_last_look_is_a_timeout() {
+        let read = last_look_for_echo(std::future::pending::<()>()).await;
+        assert!(matches!(read, Err(ConnectionError::Timeout)));
+    }
+
+    #[test]
+    fn an_answer_ends_the_wait_for_an_echo() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        liveness.echo_sent(start, Duration::from_secs(15));
+        assert_eq!(liveness.deadline(), start + Duration::from_secs(15));
+        let answered = start + Duration::from_secs(1);
+        liveness.received(answered);
+        assert!(!liveness.awaiting_echo());
+        assert_eq!(liveness.deadline(), answered + ECHO_INTERVAL);
     }
 }
