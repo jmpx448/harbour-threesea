@@ -116,7 +116,7 @@ full {
     PKGCONFIG += gstreamer-1.0 gstreamer-sdp-1.0 gstreamer-webrtc-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-rtp-1.0 nice
     SOURCES += bridge/callengine.cpp bridge/dtlscertificate.cpp bridge/groupcallengine.cpp \
         bridge/earpieceplayer.cpp bridge/videotranscoder.cpp
-    HEADERS += bridge/callengine.h bridge/dtlscertificate.h bridge/groupcallengine.h bridge/aec/echocanceller.h \
+    HEADERS += bridge/callengine.h bridge/dtlscertificate.h bridge/groupcallengine.h bridge/vp8filter.h bridge/aec/echocanceller.h \
         bridge/earpieceplayer.h bridge/videotranscoder.h
     # Echo cancellation: the bundled webrtc-audio-processing, built statically by the spec file
     # into WAP_PREFIX (meson, third_party/webrtc-audio-processing). Our wrapper is the only file
@@ -134,7 +134,7 @@ full {
     LIBS += $$system($$WAP_PC --static --libs webrtc-audio-processing-2)
 }
 DISTFILES += bridge/callengine.cpp bridge/callengine.h bridge/dtlscertificate.cpp bridge/dtlscertificate.h \
-    bridge/groupcallengine.cpp bridge/groupcallengine.h bridge/aec/echocanceller.cpp bridge/aec/echocanceller.h \
+    bridge/groupcallengine.cpp bridge/groupcallengine.h bridge/vp8filter.h bridge/aec/echocanceller.cpp bridge/aec/echocanceller.h \
     bridge/earpieceplayer.cpp bridge/earpieceplayer.h bridge/videotranscoder.cpp bridge/videotranscoder.h
 DISTFILES += systemd/harbour-threesea.service
 

@@ -34,6 +34,8 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   the same way (delivered again after a lost acknowledgement).
 - Offers during a call: rejected "busy" and recorded as missed (Android too).
 - Rejected "unknown" means the other app could not take the call, not that anyone declined.
+- Remote VP8 pictures: at most 2560 on a side and 2560x1440 in area (`vp8_filter`, ahead of the
+  decoder; the MAX profile is 1920x1080). A larger key frame stops that stream until a good one.
 
 ## Reporting spam
 - From iOS 7.5.2 (`ServerAPIConnector.m`, `SpamDetector`, `GroupSpamDetector`), newer than Android's

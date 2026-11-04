@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QList>
 #include <QMutex>
+#include <QSet>
 #include <QObject>
 #include <QScopedPointer>
 #include <QTimer>
@@ -79,6 +80,7 @@ private slots:
     void onChannelData(const QByteArray &data);
     void onError(const QString &reason);
     void sendConsent();
+    void onParticipantFrame(quint32 participant, const QImage &image);
 
 private:
     void setRemote(const QString &offer);
@@ -166,6 +168,10 @@ private:
     QString m_remoteFingerprint;
     std::atomic<bool> m_verified{false};
     QList<QByteArray> m_receivedChannel;
+    // Participants with a picture on its way to the GUI: their next ones are dropped until it got
+    // there (read from GStreamer threads).
+    QMutex m_framesLock;
+    QSet<quint32> m_pendingFrames;
     // ICE consent checks (see sendConsent) with the credentials of both sides.
     QTimer m_consent;
     QString m_localUfrag;

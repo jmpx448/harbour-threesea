@@ -5,9 +5,9 @@ TARGET = callengine-test
 QT = core gui
 CONFIG += c++14 link_pkgconfig console
 PKGCONFIG += gstreamer-1.0 gstreamer-sdp-1.0 gstreamer-webrtc-1.0 gstreamer-app-1.0 gstreamer-video-1.0
-INCLUDEPATH += ../../bridge
-SOURCES += main.cpp ../../bridge/callengine.cpp ../../bridge/dtlscertificate.cpp
-HEADERS += ../../bridge/callengine.h ../../bridge/dtlscertificate.h
+INCLUDEPATH += ../../bridge ../../core/include
+SOURCES += main.cpp core-stub.cpp ../../bridge/callengine.cpp ../../bridge/dtlscertificate.cpp
+HEADERS += ../../bridge/callengine.h ../../bridge/dtlscertificate.h ../../bridge/vp8filter.h
 # As in harbour-threesea.pro (full).
 WAP_PC = PKG_CONFIG_PATH=$$WAP_PREFIX/lib/pkgconfig pkg-config
 AEC_SOURCES = ../../bridge/aec/echocanceller.cpp

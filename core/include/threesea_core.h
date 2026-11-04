@@ -60,6 +60,11 @@ char *threesea_qr_decode(const uint8_t *grey, size_t width, size_t height);
 ptrdiff_t threesea_group_call_encrypt(uint8_t codec, const uint8_t *frame, size_t len, uint8_t *out, size_t out_cap);
 ptrdiff_t threesea_group_call_decrypt(uint32_t participant, uint8_t codec, const uint8_t *frame, size_t len,
                                       uint8_t *out, size_t out_cap);
+/* Whether a received VP8 frame may reach the decoder: 1 yes, 0 no, -1 no and it was a key frame
+ * that is too large or broken. `*waiting` is the stream's state (starts out true), used on the
+ * stream's thread only. */
+int32_t threesea_call_vp8_filter(const uint8_t *frame, size_t len, bool *waiting);
+
 /* Encrypt one of our VP8 frames of simulcast layer `layer` (0 l, 1 m, 2 h) and split it into RTP
  * payloads (VP8 descriptor included) of at most max_payload bytes, written one after the other
  * into `out`, their lengths into `lengths`. Returns the number of payloads, or -1: drop it. */

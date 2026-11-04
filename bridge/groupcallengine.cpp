@@ -15,6 +15,7 @@
 #include "groupcallengine.h"
 #include "aec/echocanceller.h"
 #include "dtlscertificate.h"
+#include "vp8filter.h"
 
 #include <QDebug>
 #include <QImage>
@@ -760,6 +761,8 @@ void GroupCallEngine::stop()
     gst_object_unref(m_pipeline);
     m_webrtc = nullptr;
     m_pipeline = nullptr;
+    QMutexLocker locker(&m_framesLock);
+    m_pendingFrames.clear();
 }
 
 // --- GStreamer threads: hand everything over to this object's thread. ---
@@ -850,6 +853,8 @@ struct IncomingStream
     // Degrees clockwise to show the picture upright (the sender's video orientation extension:
     // Threema's apps send their camera's pictures unrotated).
     std::atomic<int> rotation{0};
+    // VP8 only.
+    Vp8Filter vp8;
 };
 
 void GroupCallEngine::onPadAdded(GstElement *, GstPad *pad, void *self)
@@ -999,6 +1004,10 @@ int GroupCallEngine::onDecrypt(GstPad *, GstPadProbeInfo *info, void *data)
     if (!out) {
         return GST_PAD_PROBE_DROP;
     }
+    if (stream->codec == CODEC_VP8 && !stream->vp8.passes(out)) {
+        gst_buffer_unref(out);
+        return GST_PAD_PROBE_DROP;
+    }
     gst_buffer_unref(GST_PAD_PROBE_INFO_BUFFER(info));
     GST_PAD_PROBE_INFO_DATA(info) = out;
     return GST_PAD_PROBE_OK;
@@ -1134,17 +1143,45 @@ int GroupCallEngine::onLocalSample(GstElement *sink, void *self)
 int GroupCallEngine::onRemoteSample(GstElement *sink, void *data)
 {
     auto *stream = static_cast<IncomingStream *>(data);
-    QImage image = sampleImage(GST_APP_SINK(sink));
+    GroupCallEngine *engine = stream->engine;
     const quint32 participant = stream->participant;
-    if (image.isNull() || participant == UINT32_MAX) {
+    bool wanted = participant != UINT32_MAX;
+    if (wanted) {
+        QMutexLocker locker(&engine->m_framesLock);
+        // The GUI is behind: pictures must not pile up in its queue.
+        wanted = !engine->m_pendingFrames.contains(participant);
+        if (wanted) {
+            engine->m_pendingFrames.insert(participant);
+        }
+    }
+    if (!wanted) {
+        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+        if (sample) {
+            gst_sample_unref(sample);
+        }
+        return GST_FLOW_OK;
+    }
+    QImage image = sampleImage(GST_APP_SINK(sink));
+    if (image.isNull()) {
+        QMutexLocker locker(&engine->m_framesLock);
+        engine->m_pendingFrames.remove(participant);
         return GST_FLOW_OK;
     }
     if (const int rotation = stream->rotation) {
         image = image.transformed(QTransform().rotate(rotation));
     }
-    QMetaObject::invokeMethod(stream->engine, "participantFrame", Qt::QueuedConnection,
-                              Q_ARG(quint32, participant), Q_ARG(QImage, image));
+    QMetaObject::invokeMethod(engine, "onParticipantFrame", Qt::QueuedConnection, Q_ARG(quint32, participant),
+                              Q_ARG(QImage, image));
     return GST_FLOW_OK;
+}
+
+void GroupCallEngine::onParticipantFrame(quint32 participant, const QImage &image)
+{
+    {
+        QMutexLocker locker(&m_framesLock);
+        m_pendingFrames.remove(participant);
+    }
+    emit participantFrame(participant, image);
 }
 
 // Inside the microphone's or the speaker's bin (the volume and the mixer stay ours after the bins

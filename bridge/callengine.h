@@ -79,6 +79,7 @@ private slots:
     void onError(const QString &reason);
     void onChannelOpen();
     void onChannelData(const QByteArray &data);
+    void onRemoteFrame(const QImage &image);
 
 private:
     // `vp8PayloadType` < 0: no video sending.
@@ -106,6 +107,7 @@ private:
     static int onCaptureBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onPlaybackBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onMediaBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
+    static int onVp8Frame(GstPad *pad, GstPadProbeInfo *info, void *filter);
     void flushChannel();
     void descriptionCreated(GstPromise *promise, const char *field, const QString &type);
 
@@ -124,6 +126,8 @@ private:
     // 10 ms frames through the microphone and to the speaker (logged at the end of a call).
     std::atomic<unsigned> m_framesSent{0};
     std::atomic<unsigned> m_framesReceived{0};
+    // A picture of the peer is on its way to the GUI: the next ones are dropped until it got there.
+    std::atomic<bool> m_remoteFramePending{false};
     unsigned m_busWatch = 0;
     bool m_remoteSet = false;
     bool m_connected = false;

@@ -318,6 +318,28 @@ pub unsafe extern "C" fn threesea_group_call_decrypt(
     unsafe { write_frame(result, out, out_cap) }
 }
 
+/// Whether a received VP8 frame may reach the decoder: 1 yes, 0 no, -1 no and it was a key frame
+/// that is too large or broken. `waiting` is the stream's state (starts out true), used on the
+/// stream's thread only.
+///
+/// # Safety
+/// `frame` valid for `len` bytes (or NULL with `len` 0), `waiting` valid for reads and writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn threesea_call_vp8_filter(
+    frame: *const u8,
+    len: usize,
+    waiting: *mut bool,
+) -> i32 {
+    // SAFETY: caller contract.
+    let frame = unsafe { frame_slice(frame, len) };
+    // SAFETY: caller contract.
+    match crate::call_video::vp8_filter(frame, unsafe { &mut *waiting }) {
+        crate::call_video::Vp8Verdict::Pass => 1,
+        crate::call_video::Vp8Verdict::Drop => 0,
+        crate::call_video::Vp8Verdict::Refuse => -1,
+    }
+}
+
 /// Encrypt one of our VP8 frames of simulcast `layer` (0 l, 1 m, 2 h) and split it into RTP
 /// payloads of at most `max_payload` bytes:
 /// written one after the other into `out`, their lengths into `lengths` (room for `max_packets`).

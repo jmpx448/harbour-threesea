@@ -18,6 +18,7 @@ small and debuggable; secrets inside messages are wiped on both sides after use.
 | `threesea_buffer_free(buffer, len)` | Wipes and frees a buffer from the readers above or the key functions. |
 | `threesea_qr_decode(grey, width, height)` | First QR code in a grey image (camera scanning); no core needed. |
 | `threesea_group_call_encrypt` / `_decrypt` / `_vp8_packets` | Group call frame encryption on GStreamer's threads (ADR 0012). |
+| `threesea_call_vp8_filter` | Whether a received VP8 frame may reach the decoder (its size), on GStreamer's threads. |
 | `threesea_key_wrap` / `_unwrap` / `_wrapped` | The database key wrapped with a passphrase (scrypt; "Encrypt stored data", ADR 0009). |
 
 `callback(user_data, json)` runs **on the core thread**; the bridge copies the string and posts
