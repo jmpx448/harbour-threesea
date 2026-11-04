@@ -7,7 +7,7 @@
 //! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
 //! code), `webCertificateChanged {id, host}`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use data_encoding::HEXLOWER;
 use libthreema::common::keys::{ClientKey, PublicKey};
@@ -207,8 +207,21 @@ impl App {
     /// The receiver of session events (taken once by the core loop).
     pub(crate) fn take_web_events(&mut self) -> Option<tokio::sync::mpsc::Receiver<WebEvent>> {
         // Sessions the browser never stored can't come back: leftovers of a killed app.
-        for session in self.store.web_sessions().unwrap_or_default() {
+        let mut sessions = self.store.web_sessions().unwrap_or_default();
+        sessions.retain(|session| {
             if !session.persistent {
+                let _ = self.store.remove_web_session(session.id);
+            }
+            session.persistent
+        });
+        // One browser, one session: older versions let the same code pair twice. A wake-up only
+        // reaches one of them, so the one it used last stays.
+        sessions.sort_by_key(|session| {
+            std::cmp::Reverse(session.last_connection.unwrap_or(session.created_at))
+        });
+        let mut browsers = HashSet::new();
+        for session in &sessions {
+            if !browsers.insert(session.initiator_key) {
                 let _ = self.store.remove_web_session(session.id);
             }
         }
@@ -265,11 +278,19 @@ impl App {
             qr::QrError::Invalid => ApiError::WebCodeInvalid,
             qr::QrError::Version(_) => ApiError::WebVersion,
         })?;
+        let same_browser = self.web_sessions_of_browser(&qr.initiator_key)?;
+        if self.web_session_in_use(&same_browser) {
+            return Err(ApiError::WebAlreadyPaired);
+        }
         if self.web_host_needs_asking(&qr.host)? {
             if !allow_host {
                 return Ok(json!({ "confirmHost": qr.host }));
             }
             self.store.set_web_host(&qr.host, None)?;
+        }
+        // Left by a kill during pairing: it never worked, so nobody has to remove it first.
+        for stale in same_browser {
+            self.store.remove_web_session(stale.id)?;
         }
         let session = WebSession {
             id: 0,
@@ -290,6 +311,23 @@ impl App {
         Ok(json!({ "id": id }))
     }
 
+    fn web_sessions_of_browser(
+        &self,
+        initiator_key: &[u8; 32],
+    ) -> Result<Vec<WebSession>, ApiError> {
+        let mut sessions = self.store.web_sessions()?;
+        sessions.retain(|session| session.initiator_key == *initiator_key);
+        Ok(sessions)
+    }
+
+    /// One of these sessions works, or can come back: a second one would only compete with it
+    /// on the same SaltyRTC path. Android refuses this too.
+    fn web_session_in_use(&self, sessions: &[WebSession]) -> bool {
+        sessions
+            .iter()
+            .any(|session| session.persistent || self.web.running.contains_key(&session.id))
+    }
+
     /// Not Threema's and not allowed by the user before (ADR 0013).
     fn web_host_needs_asking(&self, host: &str) -> Result<bool, ApiError> {
         Ok(!qr::is_threema_host(host) && self.store.web_host(host)?.is_none())
@@ -300,6 +338,13 @@ impl App {
         let mut code = crate::app::qr_kind(text, crate::messages::now_ms() / 1000);
         if let Some(host) = code["host"].as_str() {
             code["confirmHost"] = json!(self.web_host_needs_asking(host)?);
+        }
+        // Say so before asking anything about pairing it.
+        if code["kind"] == "web"
+            && let Ok(qr) = qr::parse(text)
+            && self.web_session_in_use(&self.web_sessions_of_browser(&qr.initiator_key)?)
+        {
+            code["error"] = json!(ApiError::WebAlreadyPaired.kind());
         }
         Ok(code)
     }

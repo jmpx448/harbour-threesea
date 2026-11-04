@@ -101,6 +101,9 @@ function text(kind, message) {
     case "webSessionNotFound":
         //% "This Threema Web session no longer exists."
         return qsTrId("threesea-la-error-web-session")
+    case "webAlreadyPaired":
+        //% "This browser is already in the list under Threema Web. Remove it there to connect it with a new code."
+        return qsTrId("threesea-la-error-web-already-paired")
     case "linkVersion":
         //% "This version of Threema for Desktop can't be linked. Please update both apps."
         return qsTrId("threesea-la-error-link-version")

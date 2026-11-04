@@ -1115,3 +1115,104 @@ async fn web_server_close_text_stays_out_of_the_failure() {
     assert_eq!(event["state"], "stopped");
     assert_eq!(event["error"], "closed");
 }
+
+/// A made-up Threema Web code for this browser key.
+fn web_code(browser: u8, host: &str) -> String {
+    let mut bytes = qr::PROTOCOL_VERSION.to_be_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend([browser; 32]);
+    bytes.extend([2; 32]);
+    bytes.extend([0; 32]);
+    bytes.extend(443u16.to_be_bytes());
+    bytes.extend(host.as_bytes());
+    data_encoding::BASE64.encode(&bytes)
+}
+
+/// A stored session of this browser, without a task.
+fn stored_web_session(app: &App, browser: u8, host: &str, persistent: bool) -> i64 {
+    app.store
+        .add_web_session(&WebSession {
+            id: 0,
+            initiator_key: [browser; 32],
+            private_key: Zeroizing::new([9; 32]),
+            server_key: None,
+            host: host.into(),
+            port: 443,
+            self_hosted: false,
+            persistent,
+            client: String::new(),
+            created_at: 1,
+            last_connection: None,
+        })
+        .unwrap()
+}
+
+const WEB_HOST: &str = "saltyrtc-01.threema.ch";
+
+/// The same browser's code again is refused while its session works or can come back.
+#[test]
+fn web_code_of_a_paired_browser_is_refused() {
+    let (_dir, mut app) = fixture();
+    let code = web_code(1, WEB_HOST);
+    let stored = stored_web_session(&app, 1, WEB_HOST, true);
+    assert!(matches!(
+        app.web_pair(&code, false),
+        Err(ApiError::WebAlreadyPaired)
+    ));
+    assert_eq!(
+        app.classify_qr(&code).unwrap()["error"],
+        ApiError::WebAlreadyPaired.kind()
+    );
+    assert_eq!(app.store.web_sessions().unwrap().len(), 1);
+
+    // Running, though the browser hasn't stored it.
+    app.store.remove_web_session(stored).unwrap();
+    let id = stored_web_session(&app, 1, WEB_HOST, false);
+    let _rx = app.web_test_session(id);
+    assert!(matches!(
+        app.web_pair(&code, false),
+        Err(ApiError::WebAlreadyPaired)
+    ));
+}
+
+/// What a kill during pairing left behind neither stands in the way nor stays.
+#[tokio::test(flavor = "current_thread")]
+async fn web_code_replaces_a_stale_session() {
+    let (_dir, mut app) = fixture();
+    let code = web_code(1, WEB_HOST);
+    stored_web_session(&app, 1, WEB_HOST, false);
+    assert!(app.classify_qr(&code).unwrap().get("error").is_none());
+    // Nothing here waits, so the session's task never gets to connect.
+    let result = tokio::task::LocalSet::new()
+        .run_until(async { app.web_pair(&code, false) })
+        .await
+        .unwrap();
+    let sessions = app.store.web_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(result["id"], sessions[0].id);
+    assert_eq!(sessions[0].initiator_key, [1; 32]);
+}
+
+/// Duplicates of one browser from before are merged at the start, keeping the last one used;
+/// other browsers are left alone.
+#[test]
+fn web_duplicates_of_a_browser_merge() {
+    let (_dir, mut app) = fixture();
+    let older = stored_web_session(&app, 1, WEB_HOST, true);
+    let used = stored_web_session(&app, 1, WEB_HOST, true);
+    let other = stored_web_session(&app, 2, WEB_HOST, true);
+    let never_stored = stored_web_session(&app, 3, WEB_HOST, false);
+    app.store.set_web_session_connected(older, "", 5).unwrap();
+    app.store.set_web_session_connected(used, "", 9).unwrap();
+    app.take_web_events();
+    let mut left: Vec<i64> = app
+        .store
+        .web_sessions()
+        .unwrap()
+        .iter()
+        .map(|session| session.id)
+        .collect();
+    left.sort_unstable();
+    assert_eq!(left, vec![used, other]);
+    assert!(app.store.web_session(never_stored).unwrap().is_none());
+}

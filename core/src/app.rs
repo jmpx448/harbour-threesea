@@ -1053,13 +1053,16 @@ pub enum ApiError {
     GroupCallFull,
     #[error("group call version not supported")]
     GroupCallVersion,
-    /// Threema Web: not its code / another protocol version / no such session.
+    /// Threema Web: not its code / another protocol version / no such session / this browser is
+    /// already in the list.
     #[error("not a Threema Web code")]
     WebCodeInvalid,
     #[error("Threema Web version not supported")]
     WebVersion,
     #[error("no such Threema Web session")]
     WebSessionNotFound,
+    #[error("this browser already has a Threema Web session")]
+    WebAlreadyPaired,
     /// The contact's app can't do this (edit or delete for everyone).
     #[error("not supported by the contact")]
     NotSupportedByContact,
@@ -1141,6 +1144,7 @@ impl ApiError {
             Self::WebCodeInvalid => "webCodeInvalid",
             Self::WebVersion => "webVersion",
             Self::WebSessionNotFound => "webSessionNotFound",
+            Self::WebAlreadyPaired => "webAlreadyPaired",
             Self::LinkUnknownCode => "linkUnknownCode",
             Self::LinkWebCode => "linkWebCode",
             Self::LinkVersion => "linkVersion",
