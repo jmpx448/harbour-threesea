@@ -265,6 +265,45 @@ pub fn identity_blocked(
     Ok(!direct && !store.is_group_member(identity)?)
 }
 
+/// Whether a message may go to `receiver` at all (the receiver filter of Android's
+/// `OutgoingCspMessageHandle`): never to a revoked ID, and to a blocked one only if it is exempt
+/// from blocking (`exempt`), such as what keeps a group in step.
+pub fn may_receive(
+    store: &Store,
+    config: &Config,
+    receiver: &str,
+    exempt: bool,
+) -> Result<bool, StoreError> {
+    if store
+        .contact(receiver)?
+        .is_some_and(|c| c.activity_state == pc::ActivityState::Invalid)
+    {
+        return Ok(false);
+    }
+    Ok(exempt || !identity_blocked(store, config, receiver)?)
+}
+
+/// The group members `message_id` still has to go to. Whoever may not receive it is taken off the
+/// list for good, so that a message queued before the block doesn't reach them and doesn't wait
+/// for them either.
+pub fn group_receivers(
+    store: &Store,
+    config: &Config,
+    key: &str,
+    message_id: u64,
+    exempt: bool,
+) -> Result<Vec<String>, StoreError> {
+    let mut kept = Vec::new();
+    for receiver in store.pending_receivers(key, message_id)? {
+        if may_receive(store, config, &receiver, exempt)? {
+            kept.push(receiver);
+        } else {
+            store.receiver_done(&receiver, message_id)?;
+        }
+    }
+    Ok(kept)
+}
+
 /// Nothing to wake (no Threema Web while restoring forward secrecy state, fs_store).
 pub struct NoShortcuts;
 
@@ -918,6 +957,82 @@ mod tests {
         assert!(blocked(MEMBER), "only a group we left");
         group(&store, &[MEMBER], false);
         assert!(!blocked(MEMBER));
+    }
+
+    #[test]
+    fn group_receivers_lose_the_blocked_unless_exempt_and_always_the_revoked() {
+        let (_dir, store) = store();
+        let config = config();
+        for id in [MEMBER, OTHER, STRANGER] {
+            contact(
+                &store,
+                id,
+                pc::AcquaintanceLevel::Direct,
+                pc::ActivityState::Active,
+            );
+        }
+        contact(
+            &store,
+            STRANGER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Invalid,
+        );
+        settings(&store, &json!({ "blockedContacts": [OTHER] }));
+        let key = group(&store, &[MEMBER, OTHER, STRANGER], false);
+        let all = [MEMBER.to_owned(), OTHER.to_owned(), STRANGER.to_owned()];
+
+        // A group-name, say: the blocked member stays in step, the revoked one is gone.
+        store.set_pending_receivers(&key, 1, &all).unwrap();
+        assert_eq!(
+            group_receivers(&store, &config, &key, 1, true).unwrap(),
+            vec![MEMBER, OTHER]
+        );
+        assert_eq!(
+            store.pending_receivers(&key, 1).unwrap(),
+            vec![MEMBER, OTHER]
+        );
+
+        // A text queued before the block: off the list, so it doesn't wait for them.
+        store.set_pending_receivers(&key, 2, &all).unwrap();
+        assert_eq!(
+            group_receivers(&store, &config, &key, 2, false).unwrap(),
+            vec![MEMBER]
+        );
+        assert_eq!(store.pending_receivers(&key, 2).unwrap(), vec![MEMBER]);
+
+        // Nobody left: the caller counts it as sent.
+        settings(&store, &json!({ "blockedContacts": [MEMBER, OTHER] }));
+        assert!(
+            group_receivers(&store, &config, &key, 2, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn revoked_and_blocked_receive_nothing_they_are_not_owed() {
+        let (_dir, store) = store();
+        let config = config();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        let may = |exempt| may_receive(&store, &config, MEMBER, exempt).unwrap();
+        assert!(may(false));
+
+        settings(&store, &json!({ "blockedContacts": [MEMBER] }));
+        assert!(!may(false) && may(true), "only what is exempt");
+
+        settings(&store, &json!({}));
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Invalid,
+        );
+        assert!(!may(false) && !may(true), "a revoked ID, nothing at all");
     }
 
     #[test]

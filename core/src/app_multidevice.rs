@@ -799,6 +799,31 @@ mod tests {
         rx
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_contact_made_direct_by_writing_reaches_the_other_devices() {
+        let (_dir, mut app) = app();
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::GroupOrDeleted;
+        app.store.upsert_contact(&contact).unwrap();
+        let mut rx = in_a_group(&mut app);
+        let send = json!({"id": 1, "cmd": "sendText", "identity": "BBBBBBBB", "text": "hello"});
+        let reply: Value = serde_json::from_str(&app.handle(&send.to_string()).await).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        let mut reflected = false;
+        while let Ok(message) = rx.try_recv() {
+            reflected |= matches!(message, ToConnection::ReflectSync);
+        }
+        assert!(reflected);
+
+        // Nothing changed: nothing to tell.
+        let send = json!({"id": 2, "cmd": "sendText", "identity": "BBBBBBBB", "text": "again"});
+        app.handle(&send.to_string()).await;
+        while let Ok(message) = rx.try_recv() {
+            assert!(!matches!(message, ToConnection::ReflectSync));
+        }
+    }
+
     fn device(id: u64, current: bool) -> LinkedDevice {
         LinkedDevice {
             id: format!("{id:016x}"),

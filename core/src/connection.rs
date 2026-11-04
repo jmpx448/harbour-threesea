@@ -920,17 +920,32 @@ impl<'a> Session<'a> {
                 }
                 continue;
             }
+            let body = Outgoing::Contact(body);
+            // Queued before the contact was blocked or revoked: not sent, and nothing about it
+            // reaches the other devices or the contact.
+            if !self.may_receive(&message.conversation, &body)? {
+                if let Some(failed) = self
+                    .setup
+                    .store
+                    .set_outgoing_failed(message.id)
+                    .map_err(protocol_error)?
+                {
+                    self.emit(CoreEvent::MessagesChanged(vec![failed]));
+                }
+                continue;
+            }
             if matches!(
-                body,
-                ContactMessageBody::Text(_)
-                    | ContactMessageBody::Location(_)
-                    | ContactMessageBody::File(_)
-                    | ContactMessageBody::PollSetup(_)
-                    | ContactMessageBody::PollVote(_)
+                &body,
+                Outgoing::Contact(
+                    ContactMessageBody::Text(_)
+                        | ContactMessageBody::Location(_)
+                        | ContactMessageBody::File(_)
+                        | ContactMessageBody::PollSetup(_)
+                        | ContactMessageBody::PollVote(_)
+                )
             ) {
                 self.distribute_picture(&message.conversation).await?;
             }
-            let body = Outgoing::Contact(body);
             self.reflect_outgoing(
                 &message.conversation,
                 message.message_id,
@@ -975,6 +990,12 @@ impl<'a> Session<'a> {
     /// week) or a removal, if they don't have the current state yet. Failures only skip it.
     async fn distribute_picture(&mut self, receiver: &str) -> Result<(), ConnectionError> {
         use crate::profile_pictures::{Distribution, OWN_PICTURE, Upload};
+        // Not even recorded as sent: they get it if they are unblocked.
+        if !crate::providers::may_receive(&self.setup.store, &self.setup.config, receiver, false)
+            .map_err(protocol_error)?
+        {
+            return Ok(());
+        }
         let store = Rc::clone(&self.setup.store);
         let own = self.setup.media.read_picture(OWN_PICTURE).ok().flatten();
         let body = match store
@@ -1046,7 +1067,8 @@ impl<'a> Session<'a> {
     }
 
     /// Send a group message (same id for everyone) to the members that don't have it yet;
-    /// `true` if nobody is left. Members we have no contact for yet are tried again later.
+    /// `true` if nobody is left. Members we have no contact for yet are tried again later;
+    /// revoked and (unless the message is exempt) blocked ones never get it.
     async fn send_to_group(
         &mut self,
         key: &str,
@@ -1055,11 +1077,14 @@ impl<'a> Session<'a> {
         created_at: i64,
         body: &GroupMessageBody,
     ) -> Result<bool, ConnectionError> {
-        let receivers = self
-            .setup
-            .store
-            .pending_receivers(key, message_id)
-            .map_err(protocol_error)?;
+        let receivers = crate::providers::group_receivers(
+            &self.setup.store,
+            &self.setup.config,
+            key,
+            message_id,
+            body.is_exempt_from_blocking(),
+        )
+        .map_err(protocol_error)?;
         // Before the members: our own other devices want it even when there are none — a notes
         // group (Threema's group of one) would otherwise never reach Threema Desktop.
         self.reflect_outgoing(
@@ -1143,7 +1168,10 @@ impl<'a> Session<'a> {
                 continue;
             }
             let encoded = match outbox_body(&entry) {
-                Some(body) => {
+                Some(body)
+                    if self
+                        .may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))? =>
+                {
                     self.reflect_outgoing(
                         &entry.conversation,
                         entry.message_id,
@@ -1159,7 +1187,7 @@ impl<'a> Session<'a> {
                     )
                     .await?
                 }
-                None => None,
+                _ => None,
             };
             if let Some(payloads) = encoded {
                 for payload in payloads {
@@ -1216,6 +1244,10 @@ impl<'a> Session<'a> {
         let Some(contact) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
             return Ok(None);
         };
+        if contact.activity_state == libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid
+        {
+            return Ok(None);
+        }
         let nonce = self.fresh_nonce()?;
         match encode_outgoing_fs_control_message(
             self.setup.identity,
@@ -1234,9 +1266,22 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Whether `body` may go to `receiver` (see [`crate::providers::may_receive`]).
+    fn may_receive(&self, receiver: &str, body: &Outgoing) -> Result<bool, ConnectionError> {
+        crate::providers::may_receive(
+            &self.setup.store,
+            &self.setup.config,
+            receiver,
+            body.is_exempt_from_blocking(),
+        )
+        .map_err(protocol_error)
+    }
+
     /// Encode a message to a contact: forward-security encapsulated if the contact supports it
-    /// (with an `Init` first for a new session), otherwise plain. `Ok(None)` if it can never be
-    /// sent (unknown/revoked contact).
+    /// (with an `Init` first for a new session), otherwise plain. `Ok(None)` if it can't be sent:
+    /// an unknown or revoked contact, or a blocked one unless the message is exempt. Every message
+    /// passes here, so receipts, typing, picture requests and call signals stay away from them too,
+    /// and no forward secrecy session starts.
     async fn encode(
         &self,
         receiver: &str,
@@ -1247,6 +1292,9 @@ impl<'a> Session<'a> {
         let Some(contact) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
             return Ok(None);
         };
+        if !self.may_receive(receiver, &body)? {
+            return Ok(None);
+        }
         let receiver_identity = contact.identity;
         let receiver_key: PublicKey = contact.public_key;
         let nickname = self
@@ -2640,6 +2688,15 @@ fn outbox_group_body(entry: &reactions::OutboxEntry) -> Option<GroupMessageBody>
 pub(crate) enum Outgoing {
     Contact(ContactMessageBody),
     Group(GroupIdentity, GroupMessageBody),
+}
+
+impl Outgoing {
+    fn is_exempt_from_blocking(&self) -> bool {
+        match self {
+            Self::Contact(body) => body.is_exempt_from_blocking(),
+            Self::Group(_, body) => body.is_exempt_from_blocking(),
+        }
+    }
 }
 
 /// The message body of an outbox entry (see [`reactions::OUTBOX_REACTION`] and friends).

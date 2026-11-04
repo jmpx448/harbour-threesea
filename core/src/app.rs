@@ -1193,6 +1193,8 @@ pub struct App {
     media_events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>>,
     /// Binary attachments of the request being handled (e.g. `sendFile`: file, thumbnail).
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
+    /// Contacts the request being handled made direct, for the other devices.
+    pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
     /// Calls (ADR 0012): this build has a media engine; the current call, its SDP rules and
     /// cached TURN servers (with their expiry, ms).
     pub(crate) calls_supported: bool,
@@ -1272,6 +1274,7 @@ impl App {
             media_events,
             media_events_rx: Some(media_events_rx),
             attachments: Vec::new(),
+            made_direct: std::cell::RefCell::default(),
             pending_link: None,
             calls_supported: start.calls,
             update_check_built: start.update_check,
@@ -1431,7 +1434,13 @@ impl App {
             }
         };
         let change = sync_change(&request.command);
-        match self.execute(request.command).await {
+        let outcome = self.execute(request.command).await;
+        let made_direct = self.made_direct.take();
+        if !made_direct.is_empty() {
+            let change = crate::app_multidevice::SyncChange::Contacts(made_direct);
+            self.reflect_change(change, &json!({})).await;
+        }
+        match outcome {
             Ok(result) => {
                 if let Some(change) = change {
                     self.reflect_change(change, &result).await;

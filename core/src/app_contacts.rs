@@ -1212,6 +1212,78 @@ mod contact_policy_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn writing_to_someone_makes_them_a_direct_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let mut events = app.take_media_events().unwrap();
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::GroupOrDeleted;
+        app.store.upsert_contact(&contact).unwrap();
+        let send = json!({"cmd": "sendText", "identity": "BBBBBBBB", "text": "hello"});
+        assert_eq!(call(&mut app, send).await["ok"], true);
+        assert_eq!(
+            app.store
+                .contact("BBBBBBBB")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level,
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(crate::providers::CoreEvent::ContactsChanged)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_list_goes_to_those_who_can_get_it_and_makes_them_direct_contacts() {
+        use libthreema::protobuf::d2d_sync::contact::{AcquaintanceLevel, ActivityState};
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let add = |id: &str, level, state| {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.acquaintance_level = level;
+            contact.activity_state = state;
+            app.store.upsert_contact(&contact).unwrap();
+        };
+        add(
+            "BBBBBBBB",
+            AcquaintanceLevel::GroupOrDeleted,
+            ActivityState::Active,
+        );
+        add(
+            "CCCCCCCC",
+            AcquaintanceLevel::GroupOrDeleted,
+            ActivityState::Invalid,
+        );
+        add(
+            "DDDDDDDD",
+            AcquaintanceLevel::GroupOrDeleted,
+            ActivityState::Active,
+        );
+        app.store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &json!({ "blockUnknown": true, "blockedContacts": ["DDDDDDDD"] }).to_string(),
+            )
+            .unwrap();
+        let list = crate::distribution_lists::DistributionList {
+            key: "d:0000000000000001".into(),
+            name: "List".into(),
+            members: ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE"]
+                .map(str::to_owned)
+                .to_vec(),
+            created_at: 0,
+        };
+        assert_eq!(app.list_receivers(&list).unwrap(), vec!["BBBBBBBB"]);
+        let level = |id: &str| app.store.contact(id).unwrap().unwrap().acquaintance_level;
+        assert_eq!(level("BBBBBBBB"), AcquaintanceLevel::Direct);
+        assert_eq!(level("CCCCCCCC"), AcquaintanceLevel::GroupOrDeleted);
+        assert_eq!(level("DDDDDDDD"), AcquaintanceLevel::GroupOrDeleted);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn individual_settings_and_clearing_them() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(dir.path());

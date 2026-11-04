@@ -346,20 +346,51 @@ impl App {
                     }
                 }
             }
-            Conversation::Contact(_) => {}
+            Conversation::Contact(contact) => self.make_direct(contact)?,
         }
         Ok(())
     }
 
-    /// The members of a list we can write to.
+    /// Writing to someone makes them a direct contact (Android's `ContactMessageReceiver`): with
+    /// "block unknown senders" on, it is also what lets the message out and their answer in. The
+    /// contact list hears of it at once, the other devices when the command is done (`handle`).
+    fn make_direct(&self, contact: &libthreema::model::contact::Contact) -> Result<(), ApiError> {
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        if contact.acquaintance_level == AcquaintanceLevel::Direct {
+            return Ok(());
+        }
+        let mut contact = contact.clone();
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        self.store.upsert_contact(&contact)?;
+        self.made_direct
+            .borrow_mut()
+            .push(contact.identity.to_string());
+        let _ = self
+            .media_events
+            .send(crate::providers::CoreEvent::ContactsChanged);
+        Ok(())
+    }
+
+    /// The members of a list a message of ours goes to right now, each as a 1:1 message. They are
+    /// made direct contacts for it, like anyone we write to; revoked and blocked ones are left out,
+    /// so that no failed bubble turns up in their chats while the list's copy counts as sent.
     pub(crate) fn list_receivers(
         &self,
         list: &crate::distribution_lists::DistributionList,
     ) -> Result<Vec<String>, ApiError> {
-        let blocked = self.app_settings()?.blocked_contacts;
+        use libthreema::protobuf::d2d_sync::contact::ActivityState;
         let mut receivers = Vec::new();
         for member in &list.members {
-            if !blocked.contains(member) && self.store.contact(member)?.is_some() {
+            let Some(contact) = self.store.contact(member)? else {
+                continue;
+            };
+            if contact.activity_state == ActivityState::Invalid
+                || self.store.is_explicitly_blocked(member)?
+            {
+                continue;
+            }
+            self.make_direct(&contact)?;
+            if crate::providers::may_receive(&self.store, &self.config, member, false)? {
                 receivers.push(member.clone());
             }
         }
