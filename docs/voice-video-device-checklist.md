@@ -344,6 +344,11 @@ Notifications:
      again, leave it running in the background, wait more than 15 minutes, then Reply from that
      notification.
      Expect: the reply is sent.
+   - With "Encrypt stored data" on and a notification showing, end the app the same way, then
+     Reply from the notification; again with Mark as read.
+     Expect: after a Reply, "Threesea is locked" says that the reply waits. After entering the
+     passphrase, the reply is sent and the chat is read. Until then nothing is sent and the chat
+     stays unread.
 
 Threema Web:
 

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The notification actions' tokens: lipstick closes a notification before the action reaches us,
 // also when the action is what starts the app, so a token has to outlive its notification for a
-// while, and no longer. Exit 0: passed.
+// while, and no longer. An action can arrive before the core runs, and then waits for it.
+// Exit 0: passed.
 #include "dbusinterface.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QFile>
+#include <QJSEngine>
 #include <QSettings>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -183,6 +185,48 @@ void testNoPlainChats(const QString &file)
     check(QSettings().allKeys().filter(QStringLiteral("notificationActionToken")).isEmpty(), "all gone with the ID");
 }
 
+// What arrives before the core runs waits for it (qml/components/NotificationActions.js).
+void testActionsWaitForTheCore()
+{
+    QFile file(QStringLiteral(NOTIFICATION_ACTIONS_JS));
+    check(file.open(QIODevice::ReadOnly), "the actions' script");
+    // Only QML knows about the pragma.
+    const QString script = QString::fromUtf8(file.readAll()).replace(QStringLiteral(".pragma library"), QString());
+    QJSEngine engine;
+    const QJSValue loaded = engine.evaluate(script);
+    check(!loaded.isError(), "the script loads");
+    // The identities and texts released in this state, in one string.
+    const auto release = [&engine](const char *state) {
+        return engine.evaluate(QStringLiteral("release('%1').map(function(a) {"
+                                              " return a.identity + ':' + (a.text === undefined ? '' : a.text) }).join()")
+                                   .arg(QLatin1String(state))).toString();
+    };
+    const auto replyWaiting = [&engine]() { return engine.evaluate(QStringLiteral("replyWaiting()")).toBool(); };
+
+    check(!replyWaiting(), "nothing waits at first");
+    engine.evaluate(QStringLiteral("add({ identity: 'ABCD1234' })"));
+    check(!replyWaiting(), "mark as read is no reply");
+    engine.evaluate(QStringLiteral("add({ identity: 'EFGH5678', text: 'hello' })"));
+    check(replyWaiting(), "a reply waits");
+    check(release("starting").isEmpty(), "no core while starting");
+    check(release("locked").isEmpty(), "no core before the passphrase");
+    check(release("starting").isEmpty(), "no core right after the passphrase");
+    check(replyWaiting(), "still waiting");
+    check(release("ready") == QLatin1String("ABCD1234:,EFGH5678:hello"), "the core takes them in order");
+    check(release("ready").isEmpty(), "and only once");
+    check(!replyWaiting(), "nothing waits any more");
+
+    engine.evaluate(QStringLiteral("add({ identity: 'ABCD1234', text: 'hello' })"));
+    check(release("needsLicense") == QLatin1String("ABCD1234:hello"), "the core answers for itself in other states");
+
+    engine.evaluate(QStringLiteral("add({ identity: 'ABCD1234', text: 'hello' })"));
+    check(release("error").isEmpty(), "no core after a failed start");
+    check(engine.evaluate(QStringLiteral("drop()")).toBool(), "the failed start lost a reply");
+    check(!engine.evaluate(QStringLiteral("drop()")).toBool(), "and nothing is left");
+    engine.evaluate(QStringLiteral("add({ identity: 'ABCD1234' })"));
+    check(!engine.evaluate(QStringLiteral("drop()")).toBool(), "losing a mark as read loses no reply");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -198,6 +242,7 @@ int main(int argc, char **argv)
     testNewNotification();
     testColdStart();
     testNoPlainChats(QSettings().fileName());
+    testActionsWaitForTheCore();
 
     if (failures == 0) {
         std::printf("passed\n");

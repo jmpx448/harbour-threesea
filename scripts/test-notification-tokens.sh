@@ -8,7 +8,8 @@ IMAGE=harbour-threesea-sdk:$SFOS
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 docker run --rm -i -e SFOS="$SFOS" -v "$ROOT:/src:ro" "$IMAGE" sh -euc '
     T=SailfishOS-$SFOS-i486
-    B=$HOME/build; mkdir -p $B/tests $B/bridge
+    B=$HOME/build; mkdir -p $B/tests $B/bridge $B/qml/components
     cp -r /src/tests/notificationtokens $B/tests/; cp /src/bridge/dbusinterface.* $B/bridge/
+    cp /src/qml/components/NotificationActions.js $B/qml/components/
     cd $B/tests/notificationtokens && sb2 -t $T qmake >/dev/null && sb2 -t $T make -s >/dev/null 2>&1 || sb2 -t $T make
     sb2 -t $T ./notificationtokens-test'

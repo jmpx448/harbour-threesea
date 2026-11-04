@@ -8,6 +8,7 @@ import "pages"
 import "components"
 import "components/Format.js" as Fmt
 import "components/Errors.js" as Errors
+import "components/NotificationActions.js" as NotificationActions
 
 ApplicationWindow {
     id: window
@@ -72,17 +73,23 @@ ApplicationWindow {
         interval: 3000
         onTriggered: {
             if (backend.state !== "locked" || Qt.application.state === Qt.ApplicationActive) return
-            if (!notifications["locked"]) {
-                var n = privateNotificationComponent.createObject(window)
+            var body = NotificationActions.replyWaiting()
+                    //% "Open it and enter your PIN or passphrase to send your reply and receive messages."
+                    ? qsTrId("threesea-la-locked-notification-reply-body")
+                    //% "Open it and enter your PIN or passphrase to receive messages."
+                    : qsTrId("threesea-la-locked-notification-body")
+            var n = notifications["locked"]
+            if (n && n.body === body) return
+            if (!n) {
+                n = privateNotificationComponent.createObject(window)
                 //% "Threesea is locked"
                 n.summary = qsTrId("threesea-la-locked-notification")
-                //% "Open it and enter your PIN or passphrase to receive messages."
-                n.body = qsTrId("threesea-la-locked-notification-body")
                 n.previewSummary = n.summary
-                n.previewBody = n.body
-                n.publish()
                 notifications["locked"] = n
             }
+            n.body = body
+            n.previewBody = body
+            n.publish()
         }
     }
 
@@ -803,6 +810,39 @@ ApplicationWindow {
 
     onOpenChatChanged: if (openChat.length > 0) clearNotification(openChat)
 
+    // Reply and Mark as read from a notification. Such a tap can be what starts the app, so these
+    // wait until the core is there (components/NotificationActions.js).
+    function notificationAction(action) {
+        NotificationActions.add(action)
+        runNotificationActions()
+        lockedNotification()
+    }
+
+    function runNotificationActions() {
+        NotificationActions.release(backend.state).forEach(function(action) {
+            if (action.text !== undefined) {
+                backend.call("sendText", { identity: action.identity, text: action.text },
+                             function(ok, result, kind, message) {
+                    if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                })
+            }
+            // Replying means it has been read.
+            backend.call("markRead", { identity: action.identity }, function() { backend.refreshUnread() })
+            window.clearNotification(action.identity)
+        })
+        if (backend.state === "error" && NotificationActions.drop()) {
+            var n = privateNotificationComponent.createObject(window)
+            //% "Your reply was not sent"
+            n.summary = qsTrId("threesea-la-reply-not-sent")
+            //% "Threesea could not start. Open it to see why."
+            n.body = qsTrId("threesea-la-reply-not-sent-body")
+            n.previewSummary = n.summary
+            n.previewBody = n.body
+            n.publish()
+            notifications["replyNotSent"] = n
+        }
+    }
+
     // Shared from other apps ("Share" → Threesea): pick the chat, then it opens with the content
     // ready to send (one file as attachment, text in the input; several files are sent at once).
     ShareProvider {
@@ -939,18 +979,8 @@ ApplicationWindow {
         onActivateRequested: window.activate()
         onShowUpdateRequested: window.showUpdate()
         onOpenUrlRequested: window.openLink(url, false)
-        onMarkReadRequested: {
-            backend.call("markRead", { identity: identity }, function() { backend.refreshUnread() })
-            window.clearNotification(identity)
-        }
-        onReplyRequested: {
-            backend.call("sendText", { identity: identity, text: text }, function(ok, result, kind, message) {
-                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-            })
-            // Replying means it has been read.
-            backend.call("markRead", { identity: identity }, function() { backend.refreshUnread() })
-            window.clearNotification(identity)
-        }
+        onMarkReadRequested: window.notificationAction({ identity: identity })
+        onReplyRequested: window.notificationAction({ identity: identity, text: text })
     }
 
     Connections {
@@ -959,6 +989,7 @@ ApplicationWindow {
             window.showStatePage()
             window.syncAddressBook(false)
             if (backend.state === "ready") window.clearNotification("license")
+            window.runNotificationActions()
         }
         onCoreEvent: {
             // `notify`: the chat's own notification setting (muted, mentions only) allows it.
