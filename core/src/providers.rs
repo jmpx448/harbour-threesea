@@ -607,9 +607,12 @@ impl ConversationProvider for StoreConversations {
         sender: ThreemaId,
         id: MessageId,
     ) -> Result<bool, ProviderError> {
-        self.store
-            .has_incoming(&sender.to_string(), id.0)
-            .map_err(foreign)
+        let sender = sender.to_string();
+        Ok(self.store.has_incoming(&sender, id.0).map_err(foreign)?
+            && !self
+                .store
+                .awaits_reflection(&sender, id.0)
+                .map_err(foreign)?)
     }
 
     fn is_in_group(&self, group_identity: GroupIdentity) -> Result<bool, ProviderError> {
@@ -807,14 +810,15 @@ impl StoreConversations {
                 )
                 .map_err(foreign)?;
                 let mut events = self.events.borrow_mut();
-                let queued = added.is_some();
+                let is_new = added.is_some();
                 if let Some(added) = added {
                     events.push(CoreEvent::MessageAdded { message: added });
                 }
                 events.extend(changed.map(|c| CoreEvent::MessagesChanged(vec![c])));
                 drop(events);
-                if queued {
+                if is_new {
                     self.queue_receipt(&sender, &message.overrides, message.id.0)?;
+                    self.note_awaiting_reflection(&sender, message.id.0)?;
                 }
                 return Ok(());
             }
@@ -975,6 +979,20 @@ impl StoreConversations {
                 .borrow_mut()
                 .push(CoreEvent::MessageAdded { message: stored });
             self.queue_receipt(&sender, &message.overrides, message.id.0)?;
+            self.note_awaiting_reflection(&sender, message.id.0)?;
+        }
+        Ok(())
+    }
+
+    /// A 1:1 message just stored on a device that leads: libthreema reflects it next. Should the
+    /// connection die before the mediator confirms that, the server sends the message again, and
+    /// it mustn't count as a known one ([`Self::message_is_marked_used`]), or the other devices
+    /// never get it. A group message has no such check in its way.
+    fn note_awaiting_reflection(&self, sender: &str, message_id: u64) -> Result<(), ProviderError> {
+        if !self.from_sync && self.store.multi_device().map_err(foreign)?.is_some() {
+            self.store
+                .await_reflection(sender, message_id)
+                .map_err(foreign)?;
         }
         Ok(())
     }
@@ -1303,6 +1321,63 @@ mod tests {
         receive(10, true, false);
         receive(11, false, true);
         assert_eq!(receipts(), ["0000000000000009"]);
+    }
+
+    #[test]
+    fn a_message_counts_as_known_once_the_other_devices_have_it() {
+        let (_dir, store) = store();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+        let store = Rc::new(store);
+        let text = || {
+            IncomingMessageBody::Contact(ContactMessageBody::Text(TextMessage {
+                text: "hi".into(),
+            }))
+        };
+        let sender = ThreemaId::try_from(MEMBER).unwrap();
+        let conversations = |from_sync| StoreConversations {
+            store: Rc::clone(&store),
+            events: Rc::default(),
+            user: ThreemaId::try_from("USER0001").unwrap(),
+            from_sync,
+        };
+        let known = |id| {
+            conversations(false)
+                .message_is_marked_used(sender, MessageId(id))
+                .unwrap()
+        };
+
+        // No other devices: known at once.
+        deliver(&store, MEMBER, 1, text());
+        assert!(known(1));
+
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        deliver(&store, MEMBER, 2, text());
+        assert!(!known(2), "the mediator hasn't confirmed it");
+        assert_eq!(store.conversation_messages(MEMBER, 10).unwrap().len(), 2);
+        deliver(&store, MEMBER, 2, text());
+        assert_eq!(store.conversation_messages(MEMBER, 10).unwrap().len(), 2);
+        store.reflection_done(MEMBER, 2).unwrap();
+        assert!(known(2));
+
+        // What another device reflected to us is that device's to tell.
+        let mut follower = conversations(true);
+        follower
+            .add_or_update_incoming_message(IncomingMessage {
+                sender_identity: sender,
+                id: MessageId(3),
+                overrides: libthreema::model::message::MessageOverrides::default(),
+                created_at: 1,
+                body: text(),
+            })
+            .unwrap();
+        assert!(known(3));
     }
 
     /// `body` arriving from `sender`, as the connection hands it over.

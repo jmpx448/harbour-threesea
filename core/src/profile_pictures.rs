@@ -811,7 +811,7 @@ mod tests {
                      DROP TABLE messages_search; DROP TABLE marked_unread_chats;
                      DROP TRIGGER chat_summaries_insert; DROP TRIGGER chat_summaries_sort;
                      DROP TRIGGER chat_summaries_state; DROP TRIGGER chat_summaries_delete;
-                     DROP TABLE chat_summaries;
+                     DROP TABLE chat_summaries; DROP TABLE awaiting_reflection;
                      DROP TABLE picture_requests; DROP TABLE picture_downloads;
                      DROP INDEX messages_position; DROP TRIGGER messages_sort_key;
                      ALTER TABLE messages DROP COLUMN sort_key;

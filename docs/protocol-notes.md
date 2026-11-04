@@ -146,7 +146,11 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   streak (`storageProblem`), since the server keeps messages only for a limited time.
 - Reflected envelopes: applied and their nonce noted in one store step, then acknowledged; one the
   store failed on stays unacknowledged, so the mediator hands it out at the next login. Android
-  acknowledges those too (its ANDR-2706 is open), but nothing else brings them to a follower.
+  acknowledges those too (with a TODO), but nothing else brings them to a follower.
+- A leader stores a 1:1 message before reflecting it. Until the task is through it is in
+  `awaiting_reflection`, which keeps `message_is_marked_used` from discarding the server's next copy
+  as a reused id: that copy runs the reflection again, or the other devices would never get the
+  message. A group message has no such check in its way.
 - Forward secrecy: see below. Not yet: groups (LIB-53), typing-indicator sending, outgoing retries
   after server-side failures.
 - Live-tested 2026-10-21 with the test ID: ECHOECHO echoes text; server ack → "sent",

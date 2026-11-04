@@ -265,6 +265,15 @@ pub struct Message {
     pub written_out: bool,
 }
 
+/// Received 1:1 messages stored on a leader whose reflection isn't confirmed
+/// ([`Store::await_reflection`]).
+pub(crate) const MIGRATION_AWAITING_REFLECTION: &str = "
+    CREATE TABLE awaiting_reflection (
+        sender     TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        PRIMARY KEY (sender, message_id)
+    ) WITHOUT ROWID;";
+
 fn columns() -> String {
     format!(
         "id, conversation, message_id, outgoing, kind, body, created_at, updated_at, state, \
@@ -670,6 +679,36 @@ impl Store {
             )
             .optional()?
             .is_some())
+    }
+
+    /// `has_incoming`'s row isn't known to the other devices of the group yet: the mediator hasn't
+    /// confirmed its reflection. Until it has, the server's next copy has to pass again.
+    pub fn await_reflection(&self, sender: &str, message_id: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO awaiting_reflection (sender, message_id) VALUES (?1, ?2)",
+            params![sender, message_id.cast_signed()],
+        )?;
+        Ok(())
+    }
+
+    pub fn awaits_reflection(&self, sender: &str, message_id: u64) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM awaiting_reflection WHERE sender = ?1 AND message_id = ?2",
+                params![sender, message_id.cast_signed()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn reflection_done(&self, sender: &str, message_id: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM awaiting_reflection WHERE sender = ?1 AND message_id = ?2",
+            params![sender, message_id.cast_signed()],
+        )?;
+        Ok(())
     }
 
     /// Raise the state of outgoing messages (never lowers it: a late "delivered" must not undo
@@ -2436,7 +2475,9 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "ALTER TABLE messages DROP COLUMN written_out; PRAGMA user_version = 35;",
+                    "DROP TABLE awaiting_reflection;
+                     ALTER TABLE messages DROP COLUMN written_out;
+                     PRAGMA user_version = 35;",
                 )
                 .unwrap();
             (waiting.id, sent.id, stuck.id)

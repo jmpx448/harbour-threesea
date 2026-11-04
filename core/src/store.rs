@@ -188,6 +188,8 @@ const MIGRATIONS: &[&str] = &[
     crate::groups::MIGRATION_SYNC,
     // 36: outgoing messages say whether a send has begun
     crate::messages::MIGRATION_WRITTEN_OUT,
+    // 37: received messages the other devices of the group haven't been told of yet
+    crate::messages::MIGRATION_AWAITING_REFLECTION,
 ];
 
 /// Setting keys.

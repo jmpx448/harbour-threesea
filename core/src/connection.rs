@@ -2183,6 +2183,13 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// What a message stored just now leaves for the UI.
+    fn emit_stored_message_events(&self) {
+        self.emit_events_unless(|event| {
+            needs_the_connection(event) || runs_before_the_next_message(event)
+        });
+    }
+
     /// What the last connection couldn't send.
     async fn resume_carried_events(&mut self) -> Result<(), ConnectionError> {
         let carried = core::mem::take(&mut *self.setup.carried_events.borrow_mut());
@@ -3149,6 +3156,7 @@ impl<'a> Session<'a> {
         &mut self,
         message: MessageWithMetadataBox,
     ) -> Result<(), ConnectionError> {
+        let (sender, message_id) = (message.sender_identity.to_string(), message.id.0);
         let mut task = self.e2e.handle_incoming_message(message);
         let result = loop {
             match task.poll(self.e2e.context()).map_err(e2e_error)? {
@@ -3169,6 +3177,8 @@ impl<'a> Session<'a> {
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::ReflectMessage(
                     instruction,
                 )) => {
+                    // The message is stored: the wait for the mediator is no reason to hold it back.
+                    self.emit_stored_message_events();
                     let response = self.run_reflect(instruction).await?;
                     task.response(IncomingMessageResponse::ReflectMessage(response))
                         .map_err(protocol_error)?;
@@ -3212,11 +3222,15 @@ impl<'a> Session<'a> {
                 IncomingMessageLoop::Done(result) => break result,
             }
         };
+        if self.multi_device.is_some() {
+            self.setup
+                .store
+                .reflection_done(&sender, message_id)
+                .map_err(storage_error)?;
+        }
         self.storage_works();
         // It's in the store by now: before anything that can fail on the network.
-        self.emit_events_unless(|event| {
-            needs_the_connection(event) || runs_before_the_next_message(event)
-        });
+        self.emit_stored_message_events();
         if let Some(ack) = result.outgoing_message_ack {
             self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
         }
@@ -4204,7 +4218,7 @@ mod sync_order_tests {
             .try_into()
             .unwrap(),
         );
-        let e2e = CspE2eProtocol::new(CspE2eProtocolContextInit {
+        let mut e2e = CspE2eProtocol::new(CspE2eProtocolContextInit {
             client_info: setup.client_info.clone(),
             config: Arc::clone(&setup.config),
             csp_e2e: CspE2eContextInit {
@@ -4215,7 +4229,16 @@ mod sync_order_tests {
                 fs_sessions: None,
                 fs_answering_only: false,
             },
-            d2x: None,
+            d2x: store
+                .multi_device()
+                .unwrap()
+                .map(|properties| D2xContextInit {
+                    device_id: D2xDeviceId(properties.mediator_device_id),
+                    device_group_key: properties.device_group_key().unwrap(),
+                    nonce_storage: Box::new(RefCell::new(crate::multidevice::StoreD2dNonces(
+                        Rc::clone(store),
+                    ))),
+                }),
             shortcut: Box::new(WebShortcuts {
                 events: Rc::clone(&events),
             }),
@@ -4232,6 +4255,9 @@ mod sync_order_tests {
                 from_sync: false,
             })),
         });
+        if store.multi_device().unwrap().is_some() {
+            e2e.update_d2m_state(D2mRole::Leader).unwrap();
+        }
         Session {
             setup,
             transport: Transport::Direct(stream),
@@ -4258,6 +4284,8 @@ mod sync_order_tests {
         let key = ClientKey::from([5; 32]);
         let mut contact = crate::contacts::test_contact(CREATOR);
         contact.public_key = key.public_key();
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
         setup.store.upsert_contact(&contact).unwrap();
         encode_outgoing_contact_message(
             CREATOR.parse().unwrap(),
@@ -4504,6 +4532,66 @@ mod sync_order_tests {
         let lost = ConnectionError::Io(std::io::ErrorKind::ConnectionReset.into());
         assert!(lost.is_connection_lost());
         assert!(!ConnectionError::Storage { code: 13 }.is_connection_lost());
+    }
+
+    /// With other devices, the connection can die while waiting for the mediator to confirm a
+    /// stored message. The server's next copy passes and is reflected, without being stored or
+    /// announced again. Once the task is through it counts as known.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_whose_reflection_failed_is_reflected_again() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = from_creator(&setup, 1, "hi");
+        let mut first = session(&setup, &tx).await;
+        let added = |events: &[CoreEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+                .count()
+        };
+
+        // On this socket every mediator step fails.
+        let reflection_failed = |error: ConnectionError| {
+            assert!(error.to_string().contains("mediator"), "{error}");
+        };
+        reflection_failed(first.handle_incoming(message).await.unwrap_err());
+        assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert!(setup.store.awaits_reflection(CREATOR, 1).unwrap());
+        drop(first);
+        assert_eq!(added(&sent_to_ui(&mut rx)), 1);
+
+        let mut second = session(&setup, &tx).await;
+        let again = from_creator(&setup, 1, "hi");
+        reflection_failed(second.handle_incoming(again).await.unwrap_err());
+        drop(second);
+        assert_eq!(added(&sent_to_ui(&mut rx)), 0);
+        assert_eq!(
+            setup
+                .store
+                .conversation_messages(CREATOR, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A message the task ends without reflecting (blocked by now) needs no more of it.
+        setup
+            .store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockedContacts": [CREATOR] }).to_string(),
+            )
+            .unwrap();
+        let mut third = session(&setup, &tx).await;
+        let again = from_creator(&setup, 1, "hi");
+        let error = third.handle_incoming(again).await.unwrap_err();
+        assert!(!error.to_string().contains("mediator"), "{error}");
+        assert!(!setup.store.awaits_reflection(CREATOR, 1).unwrap());
     }
 
     #[test]
