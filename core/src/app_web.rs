@@ -4,8 +4,8 @@
 //!
 //! Commands: `webSessions`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
 //! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`. Events: `webSession {id, state, error?}`
-//! (`connecting`, `waiting` for the browser, `connected`, `stopped`), `webCertificateChanged
-//! {id, host}`.
+//! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
+//! code), `webCertificateChanged {id, host}`.
 
 use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ pub(crate) enum FromWeb {
     Ended {
         session: i64,
         delete: bool,
-        error: Option<String>,
+        error: Option<WebFailure>,
     },
     /// A self-hosted server's first certificate, to pin.
     Pinned {
@@ -58,6 +58,64 @@ pub(crate) enum FromWeb {
         session: i64,
         spki: String,
     },
+}
+
+/// Why a session's task ended against its will. Only fixed codes reach the log and the UI: what
+/// a server gives as its reason for closing is its own text, and a self-hosted server isn't
+/// Threema's (CLAUDE.md §7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebFailure {
+    Timeout,
+    Tls,
+    CertificateChanged,
+    /// The server closed the connection, with this close code.
+    Closed(Option<u16>),
+    /// One of our own fixed texts.
+    Protocol(&'static str),
+    Socket,
+}
+
+impl WebFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Tls => "tls",
+            Self::CertificateChanged => "certificateChanged",
+            Self::Closed(_) => "closed",
+            Self::Protocol(_) => "protocol",
+            Self::Socket => "socket",
+        }
+    }
+}
+
+impl From<WebSocketError> for WebFailure {
+    fn from(error: WebSocketError) -> Self {
+        use tokio_tungstenite::tungstenite::Error as Socket;
+        match error {
+            WebSocketError::Closed { code, .. } => Self::Closed(code),
+            WebSocketError::NotSecure | WebSocketError::NotThreema | WebSocketError::Tls(_) => {
+                Self::Tls
+            }
+            WebSocketError::Text => Self::Protocol("text message"),
+            WebSocketError::Socket(Socket::Io(error))
+                if error
+                    .get_ref()
+                    .is_some_and(|inner| inner.is::<rustls::Error>()) =>
+            {
+                Self::Tls
+            }
+            WebSocketError::Socket(_) => Self::Socket,
+        }
+    }
+}
+
+impl From<saltyrtc::Error> for WebFailure {
+    fn from(error: saltyrtc::Error) -> Self {
+        match error {
+            saltyrtc::Error::Protocol(text) => Self::Protocol(text),
+            saltyrtc::Error::NotConnected => Self::Protocol("not connected"),
+        }
+    }
 }
 
 /// From the app to a session task.
@@ -442,10 +500,10 @@ impl App {
                 if delete || !persistent {
                     let _ = self.store.remove_web_session(session);
                 }
-                if let Some(error) = &error {
-                    tracing::warn!(%error, "Threema Web session ended");
+                if let Some(error) = error {
+                    tracing::warn!(failure = ?error, "Threema Web session ended");
                 }
-                self.emit_web_state(session, "stopped", error.as_deref());
+                self.emit_web_state(session, "stopped", error.map(WebFailure::code));
             }
             FromWeb::Pinned { host, spki, .. } => {
                 let _ = self.store.set_web_host(&host, Some(&spki));
@@ -680,7 +738,7 @@ async fn run_session(
     pin: Option<Option<String>>,
     mut rx: UnboundedReceiver<ToWeb>,
     events: &TaskEvents,
-) -> Result<bool, String> {
+) -> Result<bool, WebFailure> {
     let mut responder = Responder::new(
         ClientKey::from(*session.private_key),
         PublicKey::from(session.initiator_key),
@@ -699,14 +757,15 @@ async fn run_session(
         Some(expected) => {
             crate::https::tofu_tls_config(expected.clone(), std::sync::Arc::clone(&seen))
         }
-    }?;
+    }
+    .map_err(|_| WebFailure::Tls)?;
     let connected = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         Datagrams::connect_with(&url, Some(saltyrtc::SUBPROTOCOL), tls),
     )
     .await
-    .map_err(|_| "timeout".to_owned())
-    .and_then(|result| result.map_err(|error: WebSocketError| error.to_string()));
+    .map_err(|_| WebFailure::Timeout)
+    .and_then(|result| result.map_err(WebFailure::from));
     let presented = seen
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -729,7 +788,7 @@ async fn run_session(
                         spki: presented,
                     })
                     .await;
-                return Err("certificate changed".into());
+                return Err(WebFailure::CertificateChanged);
             }
             Some(_) => {}
         }
@@ -747,19 +806,21 @@ async fn run_session(
         let mut actions: Vec<Action> = Vec::new();
         tokio::select! {
             frame = socket.receive() => {
-                let frame = frame.map_err(|error| error.to_string())?;
+                let frame = frame?;
                 let saltyrtc_events = match responder.receive(&frame) {
                     Ok(saltyrtc_events) => saltyrtc_events,
                     Err(error) => {
                         socket.close().await;
-                        return Err(error.to_string());
+                        return Err(error.into());
                     }
                 };
                 for event in saltyrtc_events {
                     match event {
                         Event::Send(frame) => out.push(frame),
                         Event::PeerConnected => {
-                            let id = responder.connection_id().ok_or("no connection ID")?;
+                            let id = responder
+                                .connection_id()
+                                .ok_or(WebFailure::Protocol("no connection ID"))?;
                             let (started, first) = arp::Connection::start(id);
                             connection = Some(started);
                             actions.extend(first);
@@ -845,7 +906,7 @@ async fn run_session(
                     Ok(frame) => out.push(frame),
                     // Between two browsers: the old connection's last words go nowhere.
                     Err(saltyrtc::Error::NotConnected) => {}
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(error.into()),
                 },
                 Action::Message(message) => {
                     events
@@ -865,10 +926,7 @@ async fn run_session(
             }
         }
         for frame in out {
-            socket
-                .send(frame)
-                .await
-                .map_err(|error| error.to_string())?;
+            socket.send(frame).await?;
         }
     }
 }

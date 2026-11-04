@@ -12,10 +12,21 @@ Page {
 
     property var sessions: []
 
-    function load() {
+    function load(done) {
         backend.call("webSessions", {}, function(ok, result) {
             if (ok) page.sessions = result.sessions
+            if (done) done()
         })
+    }
+
+    // A session the browser never stored is gone from the list by now.
+    function showDisconnected(id) {
+        var kept = page.sessions.some(function(session) { return session.id === id })
+        Notices.show(kept
+                     //% "Threema Web disconnected. Tap the browser to connect it again."
+                     ? qsTrId("threesea-la-web-disconnected-kept")
+                     //% "Threema Web disconnected."
+                     : qsTrId("threesea-la-web-disconnected"), Notice.Long, Notice.Center)
     }
 
     function stateText(session) {
@@ -43,11 +54,9 @@ Page {
         target: backend
         onCoreEvent: {
             if (name === "webSession") {
-                page.load()
-                if (data.state === "stopped" && data.error && data.error !== "certificate changed") {
-                    //% "Threema Web disconnected: %1"
-                    Notices.show(qsTrId("threesea-la-web-ended").arg(data.error), Notice.Long, Notice.Center)
-                }
+                // `error` is a code for the log's sake; a changed certificate has its own dialog.
+                var failed = data.state === "stopped" && data.error && data.error !== "certificateChanged"
+                page.load(failed ? function() { page.showDisconnected(data.id) } : undefined)
             } else if (name === "webCertificateChanged") {
                 var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"), { host: data.host })
                 dialog.accepted.connect(function() {

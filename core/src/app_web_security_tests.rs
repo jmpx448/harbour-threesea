@@ -1086,3 +1086,32 @@ fn web_goodbye_says_whether_the_pairing_stays() {
         );
     }
 }
+
+/// A server's close text goes nowhere: neither into the log's failure nor to the UI.
+#[tokio::test(flavor = "current_thread")]
+async fn web_server_close_text_stays_out_of_the_failure() {
+    let failure = WebFailure::from(WebSocketError::Closed {
+        code: Some(3000),
+        reason: "SERVER'S OWN WORDS".into(),
+    });
+    assert_eq!(failure, WebFailure::Closed(Some(3000)));
+    assert!(!format!("{failure:?}").contains("WORDS"));
+
+    let (_dir, mut app) = fixture();
+    let mut events = app.take_media_events().unwrap();
+    let (_rx, task) = app.web_test_session(1);
+    app.on_web_event((
+        task,
+        FromWeb::Ended {
+            session: 1,
+            delete: false,
+            error: Some(failure),
+        },
+    ))
+    .await;
+    let Some(CoreEvent::Call(event)) = events.recv().await else {
+        panic!("no event");
+    };
+    assert_eq!(event["state"], "stopped");
+    assert_eq!(event["error"], "closed");
+}
