@@ -1119,6 +1119,10 @@ pub enum ApiError {
     /// The directory didn't take a spam report.
     #[error("report not accepted")]
     ReportRefused,
+    /// The encrypted store failed in a way the UI tells apart (`StoreError::kind`). The message
+    /// is only a code for support.
+    #[error("{code}")]
+    StoreFailed { kind: &'static str, code: String },
     /// Bad request from the UI or internal failure.
     #[error("{0}")]
     Internal(String),
@@ -1191,14 +1195,27 @@ impl ApiError {
             Self::RateLimited => "rateLimited",
             Self::ServerUnexplained => "serverUnexplained",
             Self::ReportRefused => "reportRefused",
+            Self::StoreFailed { kind, .. } => kind,
             Self::Internal(_) => "internal",
+        }
+    }
+
+    /// Opening the store: whatever the reason, it is why the app doesn't start.
+    fn store_failed(error: &StoreError) -> Self {
+        Self::StoreFailed {
+            kind: error.kind(),
+            code: error.code(),
         }
     }
 }
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
-        Self::Internal(error.to_string())
+        if error.kind() == "store" {
+            Self::Internal(error.to_string())
+        } else {
+            Self::store_failed(&error)
+        }
     }
 }
 
@@ -1354,10 +1371,11 @@ impl App {
         std::fs::create_dir_all(&start.data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
         let media = crate::media::MediaStore::open(&start.data_dir, db_key)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        Self::with_media(start, db_key, Arc::new(media))
+        Self::with_media(start, db_key, Arc::new(media), &|| {})
     }
 
-    /// Like [`Self::new`] with a media store the caller shares (with the bridge).
+    /// Like [`Self::new`] with a media store the caller shares (with the bridge). `upgrading` is
+    /// called before the store's schema is brought up to date, which can take a while.
     ///
     /// # Errors
     /// Store or TLS setup failures.
@@ -1365,11 +1383,14 @@ impl App {
         start: &StartConfig,
         db_key: &[u8; 32],
         media: Arc<crate::media::MediaStore>,
+        upgrading: &dyn Fn(),
     ) -> Result<Self, ApiError> {
         std::fs::create_dir_all(&start.data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
         let (media_events, media_events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let store = std::rc::Rc::new(Store::open(&start.data_dir.join("threesea.db"), db_key)?);
-        forget_false_refusal(&store)?;
+        let store = Store::open_with(&start.data_dir.join("threesea.db"), db_key, upgrading)
+            .map(std::rc::Rc::new)
+            .map_err(|error| ApiError::store_failed(&error))?;
+        forget_false_refusal(&store).map_err(|error| ApiError::store_failed(&error))?;
         let app = Self {
             store,
             https: HttpsClient::new().map_err(|e| ApiError::Internal(e.to_string()))?,
@@ -3243,6 +3264,77 @@ mod tests {
         assert_eq!(reply["reply"], 4);
         assert_eq!(reply["error"]["kind"], "internal");
         assert!(!reply.to_string().contains("secret"));
+    }
+
+    /// The page of a table, unreadable from now on.
+    fn damage_table(path: &std::path::Path, key: &[u8; 32], table: &str) {
+        let store = Store::open(path, key).unwrap();
+        let root: usize = store
+            .conn
+            .query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(store);
+        let mut raw = std::fs::read(path).unwrap();
+        raw[(root - 1) * 4096 + 100..(root - 1) * 4096 + 200].fill(0xA5);
+        std::fs::write(path, raw).unwrap();
+    }
+
+    fn start_config(dir: &std::path::Path) -> StartConfig {
+        serde_json::from_value(json!({
+            "dataDir": dir,
+            "appVersion": "0.0.0",
+            "language": "en",
+            "country": "CH",
+            "model": "test",
+            "osVersion": "5.1",
+        }))
+        .unwrap()
+    }
+
+    /// The core comes up and the status the bridge waits for is what fails: it gets a kind it can
+    /// show, not a spinner.
+    #[test]
+    fn a_damaged_identity_page_makes_the_status_say_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = start_config(dir.path());
+        drop(App::new(&config, &[3; 32]).unwrap());
+        damage_table(&dir.path().join("threesea.db"), &[3; 32], "identity");
+
+        let mut app = App::new(&config, &[3; 32]).unwrap();
+        let reply: Value = serde_json::from_str(
+            &tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(app.handle(r#"{"id":1,"cmd":"status"}"#)),
+        )
+        .unwrap();
+
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["error"]["kind"], "storeDamaged", "{reply}");
+        assert_eq!(reply["error"]["message"], "sqlite 11", "{reply}");
+    }
+
+    #[test]
+    fn a_store_that_fails_while_opening_gives_its_kind_and_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = start_config(dir.path());
+        drop(App::new(&config, &[3; 32]).unwrap());
+        damage_table(
+            &dir.path().join("threesea.db"),
+            &[3; 32],
+            "sqlite_autoindex_settings_1",
+        );
+
+        let error = App::new(&config, &[3; 32]).err().unwrap();
+        assert_eq!(error.kind(), "storeDamaged");
+        assert_eq!(error.to_string(), "sqlite 11");
+
+        let error = App::new(&config, &[4; 32]).err().unwrap();
+        assert_eq!(error.kind(), "storeKey");
     }
 
     /// What the user waits for between tapping the icon and seeing the chat list: opening the

@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 use crate::{
-    app::{App, StartConfig},
+    app::{ApiError, App, StartConfig},
     connection::FromConnection,
     media::MediaStore,
     providers::CoreEvent,
@@ -33,16 +33,33 @@ pub struct CoreHandle {
 }
 
 impl CoreHandle {
-    /// Start the core. The first message emitted is `{"event":"started"}` or
-    /// `{"event":"fatal","kind":...,"message":...}`.
+    /// Start the core. It emits `{"event":"started"}` or `{"event":"fatal","kind":...,
+    /// "message":...}`, once the store is open; `{"event":"upgrading"}` before that if the store's
+    /// schema is brought up to date first. On an error here `fatal` has told why as well.
     pub fn start(
         config: StartConfig,
         db_key: Zeroizing<[u8; 32]>,
         emit: Emit,
     ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<CoreRequest>();
-        std::fs::create_dir_all(&config.data_dir)?;
-        let media = Arc::new(MediaStore::open(&config.data_dir, &db_key)?);
+        let media = std::fs::create_dir_all(&config.data_dir)
+            .and_then(|()| MediaStore::open(&config.data_dir, &db_key));
+        let media = match media {
+            Ok(media) => Arc::new(media),
+            Err(error) => {
+                let kind = if error.kind() == std::io::ErrorKind::StorageFull {
+                    "diskFull"
+                } else {
+                    "storeUnreadable"
+                };
+                let code = error
+                    .raw_os_error()
+                    .map_or(String::new(), |code| format!("os {code}"));
+                tracing::error!(kind, code, "could not set up the data directory");
+                emit(json!({"event": "fatal", "kind": kind, "message": code}).to_string());
+                return Err(error);
+            }
+        };
         let core_media = Arc::clone(&media);
         let thread = std::thread::Builder::new()
             .name("threesea-core".into())
@@ -54,10 +71,22 @@ impl CoreHandle {
                         return;
                     },
                 };
-                let app = match App::with_media(&config, &db_key, core_media) {
+                let upgrading = || {
+                    tracing::info!("bringing the store up to date");
+                    emit(json!({"event": "upgrading"}).to_string());
+                };
+                let app = match App::with_media(&config, &db_key, core_media, &upgrading) {
                     Ok(app) => app,
                     Err(error) => {
-                        emit(json!({"event": "fatal", "kind": "store", "message": error.to_string()}).to_string());
+                        let kind = error.kind();
+                        // Only the store's are codes; anything else could say anything.
+                        let code = if matches!(error, ApiError::StoreFailed { .. }) {
+                            error.to_string()
+                        } else {
+                            String::new()
+                        };
+                        tracing::error!(kind, code, "could not open the stored data");
+                        emit(json!({"event": "fatal", "kind": kind, "message": code}).to_string());
                         return;
                     },
                 };
@@ -485,6 +514,55 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn start_config(dir: &std::path::Path) -> StartConfig {
+        serde_json::from_value(json!({
+            "dataDir": dir,
+            "appVersion": "0.0.0",
+            "language": "en",
+            "country": "CH",
+            "model": "test",
+            "osVersion": "5.1",
+        }))
+        .unwrap()
+    }
+
+    /// Starts the core and waits for what it says first.
+    fn first_answer(dir: &std::path::Path, key: [u8; 32]) -> serde_json::Value {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let emit: Emit = Box::new(move |message| {
+            let _ = tx.lock().unwrap().send(message);
+        });
+        let _handle = CoreHandle::start(start_config(dir), Zeroizing::new(key), emit);
+        let message = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        serde_json::from_str(&message).unwrap()
+    }
+
+    #[test]
+    fn a_failed_start_gives_the_reason_as_a_kind_and_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(first_answer(dir.path(), [1; 32])["event"], "started");
+
+        let wrong_key = first_answer(dir.path(), [2; 32]);
+        assert_eq!(wrong_key["event"], "fatal");
+        assert_eq!(wrong_key["kind"], "storeKey", "{wrong_key}");
+        assert_eq!(wrong_key["message"], "", "{wrong_key}");
+    }
+
+    #[test]
+    fn a_data_directory_that_cannot_be_made_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"in the way").unwrap();
+        let answer = first_answer(&file.join("data"), [1; 32]);
+        assert_eq!(answer["event"], "fatal");
+        assert_eq!(answer["kind"], "storeUnreadable", "{answer}");
+        assert!(
+            answer["message"].as_str().unwrap().starts_with("os "),
+            "{answer}"
+        );
+    }
 
     #[test]
     fn remove_data_dir_leaves_it_empty() {

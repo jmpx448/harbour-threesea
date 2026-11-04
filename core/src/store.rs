@@ -12,15 +12,72 @@ use zeroize::{Zeroize as _, Zeroizing};
 /// Store errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// The key does not open the database (wrong key or corrupted file).
+    /// SQLite says this isn't a database: the key doesn't fit, or the file's first page is damaged.
+    /// With SQLCipher nobody can tell the two apart.
     #[error("database key rejected")]
     WrongKey,
     /// The database has a newer schema than this app understands.
     #[error("database schema {0} is newer than supported")]
     TooNew(i64),
+    /// The schema upgrade ran out of room and was rolled back, so nothing has changed.
+    #[error("no room for the database upgrade: {0}")]
+    UpgradeNoRoom(rusqlite::Error),
     /// Any other SQLite error.
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+}
+
+/// SQLite calls it that when it writes. Opening a store on a full disk fails earlier, on growing the
+/// WAL's shared memory file (measured on a full tmpfs).
+fn is_disk_full(error: &rusqlite::Error) -> bool {
+    error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)
+        || matches!(error, rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_IOERR_SHMSIZE)
+}
+
+impl StoreError {
+    /// What went wrong as the UI tells it apart (`Errors.js`); `store` when there is nothing more
+    /// to say. SQLCipher reports damage on any page but the first as corruption.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        use rusqlite::ErrorCode as Code;
+        match self {
+            Self::WrongKey => "storeKey",
+            Self::TooNew(_) => "storeTooNew",
+            Self::UpgradeNoRoom(_) => "upgradeNoRoom",
+            Self::Sqlite(error) if is_disk_full(error) => "diskFull",
+            Self::Sqlite(error) => match error.sqlite_error_code() {
+                Some(Code::NotADatabase) => "storeKey",
+                Some(Code::DatabaseCorrupt) => "storeDamaged",
+                Some(
+                    Code::SystemIoFailure
+                    | Code::CannotOpen
+                    | Code::PermissionDenied
+                    | Code::ReadOnly
+                    | Code::DatabaseBusy
+                    | Code::DatabaseLocked
+                    | Code::OutOfMemory,
+                ) => "storeUnreadable",
+                _ => "store",
+            },
+        }
+    }
+
+    /// For the log and for support: numbers only, SQLite's own texts can name columns.
+    #[must_use]
+    pub fn code(&self) -> String {
+        let sqlite = |error: &rusqlite::Error| match error {
+            rusqlite::Error::SqliteFailure(failure, _) => {
+                format!("sqlite {}", failure.extended_code)
+            }
+            _ => String::new(),
+        };
+        match self {
+            Self::WrongKey => String::new(),
+            Self::TooNew(version) => format!("schema {version}"),
+            Self::UpgradeNoRoom(error) | Self::Sqlite(error) => sqlite(error),
+        }
+    }
 }
 
 /// Persisted own identity.
@@ -299,6 +356,19 @@ impl Store {
     /// # Errors
     /// [`StoreError::WrongKey`] if the key does not match an existing database.
     pub fn open(path: &Path, key: &[u8; 32]) -> Result<Self, StoreError> {
+        Self::open_with(path, key, &|| {})
+    }
+
+    /// Like [`Self::open`]; `upgrading` is called before an existing database's schema is brought
+    /// up to date, which can take a while.
+    ///
+    /// # Errors
+    /// See [`Self::open`].
+    pub fn open_with(
+        path: &Path,
+        key: &[u8; 32],
+        upgrading: &dyn Fn(),
+    ) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         let mut pragma = Zeroizing::new(format!(
             "PRAGMA key = \"x'{}'\";",
@@ -306,13 +376,16 @@ impl Store {
         ));
         conn.execute_batch(&pragma)?;
         pragma.zeroize();
-        // Fails with "file is not a database" if the key is wrong.
-        if conn
-            .query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-            .is_err()
-        {
-            return Err(StoreError::WrongKey);
-        }
+        // Fails with "file is not a database" if the key is wrong. Any other failure says nothing
+        // about the key: a full disk or an I/O error must not read as a wrong one.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|error| {
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::NotADatabase) {
+                    StoreError::WrongKey
+                } else {
+                    StoreError::Sqlite(error)
+                }
+            })?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         let mut store = Self {
             conn,
@@ -320,20 +393,37 @@ impl Store {
             invalid_ids: std::cell::RefCell::default(),
             member_lookups: std::cell::Cell::default(),
         };
-        store.migrate()?;
+        store.migrate(MIGRATIONS, upgrading)?;
         Ok(store)
     }
 
-    fn migrate(&mut self) -> Result<(), StoreError> {
+    fn migrate(&mut self, migrations: &[&str], upgrading: &dyn Fn()) -> Result<(), StoreError> {
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let target = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
+        let target = i64::try_from(migrations.len()).unwrap_or(i64::MAX);
         if version > target {
             return Err(StoreError::TooNew(version));
         }
+        if version == target {
+            return Ok(());
+        }
+        if version > 0 {
+            upgrading();
+        }
+        self.apply_migrations(migrations, version)
+            .map_err(|error| match error {
+                StoreError::Sqlite(error) if is_disk_full(&error) => {
+                    StoreError::UpgradeNoRoom(error)
+                }
+                other => other,
+            })?;
+        Ok(())
+    }
+
+    fn apply_migrations(&mut self, migrations: &[&str], version: i64) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
-        for (index, sql) in MIGRATIONS
+        for (index, sql) in migrations
             .iter()
             .enumerate()
             .skip(usize::try_from(version).unwrap_or(0))
@@ -818,6 +908,151 @@ mod tests {
         assert!(
             !worth_shrinking(129 * megabyte * 2, 129 * megabyte, page),
             "the copy would be too large for memory"
+        );
+    }
+
+    /// A store on disk, closed again with everything in the main file.
+    fn closed_store(path: &Path) {
+        drop(store_with_identity(path));
+    }
+
+    fn open_error(path: &Path, key: &[u8; 32]) -> StoreError {
+        match Store::open(path, key) {
+            Ok(_) => panic!("the store opened"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn a_key_that_does_not_fit_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        closed_store(&path);
+        let error = open_error(&path, &[2; 32]);
+        assert!(matches!(error, StoreError::WrongKey), "{error}");
+        assert_eq!(error.kind(), "storeKey");
+        assert_eq!(error.code(), "");
+    }
+
+    #[test]
+    fn a_damaged_first_page_reads_like_a_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        closed_store(&path);
+        let mut raw = std::fs::read(&path).unwrap();
+        raw[100..200].fill(0xA5);
+        std::fs::write(&path, raw).unwrap();
+        assert_eq!(open_error(&path, &[1; 32]).kind(), "storeKey");
+    }
+
+    #[test]
+    fn damage_behind_the_first_page_is_damage_and_not_a_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        closed_store(&path);
+        let mut raw = std::fs::read(&path).unwrap();
+        for page in raw[4096..].chunks_mut(4096) {
+            page[100..200].fill(0xA5);
+        }
+        std::fs::write(&path, raw).unwrap();
+        let error = open_error(&path, &[1; 32]);
+        assert_eq!(error.kind(), "storeDamaged", "{error}");
+        assert_eq!(error.code(), "sqlite 11");
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_opened_is_no_key_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be.
+        let error = open_error(dir.path(), &[1; 32]);
+        assert_eq!(error.kind(), "storeUnreadable", "{error}");
+    }
+
+    #[test]
+    fn a_full_disk_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        // How SQLite's limit looks to the caller is what a full disk looks like: SQLITE_FULL.
+        store
+            .conn
+            .execute_batch("PRAGMA max_page_count = 1")
+            .unwrap();
+        let error = store.set_setting("key", &"x".repeat(100_000)).unwrap_err();
+        assert_eq!(error.kind(), "diskFull", "{error}");
+
+        // A store reopened on a full disk, as measured on a full tmpfs.
+        let error = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_SHMSIZE),
+            None,
+        ));
+        assert_eq!(error.kind(), "diskFull");
+        assert_eq!(error.code(), "sqlite 4874");
+    }
+
+    #[test]
+    fn a_newer_schema_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let newer = MIGRATIONS.len() + 1;
+        Store::open(&path, &[1; 32])
+            .unwrap()
+            .conn
+            .execute_batch(&format!("PRAGMA user_version = {newer}"))
+            .unwrap();
+        let error = open_error(&path, &[1; 32]);
+        assert_eq!(error.kind(), "storeTooNew");
+        assert_eq!(error.code(), format!("schema {newer}"));
+    }
+
+    #[test]
+    fn an_upgrade_says_so_first_and_a_new_database_or_a_current_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let told = std::cell::Cell::new(0);
+        let tell = || told.set(told.get() + 1);
+        let mut store = Store::open_with(&path, &[1; 32], &tell).unwrap();
+        assert_eq!(told.get(), 0, "a new database has nothing to upgrade");
+        drop(store);
+        store = Store::open_with(&path, &[1; 32], &tell).unwrap();
+        assert_eq!(told.get(), 0, "up to date");
+
+        let mut next = MIGRATIONS.to_vec();
+        next.push("CREATE TABLE later (a INTEGER)");
+        store.migrate(&next, &tell).unwrap();
+        assert_eq!(told.get(), 1);
+        store.migrate(&next, &tell).unwrap();
+        assert_eq!(told.get(), 1, "done");
+    }
+
+    #[test]
+    fn an_upgrade_without_room_says_so_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let pages: i64 = store
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        store
+            .conn
+            .execute_batch(&format!("PRAGMA max_page_count = {pages}"))
+            .unwrap();
+        let mut next = MIGRATIONS.to_vec();
+        next.push(
+            "CREATE TABLE later (a TEXT);
+             INSERT INTO later VALUES (zeroblob(1000000));",
+        );
+
+        let error = store.migrate(&next, &|| {}).unwrap_err();
+
+        assert_eq!(error.kind(), "upgradeNoRoom", "{error}");
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, i64::try_from(MIGRATIONS.len()).unwrap());
+        assert!(
+            store.conn.prepare("SELECT a FROM later").is_err(),
+            "rolled back"
         );
     }
 

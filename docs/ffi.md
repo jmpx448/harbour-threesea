@@ -40,7 +40,8 @@ The arguments sit in the same object as `id` and `cmd`, so **no argument may be 
 the request as a whole ("invalid request"). Name it after what it is — `device`, `message`,
 `favourite`. The bridge writes a warning when an argument of that name is passed.
 
-Events (unsolicited): `{"event": "started", "version"}`, `{"event": "fatal", "kind", "message"}`,
+Events (unsolicited): `{"event": "started", "version"}`, `{"event": "upgrading"}` (before `started`: an existing store's schema is being brought up to date, which can take a while),
+`{"event": "fatal", "kind", "message"}` (the core didn't start. `kind`: `storeKey` the key doesn't fit or the first page is damaged, which nobody can tell apart; `storeDamaged`, `storeTooNew` the data comes from a newer version, `diskFull`, `upgradeNoRoom` the upgrade ran out of room and was rolled back, `storeUnreadable` I/O, permissions, a file that won't open, `store` anything else about the store, `internal`. `message`: a code for support, empty for `internal`),
 `{"event": "safeChanged"}` (automatic Safe backup ran or its error state changed),
 `{"event": "safeServerCopyLeft"}` (`safeDisable` couldn't delete the server copy; the window tells the user, as the page may be gone),
 `{"event": "contactsChanged"}` (contacts imported in the background; the bridge reloads the model),
