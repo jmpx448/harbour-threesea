@@ -862,10 +862,10 @@ ApplicationWindow {
     }
 
     function notificationText(sender, message) {
-        return backend.notificationPreview
-                ? (sender ? sender + ": " : "") + Fmt.preview(message)
-                //% "New message"
-                : qsTrId("threesea-la-new-message")
+        if (backend.notificationPreview) return (sender ? sender + ": " : "") + Fmt.preview(message)
+        // A status line is a missed call (notify()), which has no message to hide.
+        //% "New message"
+        return message.kind === "status" ? Fmt.preview(message) : qsTrId("threesea-la-new-message")
     }
 
     function publish(identity, title, sender, message) {

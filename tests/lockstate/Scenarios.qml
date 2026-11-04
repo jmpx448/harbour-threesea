@@ -1281,6 +1281,15 @@ QtObject {
                 check("the banner stays: not published", n.previewBody, "the words")
             }, 0],
         ],
+        // Previews off, a missed call is still called that.
+        missedCallWithoutPreview: [
+            [function() {
+                ready(false)
+                backend.notificationPreview = false
+                incoming("", { kind: "status", text: undefined, body: "call|missed|0" })
+            }, 50],
+            [function() { check("what it is", window.notifications[chat].body, "threesea-la-status-call-missed") }, 0],
+        ],
         // Previews off: it stays generic.
         deletedWithoutPreview: [
             [function() {
