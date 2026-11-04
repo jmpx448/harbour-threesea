@@ -30,7 +30,11 @@ Page {
         for (var id in selected) if (selected[id]) n++
         return n
     }
-    forwardNavigation: !selecting
+    // A swipe doesn't throw away what can't come again: picked files and captures wait for the
+    // bar's X, a recording for its own, and only a swipe to the details would end a recording.
+    // Until the messages came the bar's list isn't shown, so there is no X: the swipe stays.
+    backNavigation: !recordingHere && (!attachment || !shown)
+    forwardNavigation: !selecting && !recordingHere
     function toggleSelected(id) {
         var map = selected
         map[id] = !map[id]
