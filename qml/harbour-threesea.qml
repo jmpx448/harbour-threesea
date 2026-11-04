@@ -83,6 +83,8 @@ ApplicationWindow {
                     : qsTrId("threesea-la-locked-notification-body")
             var n = notifications["locked"]
             if (n && n.body === body) return
+            // The last run's, taken over.
+            clearNotification("appLocked")
             //% "Threesea is locked"
             plainNotification("locked", qsTrId("threesea-la-locked-notification"), body)
         }
@@ -108,6 +110,12 @@ ApplicationWindow {
             lockInfo = status
             lockChecked = true
             if (lockNow && status.lock && status.lock.appLock) showLock()
+            // From the last run, and not true any more.
+            if (!locked) clearNotification("appLocked")
+            var waiting = notificationsWaiting
+            notificationsWaiting = []
+            waiting.forEach(function(item) { notify(item.message, item.isPrivate, item.held) })
+            runNotificationActions()
         })
     }
 
@@ -267,6 +275,10 @@ ApplicationWindow {
                 if (away > grace) window.lockNow()
             }
         }
+        // Nobody keeps the grace time from here on, and the next start may be far away.
+        onAboutToQuit: {
+            if (window.lockInfo && window.lockInfo.lock && window.lockInfo.lock.appLock) window.hideNotifications()
+        }
     }
     // The grace time is over while away: the cover, the media controls and the private chats
     // close now, not only when the app comes back. Timers sleep with the device, so coming back
@@ -279,6 +291,27 @@ ApplicationWindow {
         if (graceTimer.running && Date.now() - leftAt >= graceTimer.interval) {
             graceTimer.stop()
             lockNow(true)
+        }
+    }
+    // Soon after the device wakes, also where nothing wakes it (wakeJob needs Keep running): the
+    // notifications show the grace time's end at once, not after what was left of its timer.
+    Timer {
+        interval: 30000
+        repeat: true
+        running: graceTimer.running
+        onTriggered: window.checkGrace()
+    }
+    // Whether the lock is on now, by the clock as well. What it hides must not rely on a timer.
+    function lockActive() {
+        checkGrace()
+        return locked
+    }
+    onLockedChanged: {
+        if (locked) {
+            hideNotifications()
+        } else {
+            clearNotification("appLocked")
+            runNotificationActions()
         }
     }
 
@@ -782,8 +815,10 @@ ApplicationWindow {
             var n = existing[i]
             var actions = n.remoteActions || []
             var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
-            // The private chats' notification opens the app only.
-            if (!identity && actions.length > 0 && actions[0].method === "activate") identity = "private"
+            // The private chats' notification opens the app only, and so does the one for the lock.
+            if (!identity && actions.length > 0 && actions[0].method === "activate") {
+                identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked" : "private"
+            }
             if (identity && !notifications[identity]) {
                 notifications[identity] = n
                 watchClosed(identity, n)
@@ -809,6 +844,10 @@ ApplicationWindow {
     }
 
     function publish(identity, title, sender, message) {
+        if (lockActive()) {
+            notifyLocked(message, false)
+            return
+        }
         var n = notifications[identity]
         if (!n) {
             n = notificationComponent.createObject(window, { identity: identity })
@@ -832,6 +871,10 @@ ApplicationWindow {
 
     // Private chats: neither who nor what, and tapping only opens the app (ADR 0009).
     function notifyPrivate(message) {
+        if (lockActive()) {
+            notifyLocked(message, true)
+            return
+        }
         var n = notifications["private"]
         if (!n) {
             n = plainNotificationComponent.createObject(window, { key: "private" })
@@ -845,13 +888,80 @@ ApplicationWindow {
               qsTrId("threesea-la-private-chat"), qsTrId("threesea-la-new-message"))
     }
 
+    // While the app is locked one notification stands for everything, like on Android: neither
+    // who nor what, no Reply or Mark as read, and tapping it only opens the app. The core doesn't
+    // redact these events, so this is the place that keeps the words off the screen.
+    function appLockedNotification() {
+        var n = notifications["appLocked"]
+        if (!n) {
+            n = plainNotificationComponent.createObject(window, { key: "appLocked" })
+            notifications["appLocked"] = n
+            n.itemCount = 0
+        }
+        return n
+    }
+    function appLockedBody() {
+        return NotificationActions.replyWaiting()
+                //% "Open it and enter your PIN or passphrase to send your reply."
+                ? qsTrId("threesea-la-app-locked-reply-body")
+                //% "Something new has arrived. Open it and enter your PIN or passphrase to see it."
+                : qsTrId("threesea-la-app-locked-body")
+    }
+
+    // A message or missed call while locked, with the chosen sound and vibration.
+    function notifyLocked(message, isPrivate) {
+        var n = appLockedNotification()
+        n.itemCount = n.itemCount + 1
+        n.timestamp = new Date(message.createdAt)
+        alert(n, isPrivate ? "" : message.conversation, message.conversation.indexOf("g:") === 0,
+              qsTrId("threesea-la-locked-notification"), appLockedBody())
+    }
+
+    // Without a sound; `banner`: it is an answer to something just done.
+    function showAppLocked(added, banner) {
+        var body = appLockedBody()
+        if (!added && notifications["appLocked"] && notifications["appLocked"].body === body) return
+        var n = appLockedNotification()
+        n.itemCount = Math.max(n.itemCount + added, 1)
+        n.category = "im.received"
+        n.sound = ""
+        n.summary = qsTrId("threesea-la-locked-notification")
+        n.body = body
+        n.previewSummary = banner ? n.summary : ""
+        n.previewBody = banner ? body : ""
+        n.publish()
+    }
+
+    // The lock came on: what is on the screen about a chat goes, with its Reply and Mark as read.
+    // Their tokens only start their grace: lipstick closes a notification first and calls us after
+    // the device is unlocked, and a newer notification shares that token, so a tap may be on its
+    // way. It waits for the PIN (runNotificationActions).
+    function hideNotifications() {
+        var added = 0
+        Object.keys(notifications).forEach(function(key) {
+            if (["appLocked", "locked", "license", "replyNotSent"].indexOf(key) >= 0) return
+            added += Math.max(notifications[key].itemCount, 1)
+            if (closeNotification(key)) dbus.releaseToken(key)
+        })
+        var replyWaiting = NotificationActions.replyWaiting()
+        if (added > 0 || replyWaiting) showAppLocked(added, replyWaiting)
+    }
+
+    // The messages that came before the first look at the lock; until then it is not known what
+    // their notifications may show.
+    property var notificationsWaiting: []
+
     // `held`: the notification was kept back while another device led (multi-device), so the
     // message has been in the chat for a while — no in-app feedback for it any more.
     function notify(message, isPrivate, held) {
+        if (!lockChecked) {
+            notificationsWaiting.push({ message: message, isPrivate: isPrivate, held: held })
+            return
+        }
         // Of the status lines only missed calls ("call|missed|…", core/src/app_calls.rs).
         if (!backend.notificationsEnabled
                 || (message.kind === "status" && String(message.body).indexOf("call|missed|") !== 0)) return
-        if (Qt.application.state === Qt.ApplicationActive && openChat === message.conversation) {
+        if (!lockActive() && Qt.application.state === Qt.ApplicationActive && openChat === message.conversation) {
             // The message is right there, so no notification — only Android's quiet in-app
             // feedback, and none for one that has been standing there.
             if (!held) window.inAppFeedback()
@@ -879,15 +989,19 @@ ApplicationWindow {
         }
     }
 
-    function clearNotification(identity) {
+    // Says whether there was one.
+    function closeNotification(identity) {
         var n = notifications[identity]
-        if (n) {
-            n.close()
-            delete notifications[identity]
-            dbus.forgetToken(identity)
-            // A taken-over one belongs to the JavaScript engine, which collects it from here.
-            if (n.own === true) n.destroy()
-        }
+        if (!n) return false
+        n.close()
+        delete notifications[identity]
+        // A taken-over one belongs to the JavaScript engine, which collects it from here.
+        if (n.own === true) n.destroy()
+        return true
+    }
+
+    function clearNotification(identity) {
+        if (closeNotification(identity)) dbus.forgetToken(identity)
     }
 
     // The ID was removed from this device.
@@ -909,6 +1023,7 @@ ApplicationWindow {
         pendingLink = ""
         pendingChat = ""
         pendingShare = null
+        notificationsWaiting = []
         appSettings = ({})
         lockInfo = null
         lockChecked = false
@@ -923,14 +1038,18 @@ ApplicationWindow {
     onOpenChatChanged: if (openChat.length > 0) clearNotification(openChat)
 
     // Reply and Mark as read from a notification. Such a tap can be what starts the app, so these
-    // wait until the core is there (components/NotificationActions.js).
+    // wait until the core is there (components/NotificationActions.js), and one made just before
+    // the app locked waits for the PIN: nothing goes out in the user's name without it.
     function notificationAction(action) {
         NotificationActions.add(action)
         runNotificationActions()
         lockedNotification()
+        if (locked && action.text !== undefined) showAppLocked(0, true)
     }
 
     function runNotificationActions() {
+        // Only these two states have an app lock (showLock); not known yet counts as locked.
+        if ((backend.state === "ready" || backend.state === "needsLicense") && (!lockChecked || lockActive())) return
         NotificationActions.release(backend.state).forEach(function(action) {
             if (action.text !== undefined) {
                 backend.call("sendText", { identity: action.identity, text: action.text },

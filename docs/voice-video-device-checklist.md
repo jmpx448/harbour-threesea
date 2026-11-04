@@ -351,6 +351,17 @@ Notifications:
      Expect: after a Reply, "Threesea is locked" says that the reply waits. After entering the
      passphrase, the reply is sent and the chat is read. Until then nothing is sent and the chat
      stays unread.
+   - App lock on, app in the background past the grace time, with a notification showing.
+     Expect: it closes and "Threesea is locked" takes its place, without a sound. A new message
+     then gives that one notification with the usual sound and vibration, no name, no text, no
+     Reply; tapping it opens the PIN page. After the PIN it is gone.
+   - The same with the phone asleep through the grace time: wake it without opening the app.
+     Expect: the chat's text is gone within about 30 seconds.
+   - Keep running off, app lock on: close the window with a notification showing.
+     Expect: its text is gone from Events too.
+   - Type a reply in a notification on the lock screen, let the app lock's grace time pass before
+     unlocking the phone.
+     Expect: "Threesea is locked" says that the reply waits; it goes out after the PIN.
 
 Threema Web:
 

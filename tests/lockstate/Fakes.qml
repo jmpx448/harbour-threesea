@@ -70,8 +70,12 @@ QtObject {
         signal replyRequested(string identity, string text)
         function actionToken() { return "" }
         function retainTokens(identities) { }
-        function releaseToken(identity) { }
-        function forgetToken(identity) { }
+        // Those whose grace started.
+        property var released: []
+        function releaseToken(identity) { released.push(identity) }
+        // The tokens ended by us, for the checks.
+        property var forgotten: []
+        function forgetToken(identity) { forgotten.push(identity) }
         function forgetAllTokens() { }
         function activate() { }
     }

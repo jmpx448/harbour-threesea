@@ -77,6 +77,17 @@ QtObject {
         backend.coreEvent("messageAdded", { message: message, notify: true })
     }
 
+    // The one notification while locked: neither who nor what, tapping it only opens the app.
+    function checkAppLocked(count) {
+        var n = window.notifications["appLocked"]
+        check("the lock's notification", !!n, true)
+        check("its title", n.summary, "threesea-la-locked-notification")
+        check("its text", n.body, "threesea-la-app-locked-body")
+        check("count", n.itemCount, count)
+        check("only opens the app", n.remoteActions.length === 1 && n.remoteActions[0].method, "activate")
+        check("no arguments", n.remoteActions[0].arguments.length, 0)
+    }
+
     // The usual start: ready, with a lock (or without) as the core reports it.
     function ready(appLock, graceSecs) {
         harness.setActive(true)
@@ -949,6 +960,154 @@ QtObject {
                 var n = window.notifications[chat]
                 check("still that one", n === root.kept, true)
                 check("counted on", n.itemCount, 5)
+            }, 0],
+        ],
+        // Locked: one notification without who or what, without Reply, for messages and calls.
+        lockedMessageShowsNothing: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                check("no chat notification", window.notifications[chat], undefined)
+                checkAppLocked(1)
+                incoming("more", { kind: "status", text: undefined, body: "call|missed|0" })
+            }, 50],
+            [function() {
+                check("no chat notification", window.notifications[chat], undefined)
+                checkAppLocked(2)
+                backend.coreEvent("messageAdded", { private: true, notify: true,
+                    message: { conversation: chat, outgoing: false, kind: "text", createdAt: Date.now() } })
+            }, 50],
+            [function() {
+                check("no notification for the private chat", window.notifications["private"], undefined)
+                checkAppLocked(3)
+                unlock()
+            }, 100],
+            [function() {
+                check("gone with the lock", window.notifications["appLocked"], undefined)
+                incoming("after")
+            }, 50],
+            [function() { check("shown again", window.notifications[chat].body.indexOf("after") >= 0, true) }, 0],
+        ],
+        // Past the grace time by the clock, while its timer sleeps with the device.
+        lockedByClockShowsNothing: [
+            [function() { ready(true, 60) }, 100],
+            [function() {
+                harness.setActive(false)
+                check("still open", window.locked, false)
+            }, 20],
+            [function() {
+                window.leftAt = Date.now() - 61000
+                incoming("the words")
+            }, 50],
+            [function() {
+                check("locked by now", window.locked, true)
+                check("no chat notification", window.notifications[chat], undefined)
+                checkAppLocked(1)
+            }, 0],
+        ],
+        // Within the grace time it is still the chat's own notification.
+        graceShowsTheMessage: [
+            [function() { ready(true, 60) }, 100],
+            [function() { harness.setActive(false) }, 20],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                check("the text", n.body.indexOf("the words") >= 0, true)
+                check("Reply and Mark as read", n.remoteActions.length, 3)
+            }, 0],
+        ],
+        // What was on the screen goes when the lock comes on, tokens included.
+        lockHidesWhatIsShown: [
+            [function() { ready(true, 60) }, 100],
+            [function() { harness.setActive(false) }, 20],
+            [function() { incoming("the words") }, 50],
+            [function() {
+                fakes.dbus.forgotten = []
+                window.lockNow(true)
+                check("no chat notification", window.notifications[chat], undefined)
+                // A tap may be on its way: the PIN stops what it asks for, not the token.
+                check("its token's grace", fakes.dbus.released.indexOf(chat) >= 0, true)
+                check("its token still counts", fakes.dbus.forgotten.indexOf(chat), -1)
+                checkAppLocked(1)
+                check("no sound", window.notifications["appLocked"].sound, "")
+                check("no banner", window.notifications["appLocked"].previewBody, "")
+            }, 0],
+        ],
+        // Before the first look at the lock nothing is known: these wait for the answer.
+        messagesWaitForTheLockAnswer: [
+            [function() {
+                backend.hold("lockStatus")
+                backend.results["lockStatus"] = { lock: { appLock: true, graceSecs: 0, keyboard: false } }
+                backend.state = "ready"
+            }, 100],
+            [function() {
+                incoming("the words")
+                fakes.dbus.replyRequested(chat, "a reply")
+            }, 50],
+            [function() {
+                check("nothing shown", window.notifications[chat], undefined)
+                check("nothing sent", countSent("sendText"), 0)
+                backend.release("lockStatus")
+            }, 100],
+            [function() {
+                check("locked", window.locked, true)
+                check("no chat notification", window.notifications[chat], undefined)
+                check("nothing sent", countSent("sendText"), 0)
+                check("the words stay out", window.notifications["appLocked"].body.indexOf("the words"), -1)
+                check("says the reply waits", window.notifications["appLocked"].body, "threesea-la-app-locked-reply-body")
+            }, 0],
+        ],
+        // Without a lock they go through as soon as that is known.
+        messagesPassWithoutLock: [
+            [function() {
+                backend.hold("lockStatus")
+                backend.results["lockStatus"] = { lock: null }
+                backend.state = "ready"
+            }, 100],
+            [function() {
+                incoming("the words")
+                check("nothing yet", window.notifications[chat], undefined)
+                backend.release("lockStatus")
+            }, 100],
+            [function() {
+                check("the text", window.notifications[chat].body.indexOf("the words") >= 0, true)
+                check("nothing about a lock", window.notifications["appLocked"], undefined)
+            }, 0],
+        ],
+        // A Reply and a Mark as read on their way when the lock came on: only with the PIN.
+        actionsWaitForThePin: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() {
+                fakes.dbus.replyRequested(chat, "a reply")
+                fakes.dbus.markReadRequested("EFGH5678")
+            }, 50],
+            [function() {
+                check("nothing sent", countSent("sendText"), 0)
+                check("nothing read", countSent("markRead"), 0)
+                check("says so", window.notifications["appLocked"].body, "threesea-la-app-locked-reply-body")
+                check("with a banner", window.notifications["appLocked"].previewBody, "threesea-la-app-locked-reply-body")
+                unlock()
+            }, 100],
+            [function() {
+                check("sent", countSent("sendText"), 1)
+                check("the words", backend.lastArgs["sendText"].text, "a reply")
+                check("both read", countSent("markRead"), 2)
+                check("gone with the lock", window.notifications["appLocked"], undefined)
+            }, 0],
+        ],
+        // The action came past the grace time, before its timer ran out.
+        actionWaitsPastTheGrace: [
+            [function() { ready(true, 60) }, 100],
+            [function() { harness.setActive(false) }, 20],
+            [function() {
+                window.leftAt = Date.now() - 61000
+                fakes.dbus.replyRequested(chat, "a reply")
+            }, 50],
+            [function() {
+                check("locked by now", window.locked, true)
+                check("nothing sent", countSent("sendText"), 0)
             }, 0],
         ],
         // A failure of a running core with the lock up: no PIN page for a dead core.

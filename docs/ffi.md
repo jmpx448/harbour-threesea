@@ -257,6 +257,8 @@ into the notification's actions and kept in the app's private settings; calls wi
 current token are ignored, since any process on the session bus could call the service and
 lipstick calls through a helper (`mliteremoteaction`) the sandbox can't identify (audits S07/D04).
 Lipstick raises the app window for non-input actions (Mark as read); quick reply stays in Events.
+The window runs Reply and Mark as read only once it knows the app lock is open: otherwise they wait
+in memory for the PIN or passphrase (ADR 0009).
 
 ## Database key encryption (C functions, ADR 0009)
 

@@ -120,3 +120,14 @@ alone may still be stored and sent, for 60 s, counted per chat: a write-only pas
 nothing else, answers `{}` and is cleared by an unlock or deleting the data. What comes after it is
 refused as locked, and the UI says so. A private distribution list gets no pass, as its members'
 copies are made by reading its own back.
+
+## Update 2026-11-04: notifications respect the lock
+
+While the app is locked (`window.lockActive()`, which also compares the clock, since timers sleep
+with the device) one notification stands for everything, like on Android: neither who nor what, no
+Reply or Mark as read, and tapping it only opens the app. It keeps the chosen sound and vibration.
+When the lock comes on, what is on the screen about a chat closes, and with the app ending under a
+lock as well. Its token only starts its grace, as a tap may still be on its way. Messages from before the first look at the lock wait for its
+answer. A Reply or Mark as read tapped earlier and still on its way waits for the PIN in memory, as
+it does for the passphrase, and the notification says so. This is a matter for the window, not the
+core: the core has no app lock state of its own, its `unlocked` flag is the private chats'.
