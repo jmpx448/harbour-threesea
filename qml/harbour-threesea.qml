@@ -37,11 +37,23 @@ ApplicationWindow {
         backend.call("settings", {}, function(ok, result) { if (ok) window.appSettings = result })
     }
 
-    // App lock (ADR 0009): `lockInfo` from the core's lockStatus; `locked` while the lock page is
-    // up. Leaving the app for longer than the grace time locks again (and hides private chats).
+    // App lock (ADR 0009): `lockInfo` from the core's lockStatus. `locked` is the state itself,
+    // from the moment the app locks until the PIN was accepted; the lock page follows it
+    // (settleStack), so neither a page transition nor a pop or replace from elsewhere can leave
+    // the app open. Leaving the app for longer than the grace time locks again (and hides
+    // private chats).
     property var lockInfo: null
     property bool locked: false
+    property var lockPage: null
+    // The lock page whose PIN was just accepted, until the stack could take it away.
+    property var acceptedLock: null
+    // This run's first look at the lock is done: passing later steps (a new license key) doesn't
+    // ask for the PIN again.
+    property bool lockChecked: false
     property double leftAt: 0
+    // Nothing from outside moves the stack while this holds: it waits (see the timer for the
+    // pending things).
+    readonly property bool stackHeld: locked
 
     // While the stored data is still locked (after a restart) nothing arrives: say so.
     function lockedNotification() {
@@ -94,6 +106,7 @@ ApplicationWindow {
         backend.call("lockStatus", {}, function(ok, status) {
             if (!ok) return
             lockInfo = status
+            lockChecked = true
             if (lockNow && status.lock && status.lock.appLock) showLock()
         })
     }
@@ -105,21 +118,80 @@ ApplicationWindow {
     }
 
     function showLock() {
-        if (locked) return
         locked = true
-        var unlock = pageStack.push(Qt.resolvedUrl("pages/UnlockPage.qml"), { cancellable: false },
-                                    PageStackAction.Immediate)
-        unlock.unlocked.connect(function() {
-            pageStack.pop(pageStack.previousPage(unlock), PageStackAction.Immediate)
-            window.locked = false
-        })
+        settleStack()
+    }
+
+    // The lock page on top; only a call's page may be above it (it shows only who calls).
+    function lockPageUp() {
+        var top = pageStack.currentPage
+        if (top === lockPage) return true
+        return !!top && top.objectName === "call" && pageStack.find(function(page) { return page === lockPage }) !== null
+    }
+
+    // Brings the stack in line with the state. The stack takes no change during a transition
+    // (push and pop then do nothing and return null): that one is cut short, or it happens
+    // right after it.
+    function settleStack() {
+        if (!acceptedLock && !(locked && !lockPageUp())) return
+        if (pageStack.busy) pageStack.completeAnimation()
+        if (pageStack.busy) {
+            stackLater.restart()
+            return
+        }
+        if (acceptedLock) {
+            var accepted = acceptedLock
+            acceptedLock = null
+            locked = false
+            lockPage = null
+            if (pageStack.find(function(page) { return page === accepted })) {
+                pageStack.pop(pageStack.previousPage(accepted), PageStackAction.Immediate)
+            }
+        }
+        if (locked && !lockPageUp()) {
+            var unlock = pageStack.push(Qt.resolvedUrl("pages/UnlockPage.qml"), { cancellable: false },
+                                        PageStackAction.Immediate)
+            if (!unlock) {
+                stackLater.restart()
+                return
+            }
+            lockPage = unlock
+            unlock.unlocked.connect(function() {
+                window.acceptedLock = unlock
+                window.settleStack()
+            })
+        }
+    }
+    Timer {
+        id: stackLater
+        interval: 50
+        onTriggered: window.settleStack()
+    }
+    // Whatever else moved the stack (a pop in a reply that came late): the lock stays up. Later,
+    // because the stack takes no change from inside these signals.
+    Connections {
+        target: pageStack
+        onCurrentPageChanged: if (window.locked) stackLater.restart()
+        onBusyChanged: if (window.locked && !pageStack.busy) stackLater.restart()
+    }
+
+    // The way back to the chat list for everything that comes from outside (notification, link,
+    // share). False while that has to wait: nothing changed then.
+    function showConversations() {
+        if (stackHeld || pageStack.busy) return false
+        var chats = pageStack.find(function(page) { return page.objectName === "conversations" })
+        if (!chats) return false
+        pageStack.pop(chats, PageStackAction.Immediate)
+        return true
     }
 
     Connections {
         target: Qt.application
         onStateChanged: {
             window.lockedNotification()
-            if (backend.state !== "ready" || !window.lockInfo || !window.lockInfo.lock) return
+            // The license page shows the stored key: behind the lock like the rest.
+            if ((backend.state !== "ready" && backend.state !== "needsLicense")
+                    || !window.lockInfo || !window.lockInfo.lock) return
             if (Qt.application.state !== Qt.ApplicationActive) {
                 if (window.leftAt === 0) window.leftAt = Date.now()
                 // Immediately: hide everything before the switcher's snapshot.
@@ -173,27 +245,29 @@ ApplicationWindow {
         case "locked": page = Qt.resolvedUrl("pages/UnlockPage.qml"); break
         default: return // starting / error are shown by StartupPage
         }
-        var immediate = shownState === "starting"
+        // Under a lock the new page never shows by itself.
+        var immediate = shownState === "starting" || locked
         shownState = state
+        // Starting over: nothing left that a lock could protect here.
+        if (state !== "ready" && state !== "needsLicense") locked = false
         pageStack.replaceAbove(null, page, state === "locked" ? { database: true, cancellable: false } : {},
                                immediate ? PageStackAction.Immediate : PageStackAction.Animated)
-        // Opened with the passphrase just now: that was the unlock.
-        if (state === "ready") {
-            refreshLock(!backend.unlockedAtStart)
-            loadAppSettings()
+        settleStack()
+        if (state === "ready" || state === "needsLicense") {
+            // Opened with the passphrase just now: that was the unlock.
+            refreshLock(!lockChecked && !backend.unlockedAtStart)
+            if (state === "ready") loadAppSettings()
         }
         lockedNotification()
     }
 
     function showChat(identity, text) {
-        if (locked) {
+        if (openChat !== identity && !showConversations()) {
             pendingChat = identity
             activate()
             return
         }
         if (openChat !== identity) {
-            pageStack.pop(pageStack.find(function(page) { return page.objectName === "conversations" }),
-                          PageStackAction.Immediate)
             pageStack.push(Qt.resolvedUrl("pages/ChatPage.qml"), { identity: identity },
                            PageStackAction.Immediate)
         }
@@ -208,19 +282,36 @@ ApplicationWindow {
     // message (`fromMessage`: anything else opens in its own app, a contact opens on top of the
     // chat). Kept until the app is ready.
     property string pendingLink
+    property bool pendingLinkFromMessage: false
     // A chat to open (notification tapped) while still starting.
     property string pendingChat
+    // What was shared from another app, until the share page can open.
+    property var pendingShare: null
+    function showShare() {
+        if (pendingShare === null || !showConversations()) return
+        var share = pendingShare
+        pendingShare = null
+        pageStack.push(Qt.resolvedUrl("pages/SharePage.qml"), share, PageStackAction.Immediate)
+    }
     function openLink(url, fromMessage) {
-        if (backend.state === "starting" || pageStack.busy || locked) {
+        // Also after each reply: the app may have locked meanwhile. Running it again is safe,
+        // adding a contact twice changes nothing.
+        function mustWait() {
+            if (!stackHeld && !pageStack.busy && backend.state !== "starting" && backend.state !== "locked") {
+                return false
+            }
             pendingLink = url
-            return
+            pendingLinkFromMessage = fromMessage === true
+            return true
         }
+        if (mustWait()) return
         pendingLink = ""
         backend.call("parseLink", { url: url }, function(ok, link) {
             if (!ok) {
                 if (fromMessage) Qt.openUrlExternally(url)
                 return
             }
+            if (mustWait()) return
             if (link.action === "license") {
                 var licensePage = pageStack.find(function(page) { return page.objectName === "license" })
                 if (licensePage) licensePage.useKey(link.key)
@@ -229,8 +320,7 @@ ApplicationWindow {
             }
             if (backend.state !== "ready") return
             if (link.action === "compose" && !link.identity) {
-                pageStack.pop(pageStack.find(function(page) { return page.objectName === "conversations" }),
-                              PageStackAction.Immediate)
+                showConversations()
                 pageStack.push(Qt.resolvedUrl("pages/SharePage.qml"), { text: link.text || "" },
                                PageStackAction.Immediate)
                 activate()
@@ -242,13 +332,13 @@ ApplicationWindow {
                     return
                 }
                 backend.refreshContacts()
+                if (mustWait()) return
                 if (link.action === "compose" || link.text) {
                     showChat(link.identity, link.text)
                 } else if (fromMessage) {
                     pageStack.push(Qt.resolvedUrl("pages/ContactPage.qml"), { identity: link.identity })
                 } else {
-                    pageStack.pop(pageStack.find(function(page) { return page.objectName === "conversations" }),
-                                  PageStackAction.Immediate)
+                    showConversations()
                     pageStack.push(Qt.resolvedUrl("pages/ContactPage.qml"), { identity: link.identity },
                                    PageStackAction.Immediate)
                     activate()
@@ -258,16 +348,21 @@ ApplicationWindow {
     }
     Timer {
         // After start-up or a page transition.
-        running: window.pendingLink.length > 0 || window.pendingChat.length > 0 || window.pendingUpdate
+        running: !window.stackHeld && (window.pendingLink.length > 0 || window.pendingChat.length > 0
+                                       || window.pendingUpdate || window.pendingShare !== null)
         interval: 300
         repeat: true
         onTriggered: {
-            // Also wait while the stored data is locked (passphrase) or the app lock is up.
+            // Also wait while the stored data is locked (passphrase).
             if (backend.state === "starting" || backend.state === "locked" || pageStack.busy
-                    || shownState !== backend.state || window.locked) return
-            if (window.pendingLink.length > 0) window.openLink(window.pendingLink, false)
-            if (window.pendingChat.length > 0 && backend.state === "ready") window.showChat(window.pendingChat)
+                    || shownState !== backend.state) return
+            if (window.pendingLink.length > 0) window.openLink(window.pendingLink, window.pendingLinkFromMessage)
+            // showChat() and showShare() ask again for later if they still can't.
+            var chat = window.pendingChat
             window.pendingChat = ""
+            if (chat.length > 0 && backend.state === "ready") window.showChat(chat)
+            if (backend.state === "ready") window.showShare()
+            else window.pendingShare = null
             // showUpdate() asks again for later if it still can't.
             if (window.pendingUpdate && backend.state === "ready") {
                 window.pendingUpdate = false
@@ -406,7 +501,7 @@ ApplicationWindow {
     function askUpdateCheck() {
         backend.call("updateSettings", {}, function(ok, result) {
             // Not asked yet: `enabled` neither true nor false (a JSON null arrives as missing).
-            if (ok && result.available && typeof result.enabled !== "boolean" && !window.locked && !pageStack.busy) {
+            if (ok && result.available && typeof result.enabled !== "boolean" && !window.stackHeld && !pageStack.busy) {
                 pageStack.push(Qt.resolvedUrl("pages/UpdateCheckDialog.qml"))
             }
         })
@@ -415,7 +510,7 @@ ApplicationWindow {
     // Starting, locked or mid-transition: once that is over (the timer below).
     property bool pendingUpdate: false
     function showUpdate() {
-        if (backend.state !== "ready" || shownState !== "ready" || window.locked || pageStack.busy) {
+        if (backend.state !== "ready" || shownState !== "ready" || window.stackHeld || pageStack.busy) {
             pendingUpdate = true
             return
         }
@@ -578,11 +673,9 @@ ApplicationWindow {
                     text += (text.length > 0 ? "\n" : "") + resource.data
                 }
             }
-            if (backend.state !== "ready" || window.locked || (files.length === 0 && text.length === 0)) return
-            pageStack.pop(pageStack.find(function(page) { return page.objectName === "conversations" }),
-                          PageStackAction.Immediate)
-            pageStack.push(Qt.resolvedUrl("pages/SharePage.qml"), { files: files, text: text },
-                           PageStackAction.Immediate)
+            if (files.length === 0 && text.length === 0) return
+            window.pendingShare = { files: files, text: text }
+            if (backend.state === "ready" && shownState === "ready") window.showShare()
             // Started for this share: the window isn't shown yet (bridge/main.cpp).
             dbus.activate()
         }

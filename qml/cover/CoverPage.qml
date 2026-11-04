@@ -124,7 +124,7 @@ CoverBackground {
     }
 
     CoverActionList {
-        enabled: backend.state === "ready" && !cover.inCall
+        enabled: backend.state === "ready" && !cover.inCall && !window.locked
         CoverAction {
             iconSource: "image://theme/icon-cover-new"
             // New message: the contacts, attached to the chat list (swipe left there).
