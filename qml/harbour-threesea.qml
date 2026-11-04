@@ -111,10 +111,12 @@ ApplicationWindow {
         })
     }
 
-    // Close the private chats (their list and anything opened from it).
+    // Close the private chats: their list and any private chat, wherever it was opened from
+    // (the contacts, a link, a group's member list), with everything above them.
+    property bool privateToClose: false
     function closePrivate() {
-        var privatePage = pageStack.find(function(page) { return page.objectName === "private" })
-        if (privatePage) pageStack.pop(pageStack.previousPage(privatePage), PageStackAction.Immediate)
+        privateToClose = true
+        settleStack()
     }
 
     function showLock() {
@@ -133,7 +135,7 @@ ApplicationWindow {
     // (push and pop then do nothing and return null): that one is cut short, or it happens
     // right after it.
     function settleStack() {
-        if (!acceptedLock && !(locked && !lockPageUp())) return
+        if (!acceptedLock && !privateToClose && !(locked && !lockPageUp())) return
         if (pageStack.busy) pageStack.completeAnimation()
         if (pageStack.busy) {
             stackLater.restart()
@@ -147,6 +149,16 @@ ApplicationWindow {
             if (pageStack.find(function(page) { return page === accepted })) {
                 pageStack.pop(pageStack.previousPage(accepted), PageStackAction.Immediate)
             }
+        }
+        if (privateToClose) {
+            privateToClose = false
+            // The lowest one: private chats can lie on top of each other.
+            var lowest = null
+            pageStack.find(function(page) {
+                if (page.objectName === "private" || (page.objectName === "chat" && page.isPrivate)) lowest = page
+                return false
+            })
+            if (lowest) pageStack.pop(pageStack.previousPage(lowest), PageStackAction.Immediate)
         }
         if (locked && !lockPageUp()) {
             var unlock = pageStack.push(Qt.resolvedUrl("pages/UnlockPage.qml"), { cancellable: false },
