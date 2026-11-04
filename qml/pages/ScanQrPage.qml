@@ -294,6 +294,9 @@ Page {
             text: page.deviceLink
                   //% "Point the camera at the QR code Threema for Desktop shows."
                   ? qsTrId("threesea-la-scan-hint-device")
+                  : page.webPair
+                  //% "Point the camera at the QR code Threema Web shows."
+                  ? qsTrId("threesea-la-scan-hint-web")
                   : page.anyCode
                   //% "Point the camera at a contact's Threema QR code, or at the one Threema Web or Threema for Desktop shows."
                   ? qsTrId("threesea-la-scan-hint-any")
