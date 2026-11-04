@@ -215,9 +215,14 @@ pub enum Command {
     LinkEmail {
         email: String,
     },
-    /// Link a phone number (national numbers use the device's region; empty: unlink). Threema
-    /// sends an SMS with a code: `linkedMobilePending` until `verifyMobile`.
+    /// Link a phone number (with its country code; empty: unlink). Threema sends an SMS with a
+    /// code: `linkedMobilePending` until `verifyMobile`.
     LinkMobile {
+        number: String,
+    },
+    /// What `LinkMobile` would make of a number (`null`: it can't be linked), for showing it
+    /// first. No network.
+    NormalizeMobile {
         number: String,
     },
     /// The SMS code of a pending phone link.
@@ -1452,6 +1457,9 @@ impl App {
             Command::RevocationStatus { cached } => self.revocation_status(cached).await,
             Command::LinkEmail { email } => self.link_email(&email).await,
             Command::LinkMobile { number } => self.link_mobile(&number).await,
+            Command::NormalizeMobile { number } => Ok(json!({
+                "number": crate::address_book::international_phone(&number),
+            })),
             Command::VerifyMobile { code } => self.verify_mobile(&code).await,
             Command::CallMobile => self.call_mobile().await,
             Command::SetRevocationPassword { password } => {

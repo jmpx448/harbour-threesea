@@ -1474,3 +1474,33 @@ stop, the automatic resume being held back.
 
 Noticed on the way, not changed: Settings → Security says "App lock on" whenever a lock record
 exists (`SettingsPage.qml`), also with `appLock:false`.
+
+## Linking a number, and what a sync reports (2026-11-04)
+
+A tester asked why no verification SMS arrived. Linking isn't needed to find friends: the address book
+switch is enough, `match_address_book` never reads our own links (nor does Android's
+`IdentityLookupClient`). Linking only lets others find you.
+
+Done: the link dialog takes only numbers with a country code and shows the one the code will go to
+(ADR 0016); `(0)` and Hungary's `06` in `normalize_phone`; a notice when Threema answers "already
+linked", which sends no SMS or e-mail and used to show nothing, possibly what the tester hit (not
+confirmed by them); a manual address book sync always reports its result.
+
+Not fixed, waiting for a decision: the country for address book numbers without `+`, and the Italian
+and US/Canadian rules (ADR 0016).
+
+Tested: the core's tests; in the emulator, a national number (hint, can't accept), `+49 (0) 171 …`
+("+49171…" shown, can accept; cancelled, nothing was sent), and the "none found" notice with an empty
+address book. Long notices scroll, so their whole text can be read.
+
+Not tested: an actual link, the "already linked" notices, the "entries checked" and failure notices,
+and a real address book (`docs/voice-video-device-checklist.md`, section U).
+
+Open, and it may matter more than the rest: the reader may not read anything. In both app runs tried in the
+emulator the log says `Failed to attach key memory region for qtcontacts-sqlite-np`, `Failed to open
+contacts transient store`, `Unable to open synchronous engine database connection`. A contact added by
+hand to the emulator's database (no aggregate, so that alone may explain it) came back as "none found".
+Whether this is the emulator, the sandbox or that entry isn't known; a phone with a real address book
+decides it, and if it fails there too, the sync has never worked on a device. `AddressBookReader.qml` also
+reads details right after the asynchronous `ensureComplete()`; the plugin's source suggests
+`requiredProperty` already loads them, unconfirmed.

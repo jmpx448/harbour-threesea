@@ -3282,5 +3282,28 @@
             <source>The report could not be sent.</source>
             <translation type="unfinished" />
         </message>
+        <message id="threesea-la-address-book-none-new" numerus="yes">
+            <source>%n address book entries checked, no new contacts.</source>
+            <translation>
+                <numerusform>%n address book entry checked, no new contacts.</numerusform>
+                <numerusform>%n address book entries checked, no new contacts.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-address-book-empty">
+            <source>No phone numbers or e-mail addresses found in the address book.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-link-mobile-target">
+            <source>The code goes to +%1.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-email-already-linked">
+            <source>This address is already linked to your ID, so no e-mail is needed.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-phone-already-linked">
+            <source>This number is already linked to your ID, so no SMS is needed.</source>
+            <translation type="unfinished" />
+        </message>
     </context>
 </TS>

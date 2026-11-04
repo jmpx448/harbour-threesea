@@ -539,20 +539,13 @@ impl App {
         Ok(true)
     }
 
-    /// `linkMobile` (Android `linkWithMobileNumber` / `unlinkMobileNumber`).
+    /// `linkMobile` (Android `linkWithMobileNumber` / `unlinkMobileNumber`). Only numbers that
+    /// say their country: the SMS must not go to a number we guessed (ADR 0016).
     pub(crate) async fn link_mobile(&mut self, number: &str) -> Result<Value, ApiError> {
-        let international = number.trim().starts_with('+') || number.trim().starts_with("00");
         let normalized = if number.trim().is_empty() {
             String::new()
-        } else if !international
-            && crate::address_book::calling_code(&self.version.country).is_none()
-        {
-            // A national number in a region we don't know the code of: never guess.
-            return Err(ApiError::PhoneInvalid);
         } else {
-            crate::address_book::normalize_phone(number, &self.version.country)
-                .filter(|n| (6..=15).contains(&n.len()))
-                .ok_or(ApiError::PhoneInvalid)?
+            crate::address_book::international_phone(number).ok_or(ApiError::PhoneInvalid)?
         };
         let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let verification = crate::directory::link_mobile(
@@ -1004,6 +997,43 @@ mod contact_policy_tests {
             &[3; 32],
         )
         .unwrap()
+    }
+
+    // No identity here: an answer other than `phoneInvalid` would mean it went further, towards
+    // the network.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_national_number_is_refused_before_any_network_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        for number in ["079 123 45 67", "0664 1234567", "+0 79 123 45 67"] {
+            let answer = call(&mut app, json!({ "cmd": "linkMobile", "number": number })).await;
+            assert_eq!(answer["error"]["kind"], "phoneInvalid", "{answer}");
+        }
+        let answer = call(
+            &mut app,
+            json!({ "cmd": "linkMobile", "number": "+41791234567" }),
+        )
+        .await;
+        assert_eq!(answer["error"]["kind"], "noIdentity", "{answer}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalize_mobile_answers_without_an_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let answer = call(
+            &mut app,
+            json!({ "cmd": "normalizeMobile", "number": "+49 (0) 171 1234567" }),
+        )
+        .await;
+        assert_eq!(answer["result"]["number"], "491711234567", "{answer}");
+        let answer = call(
+            &mut app,
+            json!({ "cmd": "normalizeMobile", "number": "0171 1234567" }),
+        )
+        .await;
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["result"]["number"], Value::Null, "{answer}");
     }
 
     // Deleting a contact who is in one of our groups keeps it as a group acquaintance, like

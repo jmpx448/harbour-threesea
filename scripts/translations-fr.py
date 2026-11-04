@@ -231,6 +231,10 @@ FR = {
     "threesea-la-scan-hint": "Dirigez l’appareil photo vers le code QR Threema de la personne à côté de vous.",
     "threesea-la-qr-not-found": "Aucun code QR Threema trouvé dans cette image.",
     "threesea-la-address-book-unavailable": "Le carnet d’adresses n’est pas disponible sur cet appareil.",
+    "threesea-la-address-book-empty": "Aucun numéro de téléphone ni adresse e-mail trouvés dans le carnet d’adresses.",
+    "threesea-la-link-mobile-target": "Le code sera envoyé au +%1.",
+    "threesea-la-phone-already-linked": "Ce numéro est déjà relié à votre ID, aucun SMS n’est nécessaire.",
+    "threesea-la-email-already-linked": "Cette adresse est déjà reliée à votre ID, aucun e-mail n’est nécessaire.",
     "threesea-la-address-book-sync": "Trouver des contacts dans le carnet d’adresses",
     "threesea-la-address-book-sync-description": "Chaque jour, seules des empreintes des adresses e-mail et des numéros de téléphone sont envoyées à Threema pour savoir qui l’utilise. Les personnes trouvées deviennent des contacts avec le nom du carnet d’adresses.",
     "threesea-la-mention-all": "Tous",
@@ -803,6 +807,8 @@ FR = {
 }
 
 PLURALS = {
+    "threesea-la-address-book-none-new": ("%n entrée du carnet d’adresses vérifiée, aucun nouveau contact.",
+                                          "%n entrées du carnet d’adresses vérifiées, aucun nouveau contact."),
     "threesea-la-member-count": ("%n membre", "%n membres"),
     "threesea-la-poll-votes": ("%n vote", "%n votes"),
     "threesea-la-share-files": ("%n fichier", "%n fichiers"),

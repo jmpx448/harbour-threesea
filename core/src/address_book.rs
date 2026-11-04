@@ -61,7 +61,7 @@ pub fn email_hashes(email: &str) -> Vec<String> {
 
 /// Calling codes for national numbers (without international prefix) by region; unknown
 /// regions send the digits as they are (Android uses libphonenumber's E.164 formatting).
-pub(crate) fn calling_code(country: &str) -> Option<&'static str> {
+fn calling_code(country: &str) -> Option<&'static str> {
     Some(match country.to_ascii_uppercase().as_str() {
         "LU" => "352",
         "DE" => "49",
@@ -88,10 +88,34 @@ pub(crate) fn calling_code(country: &str) -> Option<&'static str> {
     })
 }
 
+/// `+49 (0) 171 …` is a common way to write a number: the zero is what one dials at home, it isn't
+/// part of it. Other brackets are: `(415) 555-0100`.
+fn without_bracketed_zero(number: &str) -> String {
+    let mut kept = String::with_capacity(number.len());
+    let mut rest = number;
+    while let Some(open) = rest.find('(') {
+        kept.push_str(&rest[..open]);
+        let inside = &rest[open + 1..];
+        let after_zero = inside
+            .trim_start()
+            .strip_prefix('0')
+            .and_then(|after| after.trim_start().strip_prefix(')'));
+        rest = after_zero.unwrap_or_else(|| {
+            kept.push('(');
+            inside
+        });
+    }
+    kept.push_str(rest);
+    kept
+}
+
 /// A phone number in E.164 without `+` (what Threema hashes), given the device's region.
 pub fn normalize_phone(number: &str, country: &str) -> Option<String> {
     let trimmed = number.trim();
-    let digits: String = trimmed.chars().filter(char::is_ascii_digit).collect();
+    let digits: String = without_bracketed_zero(trimmed)
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
     if digits.len() < 5 {
         return None;
     }
@@ -104,12 +128,27 @@ pub fn normalize_phone(number: &str, country: &str) -> Option<String> {
     match calling_code(country) {
         // North America: national numbers have no trunk prefix.
         Some("1") => Some(format!("1{digits}")),
-        Some(code) => Some(format!(
-            "{code}{}",
-            digits.strip_prefix('0').unwrap_or(&digits)
-        )),
+        Some(code) => {
+            let trunk_prefix = if code == "36" { "06" } else { "0" };
+            Some(format!(
+                "{code}{}",
+                digits.strip_prefix(trunk_prefix).unwrap_or(&digits)
+            ))
+        }
         None => Some(digits),
     }
+}
+
+/// A number that says its own country (`+` or `00`), in E.164 without `+`; anything else is
+/// `None`. For the user's own number, which goes to Threema in plain and gets an SMS: a national
+/// number would need a country, and the device's language says nothing about the SIM.
+pub fn international_phone(number: &str) -> Option<String> {
+    let trimmed = number.trim();
+    if !trimmed.starts_with('+') && !trimmed.starts_with("00") {
+        return None;
+    }
+    normalize_phone(trimmed, "")
+        .filter(|digits| (6..=15).contains(&digits.len()) && !digits.starts_with('0'))
 }
 
 pub fn phone_hash(normalized: &str) -> String {
@@ -168,6 +207,81 @@ mod tests {
         assert_eq!(email_hashes("  Someone@GMAIL.com ").len(), 2);
         assert_eq!(email_hashes("not an address"), Vec::<String>::new());
         assert_eq!(email_hashes("a@b.ch"), email_hashes("A@B.CH"));
+    }
+
+    #[test]
+    fn a_bracketed_zero_is_not_part_of_the_number() {
+        for number in [
+            "+49 (0) 171 1234567",
+            "+49 ( 0 ) 171 1234567",
+            "+49(0)1711234567",
+        ] {
+            assert_eq!(
+                normalize_phone(number, "").as_deref(),
+                Some("491711234567"),
+                "{number}"
+            );
+        }
+        assert_eq!(
+            normalize_phone("0049 (0) 171 1234567", "").as_deref(),
+            Some("491711234567")
+        );
+        assert_eq!(
+            normalize_phone("(0) 171 1234567", "DE").as_deref(),
+            Some("491711234567")
+        );
+        // Other brackets are part of the number.
+        assert_eq!(
+            normalize_phone("(0171) 1234567", "DE").as_deref(),
+            Some("491711234567")
+        );
+        assert_eq!(
+            normalize_phone("+1 (415) 555-0100", "").as_deref(),
+            Some("14155550100")
+        );
+        assert_eq!(
+            normalize_phone("+1 (800) 555-0100", "").as_deref(),
+            Some("18005550100")
+        );
+    }
+
+    #[test]
+    fn hungary_has_a_two_digit_national_prefix() {
+        assert_eq!(
+            normalize_phone("06 20 123 4567", "HU").as_deref(),
+            Some("36201234567")
+        );
+        assert_eq!(
+            normalize_phone("20 123 4567", "HU").as_deref(),
+            Some("36201234567")
+        );
+    }
+
+    #[test]
+    fn international_numbers_only() {
+        assert_eq!(
+            international_phone(" +41 79 123 45 67 ").as_deref(),
+            Some("41791234567")
+        );
+        assert_eq!(
+            international_phone("0041 79 123 45 67").as_deref(),
+            Some("41791234567")
+        );
+        assert_eq!(
+            international_phone("+49 (0) 171 1234567").as_deref(),
+            Some("491711234567")
+        );
+        // National: no country to go by.
+        assert_eq!(international_phone("0664 1234567"), None);
+        assert_eq!(international_phone("079 123 45 67"), None);
+        assert_eq!(international_phone("(415) 555-0100"), None);
+        // No calling code starts with a zero.
+        assert_eq!(international_phone("+0 79 123 45 67"), None);
+        assert_eq!(international_phone("000 79 123 45 67"), None);
+        // E.164's limits.
+        assert_eq!(international_phone("+41 123"), None);
+        assert_eq!(international_phone("+41 79123456789012"), None);
+        assert_eq!(international_phone(""), None);
     }
 
     #[test]

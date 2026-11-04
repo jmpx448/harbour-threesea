@@ -84,7 +84,8 @@ MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`.
 | `deleteContact` | `identity` | `{}` |
 | `profile` | – | `{identity, nickname, publicKey, linkedEmail, linkedMobile, pictureVersion, pictureShare (everyone\|nobody\|selected), pictureRecipients: [ID]}` |
 | `linkEmail` | `email` ("" unlinks) | profile (`linkedEmail`, `linkedEmailPending` until the link in the e-mail is opened; checked again on `profile` and in maintenance) |
-| `linkMobile` | `number` (national numbers use the device's region; "" unlinks) | profile (`linkedMobilePending`: E.164 without `+` waiting for the SMS code); errors `phoneInvalid` |
+| `linkMobile` | `number` (with its country code, `+` or `00`; "" unlinks) | profile (`linkedMobilePending`: E.164 without `+` waiting for the SMS code); errors `phoneInvalid` |
+| `normalizeMobile` | `number` | `{number}`: what `linkMobile` would send, E.164 without `+`, or `null` if it can't be linked. No network |
 | `verifyMobile` | `code` | profile (`linkedMobile`); errors `noVerification`, server message for a wrong code |
 | `callMobile` | – | profile; Threema calls and reads the code |
 | `revocationStatus` | optional `cached` (no network: last known state) | `{set, setAt (ms or null), checked}` (`identity/check_revocation_key`) |

@@ -28,7 +28,7 @@ Page {
             page.linking = ""
             if (ok) {
                 page.profile = result
-                if (done && result.linkedMobilePending) done()
+                if (done) done(result)
             } else {
                 Notices.show(Errors.text(errorKind, message), Notice.Long, Notice.Center)
             }
@@ -239,7 +239,13 @@ Page {
                 onClicked: {
                     var dialog = pageStack.push(Qt.resolvedUrl("../LinkDialog.qml"),
                                                 { kind: "email", current: page.profile.linkedEmail || "" })
-                    dialog.accepted.connect(function() { page.link("linkEmail", { email: dialog.value.trim() }, "email") })
+                    dialog.accepted.connect(function() {
+                        page.link("linkEmail", { email: dialog.value.trim() }, "email", function(result) {
+                            // Threema answers "linked" at once, and sends nothing.
+                            //% "This address is already linked to your ID, so no e-mail is needed."
+                            if (!result.linkedEmailPending) Notices.show(qsTrId("threesea-la-email-already-linked"), Notice.Long, Notice.Center)
+                        })
+                    })
                     dialog.unlinkRequested.connect(function() { page.link("linkEmail", { email: "" }, "email") })
                 }
             }
@@ -265,7 +271,13 @@ Page {
                         current: page.profile.linkedMobile ? "+" + String(page.profile.linkedMobile).replace(/^\+/, "") : ""
                     })
                     dialog.accepted.connect(function() {
-                        page.link("linkMobile", { number: dialog.value }, "mobile", function() { askCodeLater.start() })
+                        // What the dialog showed, exactly.
+                        page.link("linkMobile", { number: "+" + dialog.normalized }, "mobile", function(result) {
+                            if (result.linkedMobilePending) askCodeLater.start()
+                            // Threema answers "linked" at once, and sends nothing.
+                            //% "This number is already linked to your ID, so no SMS is needed."
+                            else Notices.show(qsTrId("threesea-la-phone-already-linked"), Notice.Long, Notice.Center)
+                        })
                     })
                     dialog.unlinkRequested.connect(function() { page.link("linkMobile", { number: "" }, "mobile") })
                 }

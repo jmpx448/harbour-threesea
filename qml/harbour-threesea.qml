@@ -614,6 +614,8 @@ ApplicationWindow {
     Connections {
         target: addressBook.item
         onFinished: {
+            var manual = addressBook.manual
+            var checked = entries.length
             backend.call("matchAddressBook", { entries: entries }, function(ok, result, kind, message) {
                 addressBook.active = false
                 if (ok) {
@@ -622,9 +624,16 @@ ApplicationWindow {
                     if (result.added > 0) {
                         //% "%n new contact(s) from your address book"
                         Notices.show(qsTrId("threesea-la-address-book-added", result.added), Notice.Short, Notice.Center)
+                    } else if (manual && checked > 0) {
+                        //% "%n address book entries checked, no new contacts."
+                        Notices.show(qsTrId("threesea-la-address-book-none-new", checked), Notice.Long, Notice.Center)
+                    } else if (manual) {
+                        //% "No phone numbers or e-mail addresses found in the address book."
+                        Notices.show(qsTrId("threesea-la-address-book-empty"), Notice.Long, Notice.Center)
                     }
                 } else {
                     console.warn("address book matching failed:", kind)
+                    if (manual) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                 }
             })
         }

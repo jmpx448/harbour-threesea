@@ -3282,5 +3282,28 @@
             <source>The report could not be sent.</source>
             <translation>Le signalement n’a pas pu être envoyé.</translation>
         </message>
+        <message id="threesea-la-address-book-none-new" numerus="yes">
+            <source>%n address book entries checked, no new contacts.</source>
+            <translation>
+                <numerusform>%n entrée du carnet d’adresses vérifiée, aucun nouveau contact.</numerusform>
+                <numerusform>%n entrées du carnet d’adresses vérifiées, aucun nouveau contact.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-address-book-empty">
+            <source>No phone numbers or e-mail addresses found in the address book.</source>
+            <translation>Aucun numéro de téléphone ni adresse e-mail trouvés dans le carnet d’adresses.</translation>
+        </message>
+        <message id="threesea-la-link-mobile-target">
+            <source>The code goes to +%1.</source>
+            <translation>Le code sera envoyé au +%1.</translation>
+        </message>
+        <message id="threesea-la-email-already-linked">
+            <source>This address is already linked to your ID, so no e-mail is needed.</source>
+            <translation>Cette adresse est déjà reliée à votre ID, aucun e-mail n’est nécessaire.</translation>
+        </message>
+        <message id="threesea-la-phone-already-linked">
+            <source>This number is already linked to your ID, so no SMS is needed.</source>
+            <translation>Ce numéro est déjà relié à votre ID, aucun SMS n’est nécessaire.</translation>
+        </message>
     </context>
 </TS>

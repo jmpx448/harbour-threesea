@@ -356,3 +356,29 @@ Lite:
 
 10. Install the Lite RPM instead of Full and repeat a short message exchange.
     - Expect: connected once opened, no call buttons, no background service, and chats kept from Full.
+
+## U. Linking a number or address, and the address book sync
+
+Linking sends a real request to Threema, and possibly a real SMS or e-mail. Use your own number and
+address only.
+
+1. Settings → My profile → Phone number: type a national number.
+   - Expect: the hint asks for the country code, and the dialog can't be accepted.
+2. Type your number as `+49 (0) 171 …`, with your own country and number.
+   - Expect: "The code goes to +…" with no extra zero. Accept: the SMS arrives and the code links it.
+3. Repeat with the same number.
+   - Expect: "already linked" and no SMS.
+4. E-mail address: link one, open the link in the mail. Then repeat with the same address.
+   - Expect: first "Waiting for you to confirm…", then the address alone; the repeat says "already
+     linked" and sends no mail.
+5. Remove both links from the dialogs' pulleys.
+   - Expect: no notice, both show "Not linked".
+6. Settings → Privacy → "Find contacts from the address book", with a real address book.
+   - Expect: "%n new contacts…" or "%n address book entries checked, no new contacts", with a count
+     near the number of address book entries that have a phone number or an e-mail address. The
+     notice "No phone numbers or e-mail addresses found" with a filled address book is a bug in
+     `AddressBookReader.qml`.
+7. Contacts: pull to refresh.
+   - Expect: the same notice.
+8. With no network, pull to refresh.
+   - Expect: an error notice.

@@ -393,6 +393,6 @@ the answer has `linked: true` if it is already linked to this ID, otherwise the 
 for phase 2. An empty address or number unlinks. E-mail is confirmed by a link in the mail;
 whether that happened is phase 1 again without answering the challenge (`linked`). Phone: phase 2
 returns `verificationId`; `{verificationId, code}` to `link_mobileno` confirms,
-`link_mobileno_call` has the code read out by phone. Numbers are E.164 without `+`, normalized like
-the address book's (national numbers need a known region, otherwise we ask for `+`).
+`link_mobileno_call` has the code read out by phone. Numbers are E.164 without `+`, and the user must
+enter them with their country code; the dialog shows the result first (ADR 0016).
 These are the only requests that send a plain address/number (CLAUDE.md §7.4 exception).

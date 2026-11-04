@@ -3,6 +3,23 @@
 All notable changes. Versions follow `MAJOR.MINOR.PATCH`; each release is built from the
 `release` branch and tagged `v<version>` (see [docs/release.md](docs/release.md)).
 
+## [Unreleased]
+
+Changed:
+
+- Linking a phone number now needs its country code, and the dialog shows the number the code will
+  go to. It used to take the country from the phone's language, which could send a linking request
+  for the wrong number.
+
+Fixed:
+
+- Numbers written as `+49 (0) 171 …` keep no extra zero, when linking and in the address book.
+  Hungarian national numbers lose their whole `06` prefix.
+- Linking a phone number or an e-mail address that is already linked to your ID says so, rather than
+  showing nothing.
+- A manual address book sync (turning it on, or pulling to refresh the contacts) always tells how it
+  went: new contacts, how many entries it checked, no phone numbers or addresses found, or the error.
+
 ## [0.2.0] - 2026-11-03
 
 Changed:
