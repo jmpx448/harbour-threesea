@@ -51,9 +51,12 @@ ApplicationWindow {
     // ask for the PIN again.
     property bool lockChecked: false
     property double leftAt: 0
+    // A call in progress: its page stays on top, and is the only way to see the video, the
+    // camera switch and the running time.
+    readonly property bool callRunning: calls.state !== "idle" && calls.state !== "ended"
     // Nothing from outside moves the stack while this holds: it waits (see the timer for the
     // pending things).
-    readonly property bool stackHeld: locked
+    readonly property bool stackHeld: locked || callRunning
 
     // While the stored data is still locked (after a restart) nothing arrives: say so.
     function lockedNotification() {
@@ -131,11 +134,22 @@ ApplicationWindow {
         return !!top && top.objectName === "call" && pageStack.find(function(page) { return page === lockPage }) !== null
     }
 
+    // A call without its page (it was taken away), or one coming in while the page of an earlier
+    // call waits under the lock. Otherwise a running call's page stays where it is: below the
+    // lock if the app locked during the call, whose cover has mute and hang up.
+    function callPageMissing() {
+        if (!callRunning) return false
+        var top = pageStack.currentPage
+        if (top && top.objectName === "call") return false
+        return calls.state === "incoming"
+               || pageStack.find(function(page) { return page.objectName === "call" }) === null
+    }
+
     // Brings the stack in line with the state. The stack takes no change during a transition
     // (push and pop then do nothing and return null): that one is cut short, or it happens
     // right after it.
     function settleStack() {
-        if (!acceptedLock && !privateToClose && !(locked && !lockPageUp())) return
+        if (!acceptedLock && !privateToClose && !callPageMissing() && !(locked && !lockPageUp())) return
         if (pageStack.busy) pageStack.completeAnimation()
         if (pageStack.busy) {
             stackLater.restart()
@@ -160,6 +174,18 @@ ApplicationWindow {
             })
             if (lowest) pageStack.pop(pageStack.previousPage(lowest), PageStackAction.Immediate)
         }
+        // Something landed on the lock page (a reply that came late): back to it, so that one
+        // PIN is all it takes. A call's page goes along and comes back with the next step.
+        if (locked && !lockPageUp() && pageStack.find(function(page) { return page === lockPage })) {
+            pageStack.pop(lockPage, PageStackAction.Immediate)
+        }
+        if (callPageMissing()) {
+            if (!pageStack.push(Qt.resolvedUrl("pages/CallPage.qml"), {},
+                                locked ? PageStackAction.Immediate : PageStackAction.Animated)) {
+                stackLater.restart()
+                return
+            }
+        }
         if (locked && !lockPageUp()) {
             var unlock = pageStack.push(Qt.resolvedUrl("pages/UnlockPage.qml"), { cancellable: false },
                                         PageStackAction.Immediate)
@@ -179,12 +205,18 @@ ApplicationWindow {
         interval: 50
         onTriggered: window.settleStack()
     }
-    // Whatever else moved the stack (a pop in a reply that came late): the lock stays up. Later,
-    // because the stack takes no change from inside these signals.
+    // Whatever else moved the stack (a pop in a reply that came late): the lock and a running
+    // call's page stay up. Later, because the stack takes no change from inside these signals.
     Connections {
         target: pageStack
-        onCurrentPageChanged: if (window.locked) stackLater.restart()
-        onBusyChanged: if (window.locked && !pageStack.busy) stackLater.restart()
+        onCurrentPageChanged: if (window.stackHeld) stackLater.restart()
+        onBusyChanged: if (window.stackHeld && !pageStack.busy) stackLater.restart()
+    }
+
+    // During a call what was asked for opens afterwards; the tap only shows the call otherwise.
+    function sayAfterCall() {
+        //% "Opens when the call is over"
+        if (callRunning) Notices.show(qsTrId("threesea-la-opens-after-call"), Notice.Short, Notice.Center)
     }
 
     // The way back to the chat list for everything that comes from outside (notification, link,
@@ -305,6 +337,7 @@ ApplicationWindow {
     function showChat(identity, text) {
         if (openChat !== identity && !showConversations()) {
             pendingChat = identity
+            sayAfterCall()
             activate()
             return
         }
@@ -343,6 +376,7 @@ ApplicationWindow {
             }
             pendingLink = url
             pendingLinkFromMessage = fromMessage === true
+            sayAfterCall()
             return true
         }
         if (mustWait()) return
@@ -717,6 +751,7 @@ ApplicationWindow {
             }
             if (files.length === 0 && text.length === 0) return
             window.pendingShare = { files: files, text: text }
+            window.sayAfterCall()
             if (backend.state === "ready" && shownState === "ready") window.showShare()
             // Started for this share: the window isn't shown yet (bridge/main.cpp).
             dbus.activate()
@@ -793,11 +828,7 @@ ApplicationWindow {
                     if (calls.identity === identity) window.callName = ok ? contact.displayName : identity
                 })
             }
-            if (calls.state === "idle" || calls.state === "ended") return
-            var top = pageStack.currentPage
-            if (top && top.objectName === "call") return
-            if (pageStack.busy) pageStack.completeAnimation()
-            pageStack.push(Qt.resolvedUrl("pages/CallPage.qml"))
+            window.settleStack()
         }
     }
 

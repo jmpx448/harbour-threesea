@@ -23,7 +23,7 @@ Page {
 
     readonly property string state: calls.state
 
-    backNavigation: state === "ended"
+    backNavigation: state === "ended" || state === "idle"
     allowedOrientations: Orientation.Portrait
 
     function load() {
@@ -67,11 +67,13 @@ Page {
         load()
     }
 
-    Connections {
-        target: calls
-        onStateChanged: {
-            if (calls.state === "idle" && page.status === PageStatus.Active) pageStack.pop()
-        }
+    // Over: back to what is underneath, as soon as this page is in view. The call can have ended
+    // behind the lock page, whose own pop is still going on when this page comes into view.
+    Timer {
+        running: page.state === "idle" && page.status === PageStatus.Active
+        interval: 100
+        repeat: true
+        onTriggered: if (!pageStack.busy && pageStack.currentPage === page) pageStack.pop()
     }
 
     Timer {
@@ -85,7 +87,7 @@ Page {
     // The other side's video while its camera is on, and our camera's preview: like a chat's
     // bubbles (radius, square outer bottom corner), on the ambience; the controls under them.
     readonly property bool remoteVideo: calls.video && calls.remoteCamera && remote.hasFrame
-    readonly property bool inCall: state !== "incoming" && state !== "ended"
+    readonly property bool inCall: state !== "incoming" && state !== "ended" && state !== "idle"
 
     SilicaFlickable {
         anchors.fill: parent
