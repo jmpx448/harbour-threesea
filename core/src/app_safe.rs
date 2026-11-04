@@ -78,6 +78,17 @@ pub(crate) fn parse_safe_id(hex: &str) -> Option<u64> {
     Some(u64::from_le_bytes(bytes))
 }
 
+/// When each chat last changed, for the backup's `lastUpdate` (ms; Android lists a restored
+/// contact's chat only if it has one).
+type LastUpdates = std::collections::HashMap<String, u64>;
+
+fn last_update(updates: &LastUpdates, chat: &str) -> Option<i64> {
+    updates
+        .get(chat)
+        .and_then(|at| i64::try_from(*at).ok())
+        .filter(|at| *at > 0)
+}
+
 /// A group as Android writes it: `members` are all participants, the user included while a member.
 fn group_to_backup(group: &crate::groups::Group, me: &str) -> backup::Group {
     let mut members = group.members.clone();
@@ -395,9 +406,9 @@ impl App {
         Ok(())
     }
 
-    /// Stored contacts plus restored ones that are not imported yet (never drop any). The own ID
-    /// is excluded, like on Android.
-    fn backup_contacts(&self) -> Result<Vec<backup::Contact>, ApiError> {
+    /// Stored contacts plus restored ones that are not imported yet (never drop any; those keep
+    /// the backup's own `lastUpdate`). The own ID is excluded, like on Android.
+    fn backup_contacts(&self, updates: &LastUpdates) -> Result<Vec<backup::Contact>, ApiError> {
         let mut list: Vec<backup::Contact> = self
             .store
             .contacts()?
@@ -405,6 +416,7 @@ impl App {
             .map(|contact| {
                 let mut entry = crate::contacts::to_backup(contact);
                 entry.is_private |= self.store.is_private(&entry.identity).unwrap_or(false);
+                entry.last_update = last_update(updates, &entry.identity);
                 entry
             })
             .collect();
@@ -505,7 +517,12 @@ impl App {
 
     /// Our groups, and those of a restored backup not imported yet (so a failed import loses
     /// nothing).
-    fn backup_groups(&self, me: &str, pending: &Value) -> Result<Vec<backup::Group>, ApiError> {
+    fn backup_groups(
+        &self,
+        me: &str,
+        pending: &Value,
+        updates: &LastUpdates,
+    ) -> Result<Vec<backup::Group>, ApiError> {
         let mut list: Vec<backup::Group> = self
             .store
             .groups()?
@@ -513,6 +530,7 @@ impl App {
             .map(|group| {
                 let mut entry = group_to_backup(group, me);
                 entry.is_private = self.store.is_private(&group.key).unwrap_or(false);
+                entry.last_update = last_update(updates, &group.key);
                 entry
             })
             .collect();
@@ -527,7 +545,11 @@ impl App {
         Ok(list)
     }
 
-    fn backup_lists(&self, pending: &Value) -> Result<Vec<backup::DistributionList>, ApiError> {
+    fn backup_lists(
+        &self,
+        pending: &Value,
+        updates: &LastUpdates,
+    ) -> Result<Vec<backup::DistributionList>, ApiError> {
         let mut list: Vec<backup::DistributionList> = self
             .store
             .distribution_lists()?
@@ -535,6 +557,7 @@ impl App {
             .map(|list| {
                 let mut entry = list_to_backup(list);
                 entry.is_private = self.store.is_private(&list.key).unwrap_or(false);
+                entry.last_update = last_update(updates, &list.key);
                 entry
             })
             .collect();
@@ -643,6 +666,8 @@ impl App {
                 if entry.is_private {
                     self.mark_private(&group.key, true)?;
                 }
+                self.store
+                    .note_restored_chat(&group.key, entry.last_update)?;
                 imported_groups += 1;
             }
         }
@@ -653,6 +678,8 @@ impl App {
                 if entry.is_private {
                     self.mark_private(&list.key, true)?;
                 }
+                self.store
+                    .note_restored_chat(&list.key, entry.last_update)?;
                 imported_lists += 1;
             }
         }
@@ -798,6 +825,7 @@ impl App {
             .setting(keys::SAFE_PENDING_IMPORT)?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(Value::Null);
+        let updates = crate::join::last_updates(&self.store)?;
         let (email, mobile) = self.store.confirmed_links()?;
         let mut links = Vec::new();
         if let Some(mobile) = mobile {
@@ -835,9 +863,9 @@ impl App {
                 )),
                 links,
             },
-            contacts: Some(self.backup_contacts()?),
-            groups: Some(self.backup_groups(&identity.threema_id, &pending)?),
-            distributionlists: Some(self.backup_lists(&pending)?),
+            contacts: Some(self.backup_contacts(&updates)?),
+            groups: Some(self.backup_groups(&identity.threema_id, &pending, &updates)?),
+            distributionlists: Some(self.backup_lists(&pending, &updates)?),
             settings: self.app_settings()?,
         })
     }
@@ -1210,6 +1238,86 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_says_when_each_chat_last_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        for id in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        app.store
+            .insert_incoming("BBBBBBBB", 1, "text", "hi", 5000)
+            .unwrap();
+        // A restored chat without messages, and a contact who never had a chat.
+        app.store
+            .note_restored_chat("CCCCCCCC", Some(3000))
+            .unwrap();
+        // Waiting to be imported: the backup's own value stays.
+        app.store
+            .set_setting(
+                keys::SAFE_PENDING_IMPORT,
+                r#"{"contacts":[{"identity":"EEEEEEEE","verification":0,"lastUpdate":7000}]}"#,
+            )
+            .unwrap();
+        let contacts = app.build_backup().unwrap().contacts.unwrap();
+        let of = |id: &str| {
+            contacts
+                .iter()
+                .find(|c| c.identity == id)
+                .unwrap()
+                .last_update
+        };
+        assert_eq!(of("BBBBBBBB"), Some(5000));
+        assert_eq!(of("CCCCCCCC"), Some(3000));
+        assert_eq!(of("DDDDDDDD"), None);
+        assert_eq!(of("EEEEEEEE"), Some(7000));
+
+        // A later message wins over the restored time, and deleting the chat ends it.
+        app.store
+            .insert_incoming("CCCCCCCC", 2, "text", "hi", 9000)
+            .unwrap();
+        app.store.delete_conversation("BBBBBBBB").unwrap();
+        let contacts = app.build_backup().unwrap().contacts.unwrap();
+        let of = |id: &str| {
+            contacts
+                .iter()
+                .find(|c| c.identity == id)
+                .unwrap()
+                .last_update
+        };
+        assert_eq!(of("BBBBBBBB"), None);
+        assert_eq!(of("CCCCCCCC"), Some(9000));
+        // Android's old negative values are no time at all.
+        app.store.note_restored_chat("DDDDDDDD", Some(-5)).unwrap();
+        assert_eq!(
+            last_update(&crate::join::last_updates(&app.store).unwrap(), "DDDDDDDD"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_restored_private_chat_without_messages_stays_out_of_the_chat_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        for id in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+            app.store.note_restored_chat(id, Some(3000)).unwrap();
+        }
+        app.mark_private("CCCCCCCC", true).unwrap();
+        let list = app.conversations_json(false, false).unwrap();
+        let listed: Vec<&str> = list["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| chat["identity"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, ["BBBBBBBB"]);
+    }
+
+    #[test]
     fn turning_safe_off_says_whether_the_server_copy_went() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_identity(dir.path());
@@ -1484,6 +1592,43 @@ mod tests {
         user.profile_pic = Some(BASE64.encode(b"GIF89a"));
         assert!(!new.restore_profile_picture(&user));
         assert_eq!(new.build_backup().unwrap().groups.unwrap().len(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_groups_last_update_survives_a_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let entry = backup::Group {
+            id: "0807060504030201".into(),
+            creator: "BBBBBBBB".into(),
+            groupname: Some("Team".into()),
+            created_at: Some(1000),
+            members: vec!["AAAAAAAA".into(), "BBBBBBBB".into()],
+            deleted: false,
+            last_update: Some(4000),
+            is_private: false,
+        };
+        let list = backup::DistributionList {
+            id: Some("ff00000000000000".into()),
+            name: "List".into(),
+            created_at: Some(1000),
+            members: vec!["BBBBBBBB".into()],
+            last_update: Some(5000),
+            is_private: false,
+        };
+        app.store
+            .set_setting(
+                keys::SAFE_PENDING_IMPORT,
+                &json!({ "groups": [entry], "distributionlists": [list] }).to_string(),
+            )
+            .unwrap();
+        assert!(app.import_pending_groups().await.unwrap());
+        let backup = app.build_backup().unwrap();
+        assert_eq!(backup.groups.unwrap()[0].last_update, Some(4000));
+        assert_eq!(backup.distributionlists.unwrap()[0].last_update, Some(5000));
     }
 
     /// The backup on the server of the test ID (`THREESEA_TEST_SAFE_ID`,

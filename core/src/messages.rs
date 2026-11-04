@@ -1177,6 +1177,24 @@ impl Store {
         Ok(())
     }
 
+    /// A chat a backup brings without its messages, last changed at `at` (ms): listed from then on
+    /// like an emptied one, as Android lists restored chats by their `lastUpdate`. A chat that
+    /// already has a time of its own keeps it; no usable time, no entry.
+    pub fn note_restored_chat(
+        &self,
+        conversation: &str,
+        at: Option<i64>,
+    ) -> Result<(), StoreError> {
+        let Some(at) = at.filter(|at| *at > 0) else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "INSERT OR IGNORE INTO emptied_chats (conversation, at) VALUES (?1, ?2)",
+            params![conversation, at],
+        )?;
+        Ok(())
+    }
+
     /// A message by its Threema id and direction in a conversation.
     pub fn message_by_id(
         &self,

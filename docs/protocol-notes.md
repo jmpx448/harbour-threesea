@@ -137,8 +137,13 @@ Not in libthreema (only the URL template); implemented in `core/src/safe/` after
   2026-10-21: 3 MiB, 180 days); `GET|PUT|DELETE backups/<backupId hex>`; 404 = no backup.
   Custom Safe servers are not supported (third-party endpoints, §7 rule 6).
 - Upload policy (`upload_due`): unchanged JSON → refresh after half the retention; changed →
-  at most every 23 h; after an error or "Back up now" → immediately. Checked at core start and
+  at most every 23 h (a chat's new message counts as a change, as `lastUpdate` is part of the
+  JSON); after an error or "Back up now" → immediately. Checked at core start and
   hourly while running. Change detection: SHA-256 of the JSON.
+- `lastUpdate` (contacts, groups, lists; ms): the chat's newest message when writing, as Android
+  lists a restored contact's chat only if it has one (`ConversationServiceImpl`). Reading: a chat
+  with a `lastUpdate` is listed without messages from then on (`emptied_chats`, the stand-in of an
+  emptied chat), so it survives our next upload; entries not imported yet keep the backup's value.
 - Links: only confirmed ones go into a backup, or to a linked device (Android:
   `LinkingState_LINKED`), since a restore on Android links them again, with a mail or an SMS. An
   address waiting for its confirmation stays out, and starting a number's change drops the old

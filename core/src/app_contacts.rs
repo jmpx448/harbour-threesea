@@ -879,6 +879,7 @@ impl App {
                 if entry.is_private {
                     self.mark_private(&id, true)?;
                 }
+                self.store.note_restored_chat(&id, entry.last_update)?;
                 imported += 1;
             }
         }

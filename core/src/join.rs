@@ -340,6 +340,21 @@ pub(crate) fn group_sync_members(
     Ok(members)
 }
 
+/// When each conversation last changed (its newest message, or the stand-in of a chat without
+/// messages), in ms.
+pub(crate) fn last_updates(store: &Store) -> Result<HashMap<String, u64>, StoreError> {
+    Ok(store
+        .conversations()?
+        .into_iter()
+        .map(|(message, _)| {
+            (
+                message.conversation,
+                u64::try_from(message.created_at).unwrap_or_default(),
+            )
+        })
+        .collect())
+}
+
 /// Collect everything for the new device. `dgk`: the device group key.
 pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<JoinData, StoreError> {
     let identity = store
@@ -368,17 +383,7 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
     }
     let settings = settings_sync(store)?;
 
-    // When each conversation last changed (its newest message).
-    let last_update: HashMap<String, u64> = store
-        .conversations()?
-        .into_iter()
-        .map(|(message, _)| {
-            (
-                message.conversation,
-                u64::try_from(message.created_at).unwrap_or_default(),
-            )
-        })
-        .collect();
+    let last_update = last_updates(store)?;
 
     // Contacts.
     let mut contacts = Vec::new();
