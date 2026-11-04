@@ -638,6 +638,8 @@ Page {
                                          everyone: everyone }, function(ok, result, kind, message) {
             if (!ok) {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            } else if (!result) {
+                // Already deleted: its row has heard of that, or will.
             } else if (result.removed) {
                 messages.remove(rowId)
                 for (var key in page.quoteCache) {

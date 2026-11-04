@@ -134,11 +134,12 @@ Dialog {
                 onClicked: remorse.execute(qsTrId("threesea-la-closing-poll"), function() {
                     backend.call("closePoll", { message: page.messageId }, function(ok, result, kind, message) {
                         // The results are a message of their own now; the voting is over.
-                        if (ok && result) {
-                            page.changed(result)
+                        // No result: already closed elsewhere, and the voting is just as over.
+                        if (ok) {
+                            if (result) page.changed(result)
                             pageStack.pop()
                         }
-                        else if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                     })
                 })
             }

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // JsonListModel and ContactListModel: update() ends with exactly the given rows, with few row
-// signals (a chat moving to the top is one move, deep audit 2026-10-27, P03). Exit 0: passed.
+// signals (a chat moving to the top is one move, deep audit 2026-10-27, P03). And a command's
+// result as a QML callback gets it. Exit 0: passed.
 #include "contactlistmodel.h"
+#include "coreresult.h"
 #include "jsonlistmodel.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QJsonDocument>
 #include <cstdio>
 #include <random>
 
@@ -232,6 +235,19 @@ int main(int argc, char **argv)
     check(got == reordered, "contacts: reorder and remove");
     check(contactCounts.moved == 1 && contactCounts.removed == 1 && contactCounts.inserted == 0,
           "contacts: one move, one removal");
+
+    // Null stays null, the core's "no such thing" (a quote of a message this device doesn't have);
+    // a result is an object, and an error reply's missing one an empty object.
+    {
+        QJSEngine engine;
+        const QJsonObject reply = QJsonDocument::fromJson(
+                R"({"none": null, "message": {"id": 7, "quote": null}})").object();
+        check(coreResultForScript(&engine, reply.value(QStringLiteral("none"))).isNull(), "null stays null");
+        const QJSValue message = coreResultForScript(&engine, reply.value(QStringLiteral("message")));
+        check(message.isObject() && message.property(QStringLiteral("id")).toInt() == 7, "a result is the object");
+        const QJSValue missing = coreResultForScript(&engine, reply.value(QStringLiteral("absent")));
+        check(missing.isObject() && !missing.isNull(), "no result at all: an empty object");
+    }
 
     std::printf(failures ? "%d failure(s)\n" : "passed\n", failures);
     return failures ? 1 : 0;

@@ -71,6 +71,7 @@ HEADERS += \
     bridge/peerimage.h \
     bridge/proximitymonitor.h \
     bridge/offlinenetwork.h \
+    bridge/coreresult.h \
     bridge/secretstore.h \
     bridge/softsound.h \
     bridge/threesebackend.h \

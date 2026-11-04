@@ -27,6 +27,7 @@
 #include <threesea_core.h>
 
 #include "contactlistmodel.h"
+#include "coreresult.h"
 #include "filepreparer.h"
 #include "voicerecorder.h"
 #include "secretstore.h"
@@ -1197,7 +1198,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
     if (callback.isCallable()) {
         QJSValueList arguments;
         arguments << QJSValue(ok);
-        arguments << m_engine->toScriptValue(result.toVariantMap());
+        arguments << coreResultForScript(m_engine, message.value(QStringLiteral("result")));
         arguments << QJSValue(error.value(QStringLiteral("kind")).toString());
         arguments << QJSValue(error.value(QStringLiteral("message")).toString());
         answer = callback.call(arguments);
