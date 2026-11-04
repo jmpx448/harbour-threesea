@@ -35,7 +35,8 @@ Page {
 
     // A code refused or declined stays quiet while the camera still sees it: no notice twice a
     // second, no dialog coming back. Frames fail to decode now and then, so it takes several in
-    // a row without it to count as gone. After a failure that may pass, retryAt tries it again.
+    // a row without it to count as gone, and only frames of a running camera: it restarts when a
+    // dialog closes. After a failure that may pass, retryAt tries it again.
     property string restingCode
     property double retryAt
     property int framesWithoutCode
@@ -49,7 +50,9 @@ Page {
     function cameraFrame(text) {
         if (busy || status !== PageStatus.Active) return
         if (!text) {
-            if (restingCode && ++framesWithoutCode >= 5) restingCode = ""
+            if (restingCode && camera.cameraStatus === Camera.ActiveStatus && ++framesWithoutCode >= 5) {
+                restingCode = ""
+            }
             return
         }
         if (text === restingCode) {
@@ -237,6 +240,10 @@ Page {
         id: camera
         captureMode: Camera.CaptureViewfinder
         focus.focusMode: Camera.FocusContinuous
+        // Only while on screen: the link dialog creates this page in advance, and a camera
+        // defaults to running. Unloaded rather than Loaded, which would still hold the device.
+        cameraState: page.status === PageStatus.Active || page.status === PageStatus.Activating
+                     ? Camera.ActiveState : Camera.UnloadedState
     }
 
     SilicaFlickable {
