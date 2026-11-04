@@ -90,8 +90,8 @@ Page {
         var someones = code.kind === "contact" || code.kind === "link"
         if (webPair && code.kind !== "web") {
             return someones
-                    //% "This is a contact's code. Scan the code web.threema.ch shows."
-                    ? qsTrId("threesea-la-qr-not-web")
+                    //% "This is a contact's code. Scan the code Threema Web shows."
+                    ? qsTrId("threesea-la-qr-not-web-code")
                     : Errors.text("webCodeInvalid")
         }
         if (deviceLink && code.kind !== "device") {

@@ -90,8 +90,8 @@ function text(kind, message) {
         //% "This code is for Threema Web. Scan the code of Threema for Desktop instead."
         return qsTrId("threesea-la-error-link-web-code")
     case "webCodeInvalid":
-        //% "This is not a Threema Web code. Open web.threema.ch and scan the code it shows."
-        return qsTrId("threesea-la-error-web-code")
+        //% "This is not a Threema Web code. Scan the code Threema Web shows in the browser."
+        return qsTrId("threesea-la-error-not-web-code")
     case "webVersion":
         //% "This version of Threema Web can't be used. Reload the page in the browser."
         return qsTrId("threesea-la-error-web-version")
