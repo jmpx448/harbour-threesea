@@ -416,22 +416,32 @@ pub fn typing_policy(choice: u8) -> Option<TypingIndicatorPolicy> {
 }
 
 /// Apply a Threema Safe contact entry to a freshly looked-up contact (`ThreemaSafeServiceImpl`
-/// restore): names, verification (level 2 only if the backed-up key matches), hidden flag,
-/// creation time and receipt/typing overrides.
+/// restore): names, verification, hidden flag, creation time and receipt/typing overrides.
+///
+/// A contact verified in person keeps the key from the backup and its level, also if the directory
+/// answers with another one: that is exactly what the verification is for. Anyone else starts out
+/// unverified with the directory's key, since a backup carries no key to compare for them;
+/// address book matching raises them again.
 pub fn apply_backup(mut c: ContactInit, b: &backup::Contact) -> ContactInit {
     c.first_name = b.firstname.clone().filter(|s| !s.is_empty());
     c.last_name = b.lastname.clone().filter(|s| !s.is_empty());
     c.nickname = b.nickname.clone().filter(|s| !s.is_empty());
-    let key_matches = b
-        .publickey
-        .as_deref()
+    let verified_key = (b.verification == 2)
+        .then_some(b.publickey.as_deref())
+        .flatten()
         .and_then(|k| BASE64.decode(k.as_bytes()).ok())
-        .is_some_and(|k| k.as_slice() == hex_bytes(&c.public_key.to_string()).as_slice());
-    c.verification_level = match b.verification {
-        2 if key_matches => pc::VerificationLevel::FullyVerified,
-        1 | 2 => pc::VerificationLevel::ServerVerified,
-        _ => pc::VerificationLevel::Unverified,
-    };
+        .and_then(|k| <[u8; PublicKey::LENGTH]>::try_from(k).ok())
+        .map(PublicKey::from);
+    match verified_key {
+        Some(key) => {
+            if key != c.public_key {
+                tracing::warn!("restored verified contact differs from the directory, key kept");
+            }
+            c.public_key = key;
+            c.verification_level = pc::VerificationLevel::FullyVerified;
+        }
+        None => c.verification_level = pc::VerificationLevel::Unverified,
+    }
     if b.work_verified {
         c.work_verification_level = pc::WorkVerificationLevel::WorkSubscriptionVerified;
     }
@@ -599,13 +609,33 @@ mod tests {
         assert_eq!(again.publickey, b.publickey);
         assert_eq!(again.read_receipts, 2);
 
-        // Level 2 with a different key is downgraded.
+        // Level 2 with a different key: the backup's key, still verified, not the directory's.
         let mut other = b.clone();
         other.publickey = Some(BASE64.encode(&[8; 32]));
+        let restored = apply_backup(c.clone(), &other);
         assert_eq!(
-            apply_backup(c, &other).verification_level,
-            pc::VerificationLevel::ServerVerified
+            restored.verification_level,
+            pc::VerificationLevel::FullyVerified
         );
+        assert_eq!(restored.public_key, PublicKey::from([8; 32]));
+
+        // Level 2 without a usable key, and level 1: the directory's key, unverified.
+        for (verification, key) in [
+            (2, None),
+            (2, Some(BASE64.encode(&[8; 31]))),
+            (1, Some(BASE64.encode(&[8; 32]))),
+            (1, None),
+        ] {
+            let mut other = b.clone();
+            other.verification = verification;
+            other.publickey = key;
+            let restored = apply_backup(c.clone(), &other);
+            assert_eq!(
+                restored.verification_level,
+                pc::VerificationLevel::Unverified
+            );
+            assert_eq!(restored.public_key, c.public_key);
+        }
     }
 
     #[test]
