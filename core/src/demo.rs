@@ -8,8 +8,8 @@
 //!
 //! Everything here is made up and local: contacts `DEMO0001`… with a fixed dummy public key,
 //! messages inserted straight into the store, pictures and voice files generated in memory.
-//! Nothing is sent, no blob is fetched, no key material is touched, and no device build
-//! contains any of it.
+//! Writing it sends nothing, fetches no blob and touches no key material, opening a demo chat
+//! asks nobody for a picture (`Store::request_picture`), and no device build contains any of it.
 
 use image::codecs::jpeg::JpegEncoder;
 use libthreema::protobuf::{d2d_sync, d2d_sync::contact as pc};

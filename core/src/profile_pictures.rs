@@ -425,6 +425,19 @@ impl Store {
         {
             return Ok(false);
         }
+        // Nobody to ask: a revoked ID, or someone we blocked.
+        if self.is_explicitly_blocked(identity)?
+            || self.contact(identity)?.is_some_and(|c| {
+                c.activity_state == libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid
+            })
+        {
+            return Ok(false);
+        }
+        // The emulator's demo contacts don't exist.
+        #[cfg(feature = "demo")]
+        if identity.starts_with("DEMO") {
+            return Ok(false);
+        }
         let now = now_ms();
         let state: Option<(i64, i64)> = self
             .conn
@@ -642,6 +655,26 @@ mod tests {
             from_safe_release(&[Some("00000BOB".into()), Some("bad".into())]),
             (Share::Selected, vec!["00000BOB".to_owned()])
         );
+    }
+
+    #[test]
+    fn no_picture_requests_to_revoked_or_blocked_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let mut revoked = crate::contacts::test_contact("00000BOB");
+        revoked.activity_state = libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid;
+        store.upsert_contact(&revoked).unwrap();
+        assert!(!store.request_picture("00000BOB").unwrap());
+
+        store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &json!({ "blockedContacts": ["0000CARL"] }).to_string(),
+            )
+            .unwrap();
+        assert!(!store.request_picture("0000CARL").unwrap());
+
+        assert!(store.outbox().unwrap().is_empty());
     }
 
     #[test]
