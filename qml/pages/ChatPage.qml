@@ -1157,14 +1157,15 @@ Page {
     readonly property bool canRecord: voiceRecorder.available && !voiceRecorder.owner && !window.anyCallRunning
                                       && !attachment && !quoting && editingMessageId === ""
                                       && inputField && inputField.text.trim().length === 0
-    // A recording went while nobody was looking: said when the app is back.
+    // A recording went, or stopped and waits, while nobody was looking: said when the app is back.
     property bool recordingDiscarded
+    property bool recordingHeldAway
 
     // Talking for a long time without touching the phone must not blank it: that would leave the
-    // app, and a lock (or a recording's end) has nobody to ask then. Once the app has been left,
-    // the phone blanks and locks as usual.
+    // app, which stops the recording. Nor while it waits for an answer at the limit: a lock would
+    // throw it away. Once the app has been left, the phone blanks and locks as usual.
     DisplayBlanking {
-        preventBlanking: page.recordingHere && voiceRecorder.recording
+        preventBlanking: page.recordingHere && (voiceRecorder.recording || voiceRecorder.held)
                          && Qt.application.state === Qt.ApplicationActive
     }
 
@@ -1307,6 +1308,10 @@ Page {
         //% "Recording stopped and discarded"
         Notices.show(qsTrId("threesea-la-recording-discarded"), Notice.Long, Notice.Center)
     }
+    function sayRecordingHeld() {
+        //% "Recording stopped. Send it or discard it."
+        Notices.show(qsTrId("threesea-la-recording-held"), Notice.Long, Notice.Center)
+    }
     function recordingWentUnasked() {
         if (Qt.application.state === Qt.ApplicationActive) sayRecordingDiscarded()
         else recordingDiscarded = true
@@ -1317,8 +1322,8 @@ Page {
         onFinished: if (page.recordingHere) page.sendRecording(duration)
         onHeldChanged: {
             if (voiceRecorder.held && page.recordingHere) {
-                //% "Recording stopped. Send it or discard it."
-                Notices.show(qsTrId("threesea-la-recording-held"), Notice.Long, Notice.Center)
+                if (Qt.application.state === Qt.ApplicationActive) page.sayRecordingHeld()
+                else page.recordingHeldAway = true
             }
         }
         onDiscarded: {
@@ -1637,8 +1642,11 @@ Page {
             if (Qt.application.state !== Qt.ApplicationActive) {
                 page.stopTyping()
                 page.saveDraft()
-            } else if (page.recordingDiscarded) {
-                page.sayRecordingDiscarded()
+            } else {
+                if (page.recordingDiscarded) page.sayRecordingDiscarded()
+                // (A lock on the way back has taken it already.)
+                if (page.recordingHeldAway && voiceRecorder.held && page.recordingHere) page.sayRecordingHeld()
+                page.recordingHeldAway = false
             }
             page.cameBack()
             page.markRead()

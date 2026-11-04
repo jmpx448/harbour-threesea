@@ -17,8 +17,9 @@
 //
 // A recording belongs to whoever started it (the chat page): only that one sends or discards it,
 // and it goes when its owner goes. Only the owner's tap sends: a recording that stopped any other
-// way (the length limit, the platform taking the microphone) waits as `held` while the app is in
-// front, and is thrown away otherwise.
+// way (the length limit, the platform taking the microphone, the app being left, which stops the
+// capture at once) waits as `held`, a plain file like a running one, until the owner's tap, the
+// app lock or the window's closing.
 class VoiceRecorder : public QObject
 {
     Q_OBJECT
@@ -58,11 +59,13 @@ signals:
     void ownerChanged();
     void durationChanged();
     void finished(int duration);
-    // Something nobody cancelled is gone, because no one could be asked about it.
+    // Something nobody cancelled is gone: the platform left nothing usable to hold.
     void discarded();
     void failed(const QString &error);
 
 private:
+    friend class VoiceRecorderTest;
+
     // Why the recording stops; ByItself: nobody here asked for it.
     enum class Stop { ByItself, Send, Limit, Discard };
 
@@ -77,6 +80,7 @@ private:
     QString outputPath() const;
 
     QAudioRecorder *m_recorder;
+    int m_maxDuration;
     QString m_codec;
     QString m_container;
     bool m_pcmAvailable = false;

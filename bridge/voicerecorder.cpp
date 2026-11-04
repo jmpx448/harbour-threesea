@@ -50,6 +50,7 @@ bool isMp4(const QString &container)
 VoiceRecorder::VoiceRecorder(QObject *parent)
     : QObject(parent)
     , m_recorder(new QAudioRecorder(this))
+    , m_maxDuration(MaxDurationMs)
 {
     // A recording left behind by a crash (security audit 2026-10-27, S08): never sent, gone.
     QFile::remove(outputPath());
@@ -79,7 +80,7 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     m_tick.setInterval(200);
     connect(&m_tick, &QTimer::timeout, this, [this]() {
         emit durationChanged();
-        if (m_stop == Stop::ByItself && duration() >= MaxDurationMs) {
+        if (m_stop == Stop::ByItself && duration() >= m_maxDuration) {
             finish(Stop::Limit);
         }
     });
@@ -90,11 +91,12 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     });
     connect(m_recorder, static_cast<void (QMediaRecorder::*)(QMediaRecorder::Error)>(&QMediaRecorder::error), this,
             [this](QMediaRecorder::Error) { fail(m_recorder->errorString()); });
-    // A plain file or the words in memory, with nobody looking: not kept on the off chance.
+    // No microphone left open with nothing to show it. What it picked up so far is the user's:
+    // the power key or a call may have been what took the app away, so it waits like at the
+    // limit. (What a tap already sent goes on.)
     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
-        if (m_held && state != Qt::ApplicationActive) {
-            emit discarded();
-            clear();
+        if (state != Qt::ApplicationActive && m_recording && m_stop == Stop::ByItself) {
+            finish(Stop::Limit);
         }
     });
 }
@@ -115,7 +117,7 @@ void VoiceRecorder::stopped()
     if (complete && how == Stop::Send) {
         m_haveRecording = true;
         emit finished(m_finalDuration);
-    } else if (complete && QGuiApplication::applicationState() == Qt::ApplicationActive) {
+    } else if (complete) {
         m_haveRecording = true;
         setHeld(true);
         return;

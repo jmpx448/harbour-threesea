@@ -96,6 +96,8 @@ if $full; then
         step "notification tokens (SDK)"
         scripts/test-notification-tokens.sh >/dev/null 2>&1 ||
             fail "notification tokens (scripts/test-notification-tokens.sh)"
+        step "voice recorder (SDK)"
+        scripts/test-voicerecorder.sh >/dev/null 2>&1 || fail "voice recorder (scripts/test-voicerecorder.sh)"
     fi
     step "libthreema"
     CARGO_TARGET_DIR="$PWD/target" cargo test -q --manifest-path third_party/libthreema/Cargo.toml \

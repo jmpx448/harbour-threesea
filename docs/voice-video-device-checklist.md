@@ -554,9 +554,9 @@ Voice recording:
    - Expect: "Recording stopped and discarded" on the way there, the recording is gone and the mic
      is back; nothing was sent.
 4. Start a recording and have someone call the phone (the phone app, not Threesea).
-   - Expect: back in the chat, "Recording stopped and discarded", or the bar still recording if
-     the phone left the microphone alone. If the phone stops it while the app stays in front, the
-     bar shows "Recorded" with send and discard. Nothing is sent by itself, and
+   - Expect: the microphone is free for the call. Back in the chat, "Recording stopped. Send it or
+     discard it." and the bar shows "Recorded" with send and discard, or the bar still recording if
+     the call took no focus. Nothing is sent by itself, and
      `ls ~/.cache/org.threesea/harbour-threesea/` shows no `voice-recording.m4a` after a discard.
 5. Record, then close the window (Full), or let the app lock engage.
    - Expect: the microphone is free at once (Jolla's Voice Recorder can record) and no message goes
@@ -566,8 +566,16 @@ Voice recording:
 7. Tap the mic and tap again at once (under a second).
    - Expect: nothing sent, no `voice-recording.m4a` in the cache.
 8. With no app lock: start a recording, go to the home screen and leave the phone untouched.
-   - Expect: the screen blanks after the usual time and the device locks as usual.
-
+   - Expect: the microphone is free at once (Jolla's Voice Recorder can record), the screen blanks
+     after the usual time and the device locks as usual. Back in the chat, "Recording stopped. Send
+     it or discard it." with send and discard; send delivers what was recorded until leaving,
+     discard leaves no `voice-recording.m4a` in the cache.
+8a. What stops a recording this way comes from reading lipstick's compositor, so try each: the power
+    key, a completed side swipe, a phone call, an alarm, a system dialog window. Each must stop it
+    and leave it held. Pulling down the top menu takes no focus: the recording must go on, the bar
+    still counting.
+8b. Let a recording reach the limit (15 minutes) untouched, then leave the phone alone.
+    - Expect: the screen stays on until send or discard is tapped, and the recording isn't lost.
 Camera and QR scanner:
 
 9. Open the in-app camera, go to the home screen, start Jolla Camera, then come back.
