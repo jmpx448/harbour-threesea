@@ -72,7 +72,8 @@ Page {
     property string stickyDay: ""
     // Editing one of our messages in the input box (its message id), "" when writing a new one.
     property string editingMessageId: ""
-    property string draftBeforeEdit: ""
+    // What the input held when the edit started ({text, mentions, quoting}): it comes back after.
+    property var beforeEdit: null
     // Quoting a message with the next text message: its message JSON, or null.
     property var quoting: null
     // Quoted messages not in the loaded list, fetched on demand (messageId -> message or false).
@@ -600,10 +601,11 @@ Page {
         for (var i = 0; i < tags.length; ++i) map[Fmt.withMentions(tags[i], mentions)] = tags[i].substring(2, 10)
         composeMentions = map
     }
-    function encodeMentions(text) {
-        var tags = Object.keys(composeMentions).sort(function(a, b) { return b.length - a.length })
+    function encodeMentions(text, mentions) {
+        var map = mentions || composeMentions
+        var tags = Object.keys(map).sort(function(a, b) { return b.length - a.length })
         for (var i = 0; i < tags.length; ++i) {
-            text = text.split(tags[i]).join("@[" + composeMentions[tags[i]] + "]")
+            text = text.split(tags[i]).join("@[" + map[tags[i]] + "]")
         }
         return text
     }
@@ -621,8 +623,10 @@ Page {
     // Editing pulls the message back into the input box; the draft comes back afterwards.
     function startEdit(messageId, raw, mentions) {
         stopTyping()
+        if (editingMessageId === "") {
+            beforeEdit = { text: inputField.text, mentions: composeMentions, quoting: quoting }
+        }
         quoting = null
-        if (editingMessageId === "") draftBeforeEdit = inputField.text
         editingMessageId = messageId
         rememberMentions(raw, mentions)
         setInput(Fmt.withMentions(raw, mentions))
@@ -630,9 +634,12 @@ Page {
     }
 
     function endEdit() {
+        var before = beforeEdit
         editingMessageId = ""
-        setInput(draftBeforeEdit)
-        draftBeforeEdit = ""
+        beforeEdit = null
+        composeMentions = before.mentions
+        quoting = before.quoting
+        setInput(before.text)
     }
 
     // The emoji panel in place of the keyboard (EmojiPanel). Its height is the keyboard's when
@@ -1149,19 +1156,54 @@ Page {
             groupCall = groupCalls.call(identity)
             groupCalls.refresh(identity)
         }
-        // The unsent text from last time (a shared/linked text set before wins).
+        // The unsent text from last time, as it was: with its mentions and what it quotes (a
+        // shared/linked text set before wins).
         backend.call("draft", { identity: identity }, function(ok, result) {
-            if (ok && result.text && page.inputField && page.inputField.text.length === 0) {
-                page.setInput(result.text)
+            page.draftLoaded = ok && !!page.inputField
+            if (!page.draftLoaded || !result.text) return
+            var quote = result.quote
+            page.savedDraft = page.draftKey(result.text, quote ? quote.messageId : "")
+            if (page.inputField.text.length > 0) return
+            page.rememberMentions(result.text, result.mentions)
+            page.setInput(Fmt.withMentions(result.text, result.mentions))
+            if (quote && !page.attachment) {
+                quote.senderName = page.senderNameOf(quote)
+                page.quoting = quote
             }
         })
     }
-    // Keep what is typed but not sent (not while editing a message: that is not a draft).
-    function saveDraft() {
-        if (!inputField) return
-        var text = editingMessageId !== "" ? draftBeforeEdit : inputField.text
-        backend.call("setDraft", { identity: identity, text: text })
+    // Keep what is typed but not sent, the way it would go out (not while editing a message:
+    // that is not a draft), from the moment it is known what is stored: an empty input before
+    // that would delete a draft that has not even been shown. Saved a moment after each change,
+    // as an app killed or crashed in the background says no goodbye.
+    property bool draftLoaded: false
+    // What the core has stored, so that an unchanged input doesn't write again.
+    readonly property string noDraft: draftKey("", "")
+    property string savedDraft: noDraft
+    function draftKey(text, quoteId) {
+        return JSON.stringify([text, quoteId])
     }
+    function saveDraft() {
+        draftSaver.stop()
+        if (!inputField) return
+        var editing = editingMessageId !== ""
+        var text = editing ? encodeMentions(beforeEdit.text, beforeEdit.mentions)
+                           : encodeMentions(inputField.text)
+        var quote = editing ? beforeEdit.quoting : quoting
+        if (!draftLoaded && text.length === 0) return
+        var key = draftKey(text, quote ? quote.messageId : "")
+        if (key === savedDraft) return
+        savedDraft = key
+        var args = { identity: identity, text: text }
+        if (quote) args.quote = quote.messageId
+        backend.call("setDraft", args)
+    }
+    Timer {
+        id: draftSaver
+        interval: 700
+        onTriggered: page.saveDraft()
+    }
+    onQuotingChanged: draftSaver.restart()
     Component.onDestruction: {
         // Playing on is fine, the system's media controls have it; a paused message would only
         // stay in the way, and a private chat's is hidden with the chat.
@@ -1218,8 +1260,12 @@ Page {
     Connections {
         target: Qt.application
         onStateChanged: {
-            if (Qt.application.state !== Qt.ApplicationActive) page.stopTyping()
-            else if (page.recordingDiscarded) page.sayRecordingDiscarded()
+            if (Qt.application.state !== Qt.ApplicationActive) {
+                page.stopTyping()
+                page.saveDraft()
+            } else if (page.recordingDiscarded) {
+                page.sayRecordingDiscarded()
+            }
             page.markRead()
         }
     }
@@ -2021,6 +2067,7 @@ Page {
                     Component.onCompleted: page.inputField = input
                     onTextChanged: {
                         page.userTyped()
+                        draftSaver.restart()
                         page.updateMentionQuery()
                         emojiRanges = backend.threemaEmoji ? Fmt.emojiRanges(text) : []
                         emojiLayout.restart()

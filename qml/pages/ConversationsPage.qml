@@ -65,7 +65,8 @@ Page {
         id: conversations
         keyField: "identity"
         roles: ["identity", "displayName", "unread", "markedUnread", "lastMessage", "verification", "section",
-                "group", "senderName", "pictureVersion", "muted", "pinned", "distributionList", "draft"]
+                "group", "senderName", "pictureVersion", "muted", "pinned", "distributionList", "draft",
+                "draftMentions"]
     }
 
     // New group: name and members in one dialog; its chat opens once the dialog has closed.
@@ -474,7 +475,7 @@ Page {
                         readonly property string plain: Fmt.previewLine(
                             model.draft
                               //% "Draft: %1"
-                              ? qsTrId("threesea-la-draft").arg(model.draft)
+                              ? qsTrId("threesea-la-draft").arg(Fmt.withMentions(model.draft, model.draftMentions))
                               : (model.group && model.senderName && !model.lastMessage.outgoing
                                  && model.lastMessage.kind !== "status"
                                  ? model.senderName + ": " : "") + Fmt.preview(model.lastMessage),
