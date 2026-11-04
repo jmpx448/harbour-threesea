@@ -8,7 +8,7 @@ use core::cell::RefCell;
 use std::rc::Rc;
 
 use libthreema::{
-    common::{Delta, MessageId, Nonce, ThreemaId},
+    common::{Delta, MessageId, Nonce, ThreemaId, config::Config},
     model::{
         contact::{Contact, ContactUpdate},
         message::{
@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use crate::{
     messages::{Message, OutgoingState},
     reactions,
-    store::{Store, keys},
+    store::{Store, StoreError, keys},
 };
 
 /// UI-relevant changes produced while processing incoming messages.
@@ -226,12 +226,43 @@ pub struct StoreSettings(pub Rc<Store>);
 
 impl SettingsProvider for StoreSettings {
     fn block_unknown_identities(&self) -> Result<bool, ProviderError> {
-        let settings = self.0.setting(keys::APP_SETTINGS).map_err(foreign)?;
-        Ok(settings
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v["blockUnknown"].as_bool())
-            .unwrap_or(false))
+        block_unknown(&self.0).map_err(foreign)
     }
+}
+
+fn block_unknown(store: &Store) -> Result<bool, StoreError> {
+    let settings = store.setting(keys::APP_SETTINGS)?;
+    Ok(settings
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["blockUnknown"].as_bool())
+        .unwrap_or(false))
+}
+
+/// The _Identity Blocked Steps_ (Android's `IdentityBlockedSteps`, libthreema's crate-private
+/// `communication_permission`): special contacts never are; everyone on the block list is; with
+/// "block unknown senders" on, so is anyone who is neither a direct contact nor in an active group
+/// with us, predefined contacts excepted.
+pub fn identity_blocked(
+    store: &Store,
+    config: &Config,
+    identity: &str,
+) -> Result<bool, StoreError> {
+    let predefined = ThreemaId::try_from(identity)
+        .ok()
+        .and_then(|id| config.predefined_contacts.get(&id));
+    if predefined.is_some_and(|contact| contact.special) {
+        return Ok(false);
+    }
+    if store.is_explicitly_blocked(identity)? {
+        return Ok(true);
+    }
+    if predefined.is_some() || !block_unknown(store)? {
+        return Ok(false);
+    }
+    let direct = store
+        .contact(identity)?
+        .is_some_and(|c| c.acquaintance_level == pc::AcquaintanceLevel::Direct);
+    Ok(!direct && !store.is_group_member(identity)?)
 }
 
 /// Nothing to wake (no Threema Web while restoring forward secrecy state, fs_store).
@@ -329,24 +360,13 @@ impl StoreContacts {
         }
         Ok(())
     }
-
-    fn blocked_identities(&self) -> Vec<String> {
-        self.store
-            .setting(keys::APP_SETTINGS)
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| serde_json::from_value(v["blockedContacts"].clone()).ok())
-            .unwrap_or_default()
-    }
 }
 
 impl ContactProvider for StoreContacts {
     fn is_explicitly_blocked(&self, identity: ThreemaId) -> Result<bool, ProviderError> {
-        Ok(self
-            .blocked_identities()
-            .iter()
-            .any(|blocked| *blocked == identity.to_string()))
+        self.store
+            .is_explicitly_blocked(&identity.to_string())
+            .map_err(foreign)
     }
 
     fn is_member_of_active_group(&self, identity: ThreemaId) -> Result<bool, ProviderError> {
@@ -505,6 +525,7 @@ impl ConversationProvider for StoreConversations {
                     i64::try_from(message.created_at).unwrap_or(i64::MAX),
                     group,
                     &|identity| store.contact(identity).ok().flatten().is_some(),
+                    &|identity| store.is_explicitly_blocked(identity),
                     &|identity| {
                         store.contact(identity).ok().flatten().map_or_else(
                             || identity.to_owned(),
@@ -807,7 +828,97 @@ impl ConversationProvider for StoreConversations {
 
 #[cfg(test)]
 mod tests {
-    use super::CoreEvent;
+    use libthreema::common::{GroupIdentity, config::ConfigEnvironment};
+
+    use super::*;
+
+    const MEMBER: &str = "B0B0B0B0";
+    const OTHER: &str = "C0C0C0C0";
+    const STRANGER: &str = "D0D0D0D0";
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        (dir, store)
+    }
+
+    fn config() -> Config {
+        Config::from(ConfigEnvironment::Production)
+    }
+
+    fn settings(store: &Store, value: &Value) {
+        store
+            .set_setting(keys::APP_SETTINGS, &value.to_string())
+            .unwrap();
+    }
+
+    fn contact(store: &Store, id: &str, level: pc::AcquaintanceLevel, state: pc::ActivityState) {
+        let mut contact = crate::contacts::test_contact(id);
+        contact.acquaintance_level = level;
+        contact.activity_state = state;
+        store.upsert_contact(&contact).unwrap();
+    }
+
+    fn group(store: &Store, members: &[&str], left: bool) -> String {
+        let identity = GroupIdentity {
+            creator_identity: ThreemaId::try_from("ABCD1234").unwrap(),
+            group_id: 7,
+        };
+        let key = crate::groups::key(&identity);
+        store
+            .upsert_group(&crate::groups::Group {
+                key: key.clone(),
+                identity,
+                name: String::new(),
+                members: members.iter().map(ToString::to_string).collect(),
+                left,
+                created_at: 0,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        key
+    }
+
+    #[test]
+    fn identity_blocked_steps() {
+        let (_dir, store) = store();
+        let config = config();
+        let blocked = |id: &str| identity_blocked(&store, &config, id).unwrap();
+        contact(
+            &store,
+            MEMBER,
+            pc::AcquaintanceLevel::GroupOrDeleted,
+            pc::ActivityState::Active,
+        );
+        contact(
+            &store,
+            OTHER,
+            pc::AcquaintanceLevel::Direct,
+            pc::ActivityState::Active,
+        );
+
+        // Nothing set: nobody.
+        assert!(!blocked(STRANGER) && !blocked(MEMBER) && !blocked(OTHER));
+
+        // The block list, whoever is on it; special contacts can't be.
+        settings(
+            &store,
+            &json!({ "blockedContacts": [OTHER, "*3MAPUSH", "*3MATOKN"] }),
+        );
+        assert!(blocked(OTHER) && blocked("*3MATOKN"));
+        assert!(!blocked("*3MAPUSH") && !blocked(STRANGER));
+
+        // Block unknown: strangers and non-direct contacts, unless they share an active group.
+        settings(&store, &json!({ "blockUnknown": true }));
+        assert!(blocked(STRANGER) && blocked(MEMBER));
+        assert!(!blocked(OTHER), "a direct contact");
+        assert!(!blocked("*3MATOKN"), "a predefined contact");
+        group(&store, &[MEMBER], true);
+        assert!(blocked(MEMBER), "only a group we left");
+        group(&store, &[MEMBER], false);
+        assert!(!blocked(MEMBER));
+    }
 
     #[test]
     fn held_notifications_wait_for_their_notify_event() {

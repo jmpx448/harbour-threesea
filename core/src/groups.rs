@@ -455,7 +455,8 @@ pub struct GroupOutcome {
 }
 
 /// Group receive steps; `user` is our identity, `contact_exists` whether we have a contact (any
-/// acquaintance) for an identity, `name_of` its display name (for status lines).
+/// acquaintance) for an identity, `blocked` whether the user blocked one explicitly (ADR 0019),
+/// `name_of` its display name (for status lines).
 #[expect(clippy::too_many_arguments, reason = "the receive context")]
 pub fn receive(
     store: &Store,
@@ -465,6 +466,7 @@ pub fn receive(
     created_at: i64,
     message: IncomingGroupMessageBody,
     contact_exists: &dyn Fn(&str) -> bool,
+    blocked: &dyn Fn(&str) -> Result<bool, StoreError>,
     name_of: &dyn Fn(&str) -> String,
 ) -> Result<GroupOutcome, StoreError> {
     let identity = message.group_identity;
@@ -485,6 +487,7 @@ pub fn receive(
                 group,
                 &mut outcome,
                 contact_exists,
+                blocked,
                 name_of,
             )?;
             return Ok(outcome);
@@ -495,7 +498,7 @@ pub fn receive(
                 return Ok(outcome);
             }
             let Some(mut group) = group.filter(|g| !g.left) else {
-                if !user_is_creator {
+                if !user_is_creator && !blocked(&creator)? {
                     sync_request(store, &key, &creator, &mut outcome)?;
                 }
                 return Ok(outcome);
@@ -538,9 +541,10 @@ pub fn receive(
         _ => {}
     }
 
-    // Common Group Receive Steps.
+    // Common Group Receive Steps. A group we don't know is none of a blocked creator's business:
+    // asking them would bring it back (ADR 0019).
     let Some(mut group) = group else {
-        if !user_is_creator {
+        if !user_is_creator && !blocked(&creator)? {
             sync_request(store, &key, &creator, &mut outcome)?;
         }
         return Ok(outcome);
@@ -652,6 +656,11 @@ pub fn receive(
                     .changed
                     .extend(store.mark_deleted(original.id, created_at)?);
             }
+        }
+        // Exempt from blocking so that a blocked member's copy of a poll stays in step when we send,
+        // but their poll doesn't show here (Android's `processIncomingGroupMessage`).
+        GroupMessageBody::PollSetup(_) if blocked(sender)? => {
+            tracing::info!("group poll from a blocked member, ignored");
         }
         GroupMessageBody::PollSetup(setup) => {
             let (added, changed) = crate::polls::receive_setup(
@@ -788,9 +797,17 @@ fn receive_setup(
     group: Option<Group>,
     outcome: &mut GroupOutcome,
     contact_exists: &dyn Fn(&str) -> bool,
+    blocked: &dyn Fn(&str) -> Result<bool, StoreError>,
     name_of: &dyn Fn(&str) -> String,
 ) -> Result<(), StoreError> {
     let creator = identity.creator_identity.to_string();
+    // group-setup is exempt from the general block check because of these dedicated steps: a blocked
+    // creator can't bring us into a new group, or back into one we left (ADR 0019). For a group we
+    // are in, their setup still counts.
+    if group.as_ref().is_none_or(|g| g.left) && blocked(&creator)? {
+        tracing::info!("group-setup for a group we aren't in from a blocked creator, discarded");
+        return Ok(());
+    }
     let members: BTreeSet<String> = members
         .into_iter()
         .map(|m| m.to_string())
@@ -908,6 +925,7 @@ mod tests {
     const USER: &str = "USER0001";
     const CREATOR: &str = "CREATOR1";
     const BOB: &str = "00000BOB";
+    const BLOCKED: &str = "BLOCKED1";
 
     fn id(s: &str) -> ThreemaId {
         ThreemaId::try_from(s).unwrap()
@@ -932,6 +950,7 @@ mod tests {
                 body,
             },
             &|m| m != "UNKNOWN1",
+            &|m| Ok(m == BLOCKED),
             &|m| format!("~{m}"),
         )
         .unwrap()
@@ -983,6 +1002,112 @@ mod tests {
         );
         // Recently resynced: no second request within the hour.
         assert!(!run(&store, BOB, CREATOR, text()).send);
+    }
+
+    #[test]
+    fn a_blocked_creator_cannot_bring_us_into_a_new_group() {
+        let (_dir, store) = store();
+        let group_key = key(&gid(BLOCKED));
+
+        // A new group from them: nothing appears, nobody is told.
+        let outcome = run(&store, BLOCKED, BLOCKED, setup(&[USER, BOB]));
+        assert!(outcome.added.is_empty() && !outcome.groups_changed && !outcome.send);
+        assert!(store.group(&group_key).unwrap().is_none());
+
+        // Group messages for it don't ask the blocked creator for it either.
+        let text = GroupMessageBody::Text(TextMessage { text: "hi".into() });
+        assert!(!run(&store, BOB, BLOCKED, text).send);
+        let leave = GroupMessageBody::Leave(GroupLeaveMessage {});
+        assert!(!run(&store, BOB, BLOCKED, leave).send);
+        assert!(outbox_kinds(&store).is_empty());
+    }
+
+    #[test]
+    fn a_blocked_creator_cannot_bring_us_back_into_a_group_we_left() {
+        let (_dir, store) = store();
+        let group_key = key(&gid(BLOCKED));
+        store
+            .upsert_group(&Group {
+                key: group_key.clone(),
+                identity: gid(BLOCKED),
+                name: String::new(),
+                members: vec![BLOCKED.into(), BOB.into()],
+                left: true,
+                created_at: 0,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let outcome = run(&store, BLOCKED, BLOCKED, setup(&[USER, BOB]));
+        assert!(outcome.added.is_empty() && !outcome.groups_changed);
+        assert!(store.group(&group_key).unwrap().unwrap().left);
+        // Nor does being removed from it again add a line.
+        let outcome = run(&store, BLOCKED, BLOCKED, setup(&[BOB]));
+        assert!(outcome.added.is_empty() && !outcome.groups_changed);
+    }
+
+    #[test]
+    fn a_blocked_members_poll_does_not_show() {
+        let (_dir, store) = store();
+        let group_key = key(&gid(CREATOR));
+        store
+            .upsert_group(&Group {
+                key: group_key.clone(),
+                identity: gid(CREATOR),
+                name: String::new(),
+                members: vec![CREATOR.into(), BLOCKED.into(), BOB.into()],
+                left: false,
+                created_at: 0,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let poll = |id: u64| {
+            let poll = crate::polls::new_poll(
+                id,
+                "ABCD1234",
+                "Lunch?",
+                &["Pizza".into(), "Sushi".into()],
+                false,
+                true,
+            )
+            .unwrap();
+            GroupMessageBody::PollSetup(libthreema::model::message::PollSetupMessage {
+                poll_id: id,
+                poll: crate::polls::setup_json(&poll),
+            })
+        };
+        assert!(run(&store, BLOCKED, CREATOR, poll(1)).added.is_empty());
+        assert!(
+            store
+                .conversation_messages(&group_key, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(run(&store, BOB, CREATOR, poll(2)).added.len(), 1);
+    }
+
+    #[test]
+    fn a_blocked_creator_still_changes_a_group_we_have() {
+        let (_dir, store) = store();
+        let group_key = key(&gid(BLOCKED));
+        store
+            .upsert_group(&Group {
+                key: group_key.clone(),
+                identity: gid(BLOCKED),
+                name: String::new(),
+                members: vec![BLOCKED.into(), BOB.into()],
+                left: false,
+                created_at: 0,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        assert!(run(&store, BLOCKED, BLOCKED, setup(&[USER])).groups_changed);
+        assert_eq!(
+            store.group(&group_key).unwrap().unwrap().members,
+            vec![BLOCKED.to_owned()]
+        );
     }
 
     #[test]

@@ -129,6 +129,15 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the user put `identity` on the block list.
+    pub fn is_explicitly_blocked(&self, identity: &str) -> Result<bool, StoreError> {
+        let settings = self.setting(crate::store::keys::APP_SETTINGS)?;
+        Ok(settings
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["blockedContacts"].as_array().cloned())
+            .is_some_and(|blocked| blocked.iter().any(|id| id.as_str() == Some(identity))))
+    }
+
     /// One contact.
     pub fn contact(&self, identity: &str) -> Result<Option<Contact>, StoreError> {
         Ok(self
