@@ -93,8 +93,21 @@ linking a device, removing the ID) needs the PIN in the core whenever a lock exi
 the grace time, like Android. The UI asks before opening those pages (`window.pushWithPin`);
 linking asks on `LinkDevicePage`, where every route ends. The app locking closes the page
 holding a PIN, the lock settings included. Scheduled backups run without it. So
-a forgotten PIN can't be reset from inside the app any more: that takes removing the app's data
-from the device, then restoring from a backup. Creating or restoring an ID starts only on a
+a forgotten PIN can't be reset from inside the app any more: that takes deleting the app's data
+folder, then restarting the phone, then restoring from a backup; Settings → Security → App lock
+says so with the folder's path, and the README, which a locked-out user can still read. The restart
+is a step of its own because with "Keep running in the background" on (the default) closing the
+window leaves the process running, with the deleted database still open and the same lock up, and
+the setting is behind the lock. The Full flavour's login service starting the app again is fine:
+the folder is gone by then. Doing it in the other order isn't: the service would have the database
+open again before the delete. All this is by reading the code, still to be confirmed on a phone
+(`docs/voice-video-device-checklist.md`).
+
+It covers the app lock only. The wrapped key of the stored data's passphrase lives in Sailfish
+Secrets, not in the folder: after the delete and the restart the passphrase page comes back, and
+the right passphrase then starts an empty app. A forgotten passphrase has no way back in; nothing
+in the app removes that secret. The lock page offers no removal: nothing there tells the owner
+from anyone else holding the phone. Creating or restoring an ID starts only on a
 device without one (`identityExists`), so those commands can't replace an ID around the PIN.
 
 A mark from anywhere (the UI, a linked device, a restore) goes out as `CoreEvent::PrivateChanged`:

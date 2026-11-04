@@ -77,6 +77,23 @@ install it in developer mode; see [docs/release.md](docs/release.md#installing-a
 Each release is built by GitHub Actions from the tagged source, with checksums and build
 provenance attestations ([SECURITY.md](SECURITY.md#verifying-a-release)).
 
+### If you forget the app lock's PIN or passphrase
+
+This takes the chats and media on this phone with it; what comes back is what your backups hold.
+
+1. Delete the app's data folder, `.local/share/org.threesea/harbour-threesea` in your home folder:
+   with a file manager that shows hidden folders, or in a terminal with
+   `rm -rf ~/.local/share/org.threesea/harbour-threesea`.
+2. Restart the phone. Closing the window is not enough: with "Keep running in the background" on,
+   which is the default, Threesea goes on running and keeps the deleted data open.
+3. Open Threesea. It starts as on a new phone, without the lock: enter the license key and restore
+   your ID from Threema Safe or an ID backup. A data backup brings the chats back after that, from
+   its page in the settings.
+
+With a passphrase for the stored data (Settings → Security), Threesea asks for that passphrase
+before step 3: it is kept in Sailfish Secrets, not in the folder. Only that passphrase gets past
+this page, so keep it safe.
+
 ## How it was made, and how to continue
 
 Everything the AI was told and everything learned on the way is in the repository, so anyone

@@ -429,6 +429,16 @@ device; what is left here is the real cover, the real window manager and the rea
 8. App lock switched off, but with a PIN set for the private chats. Mark a chat private, open it
    from the contacts, enter the PIN and put the app aside past the grace time.
    - Expect: coming back, the chat is closed.
+9. A forgotten PIN, the way the app lock page and the README describe it, on a test ID with a
+   backup, in both flavours. Lock on with a PIN, close the window, then in a terminal
+   `rm -rf ~/.local/share/org.threesea/harbour-threesea`, and open the app again before restarting.
+   - Expect: the same lock page (the process is still running). This is why the restart is a step.
+   Now restart the phone and open the app.
+   - Expect: the license page, no lock; in Full the login service has started the app in the
+     background first, without a window. Restoring the ID works, and there is no lock afterwards.
+10. The same with a passphrase on under Settings → Security → Encryption of stored data.
+    - Expect: after the restart the passphrase page, also with the folder gone. A wrong passphrase
+      keeps you there; the right one leads to the license page, with no app lock.
 
 ## One call has the microphone
 

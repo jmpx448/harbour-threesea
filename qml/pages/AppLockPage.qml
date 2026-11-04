@@ -173,8 +173,8 @@ Page {
             Item { width: 1; height: Theme.paddingLarge }
 
             InfoLabel {
-                //% "With a lock you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the PIN or passphrase, you can only get back in by removing your ID from this device and restoring it from a backup."
-                text: qsTrId("threesea-la-app-lock-info")
+                //% "With a lock you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the app lock's PIN or passphrase, the way back in is to delete Threesea's data folder .local/share/org.threesea/harbour-threesea with the chats and media in it, restart the phone and restore from a backup. A passphrase for the stored data stays set: Threesea asks for it first."
+                text: qsTrId("threesea-la-app-lock-about")
                 font.pixelSize: Theme.fontSizeSmall
             }
         }
