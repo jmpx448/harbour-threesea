@@ -389,6 +389,7 @@ mod tests {
                 &to_key,
                 inner_type,
                 &inner_data,
+                None,
                 1,
             )
             .unwrap();

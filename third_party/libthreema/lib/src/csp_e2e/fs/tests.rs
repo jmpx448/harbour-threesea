@@ -101,6 +101,16 @@ impl Party {
     }
 
     fn send(&mut self, to: &Party, inner_type: u8, data: &[u8]) -> Encapsulation {
+        self.send_in_group(to, inner_type, data, None)
+    }
+
+    fn send_in_group(
+        &mut self,
+        to: &Party,
+        inner_type: u8,
+        data: &[u8],
+        group_identity: Option<GroupIdentity>,
+    ) -> Encapsulation {
         let mut store = self.fs.store.borrow_mut();
         encapsulate(
             &mut *store,
@@ -110,6 +120,7 @@ impl Party {
             &to.key.public_key(),
             inner_type,
             data,
+            group_identity,
             1,
         )
         .unwrap()
@@ -259,6 +270,70 @@ fn unknown_session_is_rejected() {
             .statuses
             .contains(&(bob.id, FsStatus::MessageRejected { message_id: 42 }))
     }));
+}
+
+fn group_identity() -> GroupIdentity {
+    GroupIdentity {
+        group_id: 7,
+        creator_identity: "00000BOB".to_owned(),
+    }
+}
+
+fn encapsulated_of(envelope: &[u8]) -> Encapsulated {
+    match Envelope::decode(envelope).unwrap().content {
+        Some(envelope::Content::Encapsulated(encapsulated)) => encapsulated,
+        other => panic!("expected an encapsulated message, got {other:?}"),
+    }
+}
+
+fn reject_of(envelope: &[u8]) -> Reject {
+    match Envelope::decode(envelope).unwrap().content {
+        Some(envelope::Content::Reject(reject)) => reject,
+        other => panic!("expected a reject, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_group_message_names_its_group_and_a_contact_message_does_not() {
+    let mut alice = alice();
+    let bob = bob();
+    let text = alice.send(&bob, 0x01, b"to bob");
+    assert_eq!(
+        encapsulated_of(text.envelope.as_ref().unwrap()).group_identity,
+        None
+    );
+    let group_text = alice.send_in_group(&bob, 0x01, b"to the group", Some(group_identity()));
+    assert_eq!(
+        encapsulated_of(group_text.envelope.as_ref().unwrap()).group_identity,
+        Some(group_identity())
+    );
+}
+
+#[test]
+fn a_rejected_group_message_names_its_group_in_the_reject() {
+    let mut alice = alice();
+    let mut bob = bob();
+    let first = alice.send_in_group(&bob, 0x01, b"to the group", Some(group_identity()));
+
+    // Unknown session: Bob never saw the Init.
+    let _ = bob.receive(&alice, first.envelope.as_ref().unwrap(), 42);
+    let controls = bob.take_controls();
+    let reject = reject_of(&controls[0]);
+    assert_eq!(reject.cause, reject::Cause::UnknownSession as i32);
+    assert_eq!(reject.group_identity, Some(group_identity()));
+
+    // State mismatch: a session exists, but the message doesn't decrypt.
+    let _ = bob.receive(&alice, &first.prelude[0], 43);
+    let _ = bob.take_controls();
+    let mut envelope = Envelope::decode(first.envelope.as_ref().unwrap().as_slice()).unwrap();
+    if let Some(envelope::Content::Encapsulated(encapsulated)) = envelope.content.as_mut() {
+        encapsulated.encrypted_inner[0] ^= 1;
+    }
+    let _ = bob.receive(&alice, &envelope.encode_to_vec(), 44);
+    let controls = bob.take_controls();
+    let reject = reject_of(&controls[0]);
+    assert_eq!(reject.cause, reject::Cause::StateMismatch as i32);
+    assert_eq!(reject.group_identity, Some(group_identity()));
 }
 
 #[test]

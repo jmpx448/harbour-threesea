@@ -1342,6 +1342,11 @@ impl<'a> Session<'a> {
         };
         if use_fs {
             let (inner_type, inner_data) = encode_message_body(&body);
+            let group_identity = if let OutgoingMessageBody::Group(group) = &body {
+                Some((&group.group_identity).into())
+            } else {
+                None
+            };
             match fs_protocol::encapsulate(
                 &mut self.fs_store(),
                 self.setup.identity,
@@ -1350,6 +1355,7 @@ impl<'a> Session<'a> {
                 &receiver_key,
                 inner_type,
                 &inner_data,
+                group_identity,
                 u64::try_from(crate::messages::now_ms()).unwrap_or(0),
             ) {
                 Ok(encapsulation) => {

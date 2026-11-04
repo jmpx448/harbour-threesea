@@ -24,9 +24,12 @@ use crate::{
         keys::{ClientKey, PublicKey},
     },
     model::provider::ProviderError,
-    protobuf::csp_e2e_fs::{
-        Accept, Encapsulated, Envelope, Init, Reject, Terminate, Version, encapsulated, envelope, reject,
-        terminate,
+    protobuf::{
+        common::GroupIdentity,
+        csp_e2e_fs::{
+            Accept, Encapsulated, Envelope, Init, Reject, Terminate, Version, encapsulated, envelope, reject,
+            terminate,
+        },
     },
 };
 
@@ -179,6 +182,7 @@ fn send_reject(
     peer: ThreemaId,
     session_id: SessionId,
     message_id: u64,
+    group_identity: Option<GroupIdentity>,
     cause: reject::Cause,
 ) -> Result<(), ProviderError> {
     store.enqueue_control(
@@ -187,7 +191,7 @@ fn send_reject(
             session_id,
             envelope::Content::Reject(Reject {
                 message_id,
-                group_identity: None,
+                group_identity,
                 cause: cause as i32,
             }),
         ),
@@ -391,6 +395,7 @@ fn handle_encapsulated(
             peer,
             session_id,
             outer_message_id,
+            encapsulated.group_identity.clone(),
             reject::Cause::UnknownSession,
         )?;
         return Ok(IncomingFsOutcome::Handled);
@@ -406,6 +411,7 @@ fn handle_encapsulated(
                 peer,
                 session_id,
                 outer_message_id,
+                encapsulated.group_identity.clone(),
                 reject::Cause::StateMismatch,
             )?;
             store.status(peer, FsStatus::Reset)?;
@@ -520,6 +526,8 @@ pub struct Encapsulation {
 
 /// Encapsulate an outgoing 1:1 message (`inner_type`, `inner_data` without padding) for `peer`.
 /// The caller must have checked that the peer supports forward security (feature mask).
+/// `group_identity` is the group of a group message: required for those by the protocol, so that
+/// a peer who can't decrypt it can say which message of which group it rejects; `None` for 1:1.
 ///
 /// # Errors
 ///
@@ -532,6 +540,7 @@ pub fn encapsulate(
     peer_public_key: &PublicKey,
     inner_type: u8,
     inner_data: &[u8],
+    group_identity: Option<GroupIdentity>,
     now_ms: u64,
 ) -> Result<Encapsulation, EncapsulationError> {
     let mut prelude = Vec::new();
@@ -587,7 +596,7 @@ pub fn encapsulate(
                 counter,
                 offered_version: offered,
                 applied_version: applied,
-                group_identity: None,
+                group_identity,
                 encrypted_inner,
             }),
         )),
