@@ -24,7 +24,8 @@ public:
     // is no database yet). Emits exactly one of keyReady / failed.
     void loadKey(bool allowCreate);
 
-    // Replace what is stored (the key, or the wrapped key); emits stored(ok).
+    // Replace what is stored (the key, or the wrapped key); emits stored(ok): whether the next
+    // start goes by the new data.
     void store(const QByteArray &data);
 
     // The old key goes for good and a new one takes its place: the ID was removed and its
@@ -57,6 +58,8 @@ private:
     void fetch(const QString &name, std::function<void(const Fetched &)> done);
     void write(const QString &name, const QByteArray &data, std::function<void(bool)> done);
     void remove(const QString &name, std::function<void(bool)> done);
+    void replaceWith(const QByteArray &data);
+    void settleFailedReplacement(const QByteArray &data);
     void storeNewKey();
 
     Sailfish::Secrets::SecretManager *m_manager;

@@ -224,6 +224,35 @@ void SecretStore::useKey(const QByteArray &key, bool found)
 
 void SecretStore::store(const QByteArray &data)
 {
+    // Nothing is deleted until it is known what is current: the staging copy may be the only one.
+    fetch(SecretName, [this, data](const Fetched &current) {
+        if (current.found) {
+            replaceWith(data);
+        } else if (!current.missing) {
+            emit stored(false);
+        } else {
+            // An earlier replacement stopped between its two writes: the staging copy is current.
+            fetch(StagingName, [this, data](const Fetched &staged) {
+                if (staged.found) {
+                    write(SecretName, staged.data, [this, data](bool ok) {
+                        if (ok) {
+                            replaceWith(data);
+                        } else {
+                            emit stored(false);
+                        }
+                    });
+                } else if (staged.missing) {
+                    replaceWith(data);
+                } else {
+                    emit stored(false);
+                }
+            });
+        }
+    });
+}
+
+void SecretStore::replaceWith(const QByteArray &data)
+{
     // Secrets refuses to overwrite. So: the new data as the staging copy, then replace the key
     // with it, then drop the copy; at every point one valid copy exists (fetchKey finishes an
     // interrupted run).
@@ -234,15 +263,37 @@ void SecretStore::store(const QByteArray &data)
                 return;
             }
             remove(SecretName, [this, data](bool) {
-                write(SecretName, data, [this](bool ok) {
+                write(SecretName, data, [this, data](bool ok) {
                     if (ok) {
                         remove(StagingName, [](bool) {});
+                        emit stored(true);
+                    } else {
+                        settleFailedReplacement(data);
                     }
-                    // Not ok: the staging copy stays and is used on the next start.
-                    emit stored(ok);
                 });
             });
         });
+    });
+}
+
+void SecretStore::settleFailedReplacement(const QByteArray &data)
+{
+    // The answer has to be what the next start will do (fetchKey: the key if there is one, else
+    // the staging copy), or the user is told one thing and gets the other.
+    fetch(SecretName, [this, data](const Fetched &current) {
+        if (current.found && current.data == data) {
+            remove(StagingName, [](bool) {});
+            emit stored(true);
+        } else if (current.found) {
+            // The old one could not be removed, and stays in force.
+            remove(StagingName, [this](bool) { emit stored(false); });
+        } else if (current.missing) {
+            qWarning("threesea: database key replaced in its staging copy only");
+            emit stored(true);
+        } else {
+            // Can't tell. The copy stays, as it may be the only one.
+            emit stored(false);
+        }
     });
 }
 
