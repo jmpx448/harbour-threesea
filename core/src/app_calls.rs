@@ -4,7 +4,7 @@
 //! (`calls.rs`), sends the signalling messages and records each call in the chat.
 //!
 //! Events to the UI: `callIncoming {identity, callId, sdp, video}`, `callRinging`,
-//! `callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record}`.
+//! `callAnswer {sdp, video}`, `callCandidates {candidates}`, `callEnded {record}`.
 
 use libthreema::{common::keys::ClientKey, protobuf::d2d_sync::contact as pc};
 use serde_json::{Value, json};
@@ -107,15 +107,17 @@ impl App {
                     }
                 }
                 Effect::Ringing => self.emit_call(json!({ "event": "callRinging" })),
-                Effect::RemoteAnswer { sdp } => {
+                Effect::RemoteAnswer { sdp, video } => {
                     let patched = self
                         .call_patcher
                         .as_mut()
                         .map(|patcher| patcher.patch(SdpKind::RemoteAnswer, &sdp));
                     match patched {
-                        Some(Ok(sdp)) => {
-                            self.emit_call(json!({ "event": "callAnswer", "sdp": sdp }))
-                        }
+                        Some(Ok(sdp)) => self.emit_call(json!({
+                            "event": "callAnswer",
+                            "sdp": sdp,
+                            "video": video,
+                        })),
                         _ => {
                             tracing::warn!("call answer unusable");
                             let effects = self.calls.hang_up(crate::messages::now_ms());
@@ -837,6 +839,26 @@ mod tests {
         assert!(app.call_patcher.is_some());
         assert_eq!(app.call_state()["call"]["phase"], "incoming");
         assert_eq!(app.call_state()["call"]["identity"], "ECHOECHO");
+    }
+
+    #[test]
+    fn an_answer_without_video_reaches_the_ui() {
+        let (_dir, mut app, _rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        let call_id = app.call_start("ECHOECHO", OFFER, true).unwrap()["callId"]
+            .as_u64()
+            .unwrap();
+        let (kind, json) = Signal::Accept {
+            call_id: u32::try_from(call_id).unwrap(),
+            sdp: OFFER.into(),
+            video: false,
+        }
+        .encode();
+        app.on_call_signal("ECHOECHO", kind, &json);
+        let event = call_events(&mut events).pop().unwrap();
+        assert_eq!(event["event"], "callAnswer");
+        assert_eq!(event["video"], false);
+        assert_eq!(app.call_state()["call"]["video"], false);
     }
 
     fn call_events(events: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<Value> {

@@ -47,8 +47,9 @@ also when synced from another device),
 "typing"}`, `{"event": "serverMessage", "message", "canReconnect"}` (server alert / close). `{"event": "messageNotify", "message", "notify", "private"}`: a message another device received first (it leads) and that is still unread after a grace time, or at the end of the mediator's backlog — its `messageAdded` came with `notify: false`. `{"event": "privateChanged", "identity", "private"}`: a chat was marked private or unmarked, here, on a linked device or by a restore. `{"event": "deviceCookieChanged"}`: the chat server saw the ID log in with another device cookie (Android's rogue-device warning; the core has already cleared the server's flag).
 
 Call events (Full, ADR 0012): `callIncoming {identity, callId, sdp (patched), video}`,
-`callRinging`, `callAnswer {sdp}`, `callCandidates {candidates}`, `callEnded {record: {peer,
-callId, outgoing, result, duration, at}}`, `callChannelSend {data}` (base64, for the call's data channel),
+`callRinging`, `callAnswer {sdp, video}` (`video`: both sides take video; else it is an audio
+call now), `callCandidates {candidates}`, `callEnded {record: {peer, callId, outgoing, result,
+duration, at}}`, `callChannelSend {data}` (base64, for the call's data channel),
 `callRemoteCapture {device: camera|microphone, on}`, `callVideoParams {bitrateKbps, fps, width,
 height}` (what our video sender may use: Android's quality profiles, the lower of both sides,
 MAX only without a relay). Contact JSON has `canCall` and `canVideoCall`.

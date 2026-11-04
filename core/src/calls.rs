@@ -284,8 +284,8 @@ pub enum Effect {
     },
     /// The peer's phone rings.
     Ringing,
-    /// The peer accepted: give the media engine their answer.
-    RemoteAnswer { sdp: String },
+    /// The peer accepted: give the media engine their answer. `video`: both sides take video.
+    RemoteAnswer { sdp: String, video: bool },
     /// Candidates for the media engine.
     RemoteCandidates(Vec<Candidate>),
     /// The call is over: stop the media, show it in the chat.
@@ -381,7 +381,10 @@ impl Calls {
                 call.phase = Phase::Active;
                 call.accepted_at = Some(now);
                 call.video &= video;
-                vec![Effect::RemoteAnswer { sdp }]
+                vec![Effect::RemoteAnswer {
+                    sdp,
+                    video: call.video,
+                }]
             }
             Signal::Reject { reason, .. } if matches_current => {
                 let result = match reason {
@@ -689,7 +692,8 @@ mod tests {
         assert_eq!(
             effects,
             vec![Effect::RemoteAnswer {
-                sdp: "answer".into()
+                sdp: "answer".into(),
+                video: false,
             }]
         );
         let effects = calls.hang_up(63_000);
@@ -807,6 +811,29 @@ mod tests {
         let effects = calls.on_signal("ECHOECHO", Signal::Hangup { call_id: 3 }, 0);
         assert!(matches!(&effects[..], [Effect::RecordOnly { .. }]));
         assert!(calls.is_current("ECHOECHO", 5));
+    }
+
+    #[test]
+    fn an_answer_without_video_makes_it_an_audio_call() {
+        let mut calls = Calls::default();
+        calls.start("ECHOECHO", 5, "sdp".into(), true, 0);
+        let effects = calls.on_signal(
+            "ECHOECHO",
+            Signal::Accept {
+                call_id: 5,
+                sdp: "answer".into(),
+                video: false,
+            },
+            0,
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::RemoteAnswer {
+                sdp: "answer".into(),
+                video: false,
+            }]
+        );
+        assert!(!calls.current.unwrap().video);
     }
 
     #[test]
