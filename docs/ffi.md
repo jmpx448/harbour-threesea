@@ -132,8 +132,8 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `createDistributionList` | `name` (may be empty), `members` | the list JSON `{key, name, displayName, members: [{identity, displayName}], pinned}` |
 | `distributionList` | `key` | the list JSON |
 | `updateDistributionList` | `key`, optional `name`, `members` | the list JSON |
-| `setDraft` | `identity`, `text` (empty: none) | `{}`; `conversations` entries carry `draft` |
-| `draft` | `identity` | `{text}` |
+| `setDraft` | `identity`, `text` (empty: none; mentions as `@[ID]`), optional `quote` (message id hex) | `{}`; `conversations` entries carry `draft` and, with mentions, `draftMentions` (`{ID: name}`). `sendText` and a `sendFile`'s caption take a draft holding the same text away once the core has accepted them; the UI writes the draft first, so a refused send keeps it |
+| `draft` | `identity` | `{text, mentions, quote}` (the message JSON, or null if it is gone); `{text: null}` when there is none |
 | `lockStatus` | – | `{lock: {keyboard, appLock, graceSecs} \| null, unlocked, graceTimes}` (ADR 0009) |
 | `setLock` | `enabled`; a new `pin` (≥ 4 chars) with `keyboard`, or none to keep it; `appLock`, `graceSecs`; if a lock exists `currentPin` | lock status; errors `wrongPin`, `pinTooShort`, `privateChatsExist` (removing) |
 | `unlock` | `pin`; `privateChats: true` makes private chats readable (until `lock`), otherwise it only checks (app lock) | lock status; errors `lockNeeded` (no lock stored: no PIN opens anything, marks from a restore or a linked device wait for one), `wrongPin`, `pinLockout` (message: seconds until a PIN is checked again; after more than 3 wrong PINs in a row, 30 s up to an hour, like Android; also for `setLock`'s `currentPin`) |

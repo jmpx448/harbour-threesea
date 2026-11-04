@@ -490,11 +490,14 @@ pub enum Command {
         message: i64,
         identity: String,
     },
-    /// The unsent text of a chat's input (empty: none), kept like Android's drafts; returned as
-    /// `draft` in `conversations` and `draft` (`{text}`).
+    /// The unsent text of a chat's input (empty: none), with its mentions as `@[ID]` and the
+    /// message it quotes (message id, hex), kept like Android's drafts; returned as `draft` and
+    /// `draftMentions` in `conversations` and by `draft`. A send of the same text takes it away.
     SetDraft {
         identity: String,
         text: String,
+        #[serde(default)]
+        quote: Option<String>,
     },
     Draft {
         identity: String,
@@ -1707,21 +1710,12 @@ impl App {
             Command::ForwardMessage { message, identity } => {
                 self.forward_message(message, &identity)
             }
-            Command::SetDraft { identity, text } => {
-                let key = self.readable_conversation(&identity)?.0;
-                let draft_key = format!("draft:{key}");
-                if text.trim().is_empty() {
-                    self.store.delete_setting(&draft_key)?;
-                } else {
-                    self.store.set_setting(&draft_key, &text)?;
-                }
-                Ok(json!({}))
-            }
-            Command::Draft { identity } => {
-                let key = self.conversation(&identity)?.0;
-                self.check_readable(&key)?;
-                Ok(json!({ "text": self.store.setting(&format!("draft:{key}"))? }))
-            }
+            Command::SetDraft {
+                identity,
+                text,
+                quote,
+            } => self.set_draft(&identity, &text, quote.as_deref()),
+            Command::Draft { identity } => self.draft(&identity),
             Command::ChatMedia { identity, kinds } => self.chat_media(&identity, kinds),
             Command::SetMediaKinds { kinds } => {
                 let kinds: Vec<&str> = crate::messages::MEDIA_KINDS
@@ -2926,6 +2920,193 @@ mod tests {
         let event = events.try_recv().unwrap().to_json(&app.store, true);
         assert_eq!(event["event"], "conversationRead");
         assert_eq!(event["identity"], "ABCD1234");
+    }
+
+    fn call(app: &mut App, request: serde_json::Value) -> serde_json::Value {
+        let reply = rt().block_on(app.handle(&request.to_string()));
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    fn app_with_draft(text: &str) -> (tempfile::TempDir, App) {
+        let (dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let reply = call(
+            &mut app,
+            json!({"id": 1, "cmd": "setDraft", "identity": "ABCD1234", "text": text}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        (dir, app)
+    }
+
+    fn stored_draft(app: &mut App) -> serde_json::Value {
+        call(
+            app,
+            json!({"id": 2, "cmd": "draft", "identity": "ABCD1234"}),
+        )["result"]
+            .clone()
+    }
+
+    /// A draft comes back as it was written: mentions as tags with the names beside them, and
+    /// what it quotes.
+    #[test]
+    fn a_draft_keeps_its_mentions_and_quote() {
+        let (_dir, mut app) = app_with_draft("first");
+        let quoted = app
+            .store
+            .insert_incoming("ABCD1234", 0x1234, "text", "the quoted one", 1)
+            .unwrap()
+            .unwrap();
+        let mut named = crate::contacts::test_contact("EFGH5678");
+        named.nickname = Some("Anna".into());
+        app.store.upsert_contact(&named).unwrap();
+        let text = "@[EFGH5678] and @[@@@@@@@@], please look";
+        let reply = call(
+            &mut app,
+            json!({"id": 3, "cmd": "setDraft", "identity": "ABCD1234", "text": text,
+                   "quote": format!("{:016x}", quoted.message_id)}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+
+        let draft = stored_draft(&mut app);
+        assert_eq!(draft["text"], text);
+        assert_eq!(draft["mentions"]["EFGH5678"], "~Anna");
+        assert_eq!(draft["quote"]["id"], quoted.id);
+
+        // The chat list says the names too.
+        let list = app.conversations_json(false, false).unwrap();
+        let entry = list["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["identity"] == "ABCD1234")
+            .unwrap();
+        assert_eq!(entry["draft"], text);
+        assert_eq!(entry["draftMentions"]["EFGH5678"], "~Anna");
+
+        // Without a quote the old one goes; a draft that isn't one any more takes it along.
+        call(
+            &mut app,
+            json!({"id": 4, "cmd": "setDraft", "identity": "ABCD1234", "text": "second"}),
+        );
+        assert_eq!(stored_draft(&mut app)["quote"], serde_json::Value::Null);
+        call(
+            &mut app,
+            json!({"id": 5, "cmd": "setDraft", "identity": "ABCD1234", "text": "third",
+                   "quote": format!("{:016x}", quoted.message_id)}),
+        );
+        call(
+            &mut app,
+            json!({"id": 6, "cmd": "setDraft", "identity": "ABCD1234", "text": "  "}),
+        );
+        let draft = stored_draft(&mut app);
+        assert_eq!(draft["text"], serde_json::Value::Null);
+        assert_eq!(draft["quote"], serde_json::Value::Null);
+        assert_eq!(
+            app.store.setting("draftQuote:ABCD1234").unwrap(),
+            None,
+            "nothing is left of the quote"
+        );
+    }
+
+    /// A draft whose quoted message is gone is still the text.
+    #[test]
+    fn a_draft_outlives_its_quoted_message() {
+        let (_dir, mut app) = app_with_draft("first");
+        call(
+            &mut app,
+            json!({"id": 3, "cmd": "setDraft", "identity": "ABCD1234", "text": "kept",
+                   "quote": "00000000000000ff"}),
+        );
+        let draft = stored_draft(&mut app);
+        assert_eq!(draft["text"], "kept");
+        assert_eq!(draft["quote"], serde_json::Value::Null);
+    }
+
+    /// The draft goes when the core has the message, and not before: a refused text is still
+    /// there after the app ended, and another draft written meanwhile stays.
+    #[test]
+    fn only_an_accepted_send_takes_its_draft_away() {
+        let long = "x".repeat(6001);
+        let (_dir, mut app) = app_with_draft(&long);
+        let reply = call(
+            &mut app,
+            json!({"id": 3, "cmd": "sendText", "identity": "ABCD1234", "text": long}),
+        );
+        assert_eq!(reply["error"]["kind"], "messageTooLong", "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], long);
+
+        call(
+            &mut app,
+            json!({"id": 4, "cmd": "setDraft", "identity": "ABCD1234", "text": "typed on"}),
+        );
+        let reply = call(
+            &mut app,
+            json!({"id": 5, "cmd": "sendText", "identity": "ABCD1234", "text": "something else"}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], "typed on");
+
+        call(
+            &mut app,
+            json!({"id": 6, "cmd": "setDraft", "identity": "ABCD1234", "text": " hello \n",
+                   "quote": "00000000000000ff"}),
+        );
+        let reply = call(
+            &mut app,
+            json!({"id": 7, "cmd": "sendText", "identity": "ABCD1234", "text": "hello"}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], serde_json::Value::Null);
+        assert_eq!(app.store.setting("draftQuote:ABCD1234").unwrap(), None);
+    }
+
+    /// The same for a file's caption, which goes out with the file.
+    #[test]
+    fn only_an_accepted_file_takes_its_caption_draft_away() {
+        let long = "x".repeat(6001);
+        let (_dir, mut app) = app_with_draft(&long);
+        let send = |app: &mut App, caption: &str| {
+            let request = json!({"id": 3, "cmd": "sendFile", "identity": "ABCD1234",
+                                 "rendering": "file", "mediaType": "text/plain",
+                                 "name": "a.txt", "caption": caption})
+            .to_string();
+            // The upload it spawns goes with the set: this answers without waiting for anything.
+            let local = tokio::task::LocalSet::new();
+            let reply = rt().block_on(
+                local.run_until(app.handle_with(&request, vec![vec![1_u8, 2, 3].into()])),
+            );
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap()
+        };
+        let reply = send(&mut app, &long);
+        assert_eq!(reply["error"]["kind"], "messageTooLong", "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], long);
+
+        call(
+            &mut app,
+            json!({"id": 4, "cmd": "setDraft", "identity": "ABCD1234", "text": "a caption"}),
+        );
+        let reply = send(&mut app, "");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], "a caption");
+        let reply = send(&mut app, "a caption");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], serde_json::Value::Null);
+    }
+
+    /// A deleted chat takes its draft along: nothing comes back when it is opened again.
+    #[test]
+    fn deleting_a_chat_takes_its_draft_along() {
+        let (_dir, mut app) = app_with_draft("first");
+        call(
+            &mut app,
+            json!({"id": 3, "cmd": "setDraft", "identity": "ABCD1234", "text": "unsent",
+                   "quote": "00000000000000ff"}),
+        );
+        app.delete_conversation("ABCD1234").unwrap();
+        assert_eq!(app.store.setting("draft:ABCD1234").unwrap(), None);
+        assert_eq!(app.store.setting("draftQuote:ABCD1234").unwrap(), None);
     }
 
     /// Exporting a chat: the messages as text and, if wanted, the media that are here

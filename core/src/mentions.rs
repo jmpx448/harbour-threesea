@@ -35,9 +35,27 @@ pub fn identities(text: &str) -> Vec<&str> {
 }
 
 impl Store {
-    /// A message's JSON for the UI, with `mentions`: `{ID: display name}` of the mentioned
-    /// contacts, our own ID with `""` (the UI says "Me"); `@@@@@@@@` and unknown IDs are left
-    /// out (the UI shows "All" / the ID). `mentionsMe`: we or everyone are mentioned.
+    /// `{ID: display name}` of the mentioned contacts, our own ID with `""` (the UI says "Me");
+    /// `@@@@@@@@` and unknown IDs are left out (the UI shows "All" / the ID). The flag: we or
+    /// everyone are mentioned.
+    pub fn mention_names(&self, mentioned: &[&str]) -> (Map<String, Value>, bool) {
+        let own = self.identity().ok().flatten().map(|own| own.threema_id);
+        let mut mentions = Map::new();
+        let mut mentions_me = false;
+        for &identity in mentioned {
+            if identity == EVERYONE {
+                mentions_me = true;
+            } else if own.as_deref() == Some(identity) {
+                mentions_me = true;
+                mentions.insert(identity.to_owned(), "".into());
+            } else if let Ok(Some(contact)) = self.contact(identity) {
+                mentions.insert(identity.to_owned(), contacts::display_name(&contact).into());
+            }
+        }
+        (mentions, mentions_me)
+    }
+
+    /// A message's JSON for the UI, with `mentions` ([`Self::mention_names`]) and `mentionsMe`.
     pub fn message_json(&self, message: &Message) -> Value {
         let mut json = message.to_json();
         let text = json["text"]
@@ -49,19 +67,7 @@ impl Store {
         if mentioned.is_empty() {
             return json;
         }
-        let own = self.identity().ok().flatten().map(|own| own.threema_id);
-        let mut mentions = Map::new();
-        let mut mentions_me = false;
-        for identity in mentioned {
-            if identity == EVERYONE {
-                mentions_me = true;
-            } else if own.as_deref() == Some(identity) {
-                mentions_me = true;
-                mentions.insert(identity.to_owned(), "".into());
-            } else if let Ok(Some(contact)) = self.contact(identity) {
-                mentions.insert(identity.to_owned(), contacts::display_name(&contact).into());
-            }
-        }
+        let (mentions, mentions_me) = self.mention_names(&mentioned);
         json["mentions"] = Value::Object(mentions);
         json["mentionsMe"] = mentions_me.into();
         json

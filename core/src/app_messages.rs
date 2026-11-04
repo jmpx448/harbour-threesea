@@ -630,6 +630,12 @@ impl App {
                 && let Some(draft) = drafts.get(id)
             {
                 entry["draft"] = draft.clone().into();
+                let (mentions, _) = self
+                    .store
+                    .mention_names(&crate::mentions::identities(draft));
+                if !mentions.is_empty() {
+                    entry["draftMentions"] = Value::Object(mentions);
+                }
             }
             let place = entry["identity"]
                 .as_str()
@@ -829,10 +835,72 @@ impl App {
             .store
             .insert_outgoing(&key, MessageId::random().0, "text", &body)?;
         self.prepare_sending(&conversation, &message)?;
+        self.forget_sent_draft(&key, text);
         // Its state may have changed (a list's copy counts as sent).
         let message = self.store.message(message.id)?.unwrap_or(message);
         self.tell_connection(ToConnection::SendPending);
         Ok(self.store.message_json(&message))
+    }
+
+    /// `setDraft`: what the chat's input holds, its mentions as `@[ID]`, with the message it
+    /// quotes. A draft without text is none, and its quote goes with it.
+    pub(crate) fn set_draft(
+        &mut self,
+        identity: &str,
+        text: &str,
+        quote: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let key = self.readable_conversation(identity)?.0;
+        if text.trim().is_empty() {
+            self.remove_draft(&key)?;
+            return Ok(json!({}));
+        }
+        let quote = quote
+            .map(|id| u64::from_str_radix(id, 16).map(|_| id))
+            .transpose()
+            .map_err(|_| ApiError::Internal("invalid quote".into()))?;
+        self.store.set_setting(&format!("draft:{key}"), text)?;
+        let quote_key = format!("draftQuote:{key}");
+        match quote {
+            Some(id) => self.store.set_setting(&quote_key, id)?,
+            None => self.store.delete_setting(&quote_key)?,
+        }
+        Ok(json!({}))
+    }
+
+    /// `draft`: `{text, mentions, quote}`, the quoted message as JSON (none if it is gone).
+    pub(crate) fn draft(&self, identity: &str) -> Result<Value, ApiError> {
+        let key = self.conversation(identity)?.0;
+        self.check_readable(&key)?;
+        let Some(text) = self.store.setting(&format!("draft:{key}"))? else {
+            return Ok(json!({ "text": null }));
+        };
+        let (mentions, _) = self
+            .store
+            .mention_names(&crate::mentions::identities(&text));
+        let quote = match self.store.setting(&format!("draftQuote:{key}"))? {
+            Some(id) => self.quoted_message(identity, &id)?,
+            None => Value::Null,
+        };
+        Ok(json!({ "text": text, "mentions": mentions, "quote": quote }))
+    }
+
+    pub(crate) fn remove_draft(&self, key: &str) -> Result<(), ApiError> {
+        self.store.delete_setting(&format!("draft:{key}"))?;
+        self.store.delete_setting(&format!("draftQuote:{key}"))?;
+        Ok(())
+    }
+
+    /// A text or caption the core has accepted: if it is what the draft held, the draft has gone
+    /// out. The UI writes the draft before it sends, so whatever becomes of the send, and of
+    /// the app, the words are in one of the two; anything else in the draft is newer, and stays.
+    pub(crate) fn forget_sent_draft(&self, key: &str, sent: &str) {
+        let draft = self.store.setting(&format!("draft:{key}"));
+        if matches!(&draft, Ok(Some(draft)) if draft.trim() == sent.trim())
+            && let Err(error) = self.remove_draft(key)
+        {
+            tracing::warn!(%error, "removing a sent draft failed");
+        }
     }
 
     /// `sendLocation`: a location message (coordinates from the device's positioning, or a
@@ -1076,6 +1144,7 @@ impl App {
 
     pub(crate) fn delete_conversation(&mut self, identity: &str) -> Result<Value, ApiError> {
         let (id, conversation) = self.readable_conversation(identity)?;
+        self.remove_draft(&id)?;
         match conversation {
             // A group's conversation goes with the group, which must have been left.
             Conversation::Group(group) if group.left => {

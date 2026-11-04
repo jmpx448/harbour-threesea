@@ -589,6 +589,9 @@ impl App {
             },
         )?;
         self.prepare_sending(&conversation, &message)?;
+        if let Some(caption) = &caption {
+            self.forget_sent_draft(&identity, caption);
+        }
         // Its state may have changed (a list's copy counts as sent).
         let message = self.store.message(message.id)?.unwrap_or(message);
         if let Conversation::List(list) = &conversation {
