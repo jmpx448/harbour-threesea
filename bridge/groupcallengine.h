@@ -16,6 +16,7 @@
 #include <atomic>
 
 typedef struct _GstElement GstElement;
+typedef struct _GstObject GstObject;
 typedef struct _GstPromise GstPromise;
 typedef struct _GstBin GstBin;
 typedef struct _GstWebRTCDataChannel GstWebRTCDataChannel;
@@ -110,6 +111,7 @@ private:
     void linkMicrophone();
     void removeCamera();
     quint32 participantOf(const QString &mid);
+    bool isSharedAudio(GstObject *source) const;
 
     GstElement *m_pipeline = nullptr;
     GstElement *m_webrtc = nullptr;

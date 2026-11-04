@@ -1147,6 +1147,23 @@ int GroupCallEngine::onRemoteSample(GstElement *sink, void *data)
     return GST_FLOW_OK;
 }
 
+// Inside the microphone's or the speaker's bin (the volume and the mixer stay ours after the bins
+// went into the pipeline).
+bool GroupCallEngine::isSharedAudio(GstObject *source) const
+{
+    for (GstElement *member : {m_micVolume, m_mixer}) {
+        GstObject *bin = member ? gst_object_get_parent(GST_OBJECT(member)) : nullptr;
+        if (bin) {
+            const bool inside = gst_object_has_as_ancestor(source, bin);
+            gst_object_unref(bin);
+            if (inside) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // On this object's thread (GLib main loop): latency changes and errors.
 int GroupCallEngine::onBusMessage(GstBus *, GstMessage *message, void *self)
 {
@@ -1162,6 +1179,12 @@ int GroupCallEngine::onBusMessage(GstBus *, GstMessage *message, void *self)
         gst_message_parse_error(message, &error, nullptr);
         qWarning() << "group call pipeline error:" << (error ? error->message : "");
         g_clear_error(&error);
+        // Without the microphone's or the speaker's branch the call only seems to run (a tile
+        // showing the microphone on while nobody hears us). One participant's receive branch
+        // failing costs only that participant, and the call goes on.
+        if (engine->isSharedAudio(GST_MESSAGE_SRC(message))) {
+            QMetaObject::invokeMethod(engine, "onError", Qt::QueuedConnection, Q_ARG(QString, QStringLiteral("media")));
+        }
         break;
     }
     default:
