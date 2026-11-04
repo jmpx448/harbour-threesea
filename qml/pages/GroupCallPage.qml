@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
+import "../components/Errors.js" as Errors
 
 // A group call (ADR 0012): the group's name and the running time on top, everyone in the call
 // as square tiles (us first; their picture or camera, name and a crossed-out microphone when it
@@ -40,19 +41,21 @@ Page {
         if (connected) joinedAt = Date.now()
     }
 
-    // The call ended while another page was on top (a 1:1 call takes the microphone over).
-    onStatusChanged: {
-        if (status === PageStatus.Active && groupCalls.state === "idle") pageStack.pop()
+    // The call is over: say why if it failed, and leave. It may have ended before this page came
+    // up, or while another page was on top (a 1:1 call takes the microphone over).
+    function closeIfOver() {
+        if (status !== PageStatus.Active || groupCalls.state !== "idle") return
+        if (groupCalls.error.length > 0) Notices.show(Errors.text(groupCalls.error, groupCalls.errorMessage), Notice.Long, Notice.Center)
+        pageStack.pop()
     }
+
+    onStatusChanged: closeIfOver()
 
     Connections {
         target: groupCalls
         onStateChanged: {
             if (groupCalls.state === "connected") page.joinedAt = Date.now()
-            if (groupCalls.state === "idle" && page.status === PageStatus.Active) {
-                if (groupCalls.error.length > 0) Notices.show(groupCalls.error, Notice.Long, Notice.Center)
-                pageStack.pop()
-            }
+            page.closeIfOver()
         }
     }
 

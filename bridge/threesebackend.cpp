@@ -957,7 +957,8 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
 
     const NativeCallback native = m_nativeCallbacks.take(id);
     if (native) {
-        native(ok, result.toVariantMap(), error.value(QStringLiteral("kind")).toString());
+        // On failure: the error's `kind` and `message`.
+        native(ok, ok ? result.toVariantMap() : error.toVariantMap(), error.value(QStringLiteral("kind")).toString());
     }
     QJSValue callback = m_callbacks.take(id);
     if (callback.isCallable()) {

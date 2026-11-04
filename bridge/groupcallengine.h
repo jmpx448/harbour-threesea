@@ -60,6 +60,9 @@ public:
     void setCamera(bool on, bool front);
     void stop();
     bool active() const { return m_pipeline != nullptr; }
+    // What came in over the network so far (before decryption; none if that couldn't be counted):
+    // while it grows the connection is alive, whoever speaks.
+    unsigned packetsReceived() const { return m_packetsReceived; }
 
 signals:
     // The SFU's data channel is open (the SFU sends Hello on it).
@@ -89,6 +92,7 @@ private:
     static void onRemoteSetCb(GstPromise *promise, void *self);
     static void onAnswerCreated(GstPromise *promise, void *self);
     static void onConnectionStateCb(GstElement *webrtc, GParamSpec *spec, void *self);
+    static int onNetworkBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static void onElementAdded(GstBin *pipeline, GstBin *bin, GstElement *element, void *self);
     static void onChannelOpenCb(GstWebRTCDataChannel *channel, void *self);
     static void onChannelDataCb(GstWebRTCDataChannel *channel, struct _GBytes *data, void *self);
@@ -168,6 +172,7 @@ private:
     QString m_remoteFingerprint;
     std::atomic<bool> m_verified{false};
     QList<QByteArray> m_receivedChannel;
+    std::atomic<unsigned> m_packetsReceived{0};
     // Participants with a picture on its way to the GUI: their next ones are dropped until it got
     // there (read from GStreamer threads).
     QMutex m_framesLock;

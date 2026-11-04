@@ -87,6 +87,7 @@ QtObject {
         property string state: "idle"
         property string conversation
         property string error
+        property string errorMessage
         property bool muted
         property bool camera
         property bool frontCamera

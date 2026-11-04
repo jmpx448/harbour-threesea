@@ -91,6 +91,18 @@ function text(kind, message) {
     case "linkFailed":
         //% "Linking didn't work. Check the connection on both devices and try again."
         return qsTrId("threesea-la-error-link-failed")
+    case "groupCallFull":
+        //% "This group call is full."
+        return qsTrId("threesea-la-error-group-call-full")
+    case "groupCallNotRunning":
+        //% "This group call has ended."
+        return qsTrId("threesea-la-error-group-call-not-running")
+    case "groupCallVersion":
+        //% "This group call needs a different version of the app."
+        return qsTrId("threesea-la-error-group-call-version")
+    case "groupCallConnection":
+        //% "The connection to the group call failed."
+        return qsTrId("threesea-la-error-group-call-connection")
     case "notGif":
         //% "This picture is not a GIF."
         return qsTrId("threesea-la-error-not-gif")

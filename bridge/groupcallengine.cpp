@@ -830,7 +830,20 @@ void GroupCallEngine::onElementAdded(GstBin *, GstBin *, GstElement *element, vo
     GstElementFactory *factory = gst_element_get_factory(element);
     if (factory && g_strcmp0(GST_OBJECT_NAME(factory), "dtlssrtpdec") == 0) {
         g_object_set(element, "pem", engine->m_certificate.constData(), nullptr);
+        // All that comes in over the transport passes here.
+        GstPad *sink = gst_element_get_static_pad(element, "sink");
+        if (sink) {
+            gst_pad_add_probe(sink, static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST),
+                              reinterpret_cast<GstPadProbeCallback>(&GroupCallEngine::onNetworkBuffer), engine, nullptr);
+            gst_object_unref(sink);
+        }
     }
+}
+
+int GroupCallEngine::onNetworkBuffer(GstPad *, GstPadProbeInfo *, void *self)
+{
+    ++static_cast<GroupCallEngine *>(self)->m_packetsReceived;
+    return GST_PAD_PROBE_OK;
 }
 
 void GroupCallEngine::onChannelOpenCb(GstWebRTCDataChannel *, void *self)

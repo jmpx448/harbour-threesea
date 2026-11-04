@@ -9,6 +9,14 @@
 #include "groupcallengine.h"
 #endif
 
+namespace {
+
+// Nothing at all has come in for this long: the connection counts as lost. Longer than a 1:1
+// call's limit: with everyone muted only the data channel's heartbeats (about every 30 s) come.
+const int MEDIA_SILENT_LIMIT_SECONDS = 60;
+
+} // namespace
+
 GroupCallManager::GroupCallManager(ThreeseBackend *backend, QObject *parent)
     : QObject(parent)
     , m_backend(backend)
@@ -26,12 +34,25 @@ GroupCallManager::GroupCallManager(ThreeseBackend *backend, QObject *parent)
     connect(m_engine, &GroupCallEngine::participantFrame, this, &GroupCallManager::participantFrame);
     // The core's timers (rekeys, call state updates, announcing a new call) run on this tick.
     m_tick.setInterval(1000);
-    connect(&m_tick, &QTimer::timeout, this, [this] { m_backend->request(QStringLiteral("groupCallTick"), QVariantMap()); });
+    connect(&m_tick, &QTimer::timeout, this, [this] {
+        m_backend->request(QStringLiteral("groupCallTick"), QVariantMap());
+        checkMedia();
+    });
+    m_connectTimer.setSingleShot(true);
+    m_connectTimer.setInterval(20000);
+    connect(&m_connectTimer, &QTimer::timeout, this, [this] { onFailed(QStringLiteral("timeout")); });
     connect(this, &GroupCallManager::stateChanged, this, [this] {
         if (m_state == QLatin1String("connected")) {
+            m_lastPackets = m_engine->packetsReceived();
+            m_silentSeconds = 0;
             m_tick.start();
         } else {
             m_tick.stop();
+        }
+        if (m_state == QLatin1String("connecting")) {
+            m_connectTimer.start();
+        } else {
+            m_connectTimer.stop();
         }
     });
 #endif
@@ -64,6 +85,7 @@ void GroupCallManager::join(const QString &conversation, bool create)
     emit aboutToTakeMicrophone();
     m_conversation = conversation;
     m_error.clear();
+    m_errorMessage.clear();
     m_participants.clear();
     emit participantsChanged();
     setState(QStringLiteral("joining"));
@@ -78,6 +100,7 @@ void GroupCallManager::join(const QString &conversation, bool create)
                            }
                            if (!ok) {
                                m_error = kind;
+                               m_errorMessage = result.value(QStringLiteral("message")).toString();
                                // Wipes our copy of the certificate made for this join.
                                m_engine->stop();
                                resetDevices();
@@ -227,6 +250,23 @@ void GroupCallManager::onChannelMessage(const QByteArray &data)
 
 void GroupCallManager::onFailed(const QString &reason)
 {
-    m_error = reason;
+    qWarning() << "group call failed:" << reason; // log-ok: the engine's own codes
+    m_error = QStringLiteral("groupCallConnection");
+    m_errorMessage.clear();
     leave();
+}
+
+// libnice (SFOS) doesn't notice a dead path by itself, see GroupCallEngine::sendConsent. Off if
+// nothing was ever counted.
+void GroupCallManager::checkMedia()
+{
+#ifdef THREESEA_FULL
+    const unsigned packets = m_engine->packetsReceived();
+    if (packets != m_lastPackets) {
+        m_lastPackets = packets;
+        m_silentSeconds = 0;
+    } else if (packets > 0 && ++m_silentSeconds >= MEDIA_SILENT_LIMIT_SECONDS) {
+        onFailed(QStringLiteral("silence"));
+    }
+#endif
 }

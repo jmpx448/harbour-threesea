@@ -28,8 +28,9 @@ class GroupCallManager : public QObject
     // The other participants: `[{id, identity, nickname, authenticated}]` (identity and nickname
     // once the handshake with them is done).
     Q_PROPERTY(QVariantList participants READ participants NOTIFY participantsChanged)
-    // Why the last join failed (error kind), for the UI.
+    // Why the last call ended on its own (error kind, for Errors.js, and the core's message).
     Q_PROPERTY(QString error READ error NOTIFY stateChanged)
+    Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
     // Our camera (its picture: CallVideo { manager: groupCalls; remote: false }).
     Q_PROPERTY(bool camera READ camera WRITE setCamera NOTIFY cameraChanged)
@@ -43,6 +44,7 @@ public:
     double activeSince() const { return m_activeSince; }
     QVariantList participants() const { return m_participants; }
     QString error() const { return m_error; }
+    QString errorMessage() const { return m_errorMessage; }
     bool muted() const { return m_muted; }
     void setMuted(bool muted);
     bool camera() const { return m_camera; }
@@ -84,6 +86,7 @@ private:
     void setState(const QString &state);
     // After a call: unmuted and without camera for the next one.
     void resetDevices();
+    void checkMedia();
 
     ThreeseBackend *m_backend;
     GroupCallEngine *m_engine = nullptr;
@@ -91,12 +94,17 @@ private:
     QString m_state = QStringLiteral("idle");
     QString m_conversation;
     QString m_error;
+    QString m_errorMessage;
     QVariantList m_participants;
     bool m_muted = false;
     bool m_camera = false;
     bool m_frontCamera = true;
     double m_activeSince = 0;
     QTimer m_tick;
+    // No connection in time (Android: 20 s), or nothing coming in any more.
+    QTimer m_connectTimer;
+    unsigned m_lastPackets = 0;
+    int m_silentSeconds = 0;
 };
 
 #endif // GROUPCALLMANAGER_H
