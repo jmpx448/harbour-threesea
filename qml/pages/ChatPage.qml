@@ -17,7 +17,7 @@ Page {
     allowedOrientations: Orientation.All
 
     property string identity
-    // Open at this message (local id), e.g. from search; loaded even if older than a page.
+    // Open at this message (local id), e.g. from search: a window around it is loaded.
     property int focusMessage: -1
     objectName: "chat"
 
@@ -200,7 +200,7 @@ Page {
         var generation = page.loadGeneration
         // A screenful and a bit: opening stays fast, scrolling back pages the rest in.
         var args = { identity: identity, limit: 60 }
-        if (focusMessage >= 0) args.since = focusMessage
+        if (focusMessage >= 0) args.around = focusMessage
         backend.call("messages", args, function(ok, result, kind) {
             if (generation !== page.loadGeneration) return
             page.loadingOlder = false
@@ -213,7 +213,7 @@ Page {
             page.shown = true
             page.isPrivate = result.private === true
             page.olderExhausted = false
-            page.newerExhausted = true
+            page.newerExhausted = result.reachesNewest
             page.voiceRevision++
             // Where the new messages start: kept for this visit (they are marked read now).
             if (firstLoad && result.firstUnread !== null && result.firstUnread !== undefined) {
@@ -299,7 +299,8 @@ Page {
     property bool loadingOlder: false
     property bool olderExhausted: false
     property bool loadingNewer: false
-    // False only after the newest messages were dropped from the window.
+    // False when the window doesn't reach the newest message: the newest ones were dropped
+    // from it, or a jump loaded a window further back.
     property bool newerExhausted: true
     // Counts the windows: a page that was asked for in an earlier one is thrown away.
     property int loadGeneration: 0
@@ -337,7 +338,7 @@ Page {
             if (generation !== page.loadGeneration) return
             if (ok) {
                 var newer = result.messages.reverse()
-                if (newer.length === 0) page.newerExhausted = true
+                if (newer.length < pageSize) page.newerExhausted = true
                 messages.insertAll(newer, 0)
                 page.dropOldest()
                 page.updateStickyDay()

@@ -880,27 +880,30 @@ impl Store {
         )?)
     }
 
-    /// Messages of a conversation from `since` (a local id) on **in history order**, at least
-    /// the newest `limit`: to show a search hit that is older than the usual page.
-    pub fn conversation_messages_since(
+    /// A window of a conversation around the message `around` (a local id), oldest first: up
+    /// to `side` messages before it in history and up to `side` after it, to show a search hit
+    /// or a quoted message however old it is. The flag says whether the window reaches the
+    /// newest message; the chat pages on from there. A message that isn't there any more (or
+    /// isn't of this conversation) gives the newest messages.
+    pub fn conversation_messages_around(
         &self,
         conversation: &str,
-        since: i64,
-        limit: u32,
-    ) -> Result<Vec<Message>, StoreError> {
-        let Some((key, id)) = self.position_of(conversation, since)? else {
-            return self.conversation_messages(conversation, limit);
-        };
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE conversation = ?1
-               AND ((sort_key > ?2 OR (sort_key = ?2 AND id >= ?3)) OR id IN
-                 (SELECT id FROM messages WHERE conversation = ?1
-                  ORDER BY sort_key DESC, id DESC LIMIT ?4))
-             ORDER BY sort_key, id",
-            columns()
-        ))?;
-        let rows = statement.query_map(params![conversation, key, id, limit], from_row)?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        around: i64,
+        side: u32,
+    ) -> Result<(Vec<Message>, bool), StoreError> {
+        if self.position_of(conversation, around)?.is_none() {
+            let newest = side.saturating_mul(2).saturating_add(1);
+            return Ok((self.conversation_messages(conversation, newest)?, true));
+        }
+        let mut window = self.conversation_messages_before(conversation, around, side)?;
+        window.extend(self.message(around)?);
+        // One more than asked for tells whether anything lies beyond the window.
+        let mut newer =
+            self.conversation_messages_newer(conversation, around, side.saturating_add(1))?;
+        let reaches_newest = newer.len() <= side as usize;
+        newer.truncate(side as usize);
+        window.append(&mut newer);
+        Ok((window, reaches_newest))
     }
 
     /// Texts, captions, file, place and poll names containing `query` (case-insensitive),
@@ -1480,13 +1483,60 @@ mod tests {
         assert!(store.set_starred(hello.id, true).unwrap().unwrap().starred);
         assert_eq!(store.starred_messages(None).unwrap().len(), 1);
         assert!(store.starred_messages(Some("00000ANN")).unwrap().is_empty());
-        assert_eq!(
-            store
-                .conversation_messages_since("00000BOB", hello.id, 1)
-                .unwrap()
-                .len(),
-            3
-        );
+        // A hit can be opened: the window around it holds it.
+        let (around, _) = store
+            .conversation_messages_around("00000BOB", hello.id, 1)
+            .unwrap();
+        assert_eq!(around.iter().filter(|m| m.id == hello.id).count(), 1);
+    }
+
+    /// A jump to an old message used to load everything newer than it at once.
+    #[test]
+    fn a_window_around_a_message_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let ids: Vec<i64> = (0..100_u64)
+            .map(|n| {
+                store
+                    .insert_incoming("00000BOB", n + 1, "text", "x", 10)
+                    .unwrap()
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        store
+            .insert_incoming("00000ANN", 1, "text", "other chat", 10)
+            .unwrap();
+        let window = |around: i64| {
+            let (messages, reaches_newest) = store
+                .conversation_messages_around("00000BOB", around, 5)
+                .unwrap();
+            let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+            (ids, reaches_newest)
+        };
+
+        // In the middle: the message and five on either side, in history order.
+        let (middle, reaches_newest) = window(ids[10]);
+        assert_eq!(middle, ids[5..=15]);
+        assert!(!reaches_newest);
+        // At the oldest end: nothing to fill the older side with.
+        assert_eq!(window(ids[0]).0, ids[..=5]);
+        // Exactly five left, and fewer: the window reaches the newest message.
+        let (near_end, reaches_newest) = window(ids[94]);
+        assert_eq!(near_end, ids[89..=99]);
+        assert!(reaches_newest);
+        assert_eq!(window(ids[99]).0, ids[94..]);
+        assert!(window(ids[99]).1);
+        // One more than fits: it doesn't.
+        assert!(!window(ids[93]).1);
+
+        // Gone, or of another chat: the newest messages, not someone else's.
+        let other = store.conversation_messages("00000ANN", 1).unwrap()[0].id;
+        for target in [other, -1] {
+            let (newest, reaches_newest) = window(target);
+            assert_eq!(newest, ids[89..]);
+            assert!(reaches_newest);
+        }
     }
 
     #[test]
@@ -1898,11 +1948,13 @@ mod tests {
             .unwrap();
         assert_eq!(older[0].body, "live one");
         assert_eq!(older[1].body, "between");
-        let since = store
-            .conversation_messages_since("00000BOB", older[1].id, 1)
+        // A window around a message follows history as well, across imported and live rows.
+        let (around, reaches_newest) = store
+            .conversation_messages_around("00000BOB", older[1].id, 1)
             .unwrap();
-        assert_eq!(since.first().unwrap().body, "between");
-        assert_eq!(since.last().unwrap().body, "newest");
+        let texts: Vec<&str> = around.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(texts, ["live one", "between", "live two"]);
+        assert!(!reaches_newest, "the imported newest one lies beyond it");
 
         // Change detection stays by insertion: everything imported after the last live row.
         let changed = store

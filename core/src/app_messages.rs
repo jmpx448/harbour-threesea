@@ -681,7 +681,7 @@ impl App {
         &self,
         identity: &str,
         limit: Option<u32>,
-        since: Option<i64>,
+        around: Option<i64>,
         before: Option<i64>,
         after: Option<i64>,
     ) -> Result<Value, ApiError> {
@@ -708,7 +708,7 @@ impl App {
         }
         // Opening a 1:1 chat (the initial load, not the follow-ups) may ask the contact for a
         // missing picture: bounded by the request backoff, never for blocked contacts.
-        if since.is_none()
+        if around.is_none()
             && crate::groups::parse_key(&key).is_none()
             && !crate::distribution_lists::is_key(&key)
             && !self.app_settings()?.blocked_contacts.contains(&key)
@@ -719,18 +719,26 @@ impl App {
         // The first unread and enough context around it, so the chat can open there and mark
         // where the new messages start; bounded for a chat with thousands unread.
         let (unread, first_unread) = self.store.unread_position(&key)?;
-        let limit = limit
-            .unwrap_or(200)
-            .max(u32::try_from(unread + 25).unwrap_or(u32::MAX).min(1000));
-        let messages = match since {
-            Some(since) => self.store.conversation_messages_since(&key, since, limit)?,
-            None => self.store.conversation_messages(&key, limit)?,
+        // A jump to a message stays a window whatever is unread: the reader asked for that place.
+        let (messages, reaches_newest) = match around {
+            Some(around) => {
+                let side = (limit.unwrap_or(100) / 2).max(1);
+                self.store
+                    .conversation_messages_around(&key, around, side)?
+            }
+            None => {
+                let limit = limit
+                    .unwrap_or(200)
+                    .max(u32::try_from(unread + 25).unwrap_or(u32::MAX).min(1000));
+                (self.store.conversation_messages(&key, limit)?, true)
+            }
         };
         Ok(json!({
             "identity": key,
             "messages": self.store.messages_json(&messages),
             "private": self.store.is_private(&key)?,
             "firstUnread": first_unread,
+            "reachesNewest": reaches_newest,
         }))
     }
 

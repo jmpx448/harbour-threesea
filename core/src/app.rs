@@ -333,9 +333,9 @@ pub enum Command {
     Messages {
         identity: String,
         limit: Option<u32>,
-        /// Also everything newer than this message (local id), e.g. a search hit.
+        /// A window of `limit` messages around this one (local id), e.g. a search hit.
         #[serde(default)]
-        since: Option<i64>,
+        around: Option<i64>,
         /// Only the page before this message (local id) in history: scrolling back.
         #[serde(default)]
         before: Option<i64>,
@@ -1656,10 +1656,10 @@ impl App {
             Command::Messages {
                 identity,
                 limit,
-                since,
+                around,
                 before,
                 after,
-            } => self.messages_json(&identity, limit, since, before, after),
+            } => self.messages_json(&identity, limit, around, before, after),
             Command::SearchMessages { query, identity } => {
                 self.search_messages(&query, identity.as_deref())
             }
@@ -2588,6 +2588,48 @@ mod tests {
         assert!(!license_check_due(Some(1000), 1000 + DAY - 1));
         assert!(license_check_due(Some(1000), 1000 + DAY));
         assert!(license_check_due(Some(1000), 999), "the clock went back");
+    }
+
+    /// The chat's window: a jump gets a bounded page around its target and says what lies
+    /// beyond it, also with a lot unread; the ordinary opening still reaches the first unread.
+    #[test]
+    fn messages_around_a_message_stay_a_window() {
+        let (_dir, app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let ids: Vec<i64> = (0..400_u64)
+            .map(|n| {
+                app.store
+                    .insert_incoming("ABCD1234", n + 1, "text", "x", 10)
+                    .unwrap()
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let rows = |value: &Value| -> Vec<i64> {
+            let rows = value["messages"].as_array().unwrap();
+            rows.iter().map(|m| m["id"].as_i64().unwrap()).collect()
+        };
+
+        let jump = app
+            .messages_json("ABCD1234", Some(60), Some(ids[100]), None, None)
+            .unwrap();
+        assert_eq!(rows(&jump), ids[70..=130]);
+        assert_eq!(jump["reachesNewest"], false);
+        assert_eq!(jump["firstUnread"], ids[0]);
+
+        let near_end = app
+            .messages_json("ABCD1234", Some(60), Some(ids[390]), None, None)
+            .unwrap();
+        assert_eq!(rows(&near_end), ids[360..]);
+        assert_eq!(near_end["reachesNewest"], true);
+
+        let opening = app
+            .messages_json("ABCD1234", Some(60), None, None, None)
+            .unwrap();
+        assert_eq!(rows(&opening), ids, "widened to reach the first unread");
+        assert_eq!(opening["reachesNewest"], true);
     }
 
     /// With an ID and a key, in the state of a running app.
