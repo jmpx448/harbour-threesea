@@ -72,7 +72,11 @@ int main(int argc, char **argv)
                     // Off again: the camera branch must go away cleanly.
                     caller.setCamera(false, true);
                 }
-                app.exit(channelOk && framesOk ? 0 : 1);
+                // The bridge's watch on a running call relies on this count.
+                const bool packetsOk = caller.packetsReceived() > 0 && callee.packetsReceived() > 0;
+                std::printf("packets received: caller %u, callee %u\n", caller.packetsReceived(),
+                            callee.packetsReceived());
+                app.exit(channelOk && framesOk && packetsOk ? 0 : 1);
             });
         }
     };

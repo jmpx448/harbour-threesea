@@ -26,6 +26,10 @@ class CallManager : public QObject
     Q_PROPERTY(QString identity READ identity NOTIFY stateChanged)
     // For `ended`: finished | missed | rejected | busy | unavailable | disabled | failed …
     Q_PROPERTY(QString result READ result NOTIFY stateChanged)
+    // For result `failed` on this device: connection | certificate | other.
+    Q_PROPERTY(QString failure READ failure NOTIFY stateChanged)
+    // In an active call nothing has come in over the network for a while.
+    Q_PROPERTY(bool interrupted READ interrupted NOTIFY interruptedChanged)
     Q_PROPERTY(bool outgoing READ outgoing NOTIFY stateChanged)
     // Start of the active call (ms since epoch), for the duration display.
     Q_PROPERTY(double activeSince READ activeSince NOTIFY stateChanged)
@@ -44,6 +48,8 @@ public:
     QString state() const { return m_state; }
     QString identity() const { return m_identity; }
     QString result() const { return m_result; }
+    QString failure() const { return m_failure; }
+    bool interrupted() const { return m_interrupted; }
     bool outgoing() const { return m_outgoing; }
     double activeSince() const { return m_activeSince; }
     bool muted() const { return m_muted; }
@@ -69,6 +75,7 @@ signals:
     void stateChanged();
     // About to take the microphone: the other kind of call has to let go of it first.
     void aboutToTakeMicrophone();
+    void interruptedChanged();
     void mutedChanged();
     void remoteChanged();
     void cameraChanged();
@@ -95,6 +102,16 @@ private:
     void setTone(Tone tone);
     void stopTone();
     void end(const QString &result);
+    // The call can't go on (`failure`: see the property): the core tells the peer if it knows of
+    // the call, and we go to the end screen at once.
+    void fail(const QString &failure);
+    // Engine, timers and what is queued for this call: gone, and late answers to its requests
+    // are recognised (m_serial).
+    void stopMedia();
+    // A new call starts clean: not muted, no camera, nothing known about the peer.
+    void resetCall();
+    void checkMedia();
+    void setInterrupted(bool interrupted);
     // TURN servers, then `then(turn)` (or the call ends).
     void withTurnServers(std::function<void(const QVariantMap &)> then);
 
@@ -103,7 +120,12 @@ private:
     QString m_state = QStringLiteral("idle");
     QString m_identity;
     QString m_result;
+    QString m_failure;
     QString m_remoteOffer;
+    // The core's id of the call this object follows, -1: none (yet); events of others don't count.
+    qint64 m_callId = -1;
+    // Changes when a call's media go away; a reply to a request of an earlier value is late.
+    unsigned m_serial = 0;
     bool m_outgoing = false;
     bool m_muted = false;
     bool m_remoteMuted = false;
@@ -120,6 +142,13 @@ private:
     QTimer m_candidateTimer;
     // Unanswered calls end after a minute (Android's ring time), both directions.
     QTimer m_ringTimer;
+    // No media in time (Android: a minute): the call failed, it doesn't wait forever.
+    QTimer m_connectTimer;
+    // Once it runs: is anything still coming in?
+    QTimer m_mediaTimer;
+    unsigned m_lastPackets = 0;
+    int m_silentSeconds = 0;
+    bool m_interrupted = false;
     QTimer m_endedTimer;
     Tone m_tone = Tone::None;
     quint32 m_toneId = 0;

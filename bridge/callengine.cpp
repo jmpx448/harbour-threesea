@@ -103,6 +103,7 @@ bool CallEngine::build(const QVariantMap &turn, bool relayOnly, int opusPayloadT
     m_pendingCandidates = pending;
     m_framesSent = 0;
     m_framesReceived = 0;
+    m_packetsReceived = 0;
     // Microphone → mono Opus, constant bitrate (Android's SdpPatcher asks for cbr=1). The
     // pulse role "phone" lets the audio policy route it like a call.
     const QString description = QStringLiteral(
@@ -545,6 +546,12 @@ int CallEngine::onMediaBuffer(GstPad *, GstPadProbeInfo *, void *self)
     return static_cast<CallEngine *>(self)->m_verified ? GST_PAD_PROBE_OK : GST_PAD_PROBE_DROP;
 }
 
+int CallEngine::onNetworkBuffer(GstPad *, GstPadProbeInfo *, void *self)
+{
+    ++static_cast<CallEngine *>(self)->m_packetsReceived;
+    return GST_PAD_PROBE_OK;
+}
+
 int CallEngine::onVp8Frame(GstPad *, GstPadProbeInfo *info, void *filter)
 {
     return static_cast<Vp8Filter *>(filter)->passes(gst_pad_probe_info_get_buffer(info)) ? GST_PAD_PROBE_OK
@@ -741,6 +748,13 @@ void CallEngine::onElementAdded(GstBin *, GstBin *, GstElement *element, void *s
             && !g_object_get_data(G_OBJECT(candidate), "threesea-certificate")) {
             g_object_set(candidate, "pem", engine->m_certificate.constData(), nullptr);
             g_object_set_data(G_OBJECT(candidate), "threesea-certificate", GINT_TO_POINTER(1));
+            // All that comes in over the transport passes here.
+            GstPad *sink = gst_element_get_static_pad(candidate, "sink");
+            if (sink) {
+                gst_pad_add_probe(sink, static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST),
+                                  reinterpret_cast<GstPadProbeCallback>(&CallEngine::onNetworkBuffer), engine, nullptr);
+                gst_object_unref(sink);
+            }
         }
     };
     configure(element);

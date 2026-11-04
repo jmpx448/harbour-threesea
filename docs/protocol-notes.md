@@ -34,6 +34,10 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   the same way (delivered again after a lost acknowledgement).
 - Offers during a call: rejected "busy" and recorded as missed (Android too).
 - Rejected "unknown" means the other app could not take the call, not that anyone declined.
+- Timeouts: media not up 60 s after setup (`INITIALIZATION_TIMEOUT_MS`). Running calls: libnice
+  0.1.21 has no consent freshness, so the bridge counts what enters `dtlssrtpdec` (ICE checks don't,
+  media and SCTP heartbeats do): 1:1 calls say "interrupted" after 10 s of nothing and fail after
+  30 s. These limits are ours, not Android's.
 - Remote VP8 pictures: at most 2560 on a side and 2560x1440 in area (`vp8_filter`, ahead of the
   decoder; the MAX profile is 1920x1080). A larger key frame stops that stream until a good one.
 

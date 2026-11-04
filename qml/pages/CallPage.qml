@@ -15,7 +15,7 @@ Page {
 
     property var contact: ({})
     // Kept: `calls.identity` is cleared once the call is over, the page may still show.
-    property string identity: calls.identity
+    property string identity
     // Our own picture hidden (the camera keeps sending).
     property bool hideSelf: false
     // Seconds since the call connected, for the running time.
@@ -27,10 +27,21 @@ Page {
     allowedOrientations: Orientation.Portrait
 
     function load() {
-        if (page.identity.length === 0) return
-        backend.call("contact", { identity: page.identity }, function(ok, result) {
-            if (ok) page.contact = result
+        var identity = page.identity
+        if (identity.length === 0) return
+        backend.call("contact", { identity: identity }, function(ok, result) {
+            if (ok && page.identity === identity) page.contact = result
         })
+    }
+
+    // A new call can come in while this page still shows the last one's end.
+    function follow() {
+        if (calls.identity.length === 0 || calls.identity === page.identity) return
+        page.identity = calls.identity
+        page.contact = ({})
+        page.hideSelf = false
+        page.seconds = 0
+        load()
     }
 
     function stateText() {
@@ -52,8 +63,19 @@ Page {
             //% "Connecting…"
             return qsTrId("threesea-la-call-connecting")
         case "active":
-            return Math.floor(seconds / 60) + ":" + ("0" + (seconds % 60)).slice(-2)
+            return calls.interrupted
+                    //% "Connection interrupted…"
+                    ? qsTrId("threesea-la-call-interrupted")
+                    : Math.floor(seconds / 60) + ":" + ("0" + (seconds % 60)).slice(-2)
         case "ended":
+            if (calls.failure === "certificate") {
+                //% "The connection could not be verified. The call was ended."
+                return qsTrId("threesea-la-call-unverified")
+            }
+            if (calls.failure === "connection") {
+                //% "Connection failed"
+                return qsTrId("threesea-la-call-connection-failed")
+            }
             return calls.result === "finished" || calls.result === "aborted"
                     //% "Call ended"
                     ? qsTrId("threesea-la-call-ended")
@@ -62,9 +84,11 @@ Page {
         return ""
     }
 
-    Component.onCompleted: {
-        identity = identity // break the binding: keep who it was
-        load()
+    Component.onCompleted: follow()
+
+    Connections {
+        target: calls
+        onStateChanged: page.follow()
     }
 
     // Over: back to what is underneath, as soon as this page is in view. The call can have ended
@@ -174,6 +198,9 @@ Page {
                 spacing: Theme.paddingSmall
 
                 Label {
+                    width: Math.min(implicitWidth, header.width - 2 * Theme.horizontalPageMargin)
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
                     font.pixelSize: page.remoteVideo ? Theme.fontSizeMedium : Theme.fontSizeLarge
                     color: Theme.secondaryHighlightColor
                     text: page.stateText()

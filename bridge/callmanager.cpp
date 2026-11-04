@@ -14,6 +14,18 @@
 #include "callengine.h"
 #endif
 
+namespace {
+
+// Nothing at all has come in (speech, silence and control packets all count) for this long: the
+// page says so, and then the connection counts as lost.
+const int MEDIA_SILENT_NOTICE_SECONDS = 10;
+const int MEDIA_SILENT_LIMIT_SECONDS = 30;
+// How long the end screen stays: a failure's text takes longer to read.
+const int END_SCREEN_MS = 2500;
+const int FAILURE_SCREEN_MS = 6000;
+
+} // namespace
+
 CallManager::CallManager(ThreeseBackend *backend, QObject *parent)
     : QObject(parent)
     , m_backend(backend)
@@ -36,9 +48,13 @@ CallManager::CallManager(ThreeseBackend *backend, QObject *parent)
     m_ringTimer.setInterval(60000);
     connect(&m_ringTimer, &QTimer::timeout, this,
             [this] { m_backend->request(QStringLiteral("callTimeout"), QVariantMap()); });
+    m_connectTimer.setSingleShot(true);
+    m_connectTimer.setInterval(60000);
+    connect(&m_connectTimer, &QTimer::timeout, this, [this] { fail(QStringLiteral("connection")); });
+    m_mediaTimer.setInterval(1000);
+    connect(&m_mediaTimer, &QTimer::timeout, this, &CallManager::checkMedia);
     // The end screen stays a moment ("Call ended"), like Jolla's phone app.
     m_endedTimer.setSingleShot(true);
-    m_endedTimer.setInterval(2500);
     connect(&m_endedTimer, &QTimer::timeout, this, [this] { setState(QStringLiteral("idle")); });
 }
 
@@ -133,22 +149,68 @@ void CallManager::setState(const QString &state)
     setTone(state == QLatin1String("incoming") ? Tone::Ringtone
             : state == QLatin1String("ringing")  ? Tone::Ringback
                                                  : Tone::None);
+    if (state == QLatin1String("starting") || state == QLatin1String("connecting")) {
+        m_connectTimer.start();
+    } else {
+        m_connectTimer.stop();
+    }
     if (state == QLatin1String("idle")) {
         m_identity.clear();
-        m_result.clear();
-        m_remoteOffer.clear();
-        m_activeSince = 0;
-        setMuted(false);
-        setCamera(false);
-        m_video = false;
-        emit remoteVideoStopped();
-        if (m_remoteMuted || m_remoteCamera) {
-            m_remoteMuted = false;
-            m_remoteCamera = false;
-            emit remoteChanged();
-        }
+        resetCall();
     }
     emit stateChanged();
+}
+
+void CallManager::resetCall()
+{
+    m_result.clear();
+    m_failure.clear();
+    m_remoteOffer.clear();
+    m_activeSince = 0;
+    m_callId = -1;
+    setInterrupted(false);
+    // Not through the setters: nobody is to be told, the call they would tell is over.
+    if (m_muted) {
+        m_muted = false;
+#ifdef THREESEA_FULL
+        m_engine->setMuted(false);
+#endif
+        emit mutedChanged();
+    }
+    if (m_camera) {
+        m_camera = false;
+        emit localVideoStopped();
+        emit cameraChanged();
+    }
+    m_video = false;
+    emit remoteVideoStopped();
+    if (m_remoteMuted || m_remoteCamera) {
+        m_remoteMuted = false;
+        m_remoteCamera = false;
+        emit remoteChanged();
+    }
+}
+
+void CallManager::setInterrupted(bool interrupted)
+{
+    if (interrupted != m_interrupted) {
+        m_interrupted = interrupted;
+        emit interruptedChanged();
+    }
+}
+
+void CallManager::stopMedia()
+{
+#ifdef THREESEA_FULL
+    m_engine->stop();
+#endif
+    m_ringTimer.stop();
+    m_connectTimer.stop();
+    m_mediaTimer.stop();
+    m_candidateTimer.stop();
+    m_candidates.clear();
+    m_descriptionSent = false;
+    ++m_serial;
 }
 
 void CallManager::withTurnServers(std::function<void(const QVariantMap &)> then)
@@ -156,15 +218,18 @@ void CallManager::withTurnServers(std::function<void(const QVariantMap &)> then)
     QVariantMap args;
     // The core decides per call whether it goes only through TURN (unverified peers do).
     args.insert(QStringLiteral("identity"), m_identity);
+    const unsigned serial = m_serial;
     m_backend->request(QStringLiteral("callTurnServers"), args,
-                       [this, then](bool ok, const QVariantMap &turn, const QString &) {
+                       [this, then, serial](bool ok, const QVariantMap &turn, const QString &) {
+                           if (serial != m_serial) {
+                               return;
+                           }
                            if (ok) {
                                m_relayOnly = turn.value(QStringLiteral("relayOnly")).toBool();
                                then(turn);
                            } else {
                                // No TURN (offline?): the call can't be set up reliably.
-                               m_backend->request(QStringLiteral("callHangUp"), QVariantMap());
-                               end(QStringLiteral("failed"));
+                               fail(QStringLiteral("connection"));
                            }
                        });
 }
@@ -176,10 +241,10 @@ void CallManager::start(const QString &identity, bool video)
     }
     emit aboutToTakeMicrophone();
     m_endedTimer.stop();
+    resetCall();
     m_identity = identity;
     m_outgoing = true;
     m_video = video;
-    m_result.clear();
     setState(QStringLiteral("starting"));
 #ifdef THREESEA_FULL
     withTurnServers([this](const QVariantMap &turn) {
@@ -220,10 +285,11 @@ void CallManager::hangUp()
         return;
     }
     if (m_state == QLatin1String("starting")) {
-        // Nothing was sent yet.
-#ifdef THREESEA_FULL
-        m_engine->stop();
-#endif
+        // Nothing was sent yet, or the offer is on its way to the core: this request follows it
+        // (they arrive in order), so the peer is told right after.
+        if (m_descriptionSent) {
+            m_backend->request(QStringLiteral("callHangUp"), QVariantMap());
+        }
         end(QStringLiteral("aborted"));
         return;
     }
@@ -244,16 +310,54 @@ void CallManager::endCallWithMicrophone()
 
 void CallManager::end(const QString &result)
 {
-#ifdef THREESEA_FULL
-    m_engine->stop();
-#endif
-    m_ringTimer.stop();
-    m_candidateTimer.stop();
-    m_candidates.clear();
-    m_descriptionSent = false;
+    stopMedia();
+    m_callId = -1;
+    setInterrupted(false);
     m_result = result;
+    m_endedTimer.setInterval(m_failure.isEmpty() ? END_SCREEN_MS : FAILURE_SCREEN_MS);
     setState(QStringLiteral("ended"));
     m_endedTimer.start();
+}
+
+void CallManager::fail(const QString &failure)
+{
+    if (m_state == QLatin1String("idle") || m_state == QLatin1String("ended")) {
+        return;
+    }
+    // In `starting` the core only knows of the call if the offer went out to it. Its reply and
+    // `callEnded` find this call gone, which is right: this is the end of it here.
+    if (m_state != QLatin1String("starting") || m_descriptionSent) {
+        QVariantMap args;
+        args.insert(QStringLiteral("reason"), failure);
+        m_backend->request(QStringLiteral("callFailed"), args);
+    }
+    m_failure = failure;
+    end(QStringLiteral("failed"));
+}
+
+// Mid-call: libnice (SFOS) doesn't notice a dead path by itself (see GroupCallEngine::sendConsent),
+// so the picture and the time would just go on. Off if nothing was ever counted.
+void CallManager::checkMedia()
+{
+#ifdef THREESEA_FULL
+    const unsigned packets = m_engine->packetsReceived();
+    if (packets != m_lastPackets) {
+        m_lastPackets = packets;
+        m_silentSeconds = 0;
+        setInterrupted(false);
+        return;
+    }
+    if (packets == 0) {
+        return;
+    }
+    ++m_silentSeconds;
+    if (m_silentSeconds >= MEDIA_SILENT_LIMIT_SECONDS) {
+        qWarning() << "call: nothing received for" << m_silentSeconds << "s";
+        fail(QStringLiteral("connection"));
+    } else if (m_silentSeconds >= MEDIA_SILENT_NOTICE_SECONDS) {
+        setInterrupted(true);
+    }
+#endif
 }
 
 void CallManager::onCoreEvent(const QString &name, const QVariantMap &data)
@@ -262,13 +366,16 @@ void CallManager::onCoreEvent(const QString &name, const QVariantMap &data)
         return;
     }
     if (name == QLatin1String("callIncoming")) {
+        // The core has no call while we set one up: the incoming one takes over from that.
+        stopMedia();
         m_endedTimer.stop();
+        resetCall();
+        m_callId = data.value(QStringLiteral("callId")).toLongLong();
         m_identity = data.value(QStringLiteral("identity")).toString();
         m_remoteOffer = data.value(QStringLiteral("sdp")).toString();
         m_outgoing = false;
         // The core already said no video if we don't take video calls.
         m_video = data.value(QStringLiteral("video")).toBool();
-        m_result.clear();
         setState(QStringLiteral("incoming"));
         m_ringTimer.start();
         emit incoming(m_identity);
@@ -277,14 +384,26 @@ void CallManager::onCoreEvent(const QString &name, const QVariantMap &data)
             setState(QStringLiteral("ringing"));
         }
     } else if (name == QLatin1String("callAnswer")) {
+        if (m_state != QLatin1String("calling") && m_state != QLatin1String("ringing")) {
+            return;
+        }
         m_ringTimer.stop();
+        // The other side may have answered without video: an audio call then, without our camera.
+        const bool video = data.value(QStringLiteral("video")).toBool();
+        if (!video) {
+            setCamera(false);
+        }
+        m_video = video;
         setState(QStringLiteral("connecting"));
 #ifdef THREESEA_FULL
         m_engine->setRemoteAnswer(data.value(QStringLiteral("sdp")).toString());
 #endif
     } else if (name == QLatin1String("callCandidates")) {
 #ifdef THREESEA_FULL
-        m_engine->addRemoteCandidates(data.value(QStringLiteral("candidates")).toList());
+        // (The engine keeps what comes before its pipeline for the call; not for the next one.)
+        if (m_state != QLatin1String("idle") && m_state != QLatin1String("ended")) {
+            m_engine->addRemoteCandidates(data.value(QStringLiteral("candidates")).toList());
+        }
 #endif
     } else if (name == QLatin1String("callChannelSend")) {
 #ifdef THREESEA_FULL
@@ -309,33 +428,50 @@ void CallManager::onCoreEvent(const QString &name, const QVariantMap &data)
         }
         emit remoteChanged();
     } else if (name == QLatin1String("callEnded")) {
-        end(data.value(QStringLiteral("record")).toMap().value(QStringLiteral("result")).toString());
+        // A call we let go of already, or one that never showed (its offer was unusable).
+        const QVariantMap record = data.value(QStringLiteral("record")).toMap();
+        if (record.value(QStringLiteral("callId")).toLongLong() == m_callId) {
+            end(record.value(QStringLiteral("result")).toString());
+        }
     }
 }
 
 void CallManager::onLocalDescription(const QString &type, const QString &sdp)
 {
+    // (What the engine queued before it stopped never comes here.)
+    const bool offer = type == QLatin1String("offer");
+    if (m_state != (offer ? QLatin1String("starting") : QLatin1String("connecting"))) {
+        return;
+    }
     QVariantMap args;
     args.insert(QStringLiteral("sdp"), sdp);
     m_descriptionSent = true;
-    if (type == QLatin1String("offer")) {
+    args.insert(QStringLiteral("video"), m_video);
+    const unsigned serial = m_serial;
+    if (offer) {
         args.insert(QStringLiteral("identity"), m_identity);
-        args.insert(QStringLiteral("video"), m_video);
-        m_backend->request(QStringLiteral("callStart"), args, [this](bool ok, const QVariantMap &, const QString &) {
-            if (ok) {
-                setState(QStringLiteral("calling"));
-                m_ringTimer.start();
-            } else {
-                end(QStringLiteral("failed"));
-            }
-        });
+        m_backend->request(QStringLiteral("callStart"), args,
+                           [this, serial](bool ok, const QVariantMap &result, const QString &) {
+                               // Hung up meanwhile: the core has the request to end it too. An
+                               // incoming call took over: the core refused this one.
+                               if (serial != m_serial) {
+                                   return;
+                               }
+                               if (ok) {
+                                   m_callId = result.value(QStringLiteral("callId")).toLongLong();
+                                   setState(QStringLiteral("calling"));
+                                   m_ringTimer.start();
+                               } else {
+                                   fail(QStringLiteral("other"));
+                               }
+                           });
     } else {
-        args.insert(QStringLiteral("video"), m_video);
-        m_backend->request(QStringLiteral("callAccept"), args, [this](bool ok, const QVariantMap &, const QString &) {
-            if (!ok) {
-                hangUp();
-            }
-        });
+        m_backend->request(QStringLiteral("callAccept"), args,
+                           [this, serial](bool ok, const QVariantMap &, const QString &) {
+                               if (!ok && serial == m_serial) {
+                                   fail(QStringLiteral("other"));
+                               }
+                           });
     }
     sendCandidates();
 }
@@ -414,10 +550,22 @@ void CallManager::onChannelMessage(const QByteArray &data)
 
 void CallManager::onConnected()
 {
+    if (m_state != QLatin1String("connecting")) {
+        return;
+    }
     // Outgoing video calls start with the camera on (Android's video call button).
     if (m_video && m_outgoing && !m_camera) {
         setCamera(true);
     }
+#ifdef THREESEA_FULL
+    // Switched on before the pipeline existed.
+    if (m_camera) {
+        m_engine->setCamera(true, m_frontCamera);
+    }
+    m_lastPackets = m_engine->packetsReceived();
+    m_silentSeconds = 0;
+    m_mediaTimer.start();
+#endif
     QVariantMap args;
     args.insert(QStringLiteral("relayed"), m_relayOnly);
     m_backend->request(QStringLiteral("callConnected"), args);
@@ -434,9 +582,11 @@ void CallManager::onConnected()
 void CallManager::onFailed(const QString &reason)
 {
     qWarning() << "call media failed:" << reason; // log-ok: the engine's own codes
-    if (m_state == QLatin1String("starting")) {
-        end(QStringLiteral("failed"));
+    if (reason == QLatin1String("certificate")) {
+        fail(reason);
+    } else if (reason == QLatin1String("ice") || reason == QLatin1String("connection")) {
+        fail(QStringLiteral("connection"));
     } else {
-        m_backend->request(QStringLiteral("callHangUp"), QVariantMap());
+        fail(QStringLiteral("other"));
     }
 }

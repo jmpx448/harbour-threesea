@@ -47,6 +47,9 @@ public:
     void setRemoteAnswer(const QString &sdp);
     // 10 ms audio frames played in the last call (tests).
     unsigned audioFramesReceived() const { return m_framesReceived; }
+    // What came in over the network so far (before decryption; none if that couldn't be counted):
+    // while it grows the connection is alive, whoever speaks.
+    unsigned packetsReceived() const { return m_packetsReceived; }
     // `[{candidate, sdpMid, sdpMLineIndex}]`; kept until the remote description is set.
     void addRemoteCandidates(const QVariantList &candidates);
     // Also before the pipeline exists: it starts as asked, and a new call keeps this until told
@@ -107,6 +110,7 @@ private:
     static int onCaptureBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onPlaybackBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onMediaBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
+    static int onNetworkBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onVp8Frame(GstPad *pad, GstPadProbeInfo *info, void *filter);
     void flushChannel();
     void descriptionCreated(GstPromise *promise, const char *field, const QString &type);
@@ -126,6 +130,7 @@ private:
     // 10 ms frames through the microphone and to the speaker (logged at the end of a call).
     std::atomic<unsigned> m_framesSent{0};
     std::atomic<unsigned> m_framesReceived{0};
+    std::atomic<unsigned> m_packetsReceived{0};
     // A picture of the peer is on its way to the GUI: the next ones are dropped until it got there.
     std::atomic<bool> m_remoteFramePending{false};
     unsigned m_busWatch = 0;
