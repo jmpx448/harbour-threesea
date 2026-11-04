@@ -364,6 +364,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   _group_ (or keeps the message unacknowledged if that lookup failed). Anyone else is discarded.
 - Queued while offline, a group's messages and control entries go out in the order the user made
   them (by `created_at`): the setup before the first text, a text before our leave.
+- Deleting a group we left keeps the queued `group-leave` or empty setup until it is acknowledged:
+  it is sent by the key alone, and otherwise the members keep writing and the creator's answer to
+  the sync request brings the group back. All else queued for the group goes.
 - Creator: create (setup + name + delete-picture to all), rename, change members (setup to all
   old and new, name/picture to added), dissolve (empty setup). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.

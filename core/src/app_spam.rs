@@ -425,6 +425,16 @@ mod tests {
                 assert!(blocked(&app, SUSPECT));
                 assert!(app.store.group(&theirs.key).unwrap().is_none());
                 assert_eq!(app.store.earliest_incoming_content(&key).unwrap(), None);
+                // They still hear that we left, or they answer with the group again.
+                let queued = app.store.outbox().unwrap();
+                assert_eq!(queued.len(), 1);
+                assert_eq!(queued[0].kind, crate::groups::OUTBOX_GROUP_LEAVE);
+                assert_eq!(
+                    app.store
+                        .pending_receivers(&theirs.key, queued[0].message_id)
+                        .unwrap(),
+                    theirs.members
+                );
             })
             .await;
     }

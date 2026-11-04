@@ -533,12 +533,24 @@ impl Store {
             > 0)
     }
 
-    /// Remove a group and its conversation (only once it has been left).
+    /// Remove a group and its conversation (only once it has been left). What the others still have
+    /// to hear of our leaving stays queued, as it is sent by the key alone: without it they keep
+    /// writing, and the creator's answer to the next sync request brings the group back. Anything
+    /// else queued for the group goes with it.
     pub fn delete_group(&self, key: &str) -> Result<(), StoreError> {
         self.conn
             .execute("DELETE FROM groups WHERE key = ?1", [key])?;
+        for entry in self.outbox_until(key, i64::MAX)? {
+            let farewell = entry.kind == OUTBOX_GROUP_LEAVE
+                || (entry.kind == OUTBOX_GROUP_SETUP
+                    && entry.body["members"].as_array().is_some_and(Vec::is_empty));
+            if !farewell {
+                self.outbox_remove(key, entry.message_id)?;
+            }
+        }
         self.conn.execute(
-            "DELETE FROM pending_receivers WHERE conversation = ?1",
+            "DELETE FROM pending_receivers WHERE conversation = ?1
+                 AND message_id NOT IN (SELECT message_id FROM outbox WHERE conversation = ?1)",
             [key],
         )?;
         self.conn
@@ -2499,6 +2511,59 @@ mod tests {
         assert!(!store.is_named_by_a_group(EVE).unwrap());
         // Unlike a group we are in, it doesn't let them past "block unknown senders".
         assert!(!store.is_group_member(BOB).unwrap());
+    }
+
+    #[test]
+    fn deleting_a_group_keeps_only_telling_them_we_are_gone() {
+        let (_dir, store) = store();
+        let group_key = stored_group(&store, CREATOR, &[BOB], true);
+        let bob = vec![BOB.to_owned()];
+        store
+            .group_outbox_add(&group_key, &bob, OUTBOX_GROUP_NAME, &json!({"name": "x"}))
+            .unwrap();
+        store
+            .group_outbox_add(&group_key, &bob, OUTBOX_GROUP_LEAVE, &json!({}))
+            .unwrap();
+        store
+            .group_outbox_add(
+                &group_key,
+                &bob,
+                OUTBOX_GROUP_SETUP,
+                &json!({"members": []}),
+            )
+            .unwrap();
+        store
+            .group_outbox_add(
+                &group_key,
+                &bob,
+                OUTBOX_GROUP_SETUP,
+                &json!({"members": [BOB]}),
+            )
+            .unwrap();
+        // A message: gone with the chat.
+        store.set_pending_receivers(&group_key, 5, &bob).unwrap();
+
+        store.delete_group(&group_key).unwrap();
+
+        assert!(store.group(&group_key).unwrap().is_none());
+        assert_eq!(
+            outbox_kinds(&store),
+            vec![
+                (OUTBOX_GROUP_LEAVE.to_owned(), bob.clone()),
+                (OUTBOX_GROUP_SETUP.to_owned(), bob.clone()),
+            ]
+        );
+        assert!(store.pending_receivers(&group_key, 5).unwrap().is_empty());
+
+        // Acknowledged, nothing is left of it.
+        for entry in store.outbox().unwrap() {
+            for conversation in store.receiver_done(BOB, entry.message_id).unwrap() {
+                store
+                    .outbox_remove(&conversation, entry.message_id)
+                    .unwrap();
+            }
+        }
+        assert!(store.outbox().unwrap().is_empty());
     }
 
     #[test]
