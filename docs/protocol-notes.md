@@ -451,6 +451,10 @@ stamp written under such a clock doesn't stop later runs. Set far behind when a 
 arrival time would later look old: a `created_at` over a day after the arrival, and not in the
 future, counts instead, which at worst keeps a message longer.
 
+A pinned chat or one with a draft stays listed when its last message goes. Other 1:1 chats leave the
+list; Android keeps every chat as an empty row, but a period chosen for privacy shouldn't leave a
+list of who wrote.
+
 ## Share target (Sailfish OS, not Threema)
 
 - Sailfish.Share "app share methods": the `.desktop` file lists `X-Share-Methods=threesea` with a

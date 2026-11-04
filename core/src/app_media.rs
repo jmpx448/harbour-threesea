@@ -196,22 +196,45 @@ impl Store {
         before: i64,
         spare_notes: bool,
     ) -> Result<usize, StoreError> {
-        Ok(self.conn.execute(
-            &format!(
-                "DELETE FROM messages
-                 WHERE {AGE_SQL} < :before AND starred = 0
-                   AND NOT (outgoing = 1 AND state = :pending)
-                   AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
-                   AND NOT (:spare_notes AND conversation IN
-                            (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))"
-            ),
-            named_params! {
-                ":now": crate::messages::now_ms(),
-                ":before": before,
-                ":pending": crate::messages::OutgoingState::Pending as i64,
-                ":spare_notes": spare_notes,
-            },
-        )?)
+        let old = format!(
+            "{AGE_SQL} < :before AND starred = 0
+             AND NOT (outgoing = 1 AND state = :pending)
+             AND NOT (kind = 'poll' AND json_extract(body, '$.state') = 0)
+             AND NOT (:spare_notes AND conversation IN
+                      (SELECT key FROM groups WHERE left_group = 0 AND members = '[]'))"
+        );
+        let condition = named_params! {
+            ":now": crate::messages::now_ms(),
+            ":before": before,
+            ":pending": crate::messages::OutgoingState::Pending as i64,
+            ":spare_notes": spare_notes,
+        };
+        let transaction = self.conn.unchecked_transaction()?;
+        // A pinned chat or one with a draft stays in the list when its last row goes: otherwise
+        // the pin and the draft would be out of sight. It stays where its newest message put it.
+        // Other 1:1 chats leave the list, unlike on Android, which keeps them all empty: a period
+        // chosen for privacy shouldn't leave a list of who wrote.
+        let kept: Vec<(String, i64)> = transaction
+            .prepare(&format!(
+                "SELECT conversation, MAX(COALESCE(received_at, created_at)) FROM messages
+                 WHERE {old} AND conversation IN
+                       (SELECT conversation FROM pinned_chats
+                        UNION SELECT substr(key, 7) FROM settings WHERE key LIKE 'draft:%')
+                 GROUP BY conversation"
+            ))?
+            .query_map(condition, |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let removed =
+            transaction.execute(&format!("DELETE FROM messages WHERE {old}"), condition)?;
+        for (conversation, at) in kept {
+            transaction.execute(
+                "INSERT OR REPLACE INTO emptied_chats (conversation, at)
+                 SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE conversation = ?1)",
+                params![conversation, at],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(removed)
     }
 
     /// Set `fileState`/`thumbnailState` of a file message; returns the changed message.
@@ -1901,6 +1924,52 @@ mod tests {
             .unwrap();
         assert_eq!(store.delete_messages_before(now - week, false).unwrap(), 1);
         assert!(store.message(own.id).unwrap().is_none());
+    }
+
+    /// A pinned chat or one with a draft stays listed when its last message ages out, in the
+    /// place that message gave it. Another 1:1 chat goes.
+    #[test]
+    fn a_pinned_or_drafted_chat_stays_listed_without_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        for (id, chat) in ["AAAAAAAA", "BBBBBBBB", "CCCCCCCC", "DDDDDDDD"]
+            .into_iter()
+            .enumerate()
+        {
+            store
+                .insert_incoming(chat, id as u64 + 1, "text", "old", 1_000 + id as i64)
+                .unwrap();
+        }
+        // Still has a row after the deletion: no stand-in needed.
+        let starred = store
+            .insert_incoming("DDDDDDDD", 9, "text", "keep", 1_000)
+            .unwrap()
+            .unwrap();
+        store.set_starred(starred.id, true).unwrap();
+        arrived_when_written(&store);
+        store.set_pinned("AAAAAAAA", true).unwrap();
+        store.set_pinned("DDDDDDDD", true).unwrap();
+        // Pinned with nothing to lose: it doesn't start showing up.
+        store.set_pinned("EEEEEEEE", true).unwrap();
+        store.set_setting("draft:BBBBBBBB", "a thought").unwrap();
+
+        assert_eq!(store.delete_messages_before(5_000, false).unwrap(), 4);
+
+        let mut listed: Vec<(String, String, i64)> = store
+            .conversations()
+            .unwrap()
+            .into_iter()
+            .map(|(m, _)| (m.conversation.clone(), m.kind.clone(), m.created_at))
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                ("AAAAAAAA".to_owned(), "empty".to_owned(), 1_000),
+                ("BBBBBBBB".to_owned(), "empty".to_owned(), 1_001),
+                ("DDDDDDDD".to_owned(), "text".to_owned(), 1_000),
+            ]
+        );
     }
 
     /// This phone's clock was far behind when a message came, so its arrival time is long past
