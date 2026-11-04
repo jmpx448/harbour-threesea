@@ -4,6 +4,7 @@ import Sailfish.Silica 1.0
 import harbour.threesea 1.0
 import "../components"
 import "../components/Format.js" as Fmt
+import "../components/Errors.js" as Errors
 
 // A 1:1 call (ADR 0012), laid out like Jolla's phone app: the picture and name in the upper
 // half, the state or the running time under them, the buttons at the bottom; in video calls the
@@ -75,6 +76,9 @@ Page {
             if (calls.failure === "connection") {
                 //% "Connection failed"
                 return qsTrId("threesea-la-call-connection-failed")
+            }
+            if (calls.failure.indexOf("contact") === 0) {
+                return Errors.text(calls.failure, "")
             }
             return calls.result === "finished" || calls.result === "aborted"
                     //% "Call ended"

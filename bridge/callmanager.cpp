@@ -468,7 +468,7 @@ void CallManager::onLocalDescription(const QString &type, const QString &sdp)
     if (offer) {
         args.insert(QStringLiteral("identity"), m_identity);
         m_backend->request(QStringLiteral("callStart"), args,
-                           [this, serial](bool ok, const QVariantMap &result, const QString &) {
+                           [this, serial](bool ok, const QVariantMap &result, const QString &kind) {
                                const QString startFailure = m_startFailure;
                                m_startFailure.clear();
                                if (serial != m_serial) {
@@ -486,10 +486,12 @@ void CallManager::onLocalDescription(const QString &type, const QString &sdp)
                                    m_ringTimer.start();
                                    sendCandidates();
                                } else {
-                                   // The core took no call, usually because another one came in
+                                   // The core took no call: this contact can't be called (the end
+                                   // screen says why), or, usually, another call came in
                                    // (`callIncoming` may still be on its way). It has nothing of
                                    // ours to end, and that other call stays untouched.
-                                   m_failure = QStringLiteral("other");
+                                   m_failure = kind.startsWith(QLatin1String("contact"))
+                                               ? kind : QStringLiteral("other");
                                    end(QStringLiteral("failed"));
                                }
                            });

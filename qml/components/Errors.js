@@ -52,6 +52,9 @@ function text(kind, message) {
     case "contactRevoked":
         //% "This Threema ID was revoked."
         return qsTrId("threesea-la-error-contact-revoked")
+    case "contactUnknown":
+        //% "Block unknown senders is on, and this person is not one of your contacts."
+        return qsTrId("threesea-la-error-contact-unknown")
     case "fileNotDownloaded":
         //% "Download the file first."
         return qsTrId("threesea-la-error-file-not-downloaded")

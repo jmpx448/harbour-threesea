@@ -310,6 +310,8 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   contact and tells the other devices (Android's `setAcquaintanceLevelFromLocal`).
 - Revoked IDs can't be written to (`contactRevoked`): `activity_state` Invalid, from the daily
   directory check. A list leaves revoked and blocked members out.
+- Calls to someone the signalling wouldn't reach are refused before anything is sent
+  (`contactRevoked`, `contactBlocked`, `contactUnknown`; Android's `VoipUtil` for blocked ones).
 
 ## Keys we trust
 

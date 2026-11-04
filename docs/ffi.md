@@ -188,7 +188,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `myQrCode` | – | `{text, size, modules}`: `3mid:<ID>,<public key hex>` and its QR modules (`size`² chars `0`/`1`) |
 | `verifyQrCode` | `text` | contact JSON; fully verified if the key matches, a new contact added only then (errors `qrInvalid`, `qrExpired`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |
 | `callTurnServers` | `identity` (who the call is with) | `{urls, username, password, relayOnly}` for the media engine (`identity/turn_cred`, cached until expiry; `relayOnly`: the peer is unverified or not a contact, or the setting `relayThreemaCalls` is on; then the dual-stack servers, like Android) |
-| `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012) |
+| `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012). Refused with `contactRevoked`, `contactBlocked` or `contactUnknown` (block unknown senders) for someone the signalling wouldn't reach |
 | `callAccept` | `callId`, `sdp` (engine's answer), `video` | `{}` |
 | `callReject` / `callHangUp` | `callId` | `{}`; the call ends with a status message `call\|result\|outgoing (0/1)\|seconds\|callId` (imported lines have no call id) |
 | `callFailed` | `callId`, `reason` (`certificate`, `connection`, `other`) | `{}`; the media side gave up: the peer is told (hangup, or reject "unknown" before the answer went out), the status message says `failed` |

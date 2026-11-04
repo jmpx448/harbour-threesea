@@ -26,7 +26,8 @@ class CallManager : public QObject
     Q_PROPERTY(QString identity READ identity NOTIFY stateChanged)
     // For `ended`: finished | missed | rejected | busy | unavailable | disabled | failed …
     Q_PROPERTY(QString result READ result NOTIFY stateChanged)
-    // For result `failed` on this device: connection | certificate | other.
+    // For result `failed` on this device: connection | certificate | other, or the core's error
+    // kind (contact…) when it refused to call this contact.
     Q_PROPERTY(QString failure READ failure NOTIFY stateChanged)
     // In an active call nothing has come in over the network for a while.
     Q_PROPERTY(bool interrupted READ interrupted NOTIFY interruptedChanged)

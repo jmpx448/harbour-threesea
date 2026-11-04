@@ -1376,7 +1376,8 @@ Page {
                 onClicked: page.openGroupCall()
             }
             MenuItem {
-                visible: !page.selecting && calls.supported && window.appSettings.threemaCalls !== false
+                visible: !page.selecting && !page.readOnly && calls.supported
+                         && window.appSettings.threemaCalls !== false
                          && page.identity.length === 8 && page.contact.canCall === true
                 enabled: calls.state === "idle"
                 //% "Call"
@@ -1384,7 +1385,8 @@ Page {
                 onClicked: calls.start(page.identity)
             }
             MenuItem {
-                visible: !page.selecting && calls.supported && window.appSettings.threemaCalls !== false
+                visible: !page.selecting && !page.readOnly && calls.supported
+                         && window.appSettings.threemaCalls !== false
                          && window.appSettings.videoCalls !== false
                          && page.identity.length === 8 && page.contact.canVideoCall === true
                 enabled: calls.state === "idle"

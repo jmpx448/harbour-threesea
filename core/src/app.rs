@@ -973,6 +973,9 @@ pub enum ApiError {
     ContactBlocked,
     #[error("this contact's ID was revoked")]
     ContactRevoked,
+    /// "Block unknown senders" is on, and this is neither a direct contact nor in a group with us.
+    #[error("this person is blocked as an unknown sender")]
+    ContactUnknown,
     #[error("the file has not been downloaded")]
     FileNotDownloaded,
     #[error("this message cannot be forwarded")]
@@ -1110,6 +1113,7 @@ impl ApiError {
             Self::FileNotDownloaded => "fileNotDownloaded",
             Self::ContactBlocked => "contactBlocked",
             Self::ContactRevoked => "contactRevoked",
+            Self::ContactUnknown => "contactUnknown",
             Self::NotForwardable => "notForwardable",
             Self::QrMismatch => "qrMismatch",
             Self::QrExpired => "qrExpired",

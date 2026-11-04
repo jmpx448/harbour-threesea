@@ -246,6 +246,7 @@ impl App {
         if !self.calls_enabled() || self.calls.current.is_some() {
             return Err(ApiError::Internal("no call possible now".into()));
         }
+        self.check_callable(identity)?;
         let video = video && self.video_calls_enabled();
         self.call_media = CallMedia::default();
         let mut patcher = patcher(video);
@@ -265,6 +266,17 @@ impl App {
             .start(identity, call_id, sdp, video, crate::messages::now_ms());
         self.apply_call_effects(effects);
         Ok(json!({ "callId": call_id }))
+    }
+
+    /// Refused up front, like Android's `VoipUtil`: the signalling wouldn't get through
+    /// (`providers::may_receive`), and the call page would wait for the timeout.
+    fn check_callable(&self, identity: &str) -> Result<(), ApiError> {
+        let (_, conversation) = self.conversation(identity)?;
+        conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
+        if crate::providers::identity_blocked(&self.store, &self.config, identity)? {
+            return Err(ApiError::ContactUnknown);
+        }
+        Ok(())
     }
 
     /// Whether a command of the bridge concerns the call in progress. These commands name their
@@ -616,6 +628,43 @@ mod tests {
     }
 
     #[test]
+    fn calls_nobody_can_answer_are_refused_up_front() {
+        use libthreema::protobuf::d2d_sync::contact::{AcquaintanceLevel, ActivityState};
+        let (_dir, mut app, mut rx) = app(true);
+        let kind = |app: &mut App| {
+            let error = app.call_start("BBBBBBBB", OFFER, false).unwrap_err();
+            assert!(app.calls.current.is_none());
+            error.kind()
+        };
+        assert_eq!(kind(&mut app), "contactNotFound");
+
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.activity_state = ActivityState::Invalid;
+        app.store.upsert_contact(&contact).unwrap();
+        assert_eq!(kind(&mut app), "contactRevoked");
+
+        contact.activity_state = ActivityState::Active;
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        app.store.upsert_contact(&contact).unwrap();
+        let mut settings = app.app_settings().unwrap();
+        settings.block_unknown = true;
+        app.save_app_settings(&settings).unwrap();
+        assert_eq!(kind(&mut app), "contactUnknown");
+
+        settings.blocked_contacts = vec!["BBBBBBBB".into()];
+        app.save_app_settings(&settings).unwrap();
+        assert_eq!(kind(&mut app), "contactBlocked");
+        assert!(sent(&mut rx).is_empty());
+
+        // A direct contact who isn't blocked can be called.
+        settings.blocked_contacts.clear();
+        app.save_app_settings(&settings).unwrap();
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        app.store.upsert_contact(&contact).unwrap();
+        assert!(app.call_start("BBBBBBBB", OFFER, false).is_ok());
+    }
+
+    #[test]
     fn without_calls_offers_are_rejected() {
         let (_dir, mut app, mut rx) = app(false);
         let (kind, json) = offer(7);
@@ -730,6 +779,9 @@ mod tests {
     fn outgoing_call_sends_a_patched_offer_and_records_the_hangup() {
         let (_dir, mut app, mut rx) = app(true);
         let mut events = app.take_media_events().unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ECHOECHO"))
+            .unwrap();
         let call_id = app
             .call_start("ECHOECHO", &OFFER.replace("opus", "OPUS"), false)
             .unwrap()["callId"]
@@ -971,6 +1023,9 @@ mod tests {
     fn an_answer_without_video_reaches_the_ui() {
         let (_dir, mut app, _rx) = app(true);
         let mut events = app.take_media_events().unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ECHOECHO"))
+            .unwrap();
         let call_id = app.call_start("ECHOECHO", OFFER, true).unwrap()["callId"]
             .as_u64()
             .unwrap();
