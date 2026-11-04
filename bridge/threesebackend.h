@@ -265,7 +265,7 @@ public:
     Q_INVOKABLE void setGroupPicture(const QString &key, const QString &path,
                                      const QJSValue &callback = QJSValue());
     // The first QR code in an image (a camera frame from grabToImage, or a file); "" if none.
-    Q_INVOKABLE QString decodeQr(const QVariant &image) const;
+    Q_INVOKABLE void decodeQr(const QVariant &image, const QJSValue &callback);
     Q_INVOKABLE QString decodeQrFile(const QString &path) const;
     // Set our profile picture from an image file (same preparation).
     Q_INVOKABLE void setProfilePicture(const QString &path, const QJSValue &callback = QJSValue());

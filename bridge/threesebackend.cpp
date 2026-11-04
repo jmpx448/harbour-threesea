@@ -365,6 +365,8 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
 QString ThreeseBackend::captureFile(const QString &extension) const
 {
     QDir().mkpath(captureDir());
+    // Plain files until they are stored encrypted: ours only.
+    QFile::setPermissions(captureDir(), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
     return captureDir() + QStringLiteral("/capture-%1.%2")
             .arg(QDateTime::currentMSecsSinceEpoch())
             .arg(extension);
@@ -654,9 +656,19 @@ QString decodeQrImage(QImage image)
 
 }
 
-QString ThreeseBackend::decodeQr(const QVariant &image) const
+void ThreeseBackend::decodeQr(const QVariant &image, const QJSValue &callback)
 {
-    return decodeQrImage(image.value<QImage>());
+    const quint64 id = m_nextId++;
+    m_keyWork.insert(id, [callback](const QByteArray &text) {
+        if (callback.isCallable()) {
+            QJSValue(callback).call(QJSValueList() << QString::fromUtf8(text));
+        }
+    });
+    // Several frames a second: not on the thread that draws the viewfinder.
+    const QImage frame = image.value<QImage>();
+    QThreadPool::globalInstance()->start(new Task([this, id, frame]() {
+        emit keyWorkDone(id, decodeQrImage(frame).toUtf8());
+    }));
 }
 
 QString ThreeseBackend::decodeQrFile(const QString &path) const

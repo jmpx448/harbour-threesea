@@ -514,14 +514,17 @@ Two phones needed for the 1:1 parts; a group with at least one other member for 
    - Expect: `call candidates: relay` only, no `host` or `srflx`, on both an outgoing and an
      incoming call. A verified contact also shows `host` and `srflx`.
 
-## A voice recording stops with the app
+## Recording and camera stop with the app
+
+Voice recording:
 
 1. Start a recording and leave the phone untouched for two minutes.
    - Expect: the screen stays on and the recording runs on.
 2. Group chat → swipe to its page → a member → record there and tap send.
    - Expect: it goes to the member's chat and nothing to the group.
-3. Record, then swipe to the contact page and back.
-   - Expect: the recording is gone and the mic is back; nothing was sent.
+3. Record, then swipe to the contact page and back; the same with a held recording ("Recorded").
+   - Expect: "Recording stopped and discarded" on the way there, the recording is gone and the mic
+     is back; nothing was sent.
 4. Start a recording and have someone call the phone (the phone app, not Threesea).
    - Expect: back in the chat, "Recording stopped and discarded", or the bar still recording if
      the phone left the microphone alone. If the phone stops it while the app stays in front, the
@@ -534,3 +537,21 @@ Two phones needed for the 1:1 parts; a group with at least one other member for 
    - Expect: the recording goes with a notice, what plays pauses and stays paused after the call.
 7. Tap the mic and tap again at once (under a second).
    - Expect: nothing sent, no `voice-recording.m4a` in the cache.
+8. With no app lock: start a recording, go to the home screen and leave the phone untouched.
+   - Expect: the screen blanks after the usual time and the device locks as usual.
+
+Camera and QR scanner:
+
+9. Open the in-app camera, go to the home screen, start Jolla Camera, then come back.
+   - Expect: Jolla Camera works; back in the app the viewfinder returns. The same on the QR scanner,
+     which goes on recognising codes and keeps the viewfinder smooth while it looks. Closing the
+     window (Full) frees the camera too.
+10. Record a video, then try to swipe back.
+    - Expect: the page doesn't go while recording; the shutter stops it and attaches the video.
+11. Record a video and go to the home screen.
+    - Expect: back in the app the viewfinder shows, "Recording stopped and discarded" comes up, and
+      `ls ~/.cache/org.threesea/harbour-threesea/capture` is empty.
+12. Leave a video running without touching the phone for two minutes.
+    - Expect: the screen stays on and the video is complete.
+13. Take a photo, tap send and go straight back to the chat list; the same with a video.
+    - Expect: both arrive, and the capture folder is empty afterwards.

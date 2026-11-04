@@ -19,6 +19,12 @@ Page {
     // Only accept this contact's code (when verifying a known contact), else anyone's.
     property string expectedIdentity
     property bool busy: false
+    // The camera runs only while the page can be seen.
+    readonly property bool shown: Qt.application.state === Qt.ApplicationActive && status === PageStatus.Active
+    // A frame is being looked at: the next one can wait.
+    property bool decoding: false
+    // A grab asked for while the window went away may never come back.
+    onShownChanged: decoding = false
 
     // Linking Threema for Desktop: only its code continues to the linking page.
     property bool deviceLink
@@ -48,7 +54,7 @@ Page {
     }
 
     function cameraFrame(text) {
-        if (busy || status !== PageStatus.Active) return
+        if (busy || !shown) return
         if (!text) {
             if (restingCode && camera.cameraStatus === Camera.ActiveStatus && ++framesWithoutCode >= 5) {
                 restingCode = ""
@@ -238,12 +244,11 @@ Page {
 
     Camera {
         id: camera
-        captureMode: Camera.CaptureViewfinder
-        focus.focusMode: Camera.FocusContinuous
         // Only while on screen: the link dialog creates this page in advance, and a camera
         // defaults to running. Unloaded rather than Loaded, which would still hold the device.
-        cameraState: page.status === PageStatus.Active || page.status === PageStatus.Activating
-                     ? Camera.ActiveState : Camera.UnloadedState
+        cameraState: page.shown ? Camera.ActiveState : Camera.UnloadedState
+        captureMode: Camera.CaptureViewfinder
+        focus.focusMode: Camera.FocusContinuous
     }
 
     SilicaFlickable {
@@ -317,10 +322,15 @@ Page {
     Timer {
         interval: 600
         repeat: true
-        running: viewfinder.visible && page.status === PageStatus.Active && !page.busy
-        onTriggered: viewfinder.grabToImage(function(result) {
-            page.cameraFrame(backend.decodeQr(result.image))
-        })
+        running: viewfinder.visible && page.shown && !page.busy && !page.decoding
+        onTriggered: {
+            page.decoding = viewfinder.grabToImage(function(result) {
+                backend.decodeQr(result.image, function(text) {
+                    page.decoding = false
+                    page.cameraFrame(text)
+                })
+            })
+        }
     }
 
     Component {

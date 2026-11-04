@@ -9,6 +9,7 @@ QtObject {
     readonly property var stack: window.pageStack
     property int failures: 0
     property int step: 0
+    property string handedOver
 
     readonly property var backend: fakes.backend
     readonly property var calls: fakes.calls
@@ -128,6 +129,100 @@ QtObject {
                 calls.state = "idle"
                 check("voice stays paused", voice.playing, false)
             }, 100],
+        ],
+        // Left in the middle of a capture: its plain file goes with the page.
+        cameraPageRemovesCapture: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var camera = push("pages/CameraPage.qml")
+                check("camera page loads", !!camera, true)
+                camera.capturePath = "/cache/capture/left.mp4"
+                camera.pendingPath = "/cache/capture/stopped.mp4"
+                stack.pop(page("conversations"), PageStackAction.Immediate)
+            }, 200],
+            [function() {
+                check("capture removed", backend.removedCaptures.indexOf("/cache/capture/left.mp4") >= 0, true)
+                check("stopped one removed", backend.removedCaptures.indexOf("/cache/capture/stopped.mp4") >= 0, true)
+            }, 0],
+        ],
+        // The file the recorder reports is the one that goes.
+        cameraPageRemovesWhatIsWritten: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var camera = push("pages/CameraPage.qml")
+                camera.capturePath = "/cache/capture/asked.mp4"
+                camera.recorderWrites("file:///cache/capture/written.mp4")
+                camera.recorderWrites("")
+                check("follows the recorder", camera.capturePath, "file:///cache/capture/written.mp4")
+                // An error between the shutter and the stop: nothing is left to hand over.
+                camera.pendingPath = camera.capturePath
+                camera.removeCapture()
+                check("removed", backend.removedCaptures.indexOf("file:///cache/capture/written.mp4") >= 0, true)
+                check("nothing to hand over", camera.pendingPath, "")
+            }, 0],
+        ],
+        // A video handed to the chat is the chat's: the page going, a late error or a late report
+        // from the recorder leave it alone.
+        cameraKeepsItsHandsOffHandedOverVideo: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var camera = push("pages/CameraPage.qml", { objectName: "camera" })
+                camera.captured.connect(function(path, video) { root.handedOver = path })
+            }, 100],
+            [function() {
+                var camera = page("camera")
+                camera.capturePath = "/cache/capture/video.mp4"
+                camera.recorderWrites("file:///cache/capture/video.mp4")
+                camera.finish("file:///cache/capture/video.mp4")
+                check("handed over", root.handedOver, "file:///cache/capture/video.mp4")
+                camera.recorderWrites("file:///cache/capture/video.mp4")
+                check("a late report doesn't take it back", camera.capturePath, "")
+                camera.removeCapture()
+            }, 1000],
+            [function() {
+                checkStack("conversations")
+                check("nothing removed", backend.removedCaptures.length, 0)
+            }, 0],
+        ],
+        // It is only seen while the app is in front and it is on top.
+        cameraPagesFollowTheApp: [
+            [function() { ready(false) }, 100],
+            [function() { push("pages/CameraPage.qml", { objectName: "camera" }) }, 100],
+            [function() {
+                var camera = page("camera")
+                check("camera shown", camera.shown, true)
+                harness.setActive(false)
+                check("camera not shown after leaving", camera.shown, false)
+                harness.setActive(true)
+                check("camera shown again", camera.shown, true)
+                push("pages/ScanQrPage.qml", { objectName: "scanner" })
+            }, 100],
+            [function() {
+                var scanner = page("scanner")
+                check("camera under the scanner", page("camera").shown, false)
+                check("scanner shown", scanner.shown, true)
+                harness.setActive(false)
+                check("scanner not shown after leaving", scanner.shown, false)
+                harness.setActive(true)
+            }, 0],
+        ],
+        // A capture finishing under the call's page or the lock: not those that are popped.
+        cameraHandsOverUnderAPage: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var camera = push("pages/CameraPage.qml", { objectName: "camera" })
+                camera.captured.connect(function(path, video) { root.handedOver = path })
+                push("pages/PlainPage.qml")
+            }, 100],
+            [function() {
+                page("camera").finish("/cache/capture/done.jpg")
+                check("handed over", root.handedOver, "/cache/capture/done.jpg")
+            }, 100],
+            [function() {
+                checkStack("conversations camera plain")
+                stack.pop(undefined, PageStackAction.Immediate)
+            }, 200],
+            [function() { checkStack("conversations") }, 0],
         ],
         // Between two voice messages: the next one doesn't follow into the call.
         callEndsChimeQueue: [
