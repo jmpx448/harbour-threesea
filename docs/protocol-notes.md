@@ -285,6 +285,43 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   conversation. The core strips the prefix (`text`) and reports `quoteId`; edits keep the
   prefix (receivers replace the whole text), incoming edits without it keep the original quote.
 
+## Blocking and revoked IDs
+
+- _Identity Blocked Steps_ (`providers::identity_blocked`, Android `IdentityBlockedSteps`):
+  special contacts never; the block list; with "block unknown senders" on anyone who is neither
+  a direct contact nor in a group we are still in, predefined contacts excepted.
+- Receiving: libthreema discards what isn't exempt. group-setup and the requests we would answer
+  with a group-sync-request have steps of their own (`groups::receive`, ADR 0019): someone on the
+  block list can't bring us into a group we aren't in, and we don't ask them for one we don't
+  have. A group we are in changes as usual, and "block unknown senders" plays no part here, as on
+  Android. A blocked member's group poll is exempt so that polls stay in step when we send, but it
+  is ignored here (Android's `processIncomingGroupMessage`).
+- Forward secrecy: someone on the block list gets no session, no Accept and no Reject, their
+  envelopes are acknowledged and discarded (`incoming.rs`, ours), unless we share an active group:
+  their group control messages are exempt and may be encapsulated. Unknown senders with "block
+  unknown senders" on keep a session for the same reason (their group-setup), and what isn't
+  exempt is discarded after decrypting. Status lines only appear for contacts who aren't blocked
+  either way (`providers::shows_fs_status`).
+- Sending (`providers::may_receive`, in `Connection::encode` so nothing gets past it; Android's
+  `OutgoingCspMessageHandle`): revoked IDs get nothing at all, blocked ones only what is exempt
+  (libthreema's `is_exempt_from_blocking`: group-setup, name, leave, sync request, picture, group
+  poll setup and vote, group call start). A group message queued before the block loses them as a
+  receiver, a 1:1 message fails. Writing to someone, also through a list, makes them a direct
+  contact and tells the other devices (Android's `setAcquaintanceLevelFromLocal`).
+- Revoked IDs can't be written to (`contactRevoked`): `activity_state` Invalid, from the daily
+  directory check. A list leaves revoked and blocked members out.
+
+## Keys we trust
+
+- Predefined contacts have the key from libthreema's `Config`; a directory or backup answer with
+  another key is refused, the right one means fully verified with the known nickname
+  (`contacts::pin_predefined`, in every directory lookup and after a Safe restore).
+- Threema Safe: a fully verified contact keeps the backup's key and level whatever the directory
+  says (`ThreemaSafeServiceImpl`). Everyone else restores unverified with the directory's key;
+  address book matching raises them again.
+- Address book match with another key than the stored one: the contact isn't changed except that
+  "server verified" drops to unverified (Android `SynchronizeAndroidContactsUseCase`).
+
 ## Profile pictures
 
 - 1:1 `set-profile-picture` (0x18: blob id, size, key; JPEG, nonce 00..01, blob persisted),
@@ -296,7 +333,10 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   what each contact has.
 - Received pictures: downloaded without `done`, stored encrypted (`contact:<ID>`), versioned in
   `contact_pictures` (migration 11). The first message of a contact without a picture triggers
-  one `contact-request-profile-picture`.
+  one `contact-request-profile-picture`, and so does opening the chat with them (the initial
+  load, bounded by the request's backoff). Both are ours; Android asks in its application setup
+  steps only. A request is a message like any other: it may start a forward secrecy session,
+  and the contact may see that. Revoked and blocked IDs aren't asked.
 - Who gets it (Android `PROFILEPIC_RELEASE_*`): everyone, nobody, or selected contacts (allow
   list, migration 18; contacts off the list get a removal like "nobody"). Changing the list
   resets only the changed contacts. Threema Safe carries it as `user.profilePicRelease`:
