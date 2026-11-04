@@ -247,7 +247,8 @@ QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, k
 | `groupCallChannel` | `data` (base64, from the SFU's data channel) | `{}`; answers go out as `groupCallSend` events |
 | `groupCallMute` / `groupCallCamera` | `muted` / `on` | `{}` (tells the others; the engine switches the device) |
 | `groupCallTick` / `groupCallLeave` | – | every second while in a call (rekeying, state) / leave |
-| `webSessions` | – | `{sessions: [{id, host, selfHosted, persistent, client, createdAt, lastConnection, state}], servers: [host], certificates: [{id, host}]}` (ADR 0013); `selfHosted` goes by the host; `servers`: the self-hosted servers the user allowed; `certificates`: their new certificates waiting for the user's word |
+| `webSetEnabled` | `enabled` | like `webSessions`: the Threema Web switch; off refuses `webPair`, `webStart` and wake-ups (`webDisabled`) and disconnects running sessions (telling the browser `disable`), keeping the pairings the browser stored |
+| `webSessions` | – | `{enabled, sessions: [{id, host, selfHosted, persistent, client, createdAt, lastConnection, state}], servers: [host], certificates: [{id, host}]}` (ADR 0013); `selfHosted` goes by the host; `servers`: the self-hosted servers the user allowed; `certificates`: their new certificates waiting for the user's word |
 | `webPair` | `qr`, `allowHost` | the new session; a host outside threema.ch first answers `{confirmHost}` and needs `allowHost` |
 | `webStart` / `webStop` / `webDelete` | `session` | `{}`: connect a stored session / disconnect / forget it (also ends its task's authority) |
 | `webAcceptCertificate` | `session` | `{}`: pin a self-hosted server's new certificate and connect again; `{scanAgain: true}`: pinned, but the session was never stored by the browser, so its code must be scanned again |

@@ -777,6 +777,61 @@ ApplicationWindow {
         }]
     }
 
+    // While a browser is connected to Threema Web: it reads and sends through this phone, perhaps
+    // after a push woke its session, and nothing else here shows that. Silent, with one banner per
+    // new connection, and it stays when tapped. It says nothing about any chat, so it also stays
+    // under the app lock.
+    Notification {
+        id: webConnectedNotification
+        // How many browsers it tells of.
+        property int count: 0
+        property bool quitting: false
+        appName: "Threesea"
+        appIcon: "harbour-threesea"
+        urgency: Notification.Low
+        resident: true
+        expireTimeout: 0
+        //% "Connected to Threema Web"
+        summary: qsTrId("threesea-la-web-connected-notification")
+        remoteActions: [window.dbusAction("default", "", "showWebSessions", "")]
+        // Dismissed, also with Clear all: back at once while a browser is connected, as the system
+        // has no notification that can't be dismissed for this type. Once per dismissal: publishing
+        // doesn't close it, and with nothing connected updateWebConnected() closes nothing.
+        onClosed: {
+            replacesId = 0
+            if (!quitting) window.updateWebConnected()
+        }
+    }
+    function updateWebConnected() {
+        backend.call("webSessions", {}, function(ok, result) {
+            // Not known, which doesn't mean nothing is connected.
+            if (!ok) return
+            var n = webConnectedNotification
+            var count = result.sessions.filter(function(session) { return session.state === "connected" }).length
+            if (count === 0) {
+                n.count = 0
+                if (n.replacesId !== 0) {
+                    n.close()
+                    n.replacesId = 0
+                }
+                return
+            }
+            if (count === n.count && n.replacesId !== 0) return
+            //% "%n browser(s) can read and send your messages through this phone. Tap to manage."
+            n.body = qsTrId("threesea-la-web-connected-notification-body", count)
+            // A banner for a new browser, not for one leaving or a dismissal undone.
+            n.previewSummary = count > n.count ? n.summary : ""
+            n.previewBody = count > n.count ? n.body : ""
+            n.count = count
+            n.publish()
+        })
+    }
+    // The sessions end with the app; if it is killed, takeOver() closes this at the next start.
+    Component.onDestruction: {
+        webConnectedNotification.quitting = true
+        webConnectedNotification.close()
+    }
+
     // A self-hosted Threema Web server shows a new certificate, perhaps for a session a push woke
     // while Threema Web's page is closed: that page asks about it.
     Notification {
@@ -1524,6 +1579,8 @@ ApplicationWindow {
                 window.licenseNotification()
             } else if (name === "deviceCookieChanged") {
                 deviceCookieNotification.publish()
+            } else if (name === "webSession") {
+                window.updateWebConnected()
             } else if (name === "webCertificateChanged") {
                 // Not when the page is there to ask at once.
                 var page = pageStack.currentPage

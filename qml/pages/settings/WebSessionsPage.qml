@@ -4,14 +4,17 @@ import Sailfish.Silica 1.0
 import "../../components/Errors.js" as Errors
 import "../../components/Format.js" as Fmt
 
-// Threema Web (ADR 0013): the browsers this phone serves, like Linked devices. Pull down to scan
-// the code web.threema.ch shows; tap a session to connect or disconnect it; long press to remove.
+// Threema Web (ADR 0013): the switch and the browsers this phone serves, like Linked devices. Pull
+// down to scan the code web.threema.ch shows; tap a session to connect or disconnect it; long press
+// to remove.
 Page {
     id: page
     // The window opens this page from its notifications, unless it is on top already.
     objectName: "webSessions"
     allowedOrientations: Orientation.All
 
+    // The core's switch; off, nothing connects.
+    property bool webOn: true
     property var sessions: []
     // The self-hosted servers the user allowed.
     property var servers: []
@@ -22,6 +25,7 @@ Page {
     function load(done) {
         backend.call("webSessions", {}, function(ok, result) {
             if (ok) {
+                page.webOn = result.enabled
                 page.sessions = result.sessions
                 page.servers = result.servers
                 page.certificates = result.certificates
@@ -124,6 +128,7 @@ Page {
         model: page.sessions
 
         PullDownMenu {
+            visible: page.webOn
             MenuItem {
                 //% "Scan Threema Web code"
                 text: qsTrId("threesea-me-scan-web-code")
@@ -134,13 +139,29 @@ Page {
             }
         }
 
-        header: PageHeader {
-            //% "Threema Web"
-            title: qsTrId("threesea-he-threema-web")
+        header: Column {
+            width: parent.width
+
+            PageHeader {
+                //% "Threema Web"
+                title: qsTrId("threesea-he-threema-web")
+            }
+            TextSwitch {
+                automaticCheck: false
+                checked: page.webOn
+                //% "Threema Web"
+                text: qsTrId("threesea-la-web-enabled")
+                //% "Lets the browsers listed here connect to this phone and use your chats. Turning it off disconnects them and keeps them in the list."
+                description: qsTrId("threesea-la-web-enabled-description")
+                onClicked: backend.call("webSetEnabled", { enabled: !checked }, function(ok, result, kind, message) {
+                    if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                    page.load()
+                })
+            }
         }
 
         ViewPlaceholder {
-            enabled: list.count === 0 && page.servers.length === 0
+            enabled: page.webOn && list.count === 0 && page.servers.length === 0
             //% "No browsers"
             text: qsTrId("threesea-la-web-none")
             //% "Open web.threema.ch in a browser and pull down to scan its code"

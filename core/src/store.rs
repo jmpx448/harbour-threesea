@@ -131,6 +131,8 @@ pub mod keys {
     pub const VIDEO_QUALITY: &str = "videoQuality";
     /// Group calls ("0" off; default on). Android's synced group call policy, not in Safe.
     pub const GROUP_CALLS: &str = "groupCalls";
+    /// Threema Web ("0" off: no pairing, connecting or wake-ups; default on).
+    pub const WEB_ENABLED: &str = "webEnabled";
     /// Directory match token (address book matching).
     pub const MATCH_TOKEN: &str = "matchToken";
     /// Our profile picture's version (changes with it; absent: none).

@@ -769,6 +769,9 @@ pub enum Command {
     GroupCallTick,
     /// Threema Web (ADR 0013), see app_web.rs (`session`: `id` is the request's own).
     WebSessions,
+    WebSetEnabled {
+        enabled: bool,
+    },
     WebPair {
         qr: String,
         #[serde(default)]
@@ -1060,7 +1063,7 @@ pub enum ApiError {
     #[error("group call version not supported")]
     GroupCallVersion,
     /// Threema Web: not its code / another protocol version / no such session / this browser is
-    /// already in the list.
+    /// already in the list / switched off.
     #[error("not a Threema Web code")]
     WebCodeInvalid,
     #[error("Threema Web version not supported")]
@@ -1069,6 +1072,8 @@ pub enum ApiError {
     WebSessionNotFound,
     #[error("this browser already has a Threema Web session")]
     WebAlreadyPaired,
+    #[error("Threema Web is off")]
+    WebDisabled,
     /// The contact's app can't do this (edit or delete for everyone).
     #[error("not supported by the contact")]
     NotSupportedByContact,
@@ -1151,6 +1156,7 @@ impl ApiError {
             Self::WebVersion => "webVersion",
             Self::WebSessionNotFound => "webSessionNotFound",
             Self::WebAlreadyPaired => "webAlreadyPaired",
+            Self::WebDisabled => "webDisabled",
             Self::LinkUnknownCode => "linkUnknownCode",
             Self::LinkWebCode => "linkWebCode",
             Self::LinkVersion => "linkVersion",
@@ -2038,6 +2044,7 @@ impl App {
             Command::GroupCallCamera { on } => Ok(self.group_call_camera(on)),
             Command::GroupCallTick => self.group_call_tick(),
             Command::WebSessions => self.web_sessions_json(),
+            Command::WebSetEnabled { enabled } => self.web_set_enabled(enabled),
             Command::WebPair { qr, allow_host } => self.web_pair(&qr, allow_host),
             Command::WebStart { session } => self.web_start(session),
             Command::WebStop { session } => Ok(self.web_stop(session)),

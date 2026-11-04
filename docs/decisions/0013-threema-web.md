@@ -33,6 +33,12 @@ The QR code of a self-hosted Threema Web can name any signalling server.
   gone by then, so accepting pins the certificate and asks for the code again.
   The sessions page lists the allowed servers; removing one takes its permission, its pin and its
   sessions, and the next code naming it asks again.
+- **Control**, as on Android: a switch stored in the core that pairing, connecting and wake-ups
+  obey (off disconnects what is running and keeps the pairings the browser stored), and a silent
+  notification for as long as a browser is connected, with one banner per new connection, leading
+  to the sessions page. Dismissed, it comes straight back: Nemo's type can't make it undismissable,
+  and it is the only sign. A browser disconnected by tap can come back with a push, as on Android;
+  removing it or the switch keeps it out, and the page says so. Both flavours.
 - New dependency: `rmpv` (msgpack values), pinned; SaltyRTC and its crypto are our own code on
   libthreema's X25519/HSalsa20 and the `crypto_secretbox` crate already used.
 

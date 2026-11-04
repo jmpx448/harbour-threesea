@@ -2,7 +2,7 @@
 //! Threema Web in the app (ADR 0013): pairing from a scanned code, one task per running session
 //! (WebSocket, SaltyRTC responder, ARP connection layer), and the app's answers to the browser.
 //!
-//! Commands: `webSessions`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
+//! Commands: `webSessions`, `webSetEnabled {enabled}`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
 //! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`, `webDeclineCertificate
 //! {session}`, `webRemoveServer {host}`. Events: `webSession {id, state, error?}`
 //! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
@@ -132,6 +132,8 @@ pub(crate) enum StopReason {
     Stop,
     /// Removed here: the browser should forget the session.
     Delete,
+    /// Threema Web was switched off: the pairing stays for when it is on again.
+    Disable,
 }
 
 impl StopReason {
@@ -139,6 +141,7 @@ impl StopReason {
         match self {
             Self::Stop => "stop",
             Self::Delete => "delete",
+            Self::Disable => "disable",
         }
     }
 }
@@ -254,7 +257,23 @@ impl App {
         (rx, task)
     }
 
-    /// `webSessions`: `{sessions: [{id, host, selfHosted, persistent, client, createdAt,
+    /// The user's switch. Off, nothing connects: not from a scanned code, a tap or a wake-up.
+    fn web_enabled(&self) -> Result<bool, ApiError> {
+        Ok(self.store.setting(keys::WEB_ENABLED)?.as_deref() != Some("0"))
+    }
+
+    /// `webSetEnabled {enabled}`: like `webSessions`. Off also disconnects what is running; the
+    /// pairings stay.
+    pub(crate) fn web_set_enabled(&mut self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        self.store
+            .set_setting(keys::WEB_ENABLED, if enabled { "1" } else { "0" })?;
+        if !enabled {
+            self.web_stop_all(StopReason::Disable);
+        }
+        self.web_sessions_json()
+    }
+
+    /// `webSessions`: `{enabled, sessions: [{id, host, selfHosted, persistent, client, createdAt,
     /// lastConnection, state}], servers: [host], certificates: [{id, host}]}` (`servers`: the
     /// self-hosted ones allowed; `certificates`: new ones waiting for the user's word).
     pub(crate) fn web_sessions_json(&self) -> Result<serde_json::Value, ApiError> {
@@ -280,6 +299,7 @@ impl App {
             .map(|(id, changed)| json!({ "id": id, "host": changed.host }))
             .collect();
         Ok(json!({
+            "enabled": self.web_enabled()?,
             "sessions": sessions,
             "servers": self.store.web_hosts()?,
             "certificates": certificates,
@@ -293,6 +313,9 @@ impl App {
         code: &str,
         allow_host: bool,
     ) -> Result<serde_json::Value, ApiError> {
+        if !self.web_enabled()? {
+            return Err(ApiError::WebDisabled);
+        }
         let qr = qr::parse(code).map_err(|error| match error {
             qr::QrError::Invalid => ApiError::WebCodeInvalid,
             qr::QrError::Version(_) => ApiError::WebVersion,
@@ -361,9 +384,12 @@ impl App {
         // Say so before asking anything about pairing it.
         if code["kind"] == "web"
             && let Ok(qr) = qr::parse(text)
-            && self.web_session_in_use(&self.web_sessions_of_browser(&qr.initiator_key)?)
         {
-            code["error"] = json!(ApiError::WebAlreadyPaired.kind());
+            if !self.web_enabled()? {
+                code["error"] = json!(ApiError::WebDisabled.kind());
+            } else if self.web_session_in_use(&self.web_sessions_of_browser(&qr.initiator_key)?) {
+                code["error"] = json!(ApiError::WebAlreadyPaired.kind());
+            }
         }
         Ok(code)
     }
@@ -375,9 +401,13 @@ impl App {
     }
 
     /// The push relay woke us for a stored session (its browser key's hex SHA-256): connect it,
-    /// if the browser stored it too.
+    /// if the browser stored it too and Threema Web is on.
     pub(crate) fn web_resume(&mut self, hash: &str) {
         use sha2::{Digest as _, Sha256};
+        if !self.web_enabled().unwrap_or(false) {
+            tracing::info!("Threema Web wake-up while it is off");
+            return;
+        }
         let Ok(sessions) = self.store.web_sessions() else {
             return;
         };
@@ -403,14 +433,30 @@ impl App {
         json!({})
     }
 
-    /// Stop every session and forget what they were waiting for: the identity they were paired
-    /// with is going away (security audit 2026-10-27, S01) with `Delete`, or the license was
-    /// refused with `Stop`, which leaves the pairings for when it is accepted again.
+    /// Stop every session at once and forget what they were waiting for: the identity they were
+    /// paired with is going away (security audit 2026-10-27, S01) with `Delete`; the license was
+    /// refused with `Stop` or Threema Web switched off with `Disable`, which leave the pairings.
+    /// Their tasks have no say any more, so this is also where their end is reported.
     pub(crate) fn web_stop_all(&mut self, reason: StopReason) {
-        for running in self.web.running.values() {
+        let running: Vec<(i64, Running)> = self.web.running.drain().collect();
+        for (id, running) in running {
+            // As when its task ends by itself: one the browser never stored can't come back, so
+            // it goes, and the browser hears that (Android does this when switched off too).
+            let never_stored = matches!(
+                self.store.web_session(id),
+                Ok(Some(session)) if !session.persistent
+            );
+            let reason = if never_stored {
+                StopReason::Delete
+            } else {
+                reason
+            };
             let _ = running.tx.send(ToWeb::Stop(reason));
+            if never_stored {
+                let _ = self.store.remove_web_session(id);
+            }
+            self.emit_web_state(id, "stopped", None);
         }
-        self.web.running.clear();
         self.web.changed.clear();
         self.web.subscriptions.clear();
         self.web.pending_blobs.clear();
@@ -418,7 +464,8 @@ impl App {
 
     /// `webDelete {session}`: stop and forget the session.
     pub(crate) fn web_delete(&mut self, id: i64) -> Result<serde_json::Value, ApiError> {
-        if let Some(running) = self.web.running.remove(&id) {
+        let running = self.web.running.remove(&id);
+        if let Some(running) = &running {
             let _ = running.tx.send(ToWeb::Stop(StopReason::Delete));
         }
         // Nothing waiting for it may reach a later session with the same ID.
@@ -426,6 +473,10 @@ impl App {
         self.web.subscriptions.remove(&id);
         self.web.pending_blobs.retain(|blob| blob.session != id);
         self.store.remove_web_session(id)?;
+        // Its task has no say any more, so its end is reported here.
+        if running.is_some() {
+            self.emit_web_state(id, "stopped", None);
+        }
         Ok(json!({}))
     }
 
@@ -486,6 +537,9 @@ impl App {
         id: i64,
         token: Option<Zeroizing<[u8; 32]>>,
     ) -> Result<(), ApiError> {
+        if !self.web_enabled()? {
+            return Err(ApiError::WebDisabled);
+        }
         if self.web.running.contains_key(&id) {
             return Ok(());
         }

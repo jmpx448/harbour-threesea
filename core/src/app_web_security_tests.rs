@@ -1077,7 +1077,11 @@ fn web_goodbye_says_whether_the_pairing_stays() {
     app.web_stop_all(StopReason::Stop);
     assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Stop))));
 
-    for (reason, wire) in [(StopReason::Stop, "stop"), (StopReason::Delete, "delete")] {
+    for (reason, wire) in [
+        (StopReason::Stop, "stop"),
+        (StopReason::Delete, "delete"),
+        (StopReason::Disable, "disable"),
+    ] {
         let message = goodbye(reason);
         let data = crate::web::saltyrtc::field(&message, "data").unwrap();
         assert_eq!(
@@ -1353,4 +1357,129 @@ async fn web_declined_certificate_is_forgotten() {
         .await
         .unwrap();
     assert!(app.web.changed.is_empty());
+}
+
+/// The hash a wake-up names this browser by.
+fn web_wake_up_hash(browser: u8) -> String {
+    use sha2::{Digest as _, Sha256};
+    HEXLOWER.encode(&Sha256::digest([browser; 32]))
+}
+
+/// Off, nothing connects: no code, no tap, no wake-up.
+#[tokio::test(flavor = "current_thread")]
+async fn web_switched_off_refuses_everything_that_connects() {
+    let (_dir, mut app) = fixture();
+    assert_eq!(app.web_sessions_json().unwrap()["enabled"], true);
+    let id = stored_web_session(&app, 1, WEB_HOST, true);
+    app.web_set_enabled(false).unwrap();
+    assert_eq!(app.web_sessions_json().unwrap()["enabled"], false);
+
+    let code = web_code(2, WEB_HOST);
+    assert!(matches!(
+        app.web_pair(&code, false),
+        Err(ApiError::WebDisabled)
+    ));
+    assert_eq!(
+        app.classify_qr(&code).unwrap()["error"],
+        ApiError::WebDisabled.kind()
+    );
+    // A host isn't allowed on the way to being refused.
+    assert!(matches!(
+        app.web_pair(&web_code(2, "web.example.org"), true),
+        Err(ApiError::WebDisabled)
+    ));
+    assert_eq!(app.store.web_host("web.example.org").unwrap(), None);
+    assert!(matches!(app.web_start(id), Err(ApiError::WebDisabled)));
+    app.web_resume(&web_wake_up_hash(1));
+    assert!(app.web.running.is_empty(), "a wake-up connected nothing");
+    assert_eq!(app.store.web_sessions().unwrap().len(), 1);
+
+    // On again: the stored session wakes up.
+    app.web_set_enabled(true).unwrap();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            app.web_resume(&web_wake_up_hash(1));
+        })
+        .await;
+    assert!(app.web.running.contains_key(&id));
+}
+
+/// Switching off ends running sessions at once: stored ones are told "disable", what the browser
+/// never stored is gone and told "delete", all reported to the window, no more say for the tasks.
+#[tokio::test(flavor = "current_thread")]
+async fn web_switching_off_stops_running_sessions() {
+    let (_dir, mut app) = fixture();
+    let mut events = app.take_media_events().unwrap();
+    let stored = stored_web_session(&app, 1, WEB_HOST, true);
+    let (mut rx, task) = app.web_test_session(stored);
+    let never_stored = stored_web_session(&app, 2, WEB_HOST, false);
+    let (mut other_rx, _) = app.web_test_session(never_stored);
+
+    let after = app.web_set_enabled(false).unwrap();
+
+    assert_eq!(after["enabled"], false);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ToWeb::Stop(StopReason::Disable))
+    ));
+    assert!(matches!(
+        other_rx.try_recv(),
+        Ok(ToWeb::Stop(StopReason::Delete))
+    ));
+    assert!(app.web.running.is_empty());
+    assert!(app.store.web_session(stored).unwrap().is_some());
+    assert!(app.store.web_session(never_stored).unwrap().is_none());
+    let mut stopped = Vec::new();
+    while let Ok(CoreEvent::Call(event)) = events.try_recv() {
+        assert_eq!(event["state"], "stopped");
+        stopped.push(event["id"].as_i64().unwrap());
+    }
+    stopped.sort_unstable();
+    assert_eq!(stopped, vec![stored, never_stored]);
+
+    let message = arp::message("request", "profile", None, None);
+    app.on_web_event((
+        task,
+        FromWeb::Message {
+            session: stored,
+            message,
+        },
+    ))
+    .await;
+    assert!(rx.try_recv().is_err(), "a stopped task's request isn't run");
+}
+
+/// The window takes down its notification on this event: removing a connected session has to
+/// report it, as its task's own end no longer counts.
+#[test]
+fn web_removing_a_connected_session_reports_its_end() {
+    let (_dir, mut app) = fixture();
+    let mut events = app.take_media_events().unwrap();
+    let id = stored_web_session(&app, 1, WEB_HOST, true);
+    let _rx = app.web_test_session(id);
+    app.web_delete(id).unwrap();
+    let Ok(CoreEvent::Call(event)) = events.try_recv() else {
+        panic!("no event");
+    };
+    assert_eq!(event["state"], "stopped");
+    assert_eq!(event["id"], id);
+}
+
+/// A refused license leaves a stored pairing alone, but a session the browser never stored can't
+/// survive it, so that browser hears "delete".
+#[test]
+fn web_refused_license_keeps_only_stored_pairings() {
+    let (_dir, mut app) = fixture();
+    let stored = stored_web_session(&app, 1, WEB_HOST, true);
+    let (mut rx, _) = app.web_test_session(stored);
+    let never_stored = stored_web_session(&app, 2, WEB_HOST, false);
+    let (mut other_rx, _) = app.web_test_session(never_stored);
+    app.web_stop_all(StopReason::Stop);
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Stop))));
+    assert!(matches!(
+        other_rx.try_recv(),
+        Ok(ToWeb::Stop(StopReason::Delete))
+    ));
+    assert!(app.store.web_session(stored).unwrap().is_some());
+    assert!(app.store.web_session(never_stored).unwrap().is_none());
 }
