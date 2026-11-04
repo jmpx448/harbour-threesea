@@ -13,10 +13,10 @@ use libthreema::{
         Encapsulation, EncapsulationError, FsSessionStore, FsStatus, encapsulate,
         ratchet::Ratchet,
         session::{Session, SessionId, SessionState, Versions},
-        terminate_all,
+        terminate_all, terminate_all_with_cause,
     },
     model::provider::ProviderError,
-    protobuf::common::GroupIdentity,
+    protobuf::{common::GroupIdentity, csp_e2e_fs::terminate},
 };
 use rusqlite::{OptionalExtension as _, Row, params};
 
@@ -294,6 +294,35 @@ impl FsSessionStore for StoreFs {
 
 /// Two parties with our real stores exchange FS payloads through libthreema's incoming message
 /// task (no network): exactly the bytes the connection would send.
+/// `peer` has no forward secrecy any more, as found from outside the connection: end its sessions.
+/// Returns the `Terminate` envelopes to send.
+///
+/// # Errors
+///
+/// Storage failures.
+pub fn end_sessions(
+    store: &Rc<Store>,
+    my_identity: ThreemaId,
+    peer: ThreemaId,
+) -> Result<Vec<Vec<u8>>, ProviderError> {
+    let events = EventSink::default();
+    let mut fs = StoreFs {
+        store: Rc::clone(store),
+        my_identity,
+        events: Rc::clone(&events),
+    };
+    terminate_all_with_cause(&mut fs, peer, terminate::Cause::DisabledByRemote)?;
+    let envelopes = events
+        .borrow_mut()
+        .drain(..)
+        .filter_map(|event| match event {
+            CoreEvent::FsControl { envelope, .. } => Some(envelope),
+            _ => None,
+        })
+        .collect();
+    Ok(envelopes)
+}
+
 /// [`fs::encapsulate`] for the connection: a session that can't be used (not one of the states a
 /// session can be in) is ended, with a Terminate for the peer, and replaced by a new one, so that
 /// one bad session costs a reset line and not this contact's messages. With `true` if that
@@ -350,9 +379,13 @@ mod tests {
         },
         csp::payload::MessageWithMetadataBox,
         csp_e2e::{
-            CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, fs,
+            CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit,
+            contacts::lookup::ContactsLookupResponse,
+            fs,
             message::task::{
-                incoming::IncomingMessageLoop,
+                incoming::{
+                    IncomingMessageInstruction, IncomingMessageLoop, IncomingMessageResponse,
+                },
                 outgoing::{
                     encode_contact_message_body, encode_outgoing_contact_message,
                     encode_outgoing_contact_message_encapsulated,
@@ -360,6 +393,7 @@ mod tests {
                 },
             },
         },
+        https::HttpsResponse,
         model::{
             contact::ContactInit,
             message::{
@@ -853,6 +887,116 @@ mod tests {
             .execute("UPDATE fs_sessions SET my_2dh_key = x'0404'", [])
             .unwrap();
         assert!(fs.get(peer, id).unwrap().is_none());
+    }
+
+    /// What libthreema does with a sender it doesn't know: ask the directory, then go on.
+    fn answer_directory(party: &mut Party, payload: MessageWithMetadataBox, sender: &Party) {
+        let public_key = data_encoding::HEXLOWER
+            .decode(
+                ClientKey::from(sender.key)
+                    .public_key()
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let public_key = data_encoding::BASE64.encode(&public_key);
+        let mut task = party.e2e.handle_incoming_message(payload);
+        loop {
+            match task.poll(party.e2e.context()).unwrap() {
+                IncomingMessageLoop::Done(result) => {
+                    assert!(result.outgoing_message_ack.is_some());
+                    break;
+                }
+                IncomingMessageLoop::Instruction(IncomingMessageInstruction::FetchSender(_)) => {
+                    let body = serde_json::json!({ "identities": [{
+                        "identity": sender.id.to_string(),
+                        "type": 0,
+                        "publicKey": public_key,
+                        "state": 0,
+                        "featureMask": FeatureMask::FORWARD_SECURITY_SUPPORT,
+                    }] });
+                    task.response(IncomingMessageResponse::FetchSender(
+                        ContactsLookupResponse {
+                            directory_result: Ok(HttpsResponse {
+                                status: 200,
+                                body: body.to_string().into_bytes(),
+                            }),
+                            work_directory_result: None,
+                        },
+                    ))
+                    .unwrap();
+                }
+                IncomingMessageLoop::Instruction(_) => panic!("only the lookup is expected"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stranger_who_writes_first_gets_the_accept_so_the_first_reply_is_not_rejected() {
+        let (alice_key, bob_key) = ([1; 32], [2; 32]);
+        let mut alice = Party::new("ABCD1234", alice_key, ("EFGH5678", bob_key));
+        // Bob has someone else as a contact, and no idea who Alice is.
+        let mut bob = Party::new("EFGH5678", bob_key, ("IJKL9012", [3; 32]));
+        let config = Config::from(ConfigEnvironment::Production);
+
+        let init = alice.send_text(&bob, "hello").swap_remove(0);
+        answer_directory(&mut bob, init, &alice);
+        assert!(bob.store.contact("ABCD1234").unwrap().is_none());
+
+        let event = bob
+            .events
+            .borrow_mut()
+            .drain(..)
+            .find_map(|event| match event {
+                CoreEvent::FsControl {
+                    peer_key, envelope, ..
+                } => Some((peer_key, envelope)),
+                _ => None,
+            });
+        let (peer_key, envelope) = event.expect("the Accept");
+        let (to, key) =
+            crate::providers::control_receiver(&bob.store, &config, "ABCD1234", peer_key)
+                .unwrap()
+                .expect("goes out without a contact");
+        assert_eq!(to, alice.id);
+        assert!(key == ClientKey::from(alice.key).public_key());
+
+        // She gets it, and is in the state in which Bob's 4DH reply is no surprise.
+        let accept = bob.control(&alice, &envelope);
+        let _ = alice.receive(&bob, vec![accept]);
+        let session = alice.fs().get_best(bob.id).unwrap().unwrap();
+        assert_eq!(session.state(), Ok(SessionState::RL44));
+
+        // The same stranger with unknown senders blocked hears nothing, and keeps the session.
+        bob.store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockUnknown": true }).to_string(),
+            )
+            .unwrap();
+        assert!(
+            crate::providers::control_receiver(&bob.store, &config, "ABCD1234", peer_key)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ending_sessions_from_outside_gives_the_terminates_to_send() {
+        let (alice, bob) = established();
+        assert_eq!(session_count(&alice, &bob), 1);
+        let id = alice.fs().get_best(bob.id).unwrap().unwrap().id;
+        let envelopes = end_sessions(&alice.store, alice.id, bob.id).unwrap();
+        assert_eq!(session_count(&alice, &bob), 0);
+        assert_eq!(envelopes.len(), 1);
+        let (_, replies) = {
+            let mut bob = bob;
+            let terminate = alice.control(&bob, &envelopes[0]);
+            let answer = bob.receive(&alice, vec![terminate]);
+            assert!(bob.fs().get(alice.id, id).unwrap().is_none());
+            answer
+        };
+        assert!(replies.is_empty(), "a Terminate gets no answer");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     app::{ApiError, App},
+    connection::ToConnection,
     contacts::{self, Lookup},
     safe::backup,
     store::keys,
@@ -530,9 +531,51 @@ impl App {
         if !demoted {
             self.store.delete_contact(&key)?;
         }
-        // Forward security sessions belong to the contact.
+        // Forward security sessions belong to the contact. Like Android, without a Terminate: it
+        // would show them a reset line the moment they are deleted. Their next message is rejected.
         self.store.delete_fs_sessions(&key)?;
         Ok(json!({}))
+    }
+
+    /// The directory says that `contact` has dropped forward secrecy: end what is left of the
+    /// sessions, and say so in its chat (Android's `OnFSFeatureMaskDowngradedTask`).
+    pub(crate) fn fs_support_lost(
+        &self,
+        contact: &libthreema::model::contact::Contact,
+    ) -> Result<(), ApiError> {
+        let own = self.store.identity()?.map(|own| own.threema_id);
+        let Some(own) = own.and_then(|own| own.parse().ok()) else {
+            return Ok(());
+        };
+        let envelopes = match crate::fs_store::end_sessions(&self.store, own, contact.identity) {
+            Ok(envelopes) => envelopes,
+            Err(error) => {
+                tracing::warn!(%error, "cannot end forward secrecy sessions");
+                return Ok(());
+            }
+        };
+        if envelopes.is_empty() {
+            return Ok(());
+        }
+        let peer = contact.identity.to_string();
+        for envelope in envelopes {
+            self.tell_connection(ToConnection::FsControl {
+                peer: peer.clone(),
+                peer_key: Some(contact.public_key),
+                envelope,
+            });
+        }
+        if crate::providers::shows_fs_status(&self.store, &self.config, &peer)?
+            && let Some(message) = self.store.insert_status(&peer, "fsUnavailable")?
+        {
+            let _ = self
+                .media_events
+                .send(crate::providers::CoreEvent::MessageAdded {
+                    message,
+                    send_delivery_receipt: false,
+                });
+        }
+        Ok(())
     }
 
     fn revocation_json(&self, checked: bool) -> Result<Value, ApiError> {
@@ -765,8 +808,12 @@ impl App {
             let Some(mut contact) = self.store.contact(&id)? else {
                 continue;
             };
+            let had_fs = contacts::has_fs_support(&contact);
             if contacts::apply_lookup(&self.config, &mut contact, result) {
                 self.store.upsert_contact(&contact)?;
+                if had_fs && !contacts::has_fs_support(&contact) {
+                    self.fs_support_lost(&contact)?;
+                }
                 changed = true;
             }
         }

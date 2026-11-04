@@ -177,6 +177,12 @@ pub enum Lookup {
     Refused,
 }
 
+/// Whether a contact's feature mask says it supports forward secrecy.
+#[must_use]
+pub fn has_fs_support(contact: &Contact) -> bool {
+    contact.feature_mask.0 & libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT != 0
+}
+
 /// What a directory lookup says about a stored contact: its feature mask and activity state. A
 /// stored key is never replaced here. Returns whether something changed, and so has to be stored.
 pub fn apply_lookup(config: &Config, contact: &mut Contact, result: Lookup) -> bool {

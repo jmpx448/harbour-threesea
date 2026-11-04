@@ -11,8 +11,8 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 
 use libthreema::{
     common::{
-        ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, DeviceCookie, FeatureMask,
-        GroupIdentity, MessageId, Nonce, ThreemaId,
+        ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, DeviceCookie, GroupIdentity,
+        MessageId, Nonce, ThreemaId,
         config::{Config, Flavor},
         keys::{ClientKey, PublicKey},
     },
@@ -183,6 +183,13 @@ pub enum ToConnection {
     DropDevices {
         ids: Option<Vec<u64>>,
         reply: oneshot::Sender<Result<DropOutcome, DeviceGroupError>>,
+    },
+    /// A forward secrecy control message, from outside the incoming messages: the Terminate for
+    /// a deleted contact. Dropped while disconnected: the contact's next message is rejected.
+    FsControl {
+        peer: String,
+        peer_key: Option<PublicKey>,
+        envelope: Vec<u8>,
     },
     /// A call signalling message (ADR 0012); dropped while disconnected, the call times out.
     CallSignal {
@@ -475,11 +482,6 @@ fn requeue_rejected(
 
 /// The status line for a message that came without forward secrecy on a session that has it.
 const FS_MESSAGE_WITHOUT: &str = "fsMessageWithoutFs";
-
-/// Whether a contact's feature mask says it supports forward secrecy.
-fn has_fs_support(contact: &libthreema::model::contact::ContactInit) -> bool {
-    contact.feature_mask.0 & FeatureMask::FORWARD_SECURITY_SUPPORT != 0
-}
 
 /// The status line for a forward secrecy event, if it gets one. Lines only appear for sessions
 /// that existed, and say what happened as far as we know it: a contact that ended a session has
@@ -1458,7 +1460,10 @@ impl<'a> Session<'a> {
         // A session against a stored "no": the mask is stale, or the session is left over. The
         // directory decides, and without its answer the session stays.
         let mut contact = contact;
-        if fs_on && !has_fs_support(&contact) && self.has_fs_session(receiver_identity) {
+        if fs_on
+            && !crate::contacts::has_fs_support(&contact)
+            && self.has_fs_session(receiver_identity)
+        {
             let check = self
                 .check_feature_mask(receiver, FS_MASK_CHECK_INTERVAL)
                 .await?;
@@ -1466,7 +1471,7 @@ impl<'a> Session<'a> {
                 return Ok(None);
             };
             contact = fresh;
-            if check != MaskCheck::Unknown && !has_fs_support(&contact) {
+            if check != MaskCheck::Unknown && !crate::contacts::has_fs_support(&contact) {
                 // Nothing here may keep this message from going out without forward secrecy.
                 match self.end_fs_sessions(receiver) {
                     Ok(controls) => {
@@ -1482,7 +1487,7 @@ impl<'a> Session<'a> {
         // The feature mask alone decides, like Android: a session is no proof, since a peer that
         // dropped forward security answers everything in it with a Terminate or nothing at all.
         // That the mask can be stale the other way round is seen to when an Init arrives.
-        let use_fs = fs_on && has_fs_support(&contact);
+        let use_fs = fs_on && crate::contacts::has_fs_support(&contact);
         // log-ok: the contact's feature mask only
         tracing::debug!(
             feature_mask = contact.feature_mask.0,
@@ -1838,7 +1843,7 @@ impl<'a> Session<'a> {
         let stored = |session: &Self| -> Result<bool, ConnectionError> {
             let contact = session.setup.store.contact(peer).map_err(protocol_error)?;
             // Without a contact there is nothing to go by and nobody to show a line to.
-            Ok(contact.is_none_or(|contact| has_fs_support(&contact)))
+            Ok(contact.is_none_or(|contact| crate::contacts::has_fs_support(&contact)))
         };
         let ending = match status {
             FsStatus::Reset => return stored(self),
@@ -2729,6 +2734,12 @@ impl<'a> Session<'a> {
                     Some(ToConnection::ReflectSync) => self.reflect_queued_syncs().await?,
                     Some(ToConnection::CallSignal { peer, signal }) => {
                         self.send_call_signal(&peer, &signal).await?;
+                    },
+                    Some(ToConnection::FsControl { peer, peer_key, envelope }) => {
+                        if let Some(payload) = self.encode_control(&peer, peer_key, &envelope)? {
+                            self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
+                                .await?;
+                        }
                     },
                     Some(ToConnection::Flush(reply)) => {
                         let _ = reply.send(());

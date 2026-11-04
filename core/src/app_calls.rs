@@ -581,6 +581,60 @@ mod tests {
         (dir, app, rx)
     }
 
+    #[test]
+    fn a_contact_that_dropped_forward_secrecy_is_told_and_the_chat_says_so() {
+        let (_dir, app, mut rx) = app(false);
+        let own: libthreema::common::ThreemaId = "ABCD1234".parse().unwrap();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let mut contact = crate::contacts::test_contact("ECHOECHO");
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
+        app.store.upsert_contact(&contact).unwrap();
+        let client_key = libthreema::common::keys::ClientKey::from([3; 32]);
+        let mut fs = crate::fs_store::StoreFs {
+            store: std::rc::Rc::clone(&app.store),
+            my_identity: own,
+            events: crate::providers::EventSink::default(),
+        };
+        libthreema::csp_e2e::fs::encapsulate(
+            &mut fs,
+            own,
+            &client_key,
+            contact.identity,
+            &contact.public_key,
+            0x01,
+            b"hello",
+            None,
+            1,
+        )
+        .unwrap();
+
+        app.fs_support_lost(&contact).unwrap();
+        assert!(app.store.fs_peers().unwrap().is_empty());
+        let Ok(ToConnection::FsControl { peer, peer_key, .. }) = rx.try_recv() else {
+            panic!("the Terminate");
+        };
+        assert_eq!(peer, "ECHOECHO");
+        assert!(peer_key == Some(contact.public_key));
+        assert!(
+            app.store
+                .newest_is_status("ECHOECHO", "fsUnavailable")
+                .unwrap()
+        );
+
+        // Nothing left to end: no line for it.
+        app.store.insert_status("ECHOECHO", "fsReset").unwrap();
+        app.fs_support_lost(&contact).unwrap();
+        assert!(rx.try_recv().is_err());
+        assert!(app.store.newest_is_status("ECHOECHO", "fsReset").unwrap());
+    }
+
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
