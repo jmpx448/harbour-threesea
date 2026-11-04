@@ -589,6 +589,20 @@ impl Store {
             }))
     }
 
+    /// Does a message with this local id still count for its media? "Message deleted" doesn't: a
+    /// download that outlived its deletion once could leave its file behind.
+    pub fn message_keeps_media(&self, id: i64) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE id = ?1 AND kind != 'deleted'",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Does a message with this local id exist?
     pub fn message_exists(&self, id: i64) -> Result<bool, StoreError> {
         Ok(self

@@ -295,80 +295,112 @@ pub fn download_kind(body: &str) -> &'static str {
 pub const AUTO_DOWNLOAD_WIFI: [&str; 4] = ["image", "audio", "video", "file"];
 pub const AUTO_DOWNLOAD_MOBILE: [&str; 1] = ["image"];
 
-/// Download one part into the media store, updating its state (events go to the UI).
 /// Media downloads running at once (each holds its blob and the decrypted data in memory).
 static DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
 
+/// Android's scopes for `done`: in public scope only for incoming 1:1 messages (group members and
+/// the other devices still need it).
+fn done_scope(outgoing: bool, group: bool) -> media::BlobScope {
+    if !outgoing && !group {
+        media::BlobScope::Public
+    } else {
+        media::BlobScope::Local
+    }
+}
+
+/// One part to fetch: what the task needs, read before it starts.
+struct Download {
+    message: i64,
+    part: MediaPart,
+    key: Zeroizing<[u8; 32]>,
+    blob_id: libthreema::common::BlobId,
+    scope: media::BlobScope,
+    done_scope: media::BlobScope,
+    save_to: Option<std::path::PathBuf>,
+}
+
+impl Download {
+    /// Whether the message is still this file. Row ids come back: once the newest message is
+    /// deleted, the next one gets its id, and a transfer that outlives its message may touch
+    /// nothing then. A deleted file has no keys any more, and another file has others; the sender
+    /// picks the key of a file message, so the blob counts too.
+    fn wanted(&self, store: &Store) -> bool {
+        store.file_keys(self.message).is_ok_and(|keys| {
+            keys.is_some_and(|keys| {
+                let blob_id = match self.part {
+                    MediaPart::File => keys.blob_id,
+                    MediaPart::Thumbnail => keys.thumbnail_blob_id,
+                };
+                *keys.key == *self.key && blob_id.is_some_and(|id| id.0 == self.blob_id.0)
+            })
+        })
+    }
+
+    /// Keep what was fetched, and say so in the message's state; `true` if it is on the device now.
+    /// No await in here: nothing can come between the check and the writes.
+    fn finish(
+        &self,
+        store: &Store,
+        media: &MediaStore,
+        events: &mpsc::UnboundedSender<CoreEvent>,
+        fetched: Result<Vec<u8>, media::MediaError>,
+    ) -> bool {
+        // Deleted meanwhile (for everyone as well): nothing may stay behind, and the id may be
+        // another message's by now.
+        if !self.wanted(store) {
+            tracing::info!(part = ?self.part, "media download dropped, its message is gone");
+            return false;
+        }
+        let stored = fetched.and_then(|blob| {
+            let data = media::decrypt_blob(&self.key, self.part, &blob)?;
+            media.write(self.message, self.part, &data)?;
+            if let Some(directory) = &self.save_to {
+                auto_save(store, self.message, &data, directory);
+            }
+            Ok(())
+        });
+        let state = match &stored {
+            Ok(()) => STATE_LOCAL,
+            Err(error) => {
+                tracing::warn!(%error, part = ?self.part, "media download failed");
+                // What is here already stays good, whatever became of the blob.
+                if media.has(self.message, self.part) {
+                    STATE_LOCAL
+                } else {
+                    STATE_FAILED
+                }
+            }
+        };
+        if let Ok(Some(message)) = store.set_media_state(self.message, self.part, state) {
+            let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
+        }
+        stored.is_ok()
+    }
+}
+
+/// Download one part into the media store, updating its state (events go to the UI).
 async fn download(
     store: Rc<Store>,
     https: HttpsClient,
     media: Arc<MediaStore>,
     events: mpsc::UnboundedSender<CoreEvent>,
-    message: i64,
-    part: MediaPart,
-    save_to: Option<std::path::PathBuf>,
+    job: Download,
 ) {
-    let changed = |result: Result<Option<Message>, StoreError>| {
-        if let Ok(Some(message)) = result {
-            let _ = events.send(CoreEvent::MessagesChanged(vec![message]));
-        }
-    };
-    let keys = match store.file_keys(message) {
-        Ok(Some(keys)) => keys,
-        _ => return,
-    };
-    let Some(blob_id) = (match part {
-        MediaPart::File => keys.blob_id,
-        MediaPart::Thumbnail => keys.thumbnail_blob_id,
-    }) else {
-        return;
-    };
-    // Android's scopes: our own (reflected) messages' blobs are only on the mirror; others'
-    // are public; "done" in public scope only for incoming 1:1 messages (group members and the
-    // other devices still need it).
-    let (outgoing, group) = store
-        .message(message)
-        .ok()
-        .flatten()
-        .map_or((false, false), |m| {
-            (m.outgoing, m.conversation.starts_with("g:"))
-        });
-    let download_scope = if outgoing {
-        media::BlobScope::Local
-    } else {
-        media::BlobScope::Public
-    };
-    let done_scope = if !outgoing && !group {
-        media::BlobScope::Public
-    } else {
-        media::BlobScope::Local
-    };
-    changed(store.set_media_state(message, part, STATE_LOADING));
-    let result = async {
+    let stored = {
         // A few at a time: each can hold a blob of up to 100 MiB, twice (S06).
         let _slot = DOWNLOAD_SLOTS.acquire().await;
-        let limit = match part {
+        if !job.wanted(&store) {
+            return;
+        }
+        let limit = match job.part {
             MediaPart::File => media::MAX_FILE_DOWNLOAD,
             MediaPart::Thumbnail => media::MAX_PICTURE_DOWNLOAD,
         };
-        let blob = media::download(&https, &blob_id, download_scope, limit).await?;
-        let data = media::decrypt_blob(&keys.key, part, &blob)?;
-        media.write(message, part, &data)?;
-        if let Some(directory) = save_to {
-            auto_save(&store, message, &data, &directory);
-        }
-        Ok::<_, media::MediaError>(())
-    }
-    .await;
-    match result {
-        Ok(()) => {
-            changed(store.set_media_state(message, part, STATE_LOCAL));
-            media::mark_done(&https, &blob_id, done_scope).await;
-        }
-        Err(error) => {
-            tracing::warn!(%error, ?part, "media download failed");
-            changed(store.set_media_state(message, part, STATE_FAILED));
-        }
+        let fetched = media::download(&https, &job.blob_id, job.scope, limit).await;
+        job.finish(&store, &media, &events, fetched)
+    };
+    if stored {
+        media::mark_done(&https, &job.blob_id, job.done_scope).await;
     }
 }
 
@@ -827,7 +859,50 @@ impl App {
         }
     }
 
+    /// Start fetching a part. It counts as downloading from here on, before its task first runs:
+    /// the lists of what is still to fetch don't name it again, however many messages arrive
+    /// in one go. A part with no blob stays as it is.
     fn spawn_download(&self, message: i64, part: MediaPart) {
+        let Some(job) = self.download_job(message, part) else {
+            return;
+        };
+        match self.store.set_media_state(message, part, STATE_LOADING) {
+            Ok(Some(changed)) => {
+                let _ = self
+                    .media_events
+                    .send(CoreEvent::MessagesChanged(vec![changed]));
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "marking a media download failed");
+                return;
+            }
+        }
+        tokio::task::spawn_local(download(
+            Rc::clone(&self.store),
+            self.https.clone(),
+            Arc::clone(&self.media),
+            self.media_events.clone(),
+            job,
+        ));
+    }
+
+    fn download_job(&self, message: i64, part: MediaPart) -> Option<Download> {
+        let file = self.store.file_keys(message).ok().flatten()?;
+        let blob_id = match part {
+            MediaPart::File => file.blob_id,
+            MediaPart::Thumbnail => file.thumbnail_blob_id,
+        }?;
+        // Android's scopes: our own (reflected) messages' blobs are only on the mirror; others'
+        // are public.
+        let (outgoing, group) = self
+            .store
+            .message(message)
+            .ok()
+            .flatten()
+            .map_or((false, false), |m| {
+                (m.outgoing, m.conversation.starts_with("g:"))
+            });
         // Settings → Media: received photos and videos also go to the Gallery's folder.
         let save_to = (part == MediaPart::File
             && self
@@ -839,15 +914,19 @@ impl App {
                 == Some("1"))
         .then(|| self.pictures_dir.clone())
         .flatten();
-        tokio::task::spawn_local(download(
-            Rc::clone(&self.store),
-            self.https.clone(),
-            Arc::clone(&self.media),
-            self.media_events.clone(),
+        Some(Download {
             message,
             part,
+            key: file.key,
+            blob_id,
+            scope: if outgoing {
+                media::BlobScope::Local
+            } else {
+                media::BlobScope::Public
+            },
+            done_scope: done_scope(outgoing, group),
             save_to,
-        ));
+        })
     }
 
     /// `downloadFile`: fetch a file (or retry a thumbnail) on request.
@@ -983,7 +1062,7 @@ impl App {
         }
         let store = Rc::clone(&self.store);
         self.media
-            .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
+            .remove_orphans(|id| store.message_keeps_media(id).unwrap_or(true));
         self.download_pending_media();
     }
 }
@@ -1155,6 +1234,221 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &crate::app::StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        (dir, app)
+    }
+
+    /// A received file message whose parts wait on the server, with this blob key.
+    fn received_file(store: &Store, message_id: u64, key: u8) -> i64 {
+        let file = FileMessage {
+            rendering_type: FileRenderingType::Media,
+            key: [key; 32],
+            blob_id: libthreema::common::BlobId([key; 16]),
+            media_type: "image/jpeg".into(),
+            name: Some("a.jpg".into()),
+            size: 1000,
+            thumbnail_blob_id: Some(libthreema::common::BlobId([key + 1; 16])),
+            thumbnail_media_type: None,
+            caption: None,
+            correlation_id: None,
+            metadata: libthreema::model::message::FileMetadata::default(),
+        };
+        let stored = store
+            .insert_incoming(
+                "ABCD1234",
+                message_id,
+                "file",
+                &file_body(&file).to_string(),
+                1,
+            )
+            .unwrap()
+            .unwrap();
+        store.set_file_keys(stored.id, &file_keys(&file)).unwrap();
+        stored.id
+    }
+
+    fn state(store: &Store, message: i64, field: &str) -> Option<i64> {
+        let body: Value = serde_json::from_str(&store.message(message).unwrap()?.body).ok()?;
+        body[field].as_i64()
+    }
+
+    /// Several file messages arriving in one go list each other's parts again and again: each part
+    /// is fetched once, and it counts as downloading before its task has run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_burst_of_files_starts_each_download_once() {
+        let (_dir, mut app) = app();
+        let first = received_file(&app.store, 1, 1);
+        let second = received_file(&app.store, 2, 3);
+        let images = vec!["image".to_owned()];
+        let mut rx = app.take_media_events().unwrap();
+        let local = tokio::task::LocalSet::new();
+        // Ends without yielding: no task runs, so nothing goes to the network.
+        local
+            .run_until(async {
+                app.download_pending_media();
+                assert_eq!(state(&app.store, first, "fileState"), Some(STATE_LOADING));
+                assert_eq!(
+                    state(&app.store, second, "thumbnailState"),
+                    Some(STATE_LOADING)
+                );
+                assert!(app.store.media_to_download(&images, 0).unwrap().is_empty());
+                let third = received_file(&app.store, 3, 5);
+                assert_eq!(
+                    app.store.media_to_download(&images, 0).unwrap(),
+                    vec![(third, MediaPart::Thumbnail), (third, MediaPart::File)]
+                );
+                // A tap on what is downloading already starts nothing either.
+                while rx.try_recv().is_ok() {}
+                app.download_file(first).unwrap();
+                assert!(rx.try_recv().is_err());
+            })
+            .await;
+    }
+
+    /// A part with no blob to fetch doesn't claim to be downloading, or it would stay so.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_part_with_no_blob_keeps_its_state() {
+        let (_dir, mut app) = app();
+        let body = json!({"mediaType": "image/jpeg", "fileState": STATE_FAILED,
+                          "thumbnail": false, "thumbnailState": STATE_FAILED});
+        let message = app
+            .store
+            .insert_incoming("ABCD1234", 1, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async { app.download_file(message.id).unwrap() })
+            .await;
+        assert_eq!(
+            state(&app.store, message.id, "fileState"),
+            Some(STATE_FAILED)
+        );
+    }
+
+    fn job(store: &Store, message: i64, part: MediaPart) -> Download {
+        let keys = store.file_keys(message).unwrap().unwrap();
+        Download {
+            message,
+            part,
+            blob_id: match part {
+                MediaPart::File => keys.blob_id.unwrap(),
+                MediaPart::Thumbnail => keys.thumbnail_blob_id.unwrap(),
+            },
+            key: keys.key,
+            scope: media::BlobScope::Public,
+            done_scope: media::BlobScope::Public,
+            save_to: None,
+        }
+    }
+
+    #[test]
+    fn a_finished_download_is_kept_and_a_late_failure_harms_no_file() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = received_file(&app.store, 1, 1);
+        let download = job(&app.store, id, MediaPart::File);
+        let blob = media::encrypt_blob(&[1; 32], MediaPart::File, b"picture");
+
+        assert!(download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOCAL));
+        assert_eq!(
+            app.media
+                .read(id, MediaPart::File)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b"picture"
+        );
+
+        // A second fetch of the same blob, which the server has dropped since.
+        let gone = Err(media::MediaError::Server("status 404".into()));
+        assert!(!download.finish(&app.store, &app.media, &events, gone));
+        assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOCAL));
+
+        // Nothing here and nothing fetched: failed.
+        let other = job(&app.store, id, MediaPart::Thumbnail);
+        let gone = Err(media::MediaError::Server("status 404".into()));
+        assert!(!other.finish(&app.store, &app.media, &events, gone));
+        assert_eq!(state(&app.store, id, "thumbnailState"), Some(STATE_FAILED));
+    }
+
+    /// Deleted for everyone while it was being fetched: "Message deleted" in the chat, and none of
+    /// the content on the device.
+    #[test]
+    fn a_download_finished_after_the_deletion_stores_nothing() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = received_file(&app.store, 1, 1);
+        let download = job(&app.store, id, MediaPart::File);
+        let blob = media::encrypt_blob(&[1; 32], MediaPart::File, b"picture");
+        app.store.mark_deleted(id, 5).unwrap();
+
+        assert!(!download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert!(!app.media.has(id, MediaPart::File));
+    }
+
+    /// A row id that came back: what was fetched for the old message stays out of the new one,
+    /// and so does its failure.
+    #[test]
+    fn a_late_download_leaves_the_next_message_with_that_id_alone() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = received_file(&app.store, 1, 1);
+        let download = job(&app.store, id, MediaPart::File);
+        let blob = media::encrypt_blob(&[1; 32], MediaPart::File, b"old picture");
+        app.store.remove_message(id).unwrap();
+        let next = received_file(&app.store, 2, 3);
+        assert_eq!(next, id, "SQLite gives the newest row's id out again");
+
+        assert!(!download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert!(!app.media.has(next, MediaPart::File));
+        let failed = Err(media::MediaError::Server("status 404".into()));
+        assert!(!download.finish(&app.store, &app.media, &events, failed));
+        assert_eq!(state(&app.store, next, "fileState"), Some(STATE_REMOTE));
+    }
+
+    /// The same sender using the same key again doesn't make it the same file.
+    #[test]
+    fn a_late_download_goes_by_the_blob_as_well() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        let download = job(&app.store, id, MediaPart::File);
+        assert!(download.wanted(&app.store));
+        let mut keys = app.store.file_keys(id).unwrap().unwrap();
+        keys.blob_id = Some(libthreema::common::BlobId([9; 16]));
+        app.store.set_file_keys(id, &keys).unwrap();
+        assert!(!download.wanted(&app.store));
+    }
+
+    /// A file left by a download that outlived its message's deletion goes at the next start.
+    #[test]
+    fn deleted_messages_keep_no_media() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        assert!(app.store.message_keeps_media(id).unwrap());
+        app.store.mark_deleted(id, 5).unwrap();
+        assert!(app.store.message_exists(id).unwrap());
+        assert!(!app.store.message_keeps_media(id).unwrap());
+    }
 
     /// A photo of a private chat must not land in the Gallery folder, unencrypted, while one of
     /// an ordinary chat does.
