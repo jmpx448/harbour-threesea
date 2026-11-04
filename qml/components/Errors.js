@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 .pragma library
 
+// While the core brings the stored data up to date (`backend.upgrading`).
+function upgradingHint() {
+    //% "Updating the stored chats. This can take a moment; keep Threesea open."
+    return qsTrId("threesea-la-upgrading-hint")
+}
+
 // User-facing text for an error kind returned by the core (see core/src/app.rs ApiError).
 function text(kind, message) {
     switch (kind) {

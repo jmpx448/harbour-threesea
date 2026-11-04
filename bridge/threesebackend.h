@@ -38,6 +38,8 @@ class ThreeseBackend : public QObject
     // needsIdentity | ready | error
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     Q_PROPERTY(QString identity READ identity NOTIFY stateChanged)
+    // State "starting": the core is bringing the stored data up to date, which can take a while.
+    Q_PROPERTY(bool upgrading READ upgrading NOTIFY upgradingChanged)
     // State "error": what went wrong as Errors.js tells it apart, and the same with its code, for
     // support.
     Q_PROPERTY(QString errorKind READ errorKind NOTIFY stateChanged)
@@ -118,6 +120,7 @@ public:
     QString coreVersion() const;
     QString state() const { return m_state; }
     QString identity() const { return m_identity; }
+    bool upgrading() const { return m_upgrading; }
     QString errorKind() const { return m_errorKind; }
     QString errorText() const { return m_errorText; }
     QObject *contacts() const;
@@ -369,6 +372,7 @@ signals:
     void dataRemoved(bool linkedDevicesRemain);
     // Refused (the PIN) before anything happened; the previous state is back.
     void dataRemovalFailed(const QString &kind, const QString &message);
+    void upgradingChanged();
     // Internal: key work done on a worker thread (queued back to this thread).
     void keyWorkDone(quint64 id, const QByteArray &result);
 
@@ -390,6 +394,7 @@ private:
                            bool safeCopy = false);
     void fail(const QString &kind, const QString &detail = QString());
     void failFromCore(const QJsonObject &error);
+    void setUpgrading(bool upgrading);
     // A command that can't reach a core still gets its answer: a refusal, or whoever waits for it
     // (a page holding its text, a reply from a notification) would wait for ever. `id`: the
     // sources of a file command, cleaned up after the answer.
@@ -424,6 +429,7 @@ private:
     QSet<quint64> m_contactRequests;
     QString m_state = QStringLiteral("starting");
     QString m_identity;
+    bool m_upgrading = false;
     QString m_errorKind;
     QString m_errorText;
     QString m_connectionState = QStringLiteral("disconnected");

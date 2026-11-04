@@ -973,6 +973,17 @@ QtObject {
                 check("update", window.pendingUpdate, false)
             }, 0],
         ],
+        // A long upgrade says what is going on; a short one doesn't flash a text.
+        upgradingExplains: [
+            [function() { backend.upgrading = true }, 200],
+            [function() {
+                check("not yet", stack.currentPage.upgradeTakesLong, false)
+            }, 1500],
+            [function() {
+                check("now", stack.currentPage.upgradeTakesLong, true)
+                backend.upgrading = false
+            }, 0],
+        ],
         // A failed start says what happened and how to go on, also when nobody is looking.
         failedStartExplains: [
             [function() {

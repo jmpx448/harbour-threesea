@@ -7,6 +7,7 @@ import QtQuick 2.6
 QtObject {
     property QtObject backend: QtObject {
         property string state: "starting"
+        property bool upgrading: false
         property string errorKind
         property string errorText
         property int startRetries: 0

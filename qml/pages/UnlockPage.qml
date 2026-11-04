@@ -40,6 +40,14 @@ Page {
             entry.errorText = Errors.text("lockNeeded", "")
     }
 
+    // The right passphrase, and the data it opens are being brought up to date first.
+    Connections {
+        target: backend
+        onUpgradingChanged: {
+            if (page.database && backend.upgrading) entry.errorText = Errors.upgradingHint()
+        }
+    }
+
     // Too many wrong PINs: the core checks none until then (like Android, counting down).
     property double pausedUntil: 0
     function showPause() {

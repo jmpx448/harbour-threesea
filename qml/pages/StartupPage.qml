@@ -4,7 +4,16 @@ import Sailfish.Silica 1.0
 import "../components/Errors.js" as Errors
 
 Page {
+    id: page
     allowedOrientations: Orientation.All
+
+    // Not for an upgrade that is over before anyone could read this.
+    property bool upgradeTakesLong: false
+    Timer {
+        interval: 1500
+        running: backend.upgrading
+        onTriggered: page.upgradeTakesLong = true
+    }
 
     // Trying again doesn't make an older version newer.
     readonly property bool canRetry: backend.state === "error"
@@ -43,9 +52,11 @@ Page {
                 bottom: busy.top
                 bottomMargin: Theme.paddingLarge
             }
-            visible: backend.state === "removing"
-            //% "Removing ID and data"
-            text: qsTrId("threesea-la-removing-data")
+            visible: backend.state === "removing" || (backend.upgrading && page.upgradeTakesLong)
+            text: backend.state === "removing"
+                  //% "Removing ID and data"
+                  ? qsTrId("threesea-la-removing-data")
+                  : Errors.upgradingHint()
         }
 
         ViewPlaceholder {

@@ -484,6 +484,7 @@ void ThreeseBackend::fail(const QString &kind, const QString &detail)
     m_errorKind = kind;
     m_errorText = detail.isEmpty() ? kind : kind + QLatin1Char(' ') + detail;
     qWarning("threesea: startup failed: %s", qPrintable(m_errorText)); // log-ok: the app's own codes and core error kinds
+    setUpgrading(false);
     m_state = QStringLiteral("error");
     // Nothing runs, so nothing is there to keep running for, and with the process staying the next
     // launch would only show this window again: closing it must end the process.
@@ -521,6 +522,14 @@ void ThreeseBackend::startAgain()
     m_wrappedKey.clear();
     m_unlockedAtStart = false;
     m_secrets->loadKey(!QFile::exists(databasePath()));
+}
+
+void ThreeseBackend::setUpgrading(bool upgrading)
+{
+    if (upgrading != m_upgrading) {
+        m_upgrading = upgrading;
+        emit upgradingChanged();
+    }
 }
 
 void ThreeseBackend::failFromCore(const QJsonObject &error)
@@ -1162,6 +1171,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
     if (message.contains(QStringLiteral("event"))) {
         const QString name = message.value(QStringLiteral("event")).toString();
         if (name == QLatin1String("started")) {
+            setUpgrading(false);
             if (m_removingData) {
                 // New database, new key, a core running on them: nothing left to finish.
                 QSettings settings;
@@ -1172,6 +1182,8 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
                 QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
             }
             refresh();
+        } else if (name == QLatin1String("upgrading")) {
+            setUpgrading(true);
         } else if (name == QLatin1String("fatal")) {
             failFromCore(message);
         } else if (name == QLatin1String("licenseChanged")) {
