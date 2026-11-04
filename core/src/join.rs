@@ -347,10 +347,8 @@ pub(crate) fn last_updates(store: &Store) -> Result<HashMap<String, u64>, StoreE
         .conversations()?
         .into_iter()
         .map(|(message, _)| {
-            (
-                message.conversation,
-                u64::try_from(message.created_at).unwrap_or_default(),
-            )
+            let at = u64::try_from(message.arrived_at()).unwrap_or_default();
+            (message.conversation, at)
         })
         .collect())
 }

@@ -448,6 +448,7 @@ impl Message {
                 _ => serde_json::from_str(&self.body).unwrap_or(Value::Null),
             },
             "createdAt": self.created_at,
+            "arrivedAt": self.arrived_at(),
             "updatedAt": self.updated_at,
             "state": self.state,
             "editedAt": self.edited_at,
@@ -462,6 +463,15 @@ impl Message {
             // is new. Fits a JavaScript number: a row id shifted by 20 bits (see the migration).
             "sortKey": self.sort_key,
         })
+    }
+}
+
+impl Message {
+    /// When this message reached this device: an incoming `created_at` is the sender's clock,
+    /// which may be off by any amount or set on purpose. What retention and the chat list go by.
+    /// Rows with no arrival time (ours, imported ones, status lines) have only the one clock.
+    pub fn arrived_at(&self) -> i64 {
+        self.received_at.unwrap_or(self.created_at)
     }
 }
 
@@ -1097,10 +1107,12 @@ impl Store {
         let mut statement = self.conn.prepare(&format!(
             // One row per chat straight from the summary the triggers keep (migration 33):
             // its newest message by history position and its unread count, no scan over the
-            // messages. The order is that message's time, with a deterministic tie-break.
+            // messages. The order is when that message arrived (`Message::arrived_at`; a sender's
+            // wrong clock must not pin a chat or bury a new message), with a deterministic
+            // tie-break.
             "SELECT {}, s.unread
              FROM chat_summaries s JOIN messages m ON m.id = s.last_id
-             ORDER BY m.created_at DESC, m.id DESC",
+             ORDER BY COALESCE(m.received_at, m.created_at) DESC, m.id DESC",
             columns()
         ))?;
         let rows = statement.query_map([], |row| Ok((from_row(row)?, row.get::<_, i64>(18)?)))?;
@@ -1144,7 +1156,7 @@ impl Store {
         for entry in markers {
             let place = list
                 .iter()
-                .position(|(m, _)| m.created_at < entry.created_at)
+                .position(|(m, _)| m.arrived_at() < entry.arrived_at())
                 .unwrap_or(list.len());
             list.insert(place, (entry, 0));
         }
@@ -2081,6 +2093,10 @@ mod tests {
         store
             .insert_incoming("00000BOB", 1, "text", "hi", 20)
             .unwrap();
+        store
+            .conn
+            .execute("UPDATE messages SET received_at = created_at", [])
+            .unwrap();
 
         // The group and the list are listed without any message, placed by creation date
         // (a contact without messages is not).
@@ -2111,6 +2127,60 @@ mod tests {
             .find(|(m, _)| m.conversation == group.key)
             .unwrap();
         assert_eq!(state.0.kind, "empty");
+    }
+
+    /// The chat list goes by when a message arrived. A sender's clock a year ahead doesn't pin
+    /// their chat on top, and a message dated long ago still comes up as the new one it is.
+    #[test]
+    fn chat_list_goes_by_arrival_not_by_the_senders_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let now = now_ms();
+        let year = 365 * 86_400_000;
+        let order = |store: &Store| -> Vec<String> {
+            let rows = store.conversations().unwrap();
+            rows.into_iter().map(|(m, _)| m.conversation).collect()
+        };
+        let ahead = store
+            .insert_incoming("AAAAAAAA", 1, "text", "from the future", now + year)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ahead.arrived_at(), ahead.received_at.unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = ?1 WHERE id = ?2",
+                params![now - 1000, ahead.id],
+            )
+            .unwrap();
+        store
+            .insert_incoming("BBBBBBBB", 2, "text", "from the past", now - year)
+            .unwrap();
+        assert_eq!(order(&store), ["BBBBBBBB", "AAAAAAAA"]);
+
+        // Our own message has no arrival time and goes by the one clock it has.
+        store
+            .insert_outgoing("CCCCCCCC", 3, "text", "ours")
+            .unwrap();
+        let own = store.conversations().unwrap().remove(0).0;
+        assert_eq!(own.conversation, "CCCCCCCC");
+        assert_eq!(own.arrived_at(), own.created_at);
+        assert_eq!(
+            own.to_json()["arrivedAt"],
+            serde_json::json!(own.created_at)
+        );
+
+        // A chat emptied just now compares its time with the same value: it stays above a message
+        // dated far ahead that arrived before it.
+        store
+            .insert_incoming("DDDDDDDD", 4, "text", "bye", now)
+            .unwrap();
+        store.empty_conversation("DDDDDDDD").unwrap();
+        store
+            .conn
+            .execute("UPDATE emptied_chats SET at = ?1", [now + 10_000])
+            .unwrap();
+        assert_eq!(order(&store)[0], "DDDDDDDD");
     }
 
     #[test]

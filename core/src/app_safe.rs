@@ -1413,7 +1413,13 @@ mod tests {
                 .unwrap()
                 .last_update
         };
-        assert_eq!(of("BBBBBBBB"), Some(5000));
+        // When it arrived here, not the sender's clock (5000).
+        let arrived = |id: &str| {
+            let newest = app.store.conversation_messages(id, 1).unwrap();
+            Some(newest[0].arrived_at())
+        };
+        assert_eq!(of("BBBBBBBB"), arrived("BBBBBBBB"));
+        assert_ne!(of("BBBBBBBB"), Some(5000));
         assert_eq!(of("CCCCCCCC"), Some(3000));
         assert_eq!(of("DDDDDDDD"), None);
         assert_eq!(of("EEEEEEEE"), Some(7000));
@@ -1432,7 +1438,7 @@ mod tests {
                 .last_update
         };
         assert_eq!(of("BBBBBBBB"), None);
-        assert_eq!(of("CCCCCCCC"), Some(9000));
+        assert_eq!(of("CCCCCCCC"), arrived("CCCCCCCC"));
         // Android's old negative values are no time at all.
         app.store.note_restored_chat("DDDDDDDD", Some(-5)).unwrap();
         assert_eq!(

@@ -142,7 +142,8 @@ Page {
             page.archivedCount = result.archivedCount || 0
             page.privateCount = result.privateCount || 0
             if (page.privateList) window.clearNotification("private")
-            // Day sections like Jolla Messages ("Yesterday", "Monday", "Wednesday, 14 October").
+            // Day sections like Jolla Messages ("Yesterday", "Monday", "Wednesday, 14 October"),
+            // by the same time the core orders the list by.
             // Pinned chats come first (core), under their own section.
             var list = result.conversations
             page.pinnedCount = 0
@@ -153,8 +154,8 @@ Page {
                     page.pinnedCount++
                 } else {
                     // A restored group can come without a creation date: no day section then.
-                    list[i].section = list[i].lastMessage.createdAt > 0
-                                      ? Fmt.day(list[i].lastMessage.createdAt) : ""
+                    list[i].section = list[i].lastMessage.arrivedAt > 0
+                                      ? Fmt.day(list[i].lastMessage.arrivedAt) : ""
                 }
             }
             conversations.update(list)
@@ -441,8 +442,8 @@ Page {
                             right: parent.right
                             baseline: nameLabel.baseline
                         }
-                        text: model.lastMessage.createdAt > 0
-                              ? Fmt.clock(model.lastMessage.createdAt, Format, Formatter) : ""
+                        text: model.lastMessage.arrivedAt > 0
+                              ? Fmt.clock(model.lastMessage.arrivedAt, Format, Formatter) : ""
                         font.pixelSize: Theme.fontSizeExtraSmall
                         color: item.highlighted || item.unread ? Theme.highlightColor : Theme.primaryColor
                     }
