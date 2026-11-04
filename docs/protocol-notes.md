@@ -442,6 +442,13 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   stores it as both and keeps it only if it is a JPEG (Android drops undecodable ones).
 - Not yet: user-defined pictures, gateway avatars.
 
+## Keep messages and Clean up (not protocol)
+
+Both go by when a message reached this device, as Android does: an incoming `created_at` is the
+sender's clock. The phone's own clock remains a weak spot: set far ahead, it makes everything look
+old and a maintenance run deletes too much. Android has the same limit and we leave it; a last-run
+stamp written under such a clock doesn't stop later runs.
+
 ## Share target (Sailfish OS, not Threema)
 
 - Sailfish.Share "app share methods": the `.desktop` file lists `X-Share-Methods=threesea` with a

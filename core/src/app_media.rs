@@ -1142,7 +1142,9 @@ impl App {
             .flatten()
             .and_then(|at| at.parse().ok())
             .unwrap_or(0);
-        if now - last < 12 * 3_600_000 {
+        // A stamp from the future was written under a clock set ahead, and says nothing: waiting
+        // for that date would silently stop Keep messages until then.
+        if last <= now && now - last < 12 * 3_600_000 {
             return false;
         }
         let removed = match self.delete_messages_with_media(now - days_ms(days), true) {
@@ -1996,6 +1998,44 @@ mod tests {
             .search_messages("harbour", None, 10, |_| None)
             .unwrap();
         assert_eq!(found.len(), 1, "the search index survived");
+    }
+
+    /// A last run dated ahead (written while the clock was wrong) doesn't hold Keep messages back
+    /// until that date; one from a few hours ago does hold it back.
+    #[test]
+    fn keep_messages_runs_after_a_last_run_dated_ahead() {
+        let (_dir, mut app) = app();
+        let now = crate::messages::now_ms();
+        let old = app
+            .store
+            .insert_incoming("ABCD1234", 1, "text", "old", 1_000)
+            .unwrap()
+            .unwrap();
+        arrived_when_written(&app.store);
+        app.store.set_setting(keys::AUTO_DELETE_DAYS, "7").unwrap();
+
+        app.store
+            .set_setting(keys::AUTO_DELETE_LAST, &(now - 3_600_000).to_string())
+            .unwrap();
+        assert!(!app.auto_delete_scheduled());
+        assert!(app.store.message(old.id).unwrap().is_some());
+
+        app.store
+            .set_setting(
+                keys::AUTO_DELETE_LAST,
+                &(now + 365 * 86_400_000).to_string(),
+            )
+            .unwrap();
+        assert!(app.auto_delete_scheduled());
+        assert!(app.store.message(old.id).unwrap().is_none());
+        let last: i64 = app
+            .store
+            .setting(keys::AUTO_DELETE_LAST)
+            .unwrap()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(last < now + 86_400_000, "the stamp is back in the present");
     }
 
     /// Keep messages leaves notes groups alone, as Android's auto-delete does: nobody else has a
