@@ -433,7 +433,7 @@ async fn web_sessions_end_with_identity_deletion() {
     let mut rx = browser(&mut app);
     app.delete_all_data().await.unwrap();
     assert!(app.web.running.is_empty());
-    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop)));
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Delete))));
     app.store
         .set_identity(&StoredIdentity {
             threema_id: "DDDDDDDD".into(),
@@ -1060,4 +1060,29 @@ async fn an_existing_id_is_not_replaced() {
     let identity = app.store.identity().unwrap().unwrap();
     assert_eq!(identity.threema_id, "AAAAAAAA");
     assert_eq!(*identity.client_key, [7; 32]);
+}
+
+/// Removing a session tells the browser to forget it; a mere disconnect or a refused license
+/// leaves it the pairing.
+#[test]
+fn web_goodbye_says_whether_the_pairing_stays() {
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    app.web_delete(1).unwrap();
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Delete))));
+
+    let mut rx = browser(&mut app);
+    app.web_stop(1);
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Stop))));
+    app.web_stop_all(StopReason::Stop);
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Stop))));
+
+    for (reason, wire) in [(StopReason::Stop, "stop"), (StopReason::Delete, "delete")] {
+        let message = goodbye(reason);
+        let data = crate::web::saltyrtc::field(&message, "data").unwrap();
+        assert_eq!(
+            crate::web::saltyrtc::field(data, "reason").and_then(Value::as_str),
+            Some(wire)
+        );
+    }
 }

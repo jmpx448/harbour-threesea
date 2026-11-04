@@ -2264,7 +2264,7 @@ impl App {
             Err(DirectoryError::Server(message)) => {
                 tracing::warn!("the directory refused the license");
                 self.store.set_setting(keys::LICENSE_REFUSED, &message)?;
-                self.web_stop_all();
+                self.web_stop_all(crate::app_web::StopReason::Stop);
                 self.stop_connection();
                 Ok(true)
             }

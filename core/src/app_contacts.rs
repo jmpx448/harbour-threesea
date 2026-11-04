@@ -202,7 +202,7 @@ impl App {
         self.call_end_for_removal();
         self.group_call_forget();
         // Paired browsers belong to this identity: none may carry over to the next one.
-        self.web_stop_all();
+        self.web_stop_all(crate::app_web::StopReason::Delete);
         // The call's end goes out now: once the contact is gone it can't be encoded any more.
         self.connection_flushed().await;
         let linked_devices_remain = self.drop_linked_devices_for_removal().await;

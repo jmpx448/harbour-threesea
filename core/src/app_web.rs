@@ -63,7 +63,25 @@ pub(crate) enum FromWeb {
 /// From the app to a session task.
 pub(crate) enum ToWeb {
     Send(Value),
+    Stop(StopReason),
+}
+
+/// What the browser is told when the app ends a session (`connectionDisconnect`'s `reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// Disconnected for now: the pairing stays and the browser may come back.
     Stop,
+    /// Removed here: the browser should forget the session.
+    Delete,
+}
+
+impl StopReason {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Delete => "delete",
+        }
+    }
 }
 
 /// A session's task as the core knows it.
@@ -258,16 +276,17 @@ impl App {
     /// `webStop {session}`: tell the browser and disconnect.
     pub(crate) fn web_stop(&mut self, id: i64) -> serde_json::Value {
         if let Some(running) = self.web.running.get(&id) {
-            let _ = running.tx.send(ToWeb::Stop);
+            let _ = running.tx.send(ToWeb::Stop(StopReason::Stop));
         }
         json!({})
     }
 
     /// Stop every session and forget what they were waiting for: the identity they were paired
-    /// with is going away (security audit 2026-10-27, S01).
-    pub(crate) fn web_stop_all(&mut self) {
+    /// with is going away (security audit 2026-10-27, S01) with `Delete`, or the license was
+    /// refused with `Stop`, which leaves the pairings for when it is accepted again.
+    pub(crate) fn web_stop_all(&mut self, reason: StopReason) {
         for running in self.web.running.values() {
-            let _ = running.tx.send(ToWeb::Stop);
+            let _ = running.tx.send(ToWeb::Stop(reason));
         }
         self.web.running.clear();
         self.web.changed.clear();
@@ -277,8 +296,9 @@ impl App {
 
     /// `webDelete {session}`: stop and forget the session.
     pub(crate) fn web_delete(&mut self, id: i64) -> Result<serde_json::Value, ApiError> {
-        self.web_stop(id);
-        self.web.running.remove(&id);
+        if let Some(running) = self.web.running.remove(&id) {
+            let _ = running.tx.send(ToWeb::Stop(StopReason::Delete));
+        }
         // Nothing waiting for it may reach a later session with the same ID.
         self.web.changed.remove(&id);
         self.web.subscriptions.remove(&id);
@@ -771,15 +791,13 @@ async fn run_session(
                         actions.extend(connection.send(message));
                     }
                 }
-                Some(ToWeb::Stop) | None => {
+                command @ (Some(ToWeb::Stop(_)) | None) => {
+                    let reason = match command {
+                        Some(ToWeb::Stop(reason)) => reason,
+                        _ => StopReason::Stop,
+                    };
                     if let Some(connection) = connection.as_mut() {
-                        let goodbye = arp::message(
-                            "update",
-                            "connectionDisconnect",
-                            None,
-                            Some(arp::map(vec![("reason", "stop".into())])),
-                        );
-                        for action in connection.send(goodbye) {
+                        for action in connection.send(goodbye(reason)) {
                             if let Action::Chunk(chunk) = action
                                 && let Ok(frame) = responder.send_data(Value::Binary(chunk))
                             {
@@ -853,6 +871,16 @@ async fn run_session(
                 .map_err(|error| error.to_string())?;
         }
     }
+}
+
+/// The last message on a connection the app ends.
+fn goodbye(reason: StopReason) -> Value {
+    arp::message(
+        "update",
+        "connectionDisconnect",
+        None,
+        Some(arp::map(vec![("reason", reason.wire().into())])),
+    )
 }
 
 /// After the server handshake without a browser on the path: we wait for it.
