@@ -1239,6 +1239,8 @@ pub struct App {
     pub(crate) pictures_dir: Option<PathBuf>,
     /// The app's data directory (store, media, the in-app log).
     pub(crate) data_dir: PathBuf,
+    /// `deleteAllData` went through: this core only waits for the bridge to stop it.
+    pub(crate) identity_removed: bool,
 }
 
 impl App {
@@ -1305,6 +1307,7 @@ impl App {
             on_wifi: false,
             pictures_dir: start.pictures_dir.clone(),
             data_dir: start.data_dir.clone(),
+            identity_removed: false,
         };
         app.apply_display_settings()?;
         app.apply_network_settings()?;

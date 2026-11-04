@@ -181,9 +181,12 @@ impl App {
     ///
     /// The core's part of one ordered wipe (ADR 0018): what runs stops, the device group is
     /// left while a connection can still do that, the store empties in one transaction, then
-    /// media and logs go and nothing of the old identity stays in memory. If the store refuses,
-    /// the ID is still there and this says so; the core loop then connects again. On success the
-    /// bridge stops the core and replaces the database and its key.
+    /// media and logs go and nothing of the old identity stays in memory. On return the bridge
+    /// stops the core and replaces the database and its key.
+    ///
+    /// There is no way back from the mark on: a store that refuses (a full disk has no room for
+    /// the write-ahead log) doesn't stop it, because replacing the file needs no space. Only a
+    /// refused PIN, before this is called, leaves the ID in place.
     ///
     /// `{linkedDevicesRemain}`: linked devices could not be removed and keep the ID.
     pub(crate) async fn delete_all_data(&mut self) -> Result<Value, ApiError> {
@@ -197,7 +200,14 @@ impl App {
         self.connection_flushed().await;
         let linked_devices_remain = self.drop_linked_devices_for_removal().await;
         self.stop_connection();
-        self.store.wipe()?;
+        // A kill from here on: the next start finishes the job, whatever the bridge got to hear.
+        if let Err(error) = crate::runtime::mark_removal(&self.data_dir, linked_devices_remain) {
+            tracing::warn!(%error, "the removal could not be marked");
+        }
+        self.identity_removed = true;
+        if let Err(error) = self.store.wipe() {
+            tracing::error!(%error, "the store could not be emptied, its file goes next");
+        }
         self.media.remove_all();
         // The next identity starts locked; its private marks wait for its own PIN.
         self.unlocked = false;

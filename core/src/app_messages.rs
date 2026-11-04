@@ -453,6 +453,10 @@ impl App {
         if self.connection.as_ref().is_some_and(|tx| !tx.is_closed()) {
             return None;
         }
+        // A store that refused to empty still holds the ID, which is on its way out.
+        if self.identity_removed {
+            return None;
+        }
         if !self.license_valid().ok()? {
             return None;
         }

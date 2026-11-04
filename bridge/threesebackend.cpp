@@ -102,6 +102,13 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     connect(m_network, &QNetworkConfigurationManager::configurationChanged, this, &ThreeseBackend::reportNetwork);
     connect(m_network, &QNetworkConfigurationManager::onlineStateChanged, this, &ThreeseBackend::reportNetwork);
     connect(m_secrets, &SecretStore::failed, this, &ThreeseBackend::fail);
+    // The core's own mark: killed after it began to wipe, before the bridge heard of it.
+    const int removalMark = threesea_data_removal_mark(dataDir().toUtf8().constData());
+    if (removalMark >= 0 && !QSettings().contains(RemovalPendingKey)) {
+        QSettings settings;
+        settings.setValue(RemovalPendingKey, removalMark == 1);
+        settings.sync();
+    }
     if (QSettings().contains(RemovalPendingKey)) {
         m_removingData = true;
         m_state = QStringLiteral("removing");

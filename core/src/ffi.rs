@@ -572,6 +572,23 @@ pub unsafe extern "C" fn threesea_core_stop(core: *mut ThreeseaCore) {
     }
 }
 
+/// The core's mark of a removal of the ID that never finished (ADR 0018): -1 none, else whether
+/// linked devices remain (0 or 1).
+///
+/// # Safety
+/// `data_dir` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn threesea_data_removal_mark(data_dir: *const c_char) -> i32 {
+    if data_dir.is_null() {
+        return -1;
+    }
+    // SAFETY: caller contract.
+    let Ok(dir) = unsafe { CStr::from_ptr(data_dir) }.to_str() else {
+        return -1;
+    };
+    crate::runtime::removal_mark(std::path::Path::new(dir)).map_or(-1, i32::from)
+}
+
 /// Remove everything in the data directory (the ID is being removed, ADR 0018). The core must
 /// have stopped. False if something stayed.
 ///

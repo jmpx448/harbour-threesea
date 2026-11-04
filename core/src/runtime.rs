@@ -237,6 +237,31 @@ pub fn log_clear(dir: &std::path::Path) {
     }
 }
 
+/// In the data directory from just before the store empties until the directory is emptied.
+const REMOVAL_MARK: &str = "removal-pending";
+
+/// The ID is going: a start that finds this finishes the removal (ADR 0018), and still knows
+/// whether linked devices remain.
+///
+/// # Errors
+/// The mark could not be written.
+pub fn mark_removal(dir: &std::path::Path, linked_devices_remain: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::File::create(dir.join(REMOVAL_MARK))?;
+    file.write_all(if linked_devices_remain { b"1" } else { b"0" })?;
+    file.sync_all()
+}
+
+/// A removal was under way when the app last ended: whether linked devices remain. A mark that
+/// doesn't say counts as yes: better a notice too many than one missing.
+pub fn removal_mark(dir: &std::path::Path) -> Option<bool> {
+    match std::fs::read(dir.join(REMOVAL_MARK)) {
+        Ok(content) => Some(content != b"0"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(true),
+    }
+}
+
 /// Remove everything in the data directory: the database with its `-wal` and `-shm`, media and
 /// logs, whatever may have been added there since. After the core has stopped; the next start
 /// makes a new database in the emptied directory (ADR 0018). The log attaches to a new file.
@@ -466,6 +491,15 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("media/inner")).unwrap();
         std::fs::write(dir.path().join("media/inner/1.file"), b"old").unwrap();
 
+        assert_eq!(removal_mark(dir.path()), None);
+        mark_removal(dir.path(), false).unwrap();
+        assert_eq!(removal_mark(dir.path()), Some(false));
+        mark_removal(dir.path(), true).unwrap();
+        assert_eq!(removal_mark(dir.path()), Some(true));
+        // Killed between creating it and writing to it.
+        std::fs::write(dir.path().join(REMOVAL_MARK), b"").unwrap();
+        assert_eq!(removal_mark(dir.path()), Some(true));
+
         remove_data_dir(dir.path()).unwrap();
 
         // The process-wide log sink belongs to no test here, so it may or may not reopen a log.
@@ -475,6 +509,7 @@ mod tests {
             .filter(|name| name != LOG_FILE)
             .collect();
         assert!(left.is_empty(), "{left:?}");
+        assert_eq!(removal_mark(dir.path()), None);
         // Nothing there is nothing to do: a repeat after a crash, say.
         remove_data_dir(&dir.path().join("not there")).unwrap();
     }

@@ -935,6 +935,7 @@ mod tests {
         tokio::spawn(offline(rx));
         let result = app.delete_all_data().await.unwrap();
         assert_eq!(result["linkedDevicesRemain"], true);
+        assert_eq!(crate::runtime::removal_mark(&app.data_dir), Some(true));
         assert!(app.store.identity().unwrap().is_none());
     }
 

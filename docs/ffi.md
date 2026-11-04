@@ -11,6 +11,7 @@ small and debuggable; secrets inside messages are wiped on both sides after use.
 | `threesea_core_start(config_json, db_key, 32, callback, user_data)` | Starts the core thread. `db_key` comes from `SecretStore` (Sailfish Secrets) and is copied. |
 | `threesea_core_send(core, request_json)` | Queues a request, never blocks. |
 | `threesea_core_stop(core)` | Stops and joins the thread; no callbacks after it returns. |
+| `threesea_data_removal_mark(data_dir)` | The core's mark of a removal of the ID that never finished (the app was killed in it): -1 none, else whether linked devices remain (0 or 1). The bridge then finishes it. |
 | `threesea_data_remove(data_dir)` | With the core stopped: removes everything in the data directory (database, media, logs), the last step of removing the ID (ADR 0018). False if something stayed. |
 | `threesea_core_version()` / `threesea_string_free()` | Version string. |
 | `threesea_core_send_data(core, request_json, data, len, thumbnail, len)` | A request with binary attachments (`sendFile`, pictures); never blocks. |
@@ -107,7 +108,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 
 | `settings` | – | Safe `settings` object (`readReceipts`, `sendTyping`, `blockUnknown`, …) |
 | `setSetting` | `name` (`readReceipts`\|`sendTyping`\|`blockUnknown`\|`videoCalls`\|`groupCalls`\|`receiveProfilePictures`\|…), `value` | settings |
-| `deleteAllData` | `pin` | `{linkedDevicesRemain}` (true: the device group could not be left in time, linked devices keep the ID); stops backups, calls, browsers and the connection, leaves the device group, then wipes the store in one transaction, media and logs (ADR 0018). An error means nothing was wiped and the connection comes back. The UI goes through `backend.removeAllData(pin)`, which then replaces the database and its key (Safe copy on the server stays) |
+| `deleteAllData` | `pin` | `{linkedDevicesRemain}` (true: this phone could not get through to the server in time, linked devices keep the ID); stops backups, calls, browsers and the connection, leaves the device group, marks the removal, then wipes the store in one transaction, media and logs (ADR 0018). A refused PIN is the only error, and nothing has happened then; a store that refuses to empty doesn't stop the removal. The UI goes through `backend.removeAllData(pin)`, which then replaces the database and its key (Safe copy on the server stays) |
 
 | `conversations` | optional `archived` (the archive instead), `private` (the private chats; error `locked` unless unlocked) | `{conversations: [{identity, displayName, verification, unread, lastMessage}]}` newest first |
 | `messages` | `identity`, optional `limit` (200), `since` (local id: load back to this message), `before` / `after` (local id: only the page before or after it in history order, the chat's window; default 100) | `{identity, messages: [message…], private, firstUnread}` oldest first (`firstUnread`: local id of the oldest unread incoming message, null when none; the initial page is widened to reach it, bounded at 1000); error `locked` for a private chat while they are hidden |

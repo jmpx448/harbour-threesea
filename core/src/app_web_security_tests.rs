@@ -380,11 +380,13 @@ async fn removing_the_id_leaves_no_media_log_or_gate() {
     assert_eq!(crate::runtime::log_text(dir.path(), usize::MAX), "");
 }
 
-/// The store refuses (a full disk, say): the ID and its media are all still there, the core says
-/// so, and the loop connects again because the connection has stopped.
+/// The store refuses (a full disk has no room for its write-ahead log): the removal goes on, as
+/// replacing the file needs no space. No connection comes back for the ID still in it, and a kill
+/// now would be finished by the next start.
 #[tokio::test(flavor = "current_thread")]
-async fn removal_that_fails_changes_nothing() {
-    let (_dir, mut app) = fixture();
+async fn a_store_that_refuses_does_not_stop_the_removal() {
+    let (dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
     app.store.set_setting("anything", "x").unwrap();
     app.store
         .conn
@@ -396,12 +398,31 @@ async fn removal_that_fails_changes_nothing() {
     app.media.write(1, MediaPart::File, b"picture").unwrap();
 
     let reply = app
-        .handle(&json!({"id": 1, "cmd": "deleteAllData", "pin": "2468"}).to_string())
+        .handle(&json!({"id": 1, "cmd": "deleteAllData"}).to_string())
+        .await;
+
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+    assert!(app.store.identity().unwrap().is_some(), "the trigger held");
+    assert_eq!(app.media.size(), 0);
+    assert_eq!(crate::runtime::removal_mark(dir.path()), Some(false));
+    assert!(app.ensure_connection().is_none());
+}
+
+/// A refused PIN is the one way out, and nothing has happened by then.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_pin_removes_nothing() {
+    let (dir, mut app) = fixture();
+    app.media.write(1, MediaPart::File, b"picture").unwrap();
+
+    let reply = app
+        .handle(&json!({"id": 1, "cmd": "deleteAllData", "pin": "1111"}).to_string())
         .await;
 
     assert!(reply.contains("\"ok\":false"), "{reply}");
     assert!(app.store.identity().unwrap().is_some());
     assert!(app.media.size() > 0);
+    assert_eq!(crate::runtime::removal_mark(dir.path()), None);
+    assert!(!app.identity_removed);
 }
 
 /// S01: deleting the identity ends its browser sessions; nothing of the next identity reaches

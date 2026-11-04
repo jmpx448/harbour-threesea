@@ -32,6 +32,9 @@ void threesea_core_send_data(ThreeseaCore *core, const char *request_json, const
                              const uint8_t *extra, size_t extra_len);
 /* Blocks until the core thread has stopped; no callbacks after it returns. */
 void threesea_core_stop(ThreeseaCore *core);
+/* The core's mark of a removal of the ID that never finished (the app was killed in it):
+ * -1 none, else whether linked devices remain (0 or 1). */
+int threesea_data_removal_mark(const char *data_dir);
 /* Removes everything in the data directory (database, media, logs): the ID is being removed. The
  * core must have stopped. False if something stayed. */
 bool threesea_data_remove(const char *data_dir);
