@@ -113,6 +113,18 @@ void CallVideo::clear()
 
 namespace {
 
+// The node owns the last frame's texture: the material doesn't, and without this it stays behind
+// whenever the scene graph deletes the node (the item went away while showing a picture).
+class VideoNode : public QSGGeometryNode
+{
+public:
+    ~VideoNode() override
+    {
+        // Set as this node's own material, which it deletes after this destructor.
+        delete static_cast<QSGOpaqueTextureMaterial *>(material())->texture();
+    }
+};
+
 // A fan around the centre with the rounded rectangle's outline (convex, so a fan covers it):
 // each corner a quarter circle or a single point.
 QVector<QPointF> outline(const QRectF &rect, qreal radius, const bool round[4])
@@ -145,17 +157,13 @@ QVector<QPointF> outline(const QRectF &rect, qreal radius, const bool round[4])
 
 QSGNode *CallVideo::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
 {
-    auto *node = static_cast<QSGGeometryNode *>(oldNode);
+    auto *node = static_cast<VideoNode *>(oldNode);
     if (m_image.isNull() || width() <= 0 || height() <= 0) {
-        if (node) {
-            // The material doesn't own its texture.
-            delete static_cast<QSGOpaqueTextureMaterial *>(node->material())->texture();
-            delete node;
-        }
+        delete node;
         return nullptr;
     }
     if (!node) {
-        node = new QSGGeometryNode;
+        node = new VideoNode;
         auto *geometry = new QSGGeometry(QSGGeometry::defaultAttributes_TexturedPoint2D(), 0);
         geometry->setDrawingMode(GL_TRIANGLE_FAN);
         node->setGeometry(geometry);
