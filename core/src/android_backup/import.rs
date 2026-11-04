@@ -464,12 +464,12 @@ impl HistoryImport {
                 }));
             }
             if let Some(keys) = &job.keys
-                && let Some(key_bytes) = keys.key
+                && let Some(key_bytes) = &keys.key
             {
                 let _ = self.store.set_file_keys(
                     job.row,
                     &crate::media::FileKeys {
-                        key: Zeroizing::new(key_bytes),
+                        key: key_bytes.clone(),
                         blob_id: keys.blob_id.map(libthreema::common::BlobId),
                         thumbnail_blob_id: None,
                     },

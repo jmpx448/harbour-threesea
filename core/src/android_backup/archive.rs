@@ -15,6 +15,8 @@ use super::{EntryKind, csv::Table};
 /// Hard bounds for the container (an archive beyond them is rejected as a whole).
 const MAX_ENTRIES: usize = 400_000;
 const MAX_NAME_BYTES: usize = 160;
+/// What a read reserves at most on the central directory's word alone.
+const MAX_INITIAL_CAPACITY: usize = 1 << 20;
 
 /// What can go wrong with an archive; the preview tells these apart for the user.
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +44,18 @@ impl From<super::csv::TooLarge> for ArchiveError {
     fn from(_: super::csv::TooLarge) -> Self {
         Self::TooLarge
     }
+}
+
+/// Append without leaving a freed copy behind: `Vec` would move to a bigger block and free the
+/// old one as it is, this wipes it.
+fn append_wiping(data: &mut Zeroizing<Vec<u8>>, bytes: &[u8]) {
+    let needed = data.len() + bytes.len();
+    if needed > data.capacity() {
+        let mut bigger = Zeroizing::new(Vec::with_capacity(needed.max(data.capacity() * 2)));
+        bigger.extend_from_slice(data);
+        *data = bigger;
+    }
+    data.extend_from_slice(bytes);
 }
 
 /// One entry as listed (nothing decrypted yet): `declared_size` comes from the central
@@ -139,8 +153,9 @@ impl Archive {
     }
 
     /// Decrypt and read one entry completely (the AES authentication code is checked at its
-    /// end), enforcing `max_bytes` while reading. The bytes are returned zeroizing: several
-    /// entries carry key material or private content.
+    /// end), enforcing `max_bytes` while reading. The bytes are returned zeroizing and this
+    /// function leaves no other copy: several entries carry key material or private content.
+    /// The zip crate's own buffers (the inflate window) are out of reach.
     pub fn read(
         &mut self,
         name: &str,
@@ -154,16 +169,20 @@ impl Archive {
             }
             Err(error) => return Err(ArchiveError::Invalid(error.to_string())),
         };
-        let mut data = Zeroizing::new(Vec::new());
-        let mut buffer = [0_u8; 64 * 1024];
+        let capacity = usize::try_from(entry.size())
+            .unwrap_or(usize::MAX)
+            .min(max_bytes)
+            .min(MAX_INITIAL_CAPACITY);
+        let mut data = Zeroizing::new(Vec::with_capacity(capacity));
+        let mut buffer = Zeroizing::new([0_u8; 64 * 1024]);
         loop {
-            match entry.read(&mut buffer) {
+            match entry.read(&mut buffer[..]) {
                 Ok(0) => break,
                 Ok(read) => {
                     if data.len() + read > max_bytes {
                         return Err(ArchiveError::TooLarge);
                     }
-                    data.extend_from_slice(&buffer[..read]);
+                    append_wiping(&mut data, &buffer[..read]);
                 }
                 // Authentication, decryption or decompression failed: never trust what came
                 // out before. (With AE, a wrong password can also surface here: the 2-byte

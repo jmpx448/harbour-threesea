@@ -6,12 +6,13 @@
 //! actually holds, never from Android's stale `isDownloaded` flag.
 
 use serde_json::{Value, json};
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::records;
 
 /// Blob key material of a file message, for the encrypted `files` table only.
 pub struct FileImport {
-    pub key: Option<[u8; 32]>,
+    pub key: Option<Zeroizing<[u8; 32]>>,
     pub blob_id: Option<[u8; 16]>,
 }
 
@@ -90,6 +91,30 @@ fn hex_bytes<const N: usize>(value: Option<&Value>) -> Option<[u8; N]> {
         .ok()
 }
 
+/// A blob key in hex, leaving no copy of it behind.
+fn hex_key(value: Option<&Value>) -> Option<Zeroizing<[u8; 32]>> {
+    let decoded = Zeroizing::new(
+        data_encoding::HEXLOWER_PERMISSIVE
+            .decode(value?.as_str()?.as_bytes())
+            .ok()?,
+    );
+    let mut key = Zeroizing::new([0; 32]);
+    if decoded.len() != key.len() {
+        return None;
+    }
+    key.copy_from_slice(&decoded);
+    Some(key)
+}
+
+/// Wipe a parsed body's strings when it is done with: one of them is the blob's key.
+fn wipe_strings(parts: &mut [Value]) {
+    for part in parts {
+        if let Value::String(text) = part {
+            text.zeroize();
+        }
+    }
+}
+
 /// The FILE body array (`FileDataModelSerializer`):
 /// `[blobId, encryptionKey, mimeType, fileSize, fileName, renderingType, isDownloaded,
 ///   caption, thumbnailMimeType, metadata]`, older bodies with missing tails.
@@ -132,7 +157,7 @@ fn file(message: &records::Message, parts: &[Value]) -> Converted {
         kind: "file",
         body: body.to_string(),
         file: Some(FileImport {
-            key: hex_bytes(parts.get(1)),
+            key: hex_key(parts.get(1)),
             blob_id: hex_bytes(parts.first()),
         }),
         compat: None,
@@ -143,7 +168,7 @@ fn file(message: &records::Message, parts: &[Value]) -> Converted {
 /// `LegacyMessageBodyTransformer` (the legacy blob keys are kept but their blobs used a
 /// different scheme; availability comes from the archived bytes).
 fn legacy_file(message: &records::Message, kind: &str) -> Converted {
-    let Ok(Value::Array(old)) = serde_json::from_str::<Value>(&message.body) else {
+    let Ok(Value::Array(mut old)) = serde_json::from_str::<Value>(&message.body) else {
         return Converted::Unsupported("media");
     };
     let array = match kind {
@@ -171,10 +196,13 @@ fn legacy_file(message: &records::Message, kind: &str) -> Converted {
             Value::Null, Value::Null, {"d": old.first()}
         ]),
     };
-    let Value::Array(parts) = array else {
+    wipe_strings(&mut old);
+    let Value::Array(mut parts) = array else {
         return Converted::Unsupported("media");
     };
-    file(message, &parts)
+    let converted = file(message, &parts);
+    wipe_strings(&mut parts);
+    converted
 }
 
 /// `VOIP_STATUS` bodies are `[1, {status, duration, …}]` (`StatusDataModel`); ours is the
@@ -229,7 +257,11 @@ pub fn convert(message: &records::Message) -> Converted {
         "TEXT" => text_message(message),
         "LOCATION" => location(message),
         "FILE" => match serde_json::from_str::<Value>(&message.body) {
-            Ok(Value::Array(parts)) => file(message, &parts),
+            Ok(Value::Array(mut parts)) => {
+                let converted = file(message, &parts);
+                wipe_strings(&mut parts);
+                converted
+            }
             _ => Converted::Unsupported("media"),
         },
         "IMAGE" | "VIDEO" | "VOICEMESSAGE" => legacy_file(message, &message.kind),
@@ -337,7 +369,24 @@ mod tests {
         assert_eq!(value["width"], 800.0);
         let file = file.unwrap();
         assert_eq!(file.blob_id, Some([0x11; 16]));
-        assert_eq!(file.key, Some([0x22; 32]));
+        assert_eq!(file.key.as_deref(), Some(&[0x22; 32]));
+    }
+
+    #[test]
+    fn a_blob_key_of_the_wrong_length_is_none() {
+        let body = format!("[\"{}\",\"{}\"]", "11".repeat(16), "22".repeat(31));
+        let Converted::Message { file, .. } = convert(&row("FILE", &body)) else {
+            panic!()
+        };
+        assert!(file.unwrap().key.is_none());
+    }
+
+    #[test]
+    fn wiping_a_body_clears_its_strings() {
+        let mut parts = vec![json!("secret"), json!(1), json!({"kept": true})];
+        wipe_strings(&mut parts);
+        assert_eq!(parts[0], "");
+        assert_eq!(parts[1], 1);
     }
 
     #[test]

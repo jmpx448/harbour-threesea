@@ -3,6 +3,8 @@
 //! (`RestoreService.createContactModel` / `createGroupModel` / `createDistributionListModel`):
 //! by header name, with the same version gates. Malformed rows are counted, never guessed.
 
+use zeroize::Zeroize as _;
+
 use super::csv::Table;
 
 /// `contacts.csv`: `publickey` is lowercase hex (not base64 like Threema Safe), `verification`
@@ -204,6 +206,15 @@ pub struct Message {
     pub starred: bool,
     /// `g_msg_states`: member → USERACK/USERDEC (group thumbs before reactions existed).
     pub group_states: Vec<(String, String)>,
+}
+
+/// The body of a file message holds the blob's key as hex; text bodies are private too. The
+/// text goes on to the store from here, but this copy doesn't linger.
+impl Drop for Message {
+    fn drop(&mut self) {
+        self.body.zeroize();
+        self.caption.zeroize();
+    }
 }
 
 impl Message {

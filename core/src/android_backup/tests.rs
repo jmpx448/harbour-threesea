@@ -210,6 +210,23 @@ fn build_zip(dir: &std::path::Path, entries: &[(&str, &[u8], bool)]) -> std::pat
 }
 
 #[test]
+fn entries_larger_than_the_first_reservation_read_whole() {
+    // The buffer moves several times on the way: everything arrives, in order.
+    let dir = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..(5 << 20)).map(|i: u32| (i % 251) as u8).collect();
+    let path = build_zip(dir.path(), &[("message_media_a", &data, true)]);
+    let mut archive = Archive::open(&path, "test-password").unwrap();
+    assert_eq!(
+        archive.read("message_media_a", 8 << 20).unwrap().as_slice(),
+        data.as_slice()
+    );
+    assert!(matches!(
+        archive.read("message_media_a", (5 << 20) - 1),
+        Err(ArchiveError::TooLarge)
+    ));
+}
+
+#[test]
 fn version_gates() {
     let dir = tempfile::tempdir().unwrap();
     let version = |settings: &str| {
