@@ -541,7 +541,7 @@ async fn upload(
     let result = async {
         let file = media
             .read(message, MediaPart::File)?
-            .ok_or_else(|| media::MediaError::Server("file is gone".into()))?;
+            .ok_or(media::MediaError::FileGone)?;
         keys.blob_id = Some(
             media::upload_scoped(
                 &https,
@@ -590,6 +590,15 @@ fn finish_upload(
         Ok(Ok(())) => STATE_LOCAL,
         Ok(Err(error)) => {
             tracing::warn!(%error, "storing blob ids failed");
+            STATE_FAILED
+        }
+        // There is nothing left to send: the message fails for good, or every reconnect would try
+        // again (`failed_uploads` asks for messages still pending) and its clock would never end.
+        Err(media::MediaError::FileGone) => {
+            tracing::warn!("upload failed for good, the file is gone");
+            if let Err(error) = store.set_outgoing_failed(message) {
+                tracing::warn!(%error, "storing the failed state failed");
+            }
             STATE_FAILED
         }
         Err(error) => {
@@ -1602,6 +1611,29 @@ mod tests {
         let failed = Err(media::MediaError::Server("status 500".into()));
         finish_upload(&app.store, &events, id, &uploaded, failed);
         assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+    }
+
+    /// A failure of the network gets another try at the next reconnect; a file that is gone can't
+    /// get better, so the message shows as failed and stops being retried.
+    #[test]
+    fn an_upload_without_its_file_fails_for_good() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = outgoing_file(&app.store, 1, 1);
+        let keys = app.store.file_keys(id).unwrap().unwrap();
+        let state_of = || app.store.message(id).unwrap().unwrap().state;
+
+        let network = Err(media::MediaError::Network("timeout".into()));
+        finish_upload(&app.store, &events, id, &keys, network);
+        assert_eq!(app.store.failed_uploads().unwrap(), vec![id]);
+        assert_eq!(state_of(), crate::messages::OutgoingState::Pending as i64);
+
+        let gone = Err(media::MediaError::FileGone);
+        finish_upload(&app.store, &events, id, &keys, gone);
+        assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+        assert_eq!(state_of(), crate::messages::OutgoingState::Failed as i64);
+        assert!(app.store.failed_uploads().unwrap().is_empty());
+        assert!(app.store.pending_outgoing().unwrap().is_empty());
     }
 
     /// A file left by a download that outlived its message's deletion goes at the next start.

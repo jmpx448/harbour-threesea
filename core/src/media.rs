@@ -97,6 +97,9 @@ pub enum MediaError {
     Decrypt,
     #[error("file too large")]
     TooLarge,
+    /// The file to upload is no longer on the device: no later try can bring it back.
+    #[error("file is gone")]
+    FileGone,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
