@@ -13,7 +13,7 @@ docker run --rm -i -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS" sh -euc '
     cp /src/qml/harbour-threesea.qml $B/app/
     cp -r /src/qml/components /src/qml/cover $B/app/
     cp /src/tests/lockstate/pages/*.qml $B/app/pages/
-    for page in CallPage DataBackupImportPage StartupPage; do cp /src/qml/pages/$page.qml $B/app/pages/; done
+    for page in CallPage GroupCallPage DataBackupImportPage StartupPage; do cp /src/qml/pages/$page.qml $B/app/pages/; done
     cp -r /src/tests/lockstate/harbour $B/app/imports/
     cp /src/tests/lockstate/Fakes.qml /src/tests/lockstate/Scenarios.qml $B/app/
     cp /src/tests/lockstate/main.cpp /src/tests/lockstate/lockstate-test.pro $B/

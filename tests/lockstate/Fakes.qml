@@ -53,6 +53,10 @@ QtObject {
         signal markReadRequested(string identity)
         signal replyRequested(string identity, string text)
         function actionToken() { return "" }
+        function retainTokens(identities) { }
+        function releaseToken(identity) { }
+        function forgetToken(identity) { }
+        function forgetAllTokens() { }
         function activate() { }
     }
     property QtObject calls: QtObject {
@@ -73,6 +77,16 @@ QtObject {
     }
     property QtObject groupCalls: QtObject {
         property bool supported: false
+        property string state: "idle"
+        property string conversation
+        property string error
+        property bool muted
+        property bool camera
+        property bool frontCamera
+        property double activeSince
+        property var participants: []
+        function call(conversation) { return ({}) }
+        function leave() { }
     }
     property QtObject voicePlayer: QtObject {
         property int messageId: -1

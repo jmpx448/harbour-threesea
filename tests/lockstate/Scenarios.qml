@@ -308,6 +308,30 @@ QtObject {
                 check("nothing waits", window.pendingChat + window.pendingLink, "")
             }, 0],
         ],
+        // Answering takes the microphone from the group call whose page lies beneath: when the
+        // 1:1 call is over, neither page stays.
+        groupCallEndsUnderCall: [
+            [function() { ready(false) }, 100],
+            [function() {
+                fakes.groupCalls.conversation = "GROUP"
+                fakes.groupCalls.state = "connected"
+                push("pages/GroupCallPage.qml", { conversation: "GROUP" })
+                calls.identity = "ABCD1234"
+                calls.state = "incoming"
+            }, 700],
+            [function() {
+                checkStack("conversations groupCall call")
+                fakes.groupCalls.conversation = ""
+                fakes.groupCalls.state = "idle"
+                calls.state = "active"
+            }, 200],
+            [function() {
+                checkStack("conversations groupCall call")
+                calls.state = "ended"
+                calls.state = "idle"
+            }, 1500],
+            [function() { checkStack("conversations") }, 0],
+        ],
         // Anything else popping a running call's page: it comes back.
         callPagePopped: [
             [function() { ready(false) }, 100],
@@ -337,6 +361,39 @@ QtObject {
                 push("pages/PlainPage.qml", {}, true)
                 window.lockNow()
             }, 300],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // A page holding the PIN goes when a lock takes effect, a lock for private chats alone too.
+        pinPageClosed: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var holder = push("pages/PinPage.qml", { pin: "1234" })
+                push("pages/PlainPage.qml")
+                window.lockNow()
+                check("PIN gone", holder.pin, "")
+                checkStack("conversations")
+            }, 0],
+        ],
+        // The stack takes no change during a transition: the page still goes, with its PIN first.
+        pinPageClosedDuringTransition: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var holder = push("pages/PinPage.qml", { pin: "1234" })
+                push("pages/PlainPage.qml", {}, true)
+                window.lockNow()
+                check("PIN gone", holder.pin, "")
+            }, 300],
+            [function() { checkStack("conversations") }, 0],
+        ],
+        // With the app lock on, the same page is not there behind the PIN either.
+        pinPageClosedUnderLock: [
+            [function() { ready(true) }, 100],
+            [function() {
+                push("pages/PinPage.qml", { pin: "1234" })
+                window.lockNow()
+                checkStack("conversations unlock")
+                unlock()
+            }, 100],
             [function() { checkStack("conversations") }, 0],
         ],
         // With a lock as well: the chat doesn't come back after the PIN.

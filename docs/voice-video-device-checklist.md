@@ -447,8 +447,10 @@ Two phones needed for the 1:1 parts; a group with at least one other member for 
    - Expect: you are out of the group call the moment you answer (the others see you leave and
      hear nothing of the private call), only the caller's voice plays, and after the 1:1 call you
      land in the chat, not on a stale group call page.
-5. In a 1:1 call, open a group chat through a notification and start or join its group call.
-   - Expect: the 1:1 call ends, then the group call connects.
+5. In a 1:1 call, tap a group chat's notification.
+   - Expect: the call stays on screen, a notice says the chat opens afterwards, and no group call
+     starts next to it. (The call's page stays on top, so the bridge's rule that joining ends a
+     1:1 call has no way in from the UI now; `tests/lockstate` covers the page.)
 6. Go to the home screen during a group call.
    - Expect: the cover shows the group's name and the time, with mute and hang up acting on the
      group call. "Hide content on the cover" and a private group hide the name. A 1:1 call ringing meanwhile takes

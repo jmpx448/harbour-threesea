@@ -3,6 +3,7 @@ import QtQuick 2.6
 
 Item {
     property var manager
+    property int participant
     property bool remote
     property bool mirror
     property bool hasFrame
