@@ -5,11 +5,15 @@ import "../components"
 
 Dialog {
     id: dialog
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
     // The caller runs the actual removal (with a remorse timer) once this dialog is gone:
     // anything started from here would outlive the dialog.
     canAccept: understood.checked
+
+    // The app lock's PIN for the caller's removal (window.pushWithPin).
+    property string pin
 
     SilicaFlickable {
         anchors.fill: parent

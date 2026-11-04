@@ -51,8 +51,8 @@ entered after every start). The user decided (2026-10-22):
 ## Consequences
 - §7 gains: the lock PIN is stored only as a slow hash in the encrypted store; with key
   encryption on, the database key exists unencrypted only in memory after the user unlocked.
-- A forgotten PIN in screen-lock mode can only be reset by removing the ID from the device
-  (restore from backup); in key-encryption mode the local data is lost without the passphrase,
+- A forgotten PIN in screen-lock mode can only be reset by removing the app's data from the
+  device (restore from backup; see the update of 2026-11-04); in key-encryption mode the local data is lost without the passphrase,
   like Android.
 - The screen lock does not protect against someone with root access to an unlocked phone; key
   encryption does, while the app is not running.
@@ -86,3 +86,16 @@ page is the one page allowed above the lock: it shows only who calls.
 Private marks can arrive without a lock (Threema Safe restore, a linked device). Those chats stay
 hidden, and `unlock` answers `lockNeeded` until a PIN is set, so no PIN opens them; the new PIN
 then does, and the marks can be taken off. Removing the lock or the ID ends what was unlocked.
+
+Whatever takes the ID or the chats off the device or gives someone else a hold on the ID (ID
+backup, data backup and its schedule, turning Threema Safe on or off, the revocation password,
+linking a device, removing the ID) needs the PIN in the core whenever a lock exists, also within
+the grace time, like Android. The UI asks before opening those pages (`window.pushWithPin`);
+linking asks on `LinkDevicePage`, where every route ends. The app locking closes the page
+holding a PIN, the lock settings included. Scheduled backups run without it. So
+a forgotten PIN can't be reset from inside the app any more: that takes removing the app's data
+from the device, then restoring from a backup.
+
+A mark from anywhere (the UI, a linked device, a restore) goes out as `CoreEvent::PrivateChanged`:
+the media readers follow at once, the chat's notification closes, a connected browser loses the
+group or list.

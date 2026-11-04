@@ -7,7 +7,7 @@ import "../components/Errors.js" as Errors
 // Asks for the app lock PIN or passphrase (ADR 0009). The app lock can't be dismissed
 // (`cancellable: false`); before the private chats or the lock settings, the X leaves.
 // `unlocked(pin)` once the core accepted it; with `privateChats` the core then shows the private
-// chats. With `database` it opens the encrypted database key instead (state
+// chats, without it this only checks (the PIN then goes to a command that needs it). With `database` it opens the encrypted database key instead (state
 // "locked", before the core runs).
 Page {
     id: page
@@ -54,6 +54,12 @@ Page {
         onTriggered: page.showPause()
     }
 
+    // The check takes a moment. If the app locked meanwhile, the lock page is on top and what
+    // was to follow must not replace it; this page, empty again, asks once the lock is gone.
+    function accepted(pin) {
+        if (database || pageStack.currentPage === page) unlocked(pin)
+    }
+
     PinEntry {
         id: entry
         anchors.fill: parent
@@ -75,7 +81,7 @@ Page {
                     entry.busy = ok && page.database
                     entry.clear()
                     if (ok) {
-                        page.unlocked(pin)
+                        page.accepted(pin)
                     } else {
                         entry.errorText = page.keyboard
                                 //% "Wrong passphrase"
@@ -89,7 +95,7 @@ Page {
                          function(ok, result, kind, message) {
                 entry.clear()
                 if (ok) {
-                    page.unlocked(pin)
+                    page.accepted(pin)
                 } else if (kind === "pinLockout") {
                     page.pausedUntil = Date.now() + parseInt(message, 10) * 1000
                     page.showPause()

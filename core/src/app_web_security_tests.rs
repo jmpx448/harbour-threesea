@@ -663,6 +663,78 @@ async fn private_content_stays_hidden_from_mutations_and_media() {
     assert!(app.media.shown(text.id) && app.media.shown(late.id));
 }
 
+/// What takes the ID or the chats off the device, or gives someone a hold on the ID, needs the
+/// PIN whether or not the private chats are open, in the core; without a lock there is no PIN to
+/// ask for.
+#[tokio::test(flavor = "current_thread")]
+async fn pin_guards_backups_linking_and_removal() {
+    async fn kind(app: &mut App, mut command: serde_json::Value) -> String {
+        command["id"] = json!(1);
+        let reply: serde_json::Value =
+            serde_json::from_str(&app.handle(&command.to_string()).await).unwrap();
+        reply["error"]["kind"].as_str().unwrap_or("").to_owned()
+    }
+    let (dir, mut app) = fixture();
+    let open = json!({"cmd": "unlock", "pin": "2468", "privateChats": true});
+    assert_eq!(kind(&mut app, open.clone()).await, "");
+    let folder = dir.path().to_str().unwrap();
+    let guarded = [
+        json!({"cmd": "exportIdentityBackup", "password": "long enough"}),
+        json!({"cmd": "safeEnable", "password": "long enough"}),
+        json!({"cmd": "safeDisable"}),
+        json!({"cmd": "androidBackupExport", "directory": folder, "password": "long enough"}),
+        json!({"cmd": "androidBackupSchedule", "directory": folder, "password": "long enough"}),
+        json!({"cmd": "setRevocationPassword", "password": "long enough"}),
+        json!({"cmd": "startLinking", "code": "not a code"}),
+        json!({"cmd": "deleteAllData"}),
+    ];
+    for command in &guarded {
+        assert_eq!(
+            kind(&mut app, command.clone()).await,
+            "wrongPin",
+            "{command}"
+        );
+        let mut wrong = command.clone();
+        wrong["pin"] = json!("1111");
+        assert_eq!(kind(&mut app, wrong).await, "wrongPin", "{command}");
+        // The right PIN clears the count of wrong ones.
+        assert_eq!(kind(&mut app, open.clone()).await, "");
+    }
+    assert!(app.store.identity().unwrap().is_some());
+    assert_eq!(
+        app.android_export_status().unwrap()["directory"],
+        serde_json::Value::Null
+    );
+
+    // With the PIN they go through; these need no network.
+    let right = |mut command: serde_json::Value| {
+        command["pin"] = json!("2468");
+        command
+    };
+    for command in [&guarded[0], &guarded[2], &guarded[4]] {
+        assert_eq!(
+            kind(&mut app, right(command.clone())).await,
+            "",
+            "{command}"
+        );
+    }
+    assert_ne!(kind(&mut app, right(guarded[6].clone())).await, "wrongPin");
+    assert_eq!(kind(&mut app, right(guarded[7].clone())).await, "");
+    assert!(app.store.identity().unwrap().is_none());
+    assert_eq!(kind(&mut app, json!({"cmd": "lockStatus"})).await, "");
+}
+
+/// Without a lock nothing asks for a PIN.
+#[tokio::test(flavor = "current_thread")]
+async fn no_pin_needed_without_a_lock() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let reply = app
+        .handle(&json!({"id": 1, "cmd": "deleteAllData"}).to_string())
+        .await;
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+}
+
 /// A chat marked private on a linked device: its older media leave the UI's readers at once and
 /// the event tells the UI (which closes the chat's notification); the same mark again changes
 /// nothing.

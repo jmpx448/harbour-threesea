@@ -115,6 +115,8 @@ function text(kind, message) {
     case "wrongPin":
         //% "Wrong PIN"
         return qsTrId("threesea-la-wrong-pin")
+    case "pinLockout":
+        return qsTrId("threesea-la-pin-paused", parseInt(message, 10))
     case "pinTooShort":
         //% "The PIN needs at least 4 digits."
         return qsTrId("threesea-la-error-pin-short")

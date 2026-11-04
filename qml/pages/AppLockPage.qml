@@ -5,14 +5,17 @@ import "../components"
 import "../components/Errors.js" as Errors
 
 // App lock settings (ADR 0009), reached through the PIN like the device lock settings:
-// `currentPin` is what was entered to get here (empty while there is no lock). Choices go
+// `pin` is what was entered to get here (empty while there is no lock). Choices go
 // through selection dialogs confirmed by swipe. (Encrypting the stored data has its own
 // passphrase: Settings → Security.)
 Page {
     id: page
+    // The app locking closes this page and takes its PIN (window.closePinPage): with it, the
+    // next person could set a PIN of their own.
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
-    property string currentPin
+    property string pin
     property var status: ({})
     readonly property var lock: status.lock || null
 
@@ -54,12 +57,12 @@ Page {
             args.pin = options.pin
             args.keyboard = options.keyboard === true
         }
-        if (currentPin.length > 0) args.currentPin = currentPin
+        if (page.pin.length > 0) args.currentPin = page.pin
         backend.call("setLock", args, function(ok, result, kind, message) {
             if (ok) {
                 page.status = result
-                if (options.pin) page.currentPin = options.pin
-                if (!result.lock) page.currentPin = ""
+                if (options.pin) page.pin = options.pin
+                if (!result.lock) page.pin = ""
                 window.lockChanged(result)
                 if (done) done()
             } else {

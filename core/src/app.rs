@@ -108,6 +108,8 @@ pub enum Command {
     /// Export the own ID as an ID backup string.
     ExportIdentityBackup {
         password: Zeroizing<String>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Rate a prospective Threema Safe password (`tooShort|tooLong|weak|ok`).
     SafeCheckPassword {
@@ -118,11 +120,16 @@ pub enum Command {
     /// Enable Threema Safe with a password and upload a first backup.
     SafeEnable {
         password: Zeroizing<String>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Upload a backup now.
     SafeBackupNow,
     /// Disable Threema Safe and forget the key (the server copy expires by itself).
-    SafeDisable,
+    SafeDisable {
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
+    },
     /// Restore an ID (and profile, contacts, groups, settings) from Threema Safe.
     SafeRestore {
         identity: String,
@@ -154,6 +161,8 @@ pub enum Command {
     AndroidBackupExport {
         directory: Option<String>,
         password: Option<Zeroizing<String>>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Configure automatic Android-format backups: folder, password (kept in the encrypted
     /// store so unattended runs can use it), interval (`off`/`daily`/`weekly`) and how many
@@ -163,6 +172,8 @@ pub enum Command {
         password: Option<Zeroizing<String>>,
         interval: Option<String>,
         keep: Option<u32>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// The automatic-backup settings and the last run.
     AndroidBackupExportStatus,
@@ -240,9 +251,14 @@ pub enum Command {
     /// Set the revocation password (8–256 characters; only a 4-byte hash goes to Threema).
     SetRevocationPassword {
         password: String,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Delete the ID and all local data.
-    DeleteAllData,
+    DeleteAllData {
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
+    },
     /// The chat list; `archived`: the archived chats instead; `private`: the private chats
     /// (only while unlocked). The result also has `archivedCount` and `privateCount`.
     Conversations {
@@ -636,6 +652,8 @@ pub enum Command {
     /// `{choices: [[emoji ×3] ×3], correct}` for the emoji check.
     StartLinking {
         code: String,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// The user picked the right emojis: multi-device on (if it isn't), send the data. Returns
     /// the linked devices once the new device has registered.
@@ -1395,14 +1413,21 @@ impl App {
             Command::RestoreIdentityBackup { backup, password } => {
                 self.restore_identity_backup(backup, password).await
             }
-            Command::ExportIdentityBackup { password } => {
+            Command::ExportIdentityBackup { password, pin } => {
+                self.check_pin(pin)?;
                 self.export_identity_backup(password).await
             }
             Command::SafeCheckPassword { password } => Ok(Self::safe_check_password(&password)),
             Command::SafeStatus => self.safe_status(),
-            Command::SafeEnable { password } => self.safe_enable(password).await,
+            Command::SafeEnable { password, pin } => {
+                self.check_pin(pin)?;
+                self.safe_enable(password).await
+            }
             Command::SafeBackupNow => self.safe_backup_now().await,
-            Command::SafeDisable => self.safe_disable(),
+            Command::SafeDisable { pin } => {
+                self.check_pin(pin)?;
+                self.safe_disable()
+            }
             Command::SafeRestore { identity, password } => {
                 self.safe_restore(&identity, password).await
             }
@@ -1428,13 +1453,21 @@ impl App {
             Command::AndroidBackupExport {
                 directory,
                 password,
-            } => self.android_backup_export(directory, password),
+                pin,
+            } => {
+                self.check_pin(pin)?;
+                self.android_backup_export(directory, password)
+            }
             Command::AndroidBackupSchedule {
                 directory,
                 password,
                 interval,
                 keep,
-            } => self.android_backup_schedule(directory, password, interval, keep),
+                pin,
+            } => {
+                self.check_pin(pin)?;
+                self.android_backup_schedule(directory, password, interval, keep)
+            }
             Command::AndroidBackupExportStatus => self.android_export_status(),
             Command::Contacts => self.contacts_json(),
             Command::Contact { identity } => self.contact_json(&identity),
@@ -1464,13 +1497,17 @@ impl App {
             })),
             Command::VerifyMobile { code } => self.verify_mobile(&code).await,
             Command::CallMobile => self.call_mobile().await,
-            Command::SetRevocationPassword { password } => {
+            Command::SetRevocationPassword { password, pin } => {
+                self.check_pin(pin)?;
                 self.set_revocation_password(&password).await
             }
             Command::SetNickname { nickname } => self.set_nickname(&nickname),
             Command::Settings => self.settings_json(),
             Command::SetSetting { name, value } => self.set_app_setting(&name, value),
-            Command::DeleteAllData => self.delete_all_data(),
+            Command::DeleteAllData { pin } => {
+                self.check_pin(pin)?;
+                self.delete_all_data()
+            }
             Command::Conversations { archived, private } => {
                 self.conversations_json(archived, private)
             }
@@ -1755,7 +1792,10 @@ impl App {
             Command::LinkedDevices => self.linked_devices().await,
             Command::DropDevices { ids } => self.drop_devices(&ids).await,
             Command::DeactivateMultiDevice => self.deactivate_multi_device().await,
-            Command::StartLinking { code } => self.start_linking(&code).await,
+            Command::StartLinking { code, pin } => {
+                self.check_pin(pin)?;
+                self.start_linking(&code).await
+            }
             Command::ConfirmLinking => self.confirm_linking().await,
             Command::CancelLinking => {
                 if let Some(link) = self.pending_link.take() {

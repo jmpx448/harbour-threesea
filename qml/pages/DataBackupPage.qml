@@ -11,6 +11,7 @@ import "../components/Format.js" as Fmt
 // create backups into a folder, by hand or on a schedule.
 Page {
     id: page
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
     property string filePath
@@ -20,6 +21,8 @@ Page {
     property var exportStatus: ({})
     property bool exportRunning: false
     property string exportResult
+    // The app lock's PIN, while this page lives (window.pushWithPin).
+    property string pin
 
     function refreshExportStatus() {
         backend.call("androidBackupExportStatus", {}, function(ok, result) {
@@ -32,14 +35,17 @@ Page {
     // come back to this page's context, not the picker's.
     function setExportFolder(path) {
         if (!path) return
-        backend.call("androidBackupSchedule", { directory: path }, function(ok, result, kind, message) {
+        backend.call("androidBackupSchedule", { directory: path, pin: page.pin }, function(ok, result, kind, message) {
             if (ok) page.exportStatus = result
             else exportError.text = Errors.text(kind, message)
         })
     }
 
     // The password stays only in this field while the page lives.
-    Component.onDestruction: password.text = ""
+    Component.onDestruction: {
+        password.text = ""
+        pin = ""
+    }
 
     // Checking only reads the file; what it holds goes to the import dialog, which imports on
     // accept (offline, nothing is sent, existing local data stays) and ends on a results page.
@@ -224,7 +230,8 @@ Page {
                         : page.exportStatus.interval === "weekly" ? 2 : 0
                 onChosen: backend.call("androidBackupSchedule", {
                     interval: index === 1 ? "daily" : index === 2 ? "weekly" : "off",
-                    password: exportPassword.text
+                    password: exportPassword.text,
+                    pin: page.pin
                 }, function(ok, result, kind, message) {
                     if (!ok) exportError.text = Errors.text(kind, message)
                     page.refreshExportStatus()
@@ -240,7 +247,7 @@ Page {
                 choice: page.exportStatus.keep >= 10 ? 3 : page.exportStatus.keep >= 5 ? 2
                         : page.exportStatus.keep >= 3 ? 1 : 0
                 onChosen: backend.call("androidBackupSchedule",
-                                       { keep: [1, 3, 5, 10][index] },
+                                       { keep: [1, 3, 5, 10][index], pin: page.pin },
                                        function() { page.refreshExportStatus() })
             }
 
@@ -256,14 +263,14 @@ Page {
                 onClicked: {
                     exportError.text = ""
                     page.exportResult = ""
-                    var args = { password: exportPassword.text }
+                    var args = { password: exportPassword.text, pin: page.pin }
                     backend.call("androidBackupExport", args, function(ok, result, kind, message) {
                         if (ok) {
                             page.exportRunning = true
                             // Saved alongside, so the schedule can reuse it.
                             if (exportPassword.text.length > 0) {
                                 backend.call("androidBackupSchedule",
-                                             { password: exportPassword.text },
+                                             { password: exportPassword.text, pin: page.pin },
                                              function() { page.refreshExportStatus() })
                             }
                         } else {

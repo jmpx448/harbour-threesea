@@ -25,7 +25,7 @@ Page {
                 id: safeItem
                 width: parent.width
                 height: Theme.itemSizeMedium
-                onClicked: pageStack.push(Qt.resolvedUrl("../SafePage.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../SafePage.qml"))
 
                 property bool safeEnabled: false
                 Component.onCompleted: refresh()
@@ -64,7 +64,7 @@ Page {
 
             BackgroundItem {
                 width: parent.width
-                onClicked: pageStack.push(Qt.resolvedUrl("../ExportBackupPage.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../ExportBackupPage.qml"))
 
                 Label {
                     x: Theme.horizontalPageMargin
@@ -78,7 +78,7 @@ Page {
 
             BackgroundItem {
                 width: parent.width
-                onClicked: pageStack.push(Qt.resolvedUrl("../DataBackupPage.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../DataBackupPage.qml"))
 
                 Label {
                     x: Theme.horizontalPageMargin

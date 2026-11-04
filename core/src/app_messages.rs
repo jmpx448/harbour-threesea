@@ -281,6 +281,14 @@ impl App {
         Err(ApiError::PinLockout(pause))
     }
 
+    /// What takes the ID or the chats off this device, or gives someone else a hold on the ID,
+    /// needs the PIN whenever a lock exists, whether or not the chats are open (ADR 0009). The
+    /// core checks it so that no UI path can skip the prompt. Scheduled backups don't come
+    /// through here: the user set them up with the PIN.
+    pub(crate) fn check_pin(&self, pin: Option<Zeroizing<String>>) -> Result<(), ApiError> {
+        self.check_lock(pin.as_deref().map(String::as_str))
+    }
+
     /// Store a private mark and let everyone who follows them know at once: the media readers
     /// here, and through the event the UI's notifications and the browsers.
     pub(crate) fn mark_private(&self, key: &str, private: bool) -> Result<(), ApiError> {

@@ -6,15 +6,18 @@ import "../components/Errors.js" as Errors
 
 Page {
     id: page
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
     property bool working: false
     property string backup: ""
+    // The app lock's PIN, while this page lives (window.pushWithPin).
+    property string pin
 
     function exportBackup() {
         working = true
         errorLabel.text = ""
-        backend.call("exportIdentityBackup", { password: passwordField.text }, function(ok, result, kind, message) {
+        backend.call("exportIdentityBackup", { password: passwordField.text, pin: page.pin }, function(ok, result, kind, message) {
             working = false
             if (ok) {
                 backup = result.backup

@@ -68,19 +68,19 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `licenseStatus` | – | `{key, refused}`: the stored key, and the directory's message if it refused it |
 | `createIdentity` | – | `{identity}` (uses the stored license) |
 | `restoreIdentityBackup` | `backup`, `password` | `{identity}` (needs a license first) |
-| `exportIdentityBackup` | `password` (≥ 8 chars) | `{backup}` |
+| `exportIdentityBackup` | `password` (≥ 8 chars), `pin` | `{backup}` |
 | `safeCheckPassword` | `password` | `{result: tooShort\|tooLong\|weak\|ok}` |
 | `safeStatus` | – | `{enabled, server, lastBackup, lastError, size, maxBytes, retentionDays, restore}`; `restore` = `{pendingContacts, pendingGroups, pendingLists, importError, summary}` — what a restore still has to import (retried on reconnect, hourly and via `safeRetryImport`), why the last attempt failed, and the import's counts (`summary`: `{contacts, revokedContacts, groups, lists, skippedGroups: {deleted, unknownCreator, invalid}, at}`) |
-| `safeEnable` | `password` | status; derives the key, uploads a first backup |
+| `safeEnable` | `password`, `pin` | status; derives the key, uploads a first backup |
 | `safeBackupNow` | – | status |
-| `safeDisable` | – | status; forgets the key (server copy expires) |
+| `safeDisable` | `pin` | status; forgets the key (server copy expires) |
 | `safeRestore` | `identity`, `password` | `{identity, contacts, groups}` (needs a license first) |
 | `safeRetryImport` | – | status; tries the rest of a restored backup's import now |
 | `androidBackupInspect` | `path`, `password` | `{version, identity (match\|otherIdentity\|keyMismatch\|unreadable\|missing), inventory: {contactChats, groupChats, listChats, mediaEntries, mediaBytes (declared, an estimate), thumbnails, contactAvatars, contactProfilePictures, groupAvatars, ownAvatar, has…, unknownEntries}}` — looks into an Android data backup ZIP, entirely locally; errors `backupDecrypt` (password), `backupVersion`, `backupInvalid` |
 | `androidBackupImport` | `path`, `password`, `scope` (`metadata`\|`history`) | `metadata`: `{contacts: {added, existing, updated, keyConflicts}, groups: {added, existing, skippedDeleted, skippedUnknownCreator}, lists: {added, existing}, pictures: {own, contacts, groups, kept, localAvatarsNotImported, skipped}, invalidRows}` — merges the archive's contacts, groups, lists and pictures into the running identity, offline, without sending anything; existing local data wins; idempotent. Only a backup of the same ID and key (`backupIdentity` otherwise). `history`: starts the background job (messages, media, reactions; one at a time) and replies `{started}`; progress and outcome come as events: `{"event": "androidBackupProgress", step (messages\|media), done, total}` and `{"event": "androidBackupDone", ok, summary \| kind}` with `summary` = `{chats, skippedChats, imported, existing, collisions, unsent, invalidRows, unsupported: {category: n}, compat, mediaFiles, thumbnails, mediaMissing, mediaFailed, reactions, reactionsUnmatched, cancelled}`; it ends with `chatsChanged`/`contactsChanged` so the lists reload. Old messages are placed into history by time (sort_key), never resent; outgoing rows that never left Android stay failed; existing rows (live edits, tombstones) always win; repeated runs resume/add nothing. |
 | `androidBackupCancel` | – | `{}`; stops a running history import between batches (done work stays; running the import again continues) |
-| `androidBackupExport` | `directory?`, `password?` (omitted: the stored schedule settings) | `{started}`; writes an Android-format backup (format 27: settings, identity, contacts/groups/lists, messages, local media+thumbnails, pictures, reaction files; polls/status lines are counted as skipped, nonces are not written) as a background job; `{"event": "androidExportProgress", done, total}` and `{"event": "androidExportDone", ok, path, summary \| kind}`. The file is `threema-backup-<date>-<time>.zip`, written as `.part` first; afterwards the rotation keeps the newest `keep` of our files in the folder |
-| `androidBackupSchedule` | `directory?`, `password?` (min 8 chars; kept in the encrypted store for unattended runs), `interval?` (`off`\|`daily`\|`weekly`), `keep?` | status; maintenance starts a backup when one is due |
+| `androidBackupExport` | `directory?`, `password?` (omitted: the stored schedule settings), `pin` | `{started}`; writes an Android-format backup (format 27: settings, identity, contacts/groups/lists, messages, local media+thumbnails, pictures, reaction files; polls/status lines are counted as skipped, nonces are not written) as a background job; `{"event": "androidExportProgress", done, total}` and `{"event": "androidExportDone", ok, path, summary \| kind}`. The file is `threema-backup-<date>-<time>.zip`, written as `.part` first; afterwards the rotation keeps the newest `keep` of our files in the folder |
+| `androidBackupSchedule` | `directory?`, `password?` (min 8 chars; kept in the encrypted store for unattended runs), `interval?` (`off`\|`daily`\|`weekly`), `keep?`, `pin` | status; maintenance starts a backup when one is due |
 | `androidBackupExportStatus` | – | `{directory, interval, keep, lastBackup, lastError, passwordSet, running}` |
 | `contacts` | – | `{contacts: [contact…]}` (direct contacts, sorted by name); also fills `backend.contacts` |
 | `contact` | `identity` | contact |
@@ -94,14 +94,14 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `verifyMobile` | `code` | profile (`linkedMobile`); errors `noVerification`, server message for a wrong code |
 | `callMobile` | – | profile; Threema calls and reads the code |
 | `revocationStatus` | optional `cached` (no network: last known state) | `{set, setAt (ms or null), checked}` (`identity/check_revocation_key`) |
-| `setRevocationPassword` | `password` (8–256 chars) | revocation status; only base64(SHA-256(password)[0..4]) goes to the directory |
+| `setRevocationPassword` | `password` (8–256 chars), `pin` | revocation status; only base64(SHA-256(password)[0..4]) goes to the directory |
 | `setProfilePictureShare` | `share` (everyone\|nobody\|selected), optional `recipients` (the new allow list) | profile |
 | `setProfilePictureRecipient` | `identity`, `share` (bool) | the contact JSON (`pictureRecipient`: bool while sharing with selected contacts, else null) |
 | `setNickname` | `nickname` (≤ 32 bytes) | profile |
 
 | `settings` | – | Safe `settings` object (`readReceipts`, `sendTyping`, `blockUnknown`, …) |
 | `setSetting` | `name` (`readReceipts`\|`sendTyping`\|`blockUnknown`\|`videoCalls`\|`groupCalls`\|`receiveProfilePictures`\|…), `value` | settings |
-| `deleteAllData` | – | `{}`; wipes identity, contacts, settings (Safe copy on the server stays) |
+| `deleteAllData` | `pin` | `{}`; wipes identity, contacts, settings (Safe copy on the server stays) |
 
 | `conversations` | optional `archived` (the archive instead), `private` (the private chats; error `locked` unless unlocked) | `{conversations: [{identity, displayName, verification, unread, lastMessage}]}` newest first |
 | `messages` | `identity`, optional `limit` (200), `since` (local id: load back to this message), `before` / `after` (local id: only the page before or after it in history order, the chat's window; default 100) | `{identity, messages: [message…], private, firstUnread}` oldest first (`firstUnread`: local id of the oldest unread incoming message, null when none; the initial page is widened to reach it, bounded at 1000); error `locked` for a private chat while they are hidden |
@@ -131,6 +131,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setLock` | `enabled`; a new `pin` (≥ 4 chars) with `keyboard`, or none to keep it; `appLock`, `graceSecs`; if a lock exists `currentPin` | lock status; errors `wrongPin`, `pinTooShort`, `privateChatsExist` (removing) |
 | `unlock` | `pin`; `privateChats: true` makes private chats readable (until `lock`), otherwise it only checks (app lock) | lock status; errors `lockNeeded` (no lock stored: no PIN opens anything, marks from a restore or a linked device wait for one), `wrongPin`, `pinLockout` (message: seconds until a PIN is checked again; after more than 3 wrong PINs in a row, 30 s up to an hour, like Android; also for `setLock`'s `currentPin`) |
 | `lock` | – | lock status (private chats hidden again) |
+| (PIN-guarded) | `pin` on `exportIdentityBackup`, `safeEnable`, `safeDisable`, `androidBackupExport`, `androidBackupSchedule`, `setRevocationPassword`, `startLinking`, `deleteAllData` | if a lock exists they need its PIN, whether or not private chats are open: errors `wrongPin`, `pinLockout`. The UI asks through `unlock` without `privateChats`, changing nothing |
 | `setPrivate` | `identity`, `private` | `{identity, private}`; errors `lockNeeded`, `locked` (unmarking while locked). Private chats leave the chat list, archive, search, starred and media while locked; reading them returns `locked`; `messageAdded` carries `private` |
 | `emptyConversation` | `identity` | `{}`; deletes the messages, the chat stays in `conversations` with a `lastMessage` of kind `empty` (Android's "Empty chat"; migration 20) |
 | `setSyncExcluded` / `syncExcluded` | `identity`, `excluded` / – | `{excluded: [{identity, displayName}]}`; address book matching skips these IDs (Safe `syncExcludedIds`) |
@@ -221,7 +222,7 @@ QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, k
 | `createPoll` | `identity`, `description`, `choices`, `multiple`, `announce` | the poll message |
 | `vote` / `closePoll` | `message` (local id) and `choices` (choice ids) / `message` | the changed poll message; closing also adds the `pollClosed` message. Error `locked` in a hidden private chat |
 | `qrKind` | `text` | `{kind: "contact" \| "web" \| "device" \| "unknown"}` |
-| `startLinking` | `code` (Threema for Desktop's QR code) | `{choices: [[emoji ×3] ×3], correct}` for the emoji check (ADR 0011) |
+| `startLinking` | `code` (Threema for Desktop's QR code), `pin` | `{choices: [[emoji ×3] ×3], correct}` for the emoji check (ADR 0011) |
 | `confirmLinking` / `cancelLinking` | – | the linked devices once the new device registered / `{}` |
 | `groupCallRefresh` | `conversation` | `{}`; the state comes as the `groupCall` event (ADR 0012) |
 | `groupCallJoin` | `conversation`, `fingerprint` (hex SHA-256 of our DTLS certificate), `create` | `{offer, candidates, participantId}` for the media engine |

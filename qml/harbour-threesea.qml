@@ -151,7 +151,8 @@ ApplicationWindow {
     // (push and pop then do nothing and return null): that one is cut short, or it happens
     // right after it.
     function settleStack() {
-        if (!acceptedLock && !privateToClose && !callPageMissing() && !(locked && !lockPageUp())) return
+        if (!acceptedLock && !privateToClose && !pinPageToClose && !callPageMissing()
+                && !(locked && !lockPageUp())) return
         if (pageStack.busy) pageStack.completeAnimation()
         if (pageStack.busy) {
             stackLater.restart()
@@ -175,6 +176,11 @@ ApplicationWindow {
                 return false
             })
             if (lowest) pageStack.pop(pageStack.previousPage(lowest), PageStackAction.Immediate)
+        }
+        if (pinPageToClose) {
+            pinPageToClose = false
+            var pinPage = pageStack.find(function(page) { return page.objectName === "holdsPin" })
+            if (pinPage) pageStack.pop(pageStack.previousPage(pinPage), PageStackAction.Immediate)
         }
         // Something landed on the lock page (a reply that came late): back to it, so that one
         // PIN is all it takes. A call's page goes along and comes back with the next step.
@@ -276,6 +282,24 @@ ApplicationWindow {
         }
     }
 
+    // Opens a page whose commands need the PIN (ADR 0009; the core checks it each time): asks
+    // first if a lock exists and hands the page its `pin`. `opened(page)`, if given, gets the
+    // page. The X on the PIN page goes back without opening anything.
+    function pushWithPin(url, properties, opened) {
+        var args = properties || {}
+        if (!(lockInfo && lockInfo.lock)) {
+            var shown = pageStack.push(url, args)
+            if (opened) opened(shown)
+            return
+        }
+        var unlock = pageStack.push(Qt.resolvedUrl("pages/UnlockPage.qml"))
+        unlock.unlocked.connect(function(pin) {
+            args.pin = pin
+            var replaced = pageStack.replace(url, args)
+            if (opened) opened(replaced)
+        })
+    }
+
     // Replace `chatPage` (a private chat while they are hidden) with the PIN, then the chat.
     function unlockChat(chatPage, identity) {
         var unlock = pageStack.replace(Qt.resolvedUrl("pages/UnlockPage.qml"), {
@@ -288,11 +312,24 @@ ApplicationWindow {
         })
     }
 
+    // Close the page holding a PIN (pushWithPin or the app lock settings; it and what it opened):
+    // the next person gets the prompt again. Its PIN goes first, in case the stack can't pop right
+    // now; settleStack takes the page away.
+    property bool pinPageToClose: false
+    function closePinPage() {
+        var pinPage = pageStack.find(function(page) { return page.objectName === "holdsPin" })
+        if (!pinPage) return
+        pinPage.pin = ""
+        pinPageToClose = true
+        settleStack()
+    }
+
     // `letVoiceFinish`: the grace time ran out while away. A voice message being listened to
     // (phone in the pocket, screen locked) plays to its end, without the name; nothing follows it.
     function lockNow(letVoiceFinish) {
         backend.call("lock")
         closePrivate()
+        closePinPage()
         if (lockInfo && lockInfo.lock && lockInfo.lock.appLock) {
             // What's playing is behind the lock too. Only then: this also runs on coming back
             // after the grace time without any app lock (a private chat stops with its page).

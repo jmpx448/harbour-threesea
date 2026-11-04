@@ -7,10 +7,13 @@ import "../components/Format.js" as Fmt
 
 Page {
     id: page
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
     property var status: ({ enabled: false })
     property bool working: false
+    // The app lock's PIN, while this page lives (window.pushWithPin).
+    property string pin
 
     // After a restore: what still waits to be imported (it needs the directory server), what the
     // import skipped and why, and the last failure. Shown only while something needs attention.
@@ -54,7 +57,7 @@ Page {
 
     function askPassword() {
         var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"))
-        dialog.accepted.connect(function() { page.run("safeEnable", { password: dialog.password }) })
+        dialog.accepted.connect(function() { page.run("safeEnable", { password: dialog.password, pin: page.pin }) })
     }
 
     Component.onCompleted: refresh()
@@ -117,7 +120,7 @@ Page {
                     if (page.working) return
                     if (page.status.enabled) {
                         //% "Turning off Threema Safe"
-                        remorse.execute(qsTrId("threesea-la-safe-disabling"), function() { page.run("safeDisable") })
+                        remorse.execute(qsTrId("threesea-la-safe-disabling"), function() { page.run("safeDisable", { pin: page.pin }) })
                     } else {
                         page.askPassword()
                     }

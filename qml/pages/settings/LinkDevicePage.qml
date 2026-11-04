@@ -11,8 +11,10 @@ Page {
     allowedOrientations: Orientation.All
 
     property string code
-    // connecting, verify, linking, done, failed
-    property string step: "connecting"
+    // pin, connecting, verify, linking, done, failed
+    property string step: "pin"
+    // The app lock's PIN, gone once the core has checked it.
+    property string pin
     property var choices: []
     property int correct: -1
     property string errorText
@@ -48,12 +50,43 @@ Page {
         })
     }
 
-    // Once shown, not when created: a dialog creates its accept destination in advance.
+    // Once shown, not when created: a dialog creates its accept destination in advance. Every
+    // way to link comes here, so this is where the PIN is asked for (ADR 0009), once the stack
+    // has settled; the X on the PIN page leaves this page too.
     property bool started: false
-    onStatusChanged: {
-        if (status !== PageStatus.Active || started) return
+    property bool pinAsked: false
+    onStatusChanged: if (status === PageStatus.Active && !started) proceed.start()
+    Timer {
+        id: proceed
+        interval: 50
+        repeat: true
+        onTriggered: {
+            if (pageStack.busy) return
+            stop()
+            if (pageStack.currentPage !== page) return
+            if (window.lockInfo && window.lockInfo.lock && page.pin.length === 0) {
+                if (page.pinAsked) {
+                    pageStack.pop()
+                    return
+                }
+                page.pinAsked = true
+                var unlock = pageStack.push(Qt.resolvedUrl("../UnlockPage.qml"))
+                unlock.unlocked.connect(function(entered) {
+                    page.pin = entered
+                    pageStack.pop(page)
+                })
+                return
+            }
+            page.startLinking()
+        }
+    }
+
+    function startLinking() {
         started = true
-        backend.call("startLinking", { code: code }, function(ok, result, kind, message) {
+        step = "connecting"
+        var entered = pin
+        pin = ""
+        backend.call("startLinking", { code: code, pin: entered }, function(ok, result, kind, message) {
             if (!ok) {
                 page.fail(Errors.text(kind, message))
                 return

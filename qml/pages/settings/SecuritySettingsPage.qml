@@ -72,7 +72,7 @@ Page {
                     }
                     var unlock = pageStack.push(Qt.resolvedUrl("../UnlockPage.qml"))
                     unlock.unlocked.connect(function(pin) {
-                        pageStack.replace(Qt.resolvedUrl("../AppLockPage.qml"), { currentPin: pin })
+                        pageStack.replace(Qt.resolvedUrl("../AppLockPage.qml"), { pin: pin })
                     })
                 }
             }

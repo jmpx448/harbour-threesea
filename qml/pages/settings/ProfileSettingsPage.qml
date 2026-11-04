@@ -68,19 +68,19 @@ Page {
             MenuItem {
                 //% "Remove ID from this device"
                 text: qsTrId("threesea-me-delete-data")
-                onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("../DeleteDataDialog.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../DeleteDataDialog.qml"), {}, function(dialog) {
                     dialog.accepted.connect(function() {
+                        var pin = dialog.pin
                         // Last chance to undo, like Jolla's own destructive actions.
                         //% "Removing ID and data"
                         Remorse.popupAction(page, qsTrId("threesea-la-removing-data"), function() {
-                            backend.call("deleteAllData", {}, function() {
+                            backend.call("deleteAllData", { pin: pin }, function() {
                                 backend.refreshContacts()
                                 backend.refresh()
                             })
                         })
                     })
-                }
+                })
             }
             MenuItem {
                 //% "My QR code"
@@ -205,11 +205,10 @@ Page {
                          //% "No password set"
                          : qsTrId("threesea-la-revocation-not-set")
                 enabled: !working
-                onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("../RevocationPasswordDialog.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../RevocationPasswordDialog.qml"), {}, function(dialog) {
                     dialog.accepted.connect(function() {
                         revocationButton.working = true
-                        backend.call("setRevocationPassword", { password: dialog.password },
+                        backend.call("setRevocationPassword", { password: dialog.password, pin: dialog.pin },
                                      function(ok, result, kind, message) {
                             revocationButton.working = false
                             if (ok) {
@@ -219,7 +218,7 @@ Page {
                             }
                         })
                     })
-                }
+                })
             }
 
             // Identity links (Android's): only on the user's request (CLAUDE.md §7.4).

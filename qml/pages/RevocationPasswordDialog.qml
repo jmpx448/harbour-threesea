@@ -7,10 +7,13 @@ import "../components"
 // myid.threema.ch/revoke if the phone is lost. Only a 4-byte hash of it goes to Threema.
 Dialog {
     id: dialog
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
     property alias password: passwordField.text
     readonly property int length: passwordField.text.length
+    // The app lock's PIN for the caller's command (window.pushWithPin).
+    property string pin
 
     canAccept: length >= 8 && length <= 256 && repeatField.text === passwordField.text
 
