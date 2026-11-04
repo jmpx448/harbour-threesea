@@ -409,6 +409,7 @@ void ThreeseBackend::finishDataRemoval()
     m_callbacks.clear();
     m_nativeCallbacks.clear();
     m_statusRequests.clear();
+    m_contactRequests.clear();
     m_keyWork.clear();
     m_tempSources.clear();
     m_chatTones.clear();
@@ -991,6 +992,8 @@ void ThreeseBackend::call(const QString &command, const QVariantMap &args, const
     request.insert(QStringLiteral("cmd"), command);
     if (command == QLatin1String("status")) {
         m_statusRequests.insert(id);
+    } else if (command == QLatin1String("contacts")) {
+        m_contactRequests.insert(id);
     }
     if (callback.isCallable()) {
         m_callbacks.insert(id, callback);
@@ -1183,8 +1186,9 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             emit unreadFromChanged();
         }
     }
-    // Contact list replies (from any caller) feed the shared model.
-    if (ok && result.contains(QStringLiteral("contacts"))) {
+    // Contact list replies feed the shared model. By request, not by the look of the reply: the
+    // summaries of a backup import and a Safe restore have a `contacts` of their own.
+    if (m_contactRequests.remove(id) && ok) {
         m_contacts->update(result.value(QStringLiteral("contacts")).toArray().toVariantList());
     }
 

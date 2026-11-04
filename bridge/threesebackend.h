@@ -412,6 +412,7 @@ private:
     // The chats' own tones (from the core, while it runs): the notifications ask for them at once.
     QVariantMap m_chatTones;
     QSet<quint64> m_statusRequests;
+    QSet<quint64> m_contactRequests;
     QString m_state = QStringLiteral("starting");
     QString m_identity;
     QString m_errorText;
