@@ -94,6 +94,7 @@ ssh -p 2223 -i ~/SailfishOS/emulator/share/id_ed25519 root@127.0.0.1 journalctl 
 Call media engine (Full, ADR 0012): `scripts/test-callengine.sh` builds `tests/callengine` (two
 webrtcbin engines calling each other) in the SDK image and runs it in the emulator as
 `defaultuser` (PulseAudio session); it prints both SDPs and `connected`, exit code 0 on success.
+With `--build-only` it stops after the build (what CI and `scripts/run-sdk-tests.sh` do).
 Sound (calls, voice messages): the VM needs VirtualBox's PulseAudio driver with input and
 output, set while it is off:
 `VBoxManage modifyvm "Sailfish OS Emulator 5.1.0.11" --audio-driver pulse --audio-enabled on --audio-in on --audio-out on`.

@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only
-# The repository's checks in one go (what CI runs; CLAUDE.md §7.7, Phase 0):
+# The repository's checks in one go (CLAUDE.md §7.7, Phase 0). CI (.github/workflows/ci.yml) runs
+# the default set, and libthreema's and the SDK's tests and builds as jobs of their own.
 #   private data   no line matching .local/private-patterns (local, never committed: one
 #                  extended regex per line, e.g. test credentials) in the tracked files, or with
 #                  --staged in what is about to be committed
@@ -9,22 +10,29 @@
 #   format         cargo fmt --check (our crate; libthreema keeps its own style)
 #   lints, tests   cargo clippy (no warnings; twice, the emulator's `demo` feature too),
 #                  cargo test
+#   UI and core    scripts/check-qml.py: the commands the UI sends against the core's, QML
+#                  imports against the Jolla Store's list, every tests/ program run by a script
+#   fuzz targets   they still build (core/fuzz, its own workspace; fuzzing itself: docs/build.md)
+#   texts          how many texts await the translation step (scripts/check-qml.py --texts);
+#                  with --release a failure: a release has them all
 #   advisories     cargo audit, if installed
-#   libthreema     its library tests, and the list models', GIF decoder's, app lock's, pages' and
-#                  notification tokens' tests in the SDK
-#                  if its image is there (--full only: they take a while)
+# --full adds libthreema's own tests (scripts/libthreema-tests.sh), every SDK test
+#   (scripts/run-sdk-tests.sh; fails without the SDK image, which scripts/sdk-build.sh builds) and
+#   the C ABI under AddressSanitizer (scripts/test-ffi-asan.sh, nightly toolchain).
 # --quick: private data, logging, TLS pins and format only (the pre-commit hook, scripts/hooks).
 set -eu
 cd "$(dirname "$0")/.."
 quick=false
 full=false
 staged=false
+release=false
 for arg in "$@"; do
     case $arg in
         --quick) quick=true ;;
         --full) full=true ;;
         --staged) staged=true ;;
-        *) echo "usage: $0 [--quick] [--full] [--staged]" >&2; exit 2 ;;
+        --release) release=true ;;
+        *) echo "usage: $0 [--quick] [--full] [--staged] [--release]" >&2; exit 2 ;;
     esac
 done
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -32,6 +40,17 @@ export PATH="$HOME/.cargo/bin:$PATH"
 failed=0
 step() { printf '== %s\n' "$1"; }
 fail() { echo "FAILED: $1" >&2; failed=1; }
+# Runs a command quietly; its output only if it fails.
+quiet() {
+    what=$1
+    shift
+    out=$(mktemp)
+    if ! "$@" >"$out" 2>&1; then
+        tail -n 80 "$out"
+        fail "$what"
+    fi
+    rm -f "$out"
+}
 
 step "private data"
 patterns=.local/private-patterns
@@ -82,6 +101,24 @@ else
 fi
 rm -f "$log"
 
+step "UI and core"
+python3 -I scripts/check-qml.py || fail "UI and core (scripts/check-qml.py)"
+
+step "fuzz targets"
+quiet "fuzz targets (core/fuzz)" env CARGO_TARGET_DIR="$PWD/target/fuzz-check" \
+    cargo check -q --manifest-path core/fuzz/Cargo.toml --bins
+
+step "texts"
+missing=$(python3 -I scripts/check-qml.py --texts | wc -l)
+if [ "$missing" -eq 0 ]; then
+    echo "all in translations/"
+elif $release; then
+    python3 -I scripts/check-qml.py --texts | head -40
+    fail "texts (scripts/check-qml.py --texts; scripts/update-translations.sh, then the translations)"
+else
+    echo "$missing entries await the translation step (scripts/check-qml.py --texts)"
+fi
+
 step "advisories"
 if command -v cargo-audit >/dev/null 2>&1; then
     cargo audit -q || fail "cargo audit"
@@ -90,37 +127,12 @@ else
 fi
 
 if $full; then
-    if docker image inspect "harbour-threesea-sdk:${SFOS_VERSION:-5.1.0.11}" >/dev/null 2>&1; then
-        step "list models (SDK)"
-        scripts/test-models.sh >/dev/null 2>&1 || fail "list models (scripts/test-models.sh)"
-        step "loudspeaker switch (SDK)"
-        scripts/test-callroute.sh >/dev/null 2>&1 || fail "loudspeaker switch (scripts/test-callroute.sh)"
-        step "GIF decoder (SDK)"
-        scripts/test-gifdecoder.sh >/dev/null 2>&1 || fail "GIF decoder (scripts/test-gifdecoder.sh)"
-        step "reading media off the GUI thread (SDK)"
-        scripts/test-mediareader.sh >/dev/null 2>&1 || fail "media reader (scripts/test-mediareader.sh)"
-        step "pictures upright (SDK)"
-        scripts/test-mediaimage.sh >/dev/null 2>&1 || fail "pictures (scripts/test-mediaimage.sh)"
-        scripts/test-filetype.sh >/dev/null 2>&1 || fail "file types (scripts/test-filetype.sh)"
-        step "what pictures carry out (SDK)"
-        scripts/test-photoedit.sh >/dev/null 2>&1 || fail "pictures (scripts/test-photoedit.sh)"
-        step "app lock (SDK)"
-        scripts/test-lockstate.sh >/dev/null 2>&1 || fail "app lock (scripts/test-lockstate.sh)"
-        step "every page opens (SDK)"
-        scripts/test-pages.sh >/dev/null 2>&1 || fail "pages (scripts/test-pages.sh)"
-        step "notification tokens (SDK)"
-        scripts/test-notification-tokens.sh >/dev/null 2>&1 ||
-            fail "notification tokens (scripts/test-notification-tokens.sh)"
-        step "the process's end (SDK)"
-        scripts/test-lifecycle.sh >/dev/null 2>&1 || fail "the process's end (scripts/test-lifecycle.sh)"
-        step "text helpers (SDK)"
-        scripts/test-format.sh >/dev/null 2>&1 || fail "text helpers (scripts/test-format.sh)"
-        step "voice recorder (SDK)"
-        scripts/test-voicerecorder.sh >/dev/null 2>&1 || fail "voice recorder (scripts/test-voicerecorder.sh)"
-    fi
     step "libthreema"
-    CARGO_TARGET_DIR="$PWD/target" cargo test -q --manifest-path third_party/libthreema/Cargo.toml \
-        -p libthreema --lib --locked >/dev/null 2>&1 || fail "libthreema tests"
+    quiet "libthreema tests (scripts/libthreema-tests.sh)" scripts/libthreema-tests.sh
+    step "SDK tests"
+    scripts/run-sdk-tests.sh || fail "SDK tests (scripts/run-sdk-tests.sh)"
+    step "C ABI under AddressSanitizer"
+    quiet "C ABI under AddressSanitizer (scripts/test-ffi-asan.sh)" scripts/test-ffi-asan.sh
 fi
 
 [ $failed -eq 0 ] && echo "OK" || exit 1

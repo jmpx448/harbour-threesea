@@ -30,9 +30,15 @@ cargo clippy --all-targets
 cargo test -- --ignored              # live tests against the real Threema servers
 ```
 
-All checks in one go (what CI is to run): `scripts/check.sh` (private data, logging rules,
-format, clippy, tests, `cargo audit` if installed); `--full` adds libthreema's tests and the
-tests in the SDK, `--quick` does only the first three. `scripts/test-lockstate.sh` runs the real
+All checks in one go: `scripts/check.sh` (private data, logging rules, format, clippy, tests, the
+UI's commands and imports against the core and the Jolla Store's list (`scripts/check-qml.py`),
+that the fuzz targets build, how many texts await translation, `cargo audit` if installed);
+`--full` adds libthreema's own tests (`scripts/libthreema-tests.sh`) and every test in the SDK
+(`scripts/run-sdk-tests.sh`: each `scripts/test-*.sh`, the call engine's built only), and fails
+without the SDK image; `--release` fails while a text is missing from `translations/`;
+`--quick` does only the first three. CI (`.github/workflows/ci.yml`) runs the default checks,
+libthreema's tests, the SDK tests and builds of both flavours for all three architectures on
+every push; `advisories.yml` runs `cargo audit` weekly too. `scripts/test-lockstate.sh` runs the real
 window QML on the real Silica with a fake backend and no window system (`tests/lockstate`): the
 app lock, calls and the page stack, one scenario per process, no device or emulator needed.
 `scripts/test-pages.sh` opens every page and dialog under `qml/pages` the same way, for both
@@ -128,3 +134,8 @@ stalls at the container headers. The voice seed is rewritten by
 `write_backup_seeds`, the video seed by `write_video_seed`, the WebP seeds by `write_webp_seeds`, the GIF seeds by `write_gif_seeds`. Crashes land in `fuzz/artifacts/` (ignored by git). Where a seal stands in
 front of a decoder, the target seals the input itself (`group_call_handshake`) or starts behind it
 (`d2d_envelope`).
+
+`scripts/check.sh` (and so CI) builds every target with `cargo check` on the pinned toolchain, so a
+target that stops compiling shows at once; fuzzing itself stays a manual run. `gif_clean` was
+fuzzed for 15 minutes on 2026-11-05: it found the reordering of a control block in front of a
+loop block, fixed in `core/src/gif.rs`, and then ran 43 million inputs without a finding.

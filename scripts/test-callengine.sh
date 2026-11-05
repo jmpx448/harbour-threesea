@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only
 # Builds tests/callengine for i486 in the SDK image and runs it in the emulator (as the device
-# user, for the PulseAudio session). See docs/emulator.md.
+# user, for the PulseAudio session). See docs/emulator.md. With --build-only it stops after the
+# build (no emulator needed; scripts/run-sdk-tests.sh, CI).
 set -eu
 SFOS=${SFOS_VERSION:-5.1.0.11}
 IMAGE=harbour-threesea-sdk:$SFOS
@@ -22,6 +23,11 @@ docker run --rm -i -e SFOS="$SFOS" -v "$ROOT:/src:ro" "$IMAGE" sh -euc '
     sb2 -t $T meson install -C wap-build >&2
     cd $B/tests/callengine && sb2 -t $T qmake WAP_PREFIX=$B/wap && sb2 -t $T make >&2
     cat callengine-test' > "$OUT/callengine-test"
+[ -s "$OUT/callengine-test" ] || { echo "callengine-test was not built" >&2; exit 1; }
+if [ "${1:-}" = --build-only ]; then
+  echo "callengine-test built"
+  exit 0
+fi
 KEY=${THREESEA_EMU_KEY:-$HOME/SailfishOS/emulator/share/id_ed25519}
 OPTS="-i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 scp -P 2223 $OPTS "$OUT/callengine-test" root@127.0.0.1:/tmp/callengine-test
