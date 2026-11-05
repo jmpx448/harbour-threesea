@@ -1753,6 +1753,45 @@ mod tests {
         assert!(to(STRANGER, Some(key(1))).is_none());
     }
 
+    /// libthreema asks through its traits, which read the stored settings by their JSON keys; the
+    /// app, Threema Safe and the other devices write them through `backup::Settings`. A key renamed
+    /// on one side only would let every blocked sender through.
+    #[test]
+    fn libthreema_reads_the_block_settings_the_app_writes() {
+        let (_dir, store) = store();
+        let store = Rc::new(store);
+        let contacts = StoreContacts {
+            store: Rc::clone(&store),
+            user_identity: ThreemaId::try_from("ABCD1234").unwrap(),
+            events: EventSink::default(),
+        };
+        let settings = StoreSettings(Rc::clone(&store));
+        let id = |id: &str| ThreemaId::try_from(id).unwrap();
+        let save = |app: &crate::safe::backup::Settings| {
+            store
+                .set_setting(keys::APP_SETTINGS, &serde_json::to_string(app).unwrap())
+                .unwrap();
+        };
+
+        assert!(!contacts.is_explicitly_blocked(id(OTHER)).unwrap());
+        assert!(!settings.block_unknown_identities().unwrap());
+
+        let mut app = crate::safe::backup::Settings {
+            blocked_contacts: vec![OTHER.to_owned()],
+            ..Default::default()
+        };
+        save(&app);
+        assert!(contacts.is_explicitly_blocked(id(OTHER)).unwrap());
+        assert!(!contacts.is_explicitly_blocked(id(STRANGER)).unwrap());
+        assert!(!settings.block_unknown_identities().unwrap());
+
+        app.block_unknown = true;
+        app.blocked_contacts.clear();
+        save(&app);
+        assert!(settings.block_unknown_identities().unwrap());
+        assert!(!contacts.is_explicitly_blocked(id(OTHER)).unwrap());
+    }
+
     #[test]
     fn identity_blocked_steps() {
         let (_dir, store) = store();

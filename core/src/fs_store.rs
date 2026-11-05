@@ -676,12 +676,17 @@ mod tests {
             .len()
     }
 
+    /// As the app writes it (`App::set_blocked`).
     fn block(party: &Party, peer: &Party) {
+        let settings = crate::safe::backup::Settings {
+            blocked_contacts: vec![peer.id.to_string()],
+            ..Default::default()
+        };
         party
             .store
             .set_setting(
                 crate::store::keys::APP_SETTINGS,
-                &serde_json::json!({ "blockedContacts": [peer.id.to_string()] }).to_string(),
+                &serde_json::to_string(&settings).unwrap(),
             )
             .unwrap();
     }
@@ -742,10 +747,14 @@ mod tests {
         let mut known = bob.store.contact("ABCD1234").unwrap().unwrap();
         known.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
         bob.store.upsert_contact(&known).unwrap();
+        let settings = crate::safe::backup::Settings {
+            block_unknown: true,
+            ..Default::default()
+        };
         bob.store
             .set_setting(
                 crate::store::keys::APP_SETTINGS,
-                &serde_json::json!({ "blockUnknown": true }).to_string(),
+                &serde_json::to_string(&settings).unwrap(),
             )
             .unwrap();
         // Their group-setup is exempt and may be encapsulated, so the session has to exist.
@@ -851,6 +860,44 @@ mod tests {
                 .unwrap()
         );
         assert!(!bob.store.newest_is_status(&chat, "fsReset").unwrap());
+    }
+
+    /// The same box once more, under the message ID given, which isn't encrypted: anyone on the
+    /// way can change it.
+    fn replayed(payload: &MessageWithMetadataBox, id: MessageId) -> MessageWithMetadataBox {
+        let mut bytes = payload.bytes.clone();
+        // Sender, receiver, then the message ID (csp.struct.yml `message-with-metadata-box`).
+        bytes[16..24].copy_from_slice(&id.0.to_le_bytes());
+        MessageWithMetadataBox {
+            sender_identity: payload.sender_identity,
+            id,
+            flags: payload.flags,
+            bytes,
+        }
+    }
+
+    /// A message recorded and delivered again is acknowledged and dropped: under its own message ID,
+    /// under another, and after the chat it was in was deleted, when only its used nonce is left.
+    #[test]
+    fn a_message_delivered_again_shows_once() {
+        let (alice, mut bob) = pair();
+        let payload = plain_text(&alice, &bob);
+        let copies = [
+            replayed(&payload, payload.id),
+            replayed(&payload, MessageId(payload.id.0 ^ 1)),
+            replayed(&payload, payload.id),
+        ];
+
+        let (texts, _) = bob.receive(&alice, vec![payload]);
+        assert_eq!(texts, ["plain"]);
+        for (round, again) in copies.into_iter().enumerate() {
+            if round == 2 {
+                bob.store.delete_conversation("ABCD1234").unwrap();
+            }
+            let (texts, replies) = bob.receive(&alice, vec![again]);
+            assert!(texts.is_empty() && replies.is_empty(), "round {round}");
+        }
+        assert_eq!(bob.store.message_count("ABCD1234").unwrap(), 0);
     }
 
     #[test]
