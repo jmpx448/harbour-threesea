@@ -4,7 +4,7 @@
 //!
 //! Upstream: Android's `reflectedd2dsync/*`. Only fields present in the message change
 //! (`optional` in md-d2d-sync.proto). Pictures come as blob mirror references
-//! (`CoreEvent::SyncPicture`, fetched by `App::apply_synced_picture`).
+//! (`synced_pictures`, then `CoreEvent::SyncPicture`, fetched by `App::apply_synced_picture`).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -65,6 +65,19 @@ fn picture(delta: Option<DeltaImage>) -> Option<Option<SyncedBlob>> {
 }
 
 /// Visibility and category of a conversation (pinned/archived, private).
+/// Kept with the sync that says it, which comes only once: fetched and stored from there on, and
+/// again at a later try (`App::apply_synced_picture`).
+fn note_picture(
+    store: &Store,
+    target: String,
+    blob: Option<&SyncedBlob>,
+    events: &mut Vec<CoreEvent>,
+) -> Result<(), StoreError> {
+    store.set_synced_picture(&target, blob)?;
+    events.push(CoreEvent::SyncPicture { target });
+    Ok(())
+}
+
 fn apply_conversation(
     store: &Store,
     conversation: &str,
@@ -205,10 +218,10 @@ fn apply_contact(
     }
     let id = identity.as_str().to_owned();
     if let Some(blob) = picture(synced.contact_defined_profile_picture.take()) {
-        events.push(CoreEvent::SyncPicture {
-            target: crate::profile_pictures::contact_picture_name(&id),
-            blob,
-        });
+        // The synced state is the newest; a download still under way is obsolete.
+        store.cancel_picture_download(&id)?;
+        let target = crate::profile_pictures::contact_picture_name(&id);
+        note_picture(store, target, blob.as_ref(), events)?;
     }
     if let Some(policy) = synced.notification_trigger_policy_override {
         store.set_chat_notifications(
@@ -372,10 +385,7 @@ fn apply_group(
         events.push(CoreEvent::UnknownMembers(unknown));
     }
     if let Some(blob) = picture(synced.profile_picture.take()) {
-        events.push(CoreEvent::SyncPicture {
-            target: key.clone(),
-            blob,
-        });
+        note_picture(store, key.clone(), blob.as_ref(), events)?;
     }
     if let Some(policy) = synced.notification_trigger_policy_override {
         store.set_chat_notifications(
@@ -838,10 +848,8 @@ pub fn user_profile_sync(
         return Ok(());
     };
     if let Some(blob) = picture(profile.profile_picture.take()) {
-        events.push(CoreEvent::SyncPicture {
-            target: crate::profile_pictures::OWN_PICTURE.to_owned(),
-            blob,
-        });
+        let target = crate::profile_pictures::OWN_PICTURE.to_owned();
+        note_picture(store, target, blob.as_ref(), events)?;
     }
     if profile.nickname.is_some()
         || profile.profile_picture_share_with.is_some()
@@ -1256,6 +1264,52 @@ mod tests {
     /// Deleted on another device: the chat is gone from the store here, and the app is told, as
     /// the picture and the media are for it to remove.
     /// What is open on the screen shows it at once.
+    /// It comes once, and the fetch can fail or be cut off: what it said stays until it is done.
+    #[test]
+    fn a_synced_picture_is_noted_with_the_sync() {
+        use libthreema::protobuf::common::{Blob, Image, image};
+        let (_dir, store) = store();
+        let updated = |byte: u8| DeltaImage {
+            image: Some(delta_image::Image::Updated(Image {
+                r#type: image::Type::Jpeg as i32,
+                blob: Some(Blob {
+                    id: vec![byte; 16],
+                    nonce: vec![byte; 24],
+                    key: vec![byte; 32],
+                    uploaded_at: 0,
+                }),
+            })),
+        };
+        let profile = |picture| UserProfileSync {
+            action: Some(user_profile_sync::Action::Update(
+                user_profile_sync::Update {
+                    user_profile: Some(d2d_sync::UserProfile {
+                        profile_picture: Some(picture),
+                        ..Default::default()
+                    }),
+                },
+            )),
+        };
+        let own = crate::profile_pictures::OWN_PICTURE;
+        let mut events = Vec::new();
+        user_profile_sync(&store, profile(updated(1)), &mut events).unwrap();
+        assert!(matches!(&events[..], [CoreEvent::SyncPicture { target }] if target == own));
+        let (blob, _) = store.synced_picture(own).unwrap().unwrap();
+        assert_eq!(blob.unwrap().key, [1; 32]);
+
+        // Newer: replaces it.
+        user_profile_sync(&store, profile(updated(2)), &mut Vec::new()).unwrap();
+        let (blob, _) = store.synced_picture(own).unwrap().unwrap();
+        assert_eq!(blob.unwrap().key, [2; 32]);
+
+        let removed = DeltaImage {
+            image: Some(delta_image::Image::Removed(Unit {})),
+        };
+        user_profile_sync(&store, profile(removed), &mut Vec::new()).unwrap();
+        let (blob, _) = store.synced_picture(own).unwrap().unwrap();
+        assert!(blob.is_none());
+    }
+
     #[test]
     fn a_change_from_another_device_tells_the_ui() {
         let (_dir, store) = store();

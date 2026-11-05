@@ -72,6 +72,20 @@ pub(crate) const MIGRATION_RESTORED: &str = "
         identity  TEXT PRIMARY KEY NOT NULL
     ) WITHOUT ROWID;";
 
+/// Pictures other devices of the group synced (store migration 39): kept from the moment the sync
+/// is applied until the picture is stored here, as the sync won't come again. `target`: `me`,
+/// `contact:<ID>` or a group key; no `blob`: removed.
+pub(crate) const MIGRATION_SYNCED_PICTURES: &str = "
+    CREATE TABLE synced_pictures (
+        target      TEXT PRIMARY KEY NOT NULL,
+        blob        BLOB,
+        key         BLOB,
+        nonce       BLOB,
+        generation  INTEGER NOT NULL,
+        attempts    INTEGER NOT NULL,
+        next_at     INTEGER NOT NULL
+    ) WITHOUT ROWID;";
+
 /// Settings keys.
 pub const SETTING_UPLOAD: &str = "profilePictureUpload";
 pub const SETTING_SHARE: &str = "profilePictureShare";
@@ -522,6 +536,8 @@ impl Store {
             .optional()?
             .unwrap_or(0);
         let generation = next_version(old);
+        // From the contact, so newer than what another device said of it.
+        self.cancel_synced_picture(&contact_picture_name(identity))?;
         self.conn.execute(
             "INSERT OR REPLACE INTO picture_downloads
                  (identity, blob, key, size, generation, attempts, next_at)
@@ -628,6 +644,124 @@ impl Store {
         Ok(true)
     }
 
+    /// A device of the group changed a picture: what it said, in place of what it said before.
+    pub(crate) fn set_synced_picture(
+        &self,
+        target: &str,
+        blob: Option<&crate::sync::SyncedBlob>,
+    ) -> Result<(), StoreError> {
+        let old: i64 = self
+            .conn
+            .query_row(
+                "SELECT generation FROM synced_pictures WHERE target = ?1",
+                [target],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO synced_pictures
+                 (target, blob, key, nonce, generation, attempts, next_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+            params![
+                target,
+                blob.map(|blob| blob.id.0.to_vec()),
+                blob.map(|blob| blob.key.to_vec()),
+                blob.map(|blob| blob.nonce.to_vec()),
+                next_version(old)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What is still to be done for `target`: the picture (`None`: it was removed) and its
+    /// generation.
+    pub(crate) fn synced_picture(
+        &self,
+        target: &str,
+    ) -> Result<Option<(Option<crate::sync::SyncedBlob>, i64)>, StoreError> {
+        type Row = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, i64);
+        let row: Option<Row> = self
+            .conn
+            .query_row(
+                "SELECT blob, key, nonce, generation FROM synced_pictures WHERE target = ?1",
+                [target],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(blob, key, nonce, generation)| {
+            let synced = (|| {
+                Some(crate::sync::SyncedBlob {
+                    id: BlobId(blob?.try_into().ok()?),
+                    key: key?.try_into().ok()?,
+                    nonce: nonce?.try_into().ok()?,
+                })
+            })();
+            (synced, generation)
+        }))
+    }
+
+    /// Those past their pause (startup, reconnect, maintenance).
+    pub(crate) fn due_synced_pictures(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT target FROM synced_pictures WHERE next_at <= ?1")?;
+        let rows = statement.query_map([now_ms()], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Stored, or gone for good: drops the row if it still is this generation.
+    pub(crate) fn clear_synced_picture(
+        &self,
+        target: &str,
+        generation: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM synced_pictures WHERE target = ?1 AND generation = ?2",
+            params![target, generation],
+        )?;
+        Ok(())
+    }
+
+    /// Something newer than the sync decided about this picture (a change here, a message from
+    /// the contact or the group's creator), or what it belongs to is gone.
+    pub(crate) fn cancel_synced_picture(&self, target: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM synced_pictures WHERE target = ?1", [target])?;
+        Ok(())
+    }
+
+    /// Fetching it failed for a passing reason: again later, as long as the mirror may have it.
+    pub(crate) fn synced_picture_failed(
+        &self,
+        target: &str,
+        generation: i64,
+    ) -> Result<(), StoreError> {
+        let attempts: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT attempts FROM synced_pictures WHERE target = ?1 AND generation = ?2",
+                params![target, generation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(attempts) = attempts else {
+            return Ok(());
+        };
+        if attempts + 1 >= DOWNLOAD_MAX_ATTEMPTS {
+            return self.clear_synced_picture(target, generation);
+        }
+        let pause = DOWNLOAD_PAUSES_MS[usize::try_from(attempts)
+            .unwrap_or(usize::MAX)
+            .min(DOWNLOAD_PAUSES_MS.len() - 1)];
+        self.conn.execute(
+            "UPDATE synced_pictures SET attempts = ?3, next_at = ?4
+             WHERE target = ?1 AND generation = ?2",
+            params![target, generation, attempts + 1, now_ms() + pause],
+        )?;
+        Ok(())
+    }
+
     /// _Common Request Profile Picture Receive Steps_ (or our picture changed: everyone).
     pub fn purge_picture_distribution(&self, receiver: Option<&str>) -> Result<(), StoreError> {
         match receiver {
@@ -644,6 +778,62 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_synced_picture_is_kept_until_it_is_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let blob = |byte| crate::sync::SyncedBlob {
+            id: BlobId([byte; 16]),
+            key: [byte; 32],
+            nonce: [byte; 24],
+        };
+        store.set_synced_picture("me", Some(&blob(1))).unwrap();
+        let (stored, first) = store.synced_picture("me").unwrap().unwrap();
+        assert_eq!(stored.unwrap().id.0, [1; 16]);
+        assert_eq!(store.due_synced_pictures().unwrap(), ["me"]);
+
+        // A passing failure: not due for now, and tried again later.
+        store.synced_picture_failed("me", first).unwrap();
+        assert!(store.due_synced_pictures().unwrap().is_empty());
+        assert!(store.synced_picture("me").unwrap().is_some());
+
+        // A newer sync takes its place, due at once; what the older one fetched doesn't count.
+        store.set_synced_picture("me", Some(&blob(2))).unwrap();
+        let (stored, second) = store.synced_picture("me").unwrap().unwrap();
+        assert_eq!(stored.unwrap().nonce, [2; 24]);
+        assert_ne!(first, second);
+        assert_eq!(store.due_synced_pictures().unwrap(), ["me"]);
+        store.clear_synced_picture("me", first).unwrap();
+        assert!(store.synced_picture("me").unwrap().is_some());
+
+        // Removed: still something to do, no blob.
+        store.set_synced_picture("me", None).unwrap();
+        let (stored, third) = store.synced_picture("me").unwrap().unwrap();
+        assert!(stored.is_none());
+        store.clear_synced_picture("me", third).unwrap();
+        assert!(store.synced_picture("me").unwrap().is_none());
+
+        // It doesn't go on for ever.
+        store.set_synced_picture("me", Some(&blob(3))).unwrap();
+        for _ in 0..DOWNLOAD_MAX_ATTEMPTS {
+            if let Some((_, generation)) = store.synced_picture("me").unwrap() {
+                store.synced_picture_failed("me", generation).unwrap();
+            }
+        }
+        assert!(store.synced_picture("me").unwrap().is_none());
+
+        // The contact's own word is newer than what a device said of them.
+        let contact = contact_picture_name("00000BOB");
+        store.set_synced_picture(&contact, Some(&blob(4))).unwrap();
+        let picture = crate::groups::GroupPicture {
+            blob_id: BlobId([5; 16]),
+            key: [5; 32],
+            size: 3,
+        };
+        store.set_picture_download("00000BOB", &picture).unwrap();
+        assert!(store.synced_picture(&contact).unwrap().is_none());
+    }
 
     #[test]
     fn safe_release_round_trip() {
@@ -798,6 +988,7 @@ mod tests {
                 .execute_batch(
                     "ALTER TABLE messages DROP COLUMN written_out;
                      ALTER TABLE groups DROP COLUMN kicked;
+                     DROP TABLE synced_pictures;
                      DROP TABLE group_member_lookups; DROP TABLE group_picture_syncs;
                      DROP TABLE chat_tones;
                      DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;

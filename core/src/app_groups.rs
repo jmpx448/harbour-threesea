@@ -40,6 +40,14 @@ pub(crate) fn title(
         .join(", ")
 }
 
+/// The blob expired, or the key is wrong, or it is far too large: no later try changes that.
+pub(crate) fn picture_is_gone(error: &media::MediaError) -> bool {
+    matches!(
+        error,
+        media::MediaError::Decrypt | media::MediaError::TooLarge | media::MediaError::Status(404)
+    )
+}
+
 /// Fetch and decrypt a contact's or group's picture: refused by its claimed size before anything
 /// is fetched, and cut off at the same limit whatever it claimed.
 async fn fetch_picture(
@@ -360,6 +368,7 @@ impl App {
     /// persistently, then sent to every member.
     pub(crate) async fn set_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
+        self.store.cancel_synced_picture(key)?;
         let data = std::mem::take(&mut self.attachments)
             .into_iter()
             .next()
@@ -398,6 +407,7 @@ impl App {
     /// `removeGroupPicture` (creator).
     pub(crate) fn remove_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
+        self.store.cancel_synced_picture(key)?;
         self.store.group_outbox_add(
             key,
             &group.members,
@@ -562,13 +572,7 @@ impl App {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "contact picture download failed");
-                    let gone = matches!(
-                        error,
-                        media::MediaError::Decrypt
-                            | media::MediaError::TooLarge
-                            | media::MediaError::Status(404)
-                    );
-                    if gone {
+                    if picture_is_gone(&error) {
                         // The blob expired (or the key is wrong, or it is far too large):
                         // retrying the download is useless.
                         let _ = store.cancel_picture_download(&identity);
@@ -592,6 +596,11 @@ impl App {
         if let Ok(pending) = self.store.groups_with_pending_picture() {
             for key in pending {
                 self.download_group_picture(key);
+            }
+        }
+        if let Ok(due) = self.store.due_synced_pictures() {
+            for target in due {
+                self.apply_synced_picture(target);
             }
         }
         // What the other devices are still owed: a picture not on the mirror yet, a member whose
@@ -638,6 +647,8 @@ impl App {
     /// gets it with our next message to them.
     /// `setProfilePicture`: attachments are the picture and (optionally) its Threema Safe copy.
     pub(crate) fn set_profile_picture(&mut self) -> Result<Value, ApiError> {
+        self.store
+            .cancel_synced_picture(crate::profile_pictures::OWN_PICTURE)?;
         let mut attachments = std::mem::take(&mut self.attachments).into_iter();
         let data = attachments
             .next()
@@ -663,6 +674,8 @@ impl App {
 
     /// `removeProfilePicture`: contacts get a removal with our next message.
     pub(crate) fn remove_profile_picture(&mut self) -> Result<Value, ApiError> {
+        self.store
+            .cancel_synced_picture(crate::profile_pictures::OWN_PICTURE)?;
         self.media
             .remove_picture(crate::profile_pictures::OWN_PICTURE);
         self.media

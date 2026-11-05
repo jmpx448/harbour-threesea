@@ -624,6 +624,7 @@ impl Store {
             .execute("DELETE FROM group_member_lookups WHERE key = ?1", [key])?;
         self.conn
             .execute("DELETE FROM group_picture_syncs WHERE key = ?1", [key])?;
+        self.cancel_synced_picture(key)?;
         // Its calls' keys, and the marks of who was resynced lately (`resync_allowed`).
         self.conn
             .execute("DELETE FROM group_calls WHERE conversation = ?1", [key])?;
@@ -1231,6 +1232,8 @@ fn receive_steps(
             if group.picture.as_ref() != Some(&picture) || group.picture_version == 0 {
                 group.picture = Some(picture);
                 store.upsert_group(&group)?;
+                // From the creator: newer than what another device said of it.
+                store.cancel_synced_picture(&key)?;
                 outcome.download_picture = Some(key.clone());
             }
         }
@@ -1239,6 +1242,7 @@ fn receive_steps(
                 group.picture = None;
                 group.picture_version = 0;
                 store.upsert_group(&group)?;
+                store.cancel_synced_picture(&key)?;
                 outcome.groups_changed = true;
                 outcome.change.picture_removed = true;
                 // A picture still owed to the other devices isn't any more.

@@ -2494,6 +2494,7 @@ mod tests {
                 .execute_batch(
                     "DROP TABLE awaiting_reflection;
                      ALTER TABLE messages DROP COLUMN written_out;
+                     DROP TABLE picture_restored; DROP TABLE synced_pictures;
                      PRAGMA user_version = 35;",
                 )
                 .unwrap();

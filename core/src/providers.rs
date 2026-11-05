@@ -109,12 +109,10 @@ pub enum CoreEvent {
         kind: CallSignalKind,
         json: Vec<u8>,
     },
-    /// Internal: a picture changed on another device of the group: fetch it from the blob
-    /// mirror (`target`: `me`, `contact:<ID>` or a group key; `None` blob: removed).
-    SyncPicture {
-        target: String,
-        blob: Option<crate::sync::SyncedBlob>,
-    },
+    /// Internal: a picture changed on another device of the group, what it said is in
+    /// `synced_pictures`: fetch it from the blob mirror (`target`: `me`, `contact:<ID>` or a group
+    /// key).
+    SyncPicture { target: String },
     /// Internal: a group was deleted on another device: its picture and media go here too.
     GroupDeleted(String),
     /// Internal: Threema Web wants this session back (`web-session-resume` from `*3MAPUSH`):
@@ -852,6 +850,9 @@ impl StoreConversations {
                 // The deletion also obsoletes any download still under way.
                 self.store
                     .cancel_picture_download(&sender)
+                    .map_err(foreign)?;
+                self.store
+                    .cancel_synced_picture(&crate::profile_pictures::contact_picture_name(&sender))
                     .map_err(foreign)?;
                 self.store
                     .set_contact_picture(&sender, None)

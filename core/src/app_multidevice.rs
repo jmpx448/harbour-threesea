@@ -74,21 +74,29 @@ impl App {
 
     /// A picture changed on another device: fetch it from the mirror (local scope, as Android's
     /// `ReflectedBlobDownloader`) and store it like a received one; or remove it.
-    pub(crate) fn apply_synced_picture(
-        &self,
-        target: String,
-        blob: Option<crate::sync::SyncedBlob>,
-    ) {
-        use crate::{media, profile_pictures::OWN_PICTURE, providers::CoreEvent};
+    /// A picture another device changed, as `synced_pictures` keeps it: fetched and stored, and
+    /// off the list only then. A newer word on it (the generation changed or the row is gone) wins
+    /// over what this one brings. What failed comes again with `resume_picture_downloads`; a
+    /// picture that is gone for good is not asked for again.
+    pub(crate) fn apply_synced_picture(&self, target: String) {
+        use crate::media;
         let https = self.https.clone();
         let store = std::rc::Rc::clone(&self.store);
         let media_store = std::sync::Arc::clone(&self.media);
         let events = self.media_events.clone();
         tokio::task::spawn_local(async move {
+            let Ok(Some((blob, generation))) = store.synced_picture(&target) else {
+                return;
+            };
+            let wanted =
+                || matches!(store.synced_picture(&target), Ok(Some((_, g))) if g == generation);
             let data = match &blob {
                 Some(blob) => {
+                    let Some(_slot) = media::slot_if_wanted(&media::PICTURE_SLOTS, wanted).await
+                    else {
+                        return;
+                    };
                     let result = async {
-                        let _slot = media::PICTURE_SLOTS.acquire().await;
                         let encrypted = media::download(
                             &https,
                             &blob.id,
@@ -96,64 +104,43 @@ impl App {
                             media::MAX_PICTURE_DOWNLOAD,
                         )
                         .await?;
-                        let data =
-                            media::decrypt_blob_with_nonce(&blob.key, &blob.nonce, &encrypted)?;
-                        media::mark_done(&https, &blob.id, media::BlobScope::Local).await;
-                        Ok::<_, media::MediaError>(data)
+                        media::decrypt_blob_with_nonce(&blob.key, &blob.nonce, &encrypted)
                     }
                     .await;
                     match result {
                         Ok(data) => Some(data),
                         Err(error) => {
                             tracing::warn!(%error, "synced picture not fetched");
+                            let noted = if crate::app_groups::picture_is_gone(&error) {
+                                store.clear_synced_picture(&target, generation)
+                            } else {
+                                store.synced_picture_failed(&target, generation)
+                            };
+                            if let Err(error) = noted {
+                                tracing::warn!(%error, "failed synced picture not noted");
+                            }
                             return;
                         }
                     }
                 }
                 None => None,
             };
-            let now = crate::messages::now_ms();
-            let stored = (|| -> Result<CoreEvent, Box<dyn std::error::Error>> {
-                match &data {
-                    Some(data) => media_store.write_picture(&target, data)?,
-                    None => media_store.remove_picture(&target),
-                }
-                Ok(if target == OWN_PICTURE {
-                    // A new own picture: contacts get it again; Safe's copy is made on demand.
-                    media_store.remove_picture(crate::profile_pictures::OWN_PICTURE_SAFE);
-                    store.set_picture_upload(None)?;
-                    store.purge_picture_distribution(None)?;
-                    match data {
-                        Some(_) => store.bump_profile_picture_version()?,
-                        None => {
-                            store.delete_setting(crate::store::keys::PROFILE_PICTURE_VERSION)?
-                        }
-                    }
-                    // The own card listens for the profile, not the contacts.
-                    CoreEvent::ProfileChanged
-                } else if let Some(identity) = target.strip_prefix("contact:") {
-                    // The synced state is the newest; a download still under way is obsolete.
-                    store.cancel_picture_download(identity)?;
-                    store.set_contact_picture(identity, data.as_ref().map(|_| now))?;
-                    CoreEvent::ContactsChanged
-                } else {
-                    if let Some(mut group) = store.group(&target)? {
-                        group.picture_version = if data.is_some() {
-                            crate::profile_pictures::next_version(group.picture_version)
-                        } else {
-                            // Its descriptor goes too, or it would be downloaded again as one
-                            // that never made it onto the device.
-                            group.picture = None;
-                            0
-                        };
-                        store.upsert_group(&group)?;
-                    }
-                    CoreEvent::GroupsChanged
-                })
-            })();
-            match stored {
+            if !wanted() {
+                return;
+            }
+            match store_synced_picture(
+                &store,
+                &media_store,
+                &target,
+                data.as_deref().map(|data| &data[..]),
+                generation,
+            ) {
                 Ok(event) => {
                     let _ = events.send(event);
+                    // Only now: the next try would find nothing there any more.
+                    if let Some(blob) = &blob {
+                        media::mark_done(&https, &blob.id, media::BlobScope::Local).await;
+                    }
                 }
                 Err(error) => tracing::warn!(%error, "synced picture not stored"),
             }
@@ -786,6 +773,57 @@ impl App {
     }
 }
 
+/// A picture another device changed is here, or removed (`data`). All it changes goes in one store
+/// step, with the end of the note that it is to be done.
+fn store_synced_picture(
+    store: &Store,
+    media: &crate::media::MediaStore,
+    target: &str,
+    data: Option<&[u8]>,
+    generation: i64,
+) -> Result<crate::providers::CoreEvent, Box<dyn std::error::Error>> {
+    use crate::{profile_pictures::OWN_PICTURE, providers::CoreEvent};
+    match data {
+        Some(data) => media.write_picture(target, data)?,
+        None => media.remove_picture(target),
+    }
+    let step = store.step()?;
+    let event = if target == OWN_PICTURE {
+        // A new own picture: contacts get it again; Safe's copy is made on demand.
+        media.remove_picture(crate::profile_pictures::OWN_PICTURE_SAFE);
+        store.set_picture_upload(None)?;
+        store.purge_picture_distribution(None)?;
+        match data {
+            Some(_) => store.bump_profile_picture_version()?,
+            None => store.delete_setting(crate::store::keys::PROFILE_PICTURE_VERSION)?,
+        }
+        // The own card listens for the profile, not the contacts.
+        CoreEvent::ProfileChanged
+    } else if let Some(identity) = target.strip_prefix("contact:") {
+        store.set_contact_picture(identity, data.map(|_| crate::messages::now_ms()))?;
+        CoreEvent::ContactsChanged
+    } else {
+        if let Some(mut group) = store.group(target)? {
+            group.picture_version = if data.is_some() {
+                crate::profile_pictures::next_version(group.picture_version)
+            } else {
+                0
+            };
+            // Its descriptor goes in any case. It is another picture's, or none's: fetching it
+            // would bring back what was replaced or removed, and whoever asks is to get what is
+            // here now.
+            group.picture = None;
+            store.upsert_group(&group)?;
+            // What the others may still have been owed is what they have just sent.
+            store.group_picture_synced(target)?;
+        }
+        CoreEvent::GroupsChanged
+    };
+    store.clear_synced_picture(target, generation)?;
+    step.commit()?;
+    Ok(event)
+}
+
 /// Queue encoded sync envelopes; the connection reflects them in order, each in its transaction.
 fn queue_syncs(store: &Store, items: Vec<(Scope, Content)>) {
     for (scope, content) in items {
@@ -1057,9 +1095,10 @@ mod tests {
         });
         group.picture_version = 5;
         app.store.upsert_group(&group).unwrap();
+        app.store.set_synced_picture(&group.key, None).unwrap();
         tokio::task::LocalSet::new()
             .run_until(async {
-                app.apply_synced_picture(group.key.clone(), None);
+                app.apply_synced_picture(group.key.clone());
                 while app
                     .store
                     .group(&group.key)
@@ -1082,6 +1121,55 @@ mod tests {
                 .is_none()
         );
         assert!(app.store.groups_with_pending_picture().unwrap().is_empty());
+        assert!(app.store.synced_picture(&group.key).unwrap().is_none());
+    }
+
+    /// Replaced elsewhere: the old descriptor would otherwise be what a member asking gets.
+    #[test]
+    fn a_picture_replaced_on_another_device_leaves_no_old_descriptor() {
+        let (_dir, app) = app();
+        let mut group = foreign_group(&app);
+        group.picture = Some(crate::groups::GroupPicture {
+            blob_id: libthreema::common::BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        });
+        group.picture_version = 5;
+        app.store.upsert_group(&group).unwrap();
+        app.store.set_synced_picture(&group.key, None).unwrap();
+        let (_, generation) = app.store.synced_picture(&group.key).unwrap().unwrap();
+
+        store_synced_picture(&app.store, &app.media, &group.key, Some(b"new"), generation).unwrap();
+
+        let stored = app.store.group(&group.key).unwrap().unwrap();
+        assert!(stored.picture.is_none());
+        assert_ne!(stored.picture_version, 0);
+        assert_ne!(stored.picture_version, 5);
+        assert_eq!(
+            &app.media.read_picture(&group.key).unwrap().unwrap()[..],
+            b"new"
+        );
+        assert!(app.store.synced_picture(&group.key).unwrap().is_none());
+        assert!(app.store.groups_with_pending_picture().unwrap().is_empty());
+    }
+
+    /// Contacts are to get it, as if it had been set here.
+    #[test]
+    fn storing_a_synced_own_picture_starts_its_distribution_anew() {
+        let (_dir, app) = app();
+        let own = crate::profile_pictures::OWN_PICTURE;
+        app.store.set_synced_picture(own, None).unwrap();
+        let (_, generation) = app.store.synced_picture(own).unwrap().unwrap();
+        let event =
+            store_synced_picture(&app.store, &app.media, own, Some(b"mine"), generation).unwrap();
+        assert!(matches!(event, crate::providers::CoreEvent::ProfileChanged));
+        assert!(
+            app.store
+                .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+                .unwrap()
+                .is_some()
+        );
+        assert!(app.store.synced_picture(own).unwrap().is_none());
     }
 
     fn group_change(name: bool) -> GroupChange {

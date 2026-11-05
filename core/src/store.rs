@@ -207,6 +207,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_AWAITING_REFLECTION,
     // 38: whom a restore left without a picture, in place of asking everyone without one
     crate::profile_pictures::MIGRATION_RESTORED,
+    // 39: pictures another device of the group changed, until they are stored here
+    crate::profile_pictures::MIGRATION_SYNCED_PICTURES,
 ];
 
 /// Setting keys.

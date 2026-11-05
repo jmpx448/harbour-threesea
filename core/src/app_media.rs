@@ -1391,9 +1391,7 @@ impl App {
                 start,
             } => self.on_group_call_start(conversation, start),
             CoreEvent::CallSignal { peer, kind, json } => self.on_call_signal(peer, *kind, json),
-            CoreEvent::SyncPicture { target, blob } => {
-                self.apply_synced_picture(target.clone(), blob.clone());
-            }
+            CoreEvent::SyncPicture { target } => self.apply_synced_picture(target.clone()),
             CoreEvent::GroupDeleted(key) => {
                 self.media.remove_picture(key);
                 self.chat_removed(key);

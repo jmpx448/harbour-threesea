@@ -609,6 +609,8 @@ impl App {
         // The group pages still show it for someone a group names, also one we left.
         if !self.store.is_named_by_a_group(&key)? {
             self.store.cancel_picture_download(&key)?;
+            self.store
+                .cancel_synced_picture(&crate::profile_pictures::contact_picture_name(&key))?;
             self.store.set_contact_picture(&key, None)?;
             self.media
                 .remove_picture(&crate::profile_pictures::contact_picture_name(&key));
