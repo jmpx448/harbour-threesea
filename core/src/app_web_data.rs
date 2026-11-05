@@ -351,6 +351,26 @@ fn file_seconds(body: &serde_json::Value) -> Option<i64> {
         .map(|seconds| seconds.round() as i64)
 }
 
+/// A message's history for the browser's "Message history". Android sends created, sent and
+/// modified; the dialog also has words for delivered and read, and we know them.
+fn message_events(message: &Message) -> Value {
+    let events = [
+        ("created", Some(message.created_at)),
+        ("sent", message.sent_at),
+        ("delivered", message.delivered_at),
+        ("read", message.read_at),
+        ("modified", message.edited_at),
+    ];
+    Value::Array(
+        events
+            .into_iter()
+            .filter_map(|(kind, at)| {
+                at.map(|at| map(vec![("type", kind.into()), ("date", secs(at))]))
+            })
+            .collect(),
+    )
+}
+
 /// Status lines as Threema Web shows them (our UI translates the codes; the browser can't).
 fn status_text(code: &str) -> String {
     let (kind, argument) = code.split_once('|').unwrap_or((code, ""));
@@ -737,13 +757,16 @@ impl App {
                 ));
             }
         }
+        if !status {
+            fields.push(("events", message_events(message)));
+        }
         if let Some(reactions) = emoji_reactions(message, user) {
             fields.push(("emojiReactions", reactions));
         }
         if let Some(edited) = message.edited_at
             && message.kind != "deleted"
         {
-            fields.push(("lastEditedAt", edited.into()));
+            fields.push(("lastEditedAt", secs(edited)));
         }
         map(fields)
     }

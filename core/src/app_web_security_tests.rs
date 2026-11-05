@@ -551,6 +551,70 @@ fn web_videos_and_voice_messages_have_a_length() {
     }
 }
 
+/// The browser's "Message history": what is known, in seconds; a status line has none.
+#[test]
+fn web_messages_carry_their_history() {
+    let (_dir, app) = fixture();
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "hello", 5_000)
+        .unwrap()
+        .unwrap();
+    let events = |message: &crate::messages::Message| {
+        let wire = app.web_message(message, "AAAAAAAA");
+        saltyrtc::field(&wire, "events")
+            .and_then(Value::as_array)
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|event| {
+                        (
+                            saltyrtc::field(event, "type")
+                                .and_then(Value::as_str)
+                                .unwrap()
+                                .to_owned(),
+                            saltyrtc::field(event, "date")
+                                .and_then(Value::as_i64)
+                                .unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+    };
+    assert_eq!(events(&message), Some(vec![("created".to_owned(), 5)]));
+
+    let mut full = message.clone();
+    full.sent_at = Some(6_000);
+    full.delivered_at = Some(7_000);
+    full.read_at = Some(8_000);
+    full.edited_at = Some(9_000);
+    assert_eq!(
+        events(&full),
+        Some(
+            [
+                ("created", 5),
+                ("sent", 6),
+                ("delivered", 7),
+                ("read", 8),
+                ("modified", 9),
+            ]
+            .map(|(kind, at)| (kind.to_owned(), at))
+            .to_vec()
+        )
+    );
+    let wire = app.web_message(&full, "AAAAAAAA");
+    assert_eq!(
+        saltyrtc::field(&wire, "lastEditedAt"),
+        Some(&Value::from(9)),
+        "in seconds, like every date the browser gets"
+    );
+
+    let mut line = message;
+    line.kind = "status".into();
+    line.body = "groupCreated".into();
+    assert_eq!(events(&line), None);
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {
