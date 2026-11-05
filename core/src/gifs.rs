@@ -231,6 +231,8 @@ impl App {
         identity: String,
         id: i64,
     ) -> Result<Value, ApiError> {
+        // Before anything of the favourite: the chat decides whether there is anything to do.
+        self.readable_conversation(&identity)?;
         let favourite = self
             .store
             .gif_favourite(id)?

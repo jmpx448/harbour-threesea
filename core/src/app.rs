@@ -2174,12 +2174,29 @@ impl App {
             Command::MarkRead { identity } => self.mark_read(&identity),
             Command::SetTyping { identity, typing } => self.set_typing(&identity, typing),
             Command::DownloadFile { message } => self.download_file(message),
-            Command::Group { key } => self.group_info(&key),
+            // A hidden private group or list is as closed as a hidden chat: its name and members
+            // are what the chat list leaves out.
+            Command::Group { key } => {
+                self.check_readable(&key)?;
+                self.group_info(&key)
+            }
             Command::CreateGroup { name, members } => self.create_group(&name, &members),
-            Command::RenameGroup { key, name } => self.rename_group(&key, &name),
-            Command::SetGroupMembers { key, members } => self.set_group_members(&key, &members),
-            Command::LeaveGroup { key } => self.leave_group(&key),
-            Command::SetGroupPicture { key } => self.set_group_picture(&key).await,
+            Command::RenameGroup { key, name } => {
+                self.check_readable(&key)?;
+                self.rename_group(&key, &name)
+            }
+            Command::SetGroupMembers { key, members } => {
+                self.check_readable(&key)?;
+                self.set_group_members(&key, &members)
+            }
+            Command::LeaveGroup { key } => {
+                self.check_readable(&key)?;
+                self.leave_group(&key)
+            }
+            Command::SetGroupPicture { key } => {
+                self.check_readable(&key)?;
+                self.set_group_picture(&key).await
+            }
             Command::SendLocation {
                 identity,
                 latitude,
@@ -2210,8 +2227,12 @@ impl App {
             Command::CreateDistributionList { name, members } => {
                 self.create_distribution_list(&name, &members)
             }
-            Command::DistributionList { key } => self.distribution_list_json(&key),
+            Command::DistributionList { key } => {
+                self.check_readable(&key)?;
+                self.distribution_list_json(&key)
+            }
             Command::UpdateDistributionList { key, name, members } => {
+                self.check_readable(&key)?;
                 self.update_distribution_list(&key, name.as_deref(), members.as_deref())
             }
             Command::SetPinned { identity, pinned } => {
@@ -2378,6 +2399,7 @@ impl App {
             Command::ClosePoll { message } => self.close_poll(message),
             Command::Polls { identity } => self.polls_json(&identity),
             Command::RemoveGroupPicture { key } => {
+                self.check_readable(&key)?;
                 // In turn: behind a new picture still on its way up, or that one would win.
                 self.detached(
                     Lane::InTurn,
@@ -2539,13 +2561,17 @@ impl App {
             Command::AddressBookCountry => self.address_book_country_json(),
             Command::SetAddressBookCountry { country } => self.set_address_book_country(&country),
             Command::GroupCallRefresh { conversation } => {
+                self.check_readable(&conversation)?;
                 Ok(self.group_call_refresh(&conversation))
             }
             Command::GroupCallJoin {
                 conversation,
                 fingerprint,
                 create,
-            } => Box::pin(self.group_call_join(conversation, fingerprint, create)).await,
+            } => {
+                self.check_readable(&conversation)?;
+                Box::pin(self.group_call_join(conversation, fingerprint, create)).await
+            }
             Command::GroupCallChannel { data } => self.group_call_channel(&data),
             Command::GroupCallLeave => Ok(self.group_call_leave()),
             Command::GroupCallMute { muted } => Ok(self.group_call_mute(muted)),

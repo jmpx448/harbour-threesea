@@ -2105,6 +2105,7 @@ impl App {
             .message(id)?
             .filter(|message| message.kind == "file")
             .ok_or_else(|| ApiError::Internal("no such file".into()))?;
+        self.check_readable(&message.conversation)?;
         let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
         for (part, field) in [
             (MediaPart::Thumbnail, "thumbnailState"),

@@ -3356,3 +3356,54 @@ fn receivers_are_built_again_only_when_something_of_them_changed() {
     app.web_refresh();
     assert_eq!(builds(&app), before + 10, "nothing");
 }
+
+/// A hidden private group or list shows neither its name nor its members, and can't be changed,
+/// until the private chats are unlocked.
+#[tokio::test(flavor = "current_thread")]
+async fn hidden_groups_and_lists_are_closed_to_their_commands() {
+    let (_dir, mut app) = fixture();
+    let group = app
+        .create_group("TELLING GROUP NAME", &["BBBBBBBB".into()])
+        .unwrap()["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let list = crate::distribution_lists::DistributionList {
+        key: "d:00000000000000ff".into(),
+        name: "TELLING LIST NAME".into(),
+        members: vec!["CCCCCCCC".into()],
+        created_at: 1,
+    };
+    app.store.upsert_distribution_list(&list).unwrap();
+    app.store.set_private(&group, true).unwrap();
+    app.store.set_private(&list.key, true).unwrap();
+    for request in [
+        json!({"cmd": "group", "key": group}),
+        json!({"cmd": "renameGroup", "key": group, "name": "x"}),
+        json!({"cmd": "setGroupMembers", "key": group, "members": []}),
+        json!({"cmd": "leaveGroup", "key": group}),
+        json!({"cmd": "removeGroupPicture", "key": group}),
+        json!({"cmd": "groupCallRefresh", "conversation": group}),
+        json!({"cmd": "distributionList", "key": list.key}),
+        json!({"cmd": "updateDistributionList", "key": list.key, "name": "x"}),
+    ] {
+        let mut request = request;
+        request["id"] = 1.into();
+        let reply = app.handle(&request.to_string()).await;
+        assert!(!reply.contains("TELLING"), "{request}: {reply}");
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["error"]["kind"], "locked", "{request}");
+    }
+    let stored = app.store.group(&group).unwrap().unwrap();
+    assert_eq!(stored.name, "TELLING GROUP NAME");
+    assert_eq!(stored.members, ["BBBBBBBB"]);
+    assert!(!stored.left);
+    let stored = app.store.distribution_list(&list.key).unwrap().unwrap();
+    assert_eq!(stored.name, "TELLING LIST NAME");
+
+    app.unlocked.set(true);
+    let reply = app
+        .handle(&json!({"id": 2, "cmd": "group", "key": group}).to_string())
+        .await;
+    assert!(reply.contains("TELLING GROUP NAME"), "{reply}");
+}
