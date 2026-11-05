@@ -133,8 +133,17 @@ CoverBackground {
                   : backend.unreadCount > 1
                     //% "unread messages"
                     ? qsTrId("threesea-la-cover-unread-many")
-                    //% "No new messages"
-                    : qsTrId("threesea-la-cover-no-new")
+                    : backend.state === "locked"
+                      ? qsTrId("threesea-la-locked-notification")
+                      // Starting, failed, not set up: nothing to say about messages.
+                      : backend.state !== "ready" ? ""
+                      // Like the chat list's header: "no new" is known only while connected.
+                      : backend.connectionState === "connected"
+                        //% "No new messages"
+                        ? qsTrId("threesea-la-cover-no-new")
+                        : backend.connectionState === "connecting"
+                          ? qsTrId("threesea-la-connecting")
+                          : qsTrId("threesea-la-offline")
         }
 
         Label {
