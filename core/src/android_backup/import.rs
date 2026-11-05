@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The history import job: streams chats out of the archive on a blocking thread, applies
-//! them on the core thread in bounded, fully synchronous transactions (no await between
-//! BEGIN and COMMIT: every task shares the store connection), and only marks media local
-//! once its bytes are written and authenticated. Cancellation stops between batches; done
-//! batches stay (the whole import is idempotent, so running it again resumes).
+//! them on the core thread in bounded, fully synchronous transactions (no await while one is
+//! open: every task shares the store connection), and only marks media local once its bytes are
+//! written and authenticated. Cancellation stops between batches; done batches stay (the whole
+//! import is idempotent, so running it again resumes). A store that refuses a write ends the job
+//! with its error: an archive's bad row is counted, a full disk isn't a bad row.
 
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
@@ -494,12 +495,9 @@ impl HistoryImport {
                 summary.cancelled = true;
                 break;
             }
-            // Fully synchronous from BEGIN to COMMIT: the connection is shared with live
-            // work, so no await may interleave while a transaction is open.
-            self.store
-                .conn
-                .execute_batch("BEGIN IMMEDIATE")
-                .map_err(StoreError::from)?;
+            // Fully synchronous within the step: the connection is shared with live work, so no
+            // await may interleave while a transaction is open. An error undoes the batch.
+            let step = self.store.step()?;
             for message in chunk {
                 self.import_message(
                     plan,
@@ -511,12 +509,9 @@ impl HistoryImport {
                     polls,
                     &mut media_jobs,
                     summary,
-                );
+                )?;
             }
-            self.store
-                .conn
-                .execute_batch("COMMIT")
-                .map_err(StoreError::from)?;
+            step.commit()?;
             tokio::task::yield_now().await;
         }
 
@@ -576,15 +571,11 @@ impl HistoryImport {
                 archive = returned;
                 match written {
                     Ok(()) => {
-                        let _ = self.store.set_media_state(
-                            job.row,
-                            part,
-                            crate::app_media::STATE_LOCAL,
-                        );
+                        self.store
+                            .set_media_state(job.row, part, crate::app_media::STATE_LOCAL)?;
                         if job.outgoing {
-                            let _ = self
-                                .store
-                                .set_upload_state(job.row, crate::app_media::STATE_LOCAL);
+                            self.store
+                                .set_upload_state(job.row, crate::app_media::STATE_LOCAL)?;
                         }
                         if part == MediaPart::File {
                             summary.media_files += 1;
@@ -616,7 +607,7 @@ impl HistoryImport {
         polls: &ArchivePolls,
         media_jobs: &mut Vec<MediaJob>,
         summary: &mut Summary,
-    ) {
+    ) -> Result<(), StoreError> {
         let key = &plan.conversation;
         let mut converted = convert::convert(message);
         // Polls: the message row only points at `ballot.csv`; the state comes from there.
@@ -642,7 +633,7 @@ impl HistoryImport {
             } => (kind, body, file, compat),
             convert::Converted::Unsupported(category) => {
                 *summary.unsupported.entry(category).or_default() += 1;
-                return;
+                return Ok(());
             }
         };
         if let Some(compat) = compat {
@@ -650,18 +641,12 @@ impl HistoryImport {
         }
         let message_id = match message.api_id {
             Some(id) => id,
-            None => match self.store.android_import_message_id(
+            None => self.store.android_import_message_id(
                 source,
                 plan.family.name(),
                 key,
                 &message.uid,
-            ) {
-                Ok(id) => id,
-                Err(_) => {
-                    summary.invalid_rows += 1;
-                    return;
-                }
-            },
+            )?,
         };
         // Availability of file content reflects the archive, not Android's stale flag.
         let has_media = media_entries.contains_key(&(plan.family.name(), message.uid.clone()));
@@ -685,7 +670,7 @@ impl HistoryImport {
                 Some(sender) => Some(sender.clone()),
                 None => {
                     summary.invalid_rows += 1;
-                    return;
+                    return Ok(());
                 }
             },
             _ => None,
@@ -735,14 +720,17 @@ impl HistoryImport {
             read_at: message.read_at,
             received_at: None,
             sort_key,
-        });
+        })?;
         let row = match inserted {
-            Ok(Some(row)) => row,
-            Ok(None) => {
+            Some(row) => row,
+            None => {
                 // Already here: a live row or an earlier run. The existing row wins; a group
                 // row from a different sender is a real collision and reported.
-                match self.store.message_by_id(key, message.outgoing, message_id) {
-                    Ok(Some(existing)) => {
+                match self
+                    .store
+                    .message_by_id(key, message.outgoing, message_id)?
+                {
+                    Some(existing) => {
                         if sender.is_some() && existing.sender != sender {
                             summary.collisions += 1;
                         } else {
@@ -766,17 +754,13 @@ impl HistoryImport {
                                         outgoing: message.outgoing,
                                     });
                                 }
-                                return;
                             }
                         }
                     }
-                    _ => summary.existing += 1,
+                    // Not added, and not here: nothing the store can name, but it isn't imported.
+                    None => summary.invalid_rows += 1,
                 }
-                return;
-            }
-            Err(_) => {
-                summary.invalid_rows += 1;
-                return;
+                return Ok(());
             }
         };
         summary.imported += 1;
@@ -784,7 +768,7 @@ impl HistoryImport {
             summary.polls += 1;
             // Only the poll itself is the target of later votes and its closing.
             if kind == "poll" {
-                let _ = self.store.register_poll(key, creator, *poll_id, row);
+                self.store.register_poll(key, creator, *poll_id, row)?;
             }
         }
         if kind == "file" && (has_media || has_thumbnail || file.is_some()) {
@@ -796,13 +780,19 @@ impl HistoryImport {
             });
         }
         if kind != "deleted" {
-            self.apply_thumbs(key, row, message);
+            self.apply_thumbs(key, row, message)?;
         }
+        Ok(())
     }
 
     /// Android's thumbs: 1:1 USERACK/USERDEC and the per-member `g_msg_states`, as reactions
     /// (`RestoreService.createReactionForStateName`).
-    fn apply_thumbs(&self, _key: &str, row: i64, message: &records::Message) {
+    fn apply_thumbs(
+        &self,
+        _key: &str,
+        row: i64,
+        message: &records::Message,
+    ) -> Result<(), StoreError> {
         let at = message.modified_at.unwrap_or(message.at);
         let emoji_for = |state: &str| match state {
             "USERACK" => Some("\u{1F44D}"),
@@ -817,7 +807,7 @@ impl HistoryImport {
                 String::new()
             };
             if crate::groups::parse_key(_key).is_none() {
-                let _ = self.store.set_reaction(row, &sender, emoji, true, at);
+                self.store.set_reaction(row, &sender, emoji, true, at)?;
             }
         }
         for (member, state) in &message.group_states {
@@ -827,9 +817,10 @@ impl HistoryImport {
                 } else {
                     member.as_str()
                 };
-                let _ = self.store.set_reaction(row, sender, emoji, true, at);
+                self.store.set_reaction(row, sender, emoji, true, at)?;
             }
         }
+        Ok(())
     }
 
     /// `contact_reactions.csv` and `group_reactions.csv` (format 26+).
@@ -881,11 +872,11 @@ impl HistoryImport {
                     };
                     let mut row = None;
                     for outgoing in [false, true] {
-                        if let Ok(Some(message)) = self.store.message_by_id(
+                        if let Some(message) = self.store.message_by_id(
                             &conversation,
                             outgoing,
                             reaction.api_message_id,
-                        ) {
+                        )? {
                             if message.kind != "deleted" {
                                 row = Some(message.id);
                             }
@@ -899,6 +890,7 @@ impl HistoryImport {
                             } else {
                                 reaction.sender.as_str()
                             };
+                            // No answer: not an emoji, so nothing was stored.
                             if self
                                 .store
                                 .set_reaction(
@@ -907,10 +899,12 @@ impl HistoryImport {
                                     &reaction.emoji,
                                     true,
                                     reaction.reacted_at,
-                                )
-                                .is_ok()
+                                )?
+                                .is_some()
                             {
                                 summary.reactions += 1;
+                            } else {
+                                summary.reactions_unmatched += 1;
                             }
                         }
                         None => summary.reactions_unmatched += 1,

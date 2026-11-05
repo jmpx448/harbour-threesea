@@ -872,6 +872,13 @@ mod history_tests {
     }
 
     async fn run_import_of(app: &App, path: std::path::PathBuf) -> Value {
+        let done = finish_import_of(app, path).await;
+        assert_eq!(done["ok"], true, "{done}");
+        done["summary"].clone()
+    }
+
+    /// The Done event of one history import.
+    async fn finish_import_of(app: &App, path: std::path::PathBuf) -> Value {
         let identity = app.store.identity().unwrap().unwrap();
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let job = HistoryImport {
@@ -894,8 +901,7 @@ mod history_tests {
                 done = json;
             }
         }
-        assert_eq!(done["ok"], true, "{done}");
-        done["summary"].clone()
+        done
     }
 
     /// A backup of the fixture's identity with the given tables, written here.
@@ -982,6 +988,51 @@ mod history_tests {
         );
         let keys = app.store.file_keys(file.id).unwrap().unwrap();
         assert_eq!(keys.blob_id.unwrap().0, [1; 16]);
+    }
+
+    /// A store that refuses a write ends the job with its error, undoes the batch and leaves no
+    /// transaction open. Counting the rows as bad would end in "imported" with messages missing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_store_error_ends_the_import_instead_of_dropping_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        app.android_backup_import(
+            fixture(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        app.store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON messages
+                 WHEN NEW.kind = 'text' AND NEW.body LIKE '%from me%'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let done = finish_import_of(&app, fixture().into()).await;
+        assert_eq!(done["ok"], false, "{done}");
+        assert!(app.store.conn.is_autocommit());
+        assert!(
+            app.store
+                .conversation_messages("g:B0B0B0B0:0102030405060708", 50)
+                .unwrap()
+                .is_empty(),
+            "the batch stands or falls together"
+        );
+
+        // Once the store takes it again, importing again completes it.
+        app.store.conn.execute_batch("DROP TRIGGER refuse").unwrap();
+        let summary = run_import(&app).await;
+        assert_eq!(summary["invalidRows"], 0, "{summary}");
+        assert!(
+            app.store
+                .conversation_messages("g:B0B0B0B0:0102030405060708", 50)
+                .unwrap()
+                .iter()
+                .any(|message| message.body.contains("from me"))
+        );
     }
 
     /// Whatever hasn't left, or doesn't say how far it got, never shows as read by the recipient.
