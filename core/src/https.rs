@@ -643,7 +643,7 @@ fn map_error(error: reqwest::Error) -> HttpsError {
     // Never include URLs with query data in errors that may reach logs: strip them.
     let kind: fn(String) -> HttpsError = if error.is_timeout() {
         HttpsError::Timeout
-    } else if error.is_builder() || error.is_request() {
+    } else if error.is_builder() {
         HttpsError::InvalidRequest
     } else if error.is_body() || error.is_decode() {
         HttpsError::InvalidResponse
@@ -927,6 +927,27 @@ mod tests {
             ]
         );
         assert_eq!(server_url(urls[0]), urls[0]);
+    }
+
+    /// reqwest calls every failure of sending a request one: a connection too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_server_that_cannot_be_reached_is_told_apart_from_a_bad_request() {
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls_config().unwrap())
+            .build()
+            .unwrap();
+        let refused = client
+            .get(format!("http://{closed}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(map_error(refused), HttpsError::Unreachable(_)));
+        let bad = client.get("not a url").send().await.unwrap_err();
+        assert!(matches!(map_error(bad), HttpsError::InvalidRequest(_)));
     }
 
     #[test]
