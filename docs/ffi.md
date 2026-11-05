@@ -148,7 +148,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setPrivate` | `identity`, `private` | `{identity, private}`; errors `lockNeeded`, `locked` (unmarking while locked). Private chats leave the chat list, archive, search, starred and media while locked; reading them returns `locked`; `messageAdded` carries `private` |
 | `emptyConversation` | `identity` | `{}`; deletes the messages, the chat stays in `conversations` with a `lastMessage` of kind `empty` (Android's "Empty chat"; migration 20) |
 | `setSyncExcluded` / `syncExcluded` | `identity`, `excluded` / – | `{excluded: [{identity, displayName}]}`; address book matching skips these IDs (Safe `syncExcludedIds`) |
-| `refreshContacts` | – | `{changed}`; contact states, keys and feature masks from the directory now |
+| `refreshContacts` | – | `{changed}`; contact states and feature masks from the directory now (`identity/check`), revoked IDs included |
 | `setContactPolicies` | `identity`, optional `readReceipts`, `typing` (0 like the app setting, 1 always, 2 never) | the contact JSON (`readReceipts`, `typing`) |
 | `clearContactPolicies` | – | `{cleared}`; every contact back to the app settings (Android's "Clear individual settings") |
 | `setNetwork` | `wifi` (bridge: Wi-Fi/Ethernet vs. mobile data) | `{}`; starts downloads the new network allows |

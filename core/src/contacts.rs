@@ -209,6 +209,39 @@ pub fn apply_lookup(config: &Config, contact: &mut Contact, result: Lookup) -> b
     before != state(contact)
 }
 
+/// What `identity/check` says about a stored contact, as Android's `ContactUpdateWorker` takes it:
+/// an unknown state or a missing mask leaves that part alone, and an inactive ID doesn't bring a
+/// revoked one back. Returns whether something changed.
+pub fn apply_identity_check(
+    config: &Config,
+    contact: &mut Contact,
+    check: crate::directory::IdentityCheck,
+) -> bool {
+    let state = |c: &Contact| {
+        (
+            c.feature_mask.0,
+            c.activity_state,
+            c.verification_level,
+            c.nickname.clone(),
+        )
+    };
+    let before = state(contact);
+    match check.state {
+        0 => contact.activity_state = pc::ActivityState::Active,
+        1 if contact.activity_state == pc::ActivityState::Active => {
+            contact.activity_state = pc::ActivityState::Inactive;
+        }
+        2 => contact.activity_state = pc::ActivityState::Invalid,
+        _ => {}
+    }
+    if let Some(mask) = check.feature_mask {
+        contact.feature_mask = FeatureMask(mask);
+    }
+    // Added before predefined contacts were pinned.
+    let _ = pin_predefined(config, contact);
+    before != state(contact)
+}
+
 impl Store {
     /// What a directory lookup found for `identity`, on a fresh read of the contact: a lookup takes
     /// a while, and a rename or a deletion meanwhile stands. Returns whether something changed.
@@ -989,6 +1022,41 @@ mod tests {
         c.first_name = Some("Eve".into());
         c.last_name = Some("Echo".into());
         assert_eq!(display_name(&c), "Eve Echo");
+    }
+
+    #[test]
+    fn an_identity_check_changes_what_it_knows_about() {
+        use crate::directory::IdentityCheck;
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let mut contact = test_contact("BBBBBBBB");
+        let check = |state, feature_mask| IdentityCheck {
+            state,
+            feature_mask,
+        };
+        assert!(apply_identity_check(
+            &config,
+            &mut contact,
+            check(1, Some(7))
+        ));
+        assert_eq!(contact.activity_state, pc::ActivityState::Inactive);
+        assert_eq!(contact.feature_mask.0, 7);
+        // Nothing new, an unknown state, no mask.
+        assert!(!apply_identity_check(
+            &config,
+            &mut contact,
+            check(1, Some(7))
+        ));
+        assert!(!apply_identity_check(&config, &mut contact, check(9, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Inactive);
+        assert_eq!(contact.feature_mask.0, 7);
+        // Revoked keeps the mask it had; inactive doesn't undo that, active does.
+        assert!(apply_identity_check(&config, &mut contact, check(2, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Invalid);
+        assert_eq!(contact.feature_mask.0, 7);
+        assert!(!apply_identity_check(&config, &mut contact, check(1, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Invalid);
+        assert!(apply_identity_check(&config, &mut contact, check(0, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Active);
     }
 
     #[test]

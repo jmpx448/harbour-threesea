@@ -255,7 +255,7 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   every 5 s, and it trusts only a lookup made for it, since the "no" from just before may be from a
   linking that was rolled back. What the lookup finds is stored on a fresh read of the contact. If the
   directory answers no FS, what's left of the sessions ends with a Terminate; without an answer they stay
-  (DISABLED_BY_REMOTE) and the chat gets its line, as also when the daily refresh finds it
+  (DISABLED_BY_REMOTE) and the chat gets its line, as also when the contact refresh finds it
   (`fs_support_lost`, Android's `OnFSFeatureMaskDowngradedTask`).
 - A peer Reject puts the message back into the queue at once, so that nothing can lose it, and it is
   re-sent after the mask lookup — Android asks the user first. With a group named: the Common Group Receive Steps, a message we

@@ -13,6 +13,30 @@ use crate::{
     store::keys,
 };
 
+/// How long the contact refresh waits unless the directory says otherwise (Android's default).
+const CONTACT_REFRESH_DEFAULT_S: i64 = 86_400;
+
+/// The wait between contact refreshes, from what the directory last gave as `checkInterval`.
+fn contact_refresh_interval(check_interval: i64) -> i64 {
+    if check_interval > 0 {
+        check_interval
+    } else {
+        CONTACT_REFRESH_DEFAULT_S
+    }
+}
+
+/// Whom a contact refresh asks about: revoked IDs only if the user asked for it.
+fn identities_to_check(
+    contacts: &[libthreema::model::contact::Contact],
+    force: bool,
+) -> Vec<String> {
+    contacts
+        .iter()
+        .filter(|contact| force || contact.activity_state != pc::ActivityState::Invalid)
+        .map(|contact| contact.identity.to_string())
+        .collect()
+}
+
 fn clean(name: Option<String>) -> Option<String> {
     name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty())
 }
@@ -888,42 +912,52 @@ impl App {
         self.profile_json()
     }
 
-    /// Refresh feature masks, activity states and keys of all contacts from the directory, at most
-    /// once a day (Android refreshes feature masks periodically too). Returns whether something
+    /// The contacts' states and feature masks, in one `identity/check` (Android's
+    /// `ContactUpdateWorker`). Every `checkInterval` the directory last gave, a day if it gave
+    /// none, and without revoked IDs, which stay revoked; `force` (the user asked): now, and them
+    /// too, as nothing else would ever correct one marked by mistake. Returns whether something
     /// changed.
-    /// Daily (or, `force`, now): the contacts' states, keys and feature masks.
     pub(crate) async fn refresh_contacts(&mut self, force: bool) -> Result<bool, ApiError> {
         let now = crate::messages::now_ms() / 1000;
-        let last = self
-            .store
-            .setting(keys::CONTACTS_REFRESHED_AT)?
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        if !force && (now - last < 86_400 || self.store.directory_resting()) {
+        let setting = |key| -> Result<i64, ApiError> {
+            Ok(self
+                .store
+                .setting(key)?
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0))
+        };
+        let last = setting(keys::CONTACTS_REFRESHED_AT)?;
+        let interval = contact_refresh_interval(setting(keys::CONTACTS_CHECK_INTERVAL)?);
+        if !force && (now - last < interval || self.store.directory_resting()) {
             return Ok(false);
         }
-        let stored = self.store.contacts()?;
-        if stored.is_empty() {
+        let ids = identities_to_check(&self.store.contacts()?, force);
+        if ids.is_empty() {
             return Ok(false);
         }
-        let ids: Vec<String> = stored.iter().map(|c| c.identity.to_string()).collect();
-        let found = contacts::lookup(&self.https, &self.config, &ids)
+        let checks = crate::directory::check_identities(&self.https, &ids)
             .await
             .map_err(|error| self.directory_error(error))?;
         let mut changed = false;
-        for (id, result) in found {
+        for (id, check) in ids.iter().zip(checks.identities) {
             // Read again: the lookup took a while, and a rename or a deletion meanwhile stands.
-            let Some(mut contact) = self.store.contact(&id)? else {
+            let Some(mut contact) = self.store.contact(id)? else {
                 continue;
             };
             let had_fs = contacts::has_fs_support(&contact);
-            if contacts::apply_lookup(&self.config, &mut contact, result) {
+            if contacts::apply_identity_check(&self.config, &mut contact, check) {
                 self.store.upsert_contact(&contact)?;
                 if had_fs && !contacts::has_fs_support(&contact) {
                     self.fs_support_lost(&contact)?;
                 }
                 changed = true;
             }
+        }
+        if checks.check_interval > 0 {
+            self.store.set_setting(
+                keys::CONTACTS_CHECK_INTERVAL,
+                &checks.check_interval.to_string(),
+            )?;
         }
         self.store
             .set_setting(keys::CONTACTS_REFRESHED_AT, &now.to_string())?;
@@ -1350,6 +1384,34 @@ enum AddressBookChange {
     Updated,
     /// New in the contact list.
     Raised,
+}
+
+#[cfg(test)]
+mod contact_refresh_tests {
+    use libthreema::protobuf::d2d_sync::contact as pc;
+
+    use super::*;
+
+    #[test]
+    fn the_directory_says_how_often_and_revoked_ids_are_left_out() {
+        assert_eq!(contact_refresh_interval(0), 86_400);
+        assert_eq!(contact_refresh_interval(-1), 86_400);
+        assert_eq!(contact_refresh_interval(604_800), 604_800);
+
+        let mut revoked = crate::contacts::test_contact("BBBBBBBB");
+        revoked.activity_state = pc::ActivityState::Invalid;
+        let mut inactive = crate::contacts::test_contact("CCCCCCCC");
+        inactive.activity_state = pc::ActivityState::Inactive;
+        let contacts = [revoked, inactive, crate::contacts::test_contact("DDDDDDDD")];
+        assert_eq!(
+            identities_to_check(&contacts, false),
+            ["CCCCCCCC", "DDDDDDDD"]
+        );
+        assert_eq!(
+            identities_to_check(&contacts, true),
+            ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"]
+        );
+    }
 }
 
 #[cfg(test)]

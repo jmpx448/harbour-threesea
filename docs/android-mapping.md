@@ -12,6 +12,7 @@ Upstream paths are relative to `third_party/threema-android`. "lt" = provided by
 | Threema Safe | `ch.threema.app.threemasafe` | URL config only | `core::safe`, `core::app_safe` | ✅ backup + restore (contacts/groups imported once stored) |
 | Setup steps after a restore | `app/protocolsteps/ApplicationSetupSteps.kt` | – | `core::app_safe` (`restore_setup_step`), `groups::resync_restored`, `fs_store::start_session` | ✅ |
 | Directory lookup by ID (`identity/fetch_bulk`) | `APIConnector.fetchIdentities` | lt `csp_e2e/contacts/lookup.rs` (crate-private) | `core::contacts::lookup` | ✅ |
+| Contact refresh (`identity/check`, `checkInterval`) | `APIConnector.checkIdentityStates`, `ContactUpdateWorker` | – | `core::directory::check_identities`, `App::refresh_contacts` | ✅ |
 | Contacts (storage, names, verification levels) | `ch.threema.app.services.ContactService` | lt `model/contact.rs` | `core::contacts` (stores lt's `Contact` model), `core::app_contacts` | ✅ add/edit/delete, Safe import/export |
 | Deleting a contact (row stays, chat goes) | `MarkContactAsDeletedBackgroundTask` | — | `App::delete_contact`, ADR 0022 | ✅ |
 | Hashed phone/e-mail lookup, address-book sync | `ch.threema.app.services.SynchronizeContactsService` | — | `core::address_book`, `qml` `AddressBookReader` (opt-in) | ✅ |

@@ -246,6 +246,8 @@ pub mod keys {
     pub const PUBLISHED_FEATURE_MASK: &str = "published_feature_mask";
     /// Unix time of the last daily contact refresh (feature masks, revocations).
     pub const CONTACTS_REFRESHED_AT: &str = "contacts_refreshed_at";
+    /// Seconds between contact refreshes, when the directory has a say in it (`checkInterval`).
+    pub const CONTACTS_CHECK_INTERVAL: &str = "contacts_check_interval";
     /// Public nickname.
     pub const NICKNAME: &str = "nickname";
     /// A new or ID-backup-restored ID whose user hasn't said what to do about a nickname: messages

@@ -538,6 +538,71 @@ pub async fn check_revocation_key(
     ))
 }
 
+/// One contact in the answer of [`check_identities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityCheck {
+    /// 0 active, 1 inactive, 2 revoked or never existed; anything else says nothing.
+    pub state: i64,
+    /// `None` for an ID that has none, e.g. a revoked one.
+    pub feature_mask: Option<u64>,
+}
+
+/// The answer of [`check_identities`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct IdentityChecks {
+    /// In the order of the request.
+    pub identities: Vec<IdentityCheck>,
+    /// Seconds until the next check, Threema's own say in how often clients ask; 0 or less: no
+    /// opinion.
+    pub check_interval: i64,
+}
+
+fn parse_identity_checks(body: &[u8], asked: usize) -> Result<IdentityChecks, DirectoryError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        check_interval: i64,
+        states: Vec<i64>,
+        feature_masks: Vec<Option<u64>>,
+    }
+    let response: Response = serde_json::from_slice(body)?;
+    // The lists go by position: if they don't fit there is no telling who is who.
+    if response.states.len() != asked || response.feature_masks.len() != asked {
+        return Err(DirectoryError::InvalidResponse(
+            "identity check: lists of the wrong length".into(),
+        ));
+    }
+    Ok(IdentityChecks {
+        identities: response
+            .states
+            .into_iter()
+            .zip(response.feature_masks)
+            .map(|(state, feature_mask)| IdentityCheck {
+                state,
+                feature_mask,
+            })
+            .collect(),
+        check_interval: response.check_interval,
+    })
+}
+
+/// `POST identity/check` (Android `APIConnector.checkIdentityStates`): the state and feature mask
+/// of any number of IDs in one request.
+pub async fn check_identities(
+    client: &HttpsClient,
+    identities: &[String],
+) -> Result<IdentityChecks, DirectoryError> {
+    let body = ensure_ok(
+        client
+            .post_json(
+                &format!("{DIRECTORY_URL}identity/check"),
+                &json!({ "identities": identities }),
+            )
+            .await,
+    )?;
+    parse_identity_checks(&body, identities.len())
+}
+
 /// `yyyy-MM-ddTHH:mm:ss` followed by `Z` or `±HHMM` / `±HH:MM` (the directory's dates) as ms.
 fn parse_timestamp(text: &str) -> Option<i64> {
     let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
@@ -619,6 +684,37 @@ mod tests {
         assert!(matches!(
             link_phase1(br#"{"success":false,"error":"Invalid e-mail address"}"#),
             Err(DirectoryError::Server(message)) if message == "Invalid e-mail address"
+        ));
+    }
+
+    #[test]
+    fn identity_check_answers_go_by_position() {
+        let checks = parse_identity_checks(
+            br#"{"checkInterval":3600,"states":[0,2],"types":[0,0],"featureMasks":[255,null]}"#,
+            2,
+        )
+        .unwrap();
+        assert_eq!(checks.check_interval, 3600);
+        assert_eq!(
+            checks.identities,
+            [
+                IdentityCheck {
+                    state: 0,
+                    feature_mask: Some(255)
+                },
+                IdentityCheck {
+                    state: 2,
+                    feature_mask: None
+                }
+            ]
+        );
+        // One short: nobody can say whose state is whose.
+        assert!(matches!(
+            parse_identity_checks(
+                br#"{"checkInterval":0,"states":[0],"types":[0],"featureMasks":[1]}"#,
+                2
+            ),
+            Err(DirectoryError::InvalidResponse(_))
         ));
     }
 
