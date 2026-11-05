@@ -1250,6 +1250,10 @@ ApplicationWindow {
     // Its sender deleted or edited a message: what the notification shows of it follows, or the
     // words stay readable on the lock screen.
     function messagesChanged(messages) {
+        messages.forEach(function(message) {
+            // 4 is failed: not out, and it won't go by itself. The chat shows that.
+            if (message.outgoing && message.state !== 0) delete repliesOnTheirWay[message.id]
+        })
         if (lockActive()) return
         messages.forEach(function(message) {
             var n = notifications[message.conversation]
@@ -1326,6 +1330,7 @@ ApplicationWindow {
     function installationChanged(removed, windowOpen, windowAsked) {
         if (removed && !windowOpen) {
             // Nothing of a removed app stays on the screen, and none of its actions would work.
+            repliesOnTheirWay = ({})
             forgetNotifications()
         } else if (removed) {
             //% "Threesea was removed from this device"
@@ -1358,6 +1363,7 @@ ApplicationWindow {
     // gone (takeOver() catches a promise that stayed).
     function appEnding() {
         lockedNotificationLater.stop()
+        sayWhatIsOnItsWay()
         var kept = NotificationActions.allRepliesKept()
         var lost = NotificationActions.drop()
         if (lockInfo && lockInfo.lock && lockInfo.lock.appLock) hideNotifications()
@@ -1475,6 +1481,7 @@ ApplicationWindow {
     function dataRemoved(linkedDevicesRemain) {
         forgetNotifications()
         NotificationActions.drop()
+        repliesOnTheirWay = ({})
         actionsCame = false
         actionsRunning = 0
         actionsSendLimit.stop()
@@ -1536,6 +1543,7 @@ ApplicationWindow {
                          function(ok, result, kind, message) {
                 // Replying means it has been read; one that didn't go out hasn't been answered.
                 if (ok) {
+                    if (result && result.state === 0) window.replyOnItsWay(result.id, action.identity)
                     window.markNotifiedRead(action.identity, window.actionEnded)
                     if (action.kept || action.keeping) window.dropKeptReply(action.identity, action.text)
                 } else {
@@ -1559,6 +1567,30 @@ ApplicationWindow {
     // says how it went.
     property bool actionsCame: false
     property int actionsRunning: 0
+    // Replies from notifications the core has stored and the server has not taken yet, by message:
+    // their chats. If the app ends first they go out when it is next opened, which it says.
+    property var repliesOnTheirWay: ({})
+    function replyOnItsWay(id, identity) {
+        repliesOnTheirWay[id] = identity
+    }
+    function sayWhatIsOnItsWay() {
+        Object.keys(repliesOnTheirWay).forEach(function(id) {
+            var identity = repliesOnTheirWay[id]
+            var key = "replyNotSent:" + identity
+            var n = notifications[key]
+            if (!n) {
+                n = plainNotificationComponent.createObject(window, { key: key, chat: identity })
+                notifications[key] = n
+            }
+            n.summary = qsTrId("threesea-la-reply-not-sent")
+            //% "It is sent when you next open Threesea."
+            n.body = qsTrId("threesea-la-reply-not-sent-yet")
+            n.previewSummary = n.summary
+            n.previewBody = n.body
+            n.publish()
+        })
+        repliesOnTheirWay = ({})
+    }
     function actionEnded() {
         actionsRunning = actionsRunning - 1
         leaveAfterActions()

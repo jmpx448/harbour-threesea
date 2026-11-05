@@ -220,6 +220,36 @@ QtObject {
                 check("then", dbus.retained, 1)
             }, 0],
         ],
+        // Stored and not out when the run ends: it says when it will go.
+        replyStillOnItsWayIsSaidAtTheEnd: [
+            [function() {
+                ready(false)
+                backend.results["sendText"] = { id: 5, state: 0 }
+                backend.results["wake"] = { waiting: true }
+            }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                backend.coreEvent("wakeSettled", {})
+                check("gone", lifecycle.left, 1)
+                check("nothing said yet", window.notifications["replyNotSent:" + chat], undefined)
+                window.appEnding()
+                check("says so", window.notifications["replyNotSent:" + chat].body, "threesea-la-reply-not-sent-yet")
+            }, 0],
+        ],
+        replyThatWentOutIsNotSaidAtTheEnd: [
+            [function() {
+                ready(false)
+                backend.results["sendText"] = { id: 5, state: 0 }
+                backend.results["wake"] = { waiting: true }
+            }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                backend.coreEvent("messagesChanged", { messages: [{ id: 5, outgoing: true, state: 1, conversation: chat }] })
+                backend.coreEvent("wakeSettled", {})
+                window.appEnding()
+                check("nothing to say", window.notifications["replyNotSent:" + chat], undefined)
+            }, 0],
+        ],
         // The core runs and took no copy: the run ends all the same, and says the reply is lost.
         waitingReplyWithoutACopyEndsTheRunAtTheLimit: [
             [function() {
