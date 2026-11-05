@@ -79,6 +79,22 @@ impl App {
             .send(CoreEvent::Call(json!({ "event": "chatsChanged" })));
     }
 
+    /// A chat opened in the browser loses its "Mark as unread". The browser hears of it with the
+    /// next refresh, our UI through the event. A private or unknown chat stays as it is.
+    fn web_chat_opened(&self, incoming: &Incoming<'_>) {
+        let Ok(key) = self.web_receiver_key(incoming.arg("id")) else {
+            return;
+        };
+        if self
+            .store
+            .marked_unread_chats()
+            .is_ok_and(|marked| marked.contains(&key))
+            && self.store.set_marked_unread(&key, false).is_ok()
+        {
+            self.web_changed_chats();
+        }
+    }
+
     /// The browser's actions; `None` if `incoming` isn't one. `Ok`: the reply (its `ack` added
     /// by the caller).
     pub(crate) async fn web_action(
@@ -102,8 +118,11 @@ impl App {
                     _ => Err("badRequest"),
                 }
             }
-            // Which chat the browser shows (Android uses it for notifications); nothing to do.
-            ("update", "activeConversation") => Ok(confirm()),
+            // The chat is open in the browser: it counts as seen, like Android.
+            ("update", "activeConversation") => {
+                self.web_chat_opened(incoming);
+                Ok(confirm())
+            }
             ("delete", "message") => match self.web_target(incoming) {
                 Ok((key, Some((message_id, outgoing)))) => {
                     let removed = map(vec![

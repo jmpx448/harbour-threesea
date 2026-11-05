@@ -15,6 +15,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     app::{ApiError, App},
+    chat_notifications::Policy,
     contacts,
     distribution_lists::DistributionList,
     group_call_handshake::public_bytes,
@@ -41,8 +42,8 @@ pub(crate) struct Subscriptions {
     conversations: bool,
     /// Chats whose messages it shows: the newest message ID sent.
     chats: HashMap<String, i64>,
-    /// The chat list as last sent: newest message ID, unread count, starred per chat.
-    listed: HashMap<String, (LastMessage, i64, bool)>,
+    /// The chat list as last sent.
+    listed: HashMap<String, ListedState>,
 }
 
 #[cfg(test)]
@@ -56,9 +57,19 @@ impl Subscriptions {
 /// change, e.g. delivered, must reach the browser's chat list too).
 type LastMessage = (i64, i64, i64);
 
-/// A chat as listed for the browser: key, its Conversation model, newest message, unread
-/// count, starred.
-type Listed = (String, Value, LastMessage, i64, bool);
+/// What of a chat's list entry the browser has to hear about when it changes.
+#[derive(Clone, PartialEq)]
+struct ListedState {
+    last: LastMessage,
+    unread: i64,
+    starred: bool,
+    /// "Mark as unread".
+    marked_unread: bool,
+    notifications: Option<(Policy, Option<i64>)>,
+}
+
+/// A chat as listed for the browser: key, its Conversation model, what changes it.
+type Listed = (String, Value, ListedState);
 
 /// `contact`, `group` or `distributionList`.
 pub(crate) fn receiver_type(key: &str) -> &'static str {
@@ -69,6 +80,23 @@ pub(crate) fn receiver_type(key: &str) -> &'static str {
     } else {
         "contact"
     }
+}
+
+/// Threema Web's notification settings of a chat (Android's `NotificationSettings`), from which
+/// the browser decides what it notifies of and which icon the chat gets.
+fn notification_settings(setting: Option<(Policy, Option<i64>)>) -> Value {
+    let mut dnd = match setting {
+        None => vec![("mode", "off".into())],
+        Some((_, None)) => vec![("mode", "on".into())],
+        Some((_, Some(until))) => vec![("mode", "until".into()), ("until", until.into())],
+    };
+    if let Some((policy, _)) = setting {
+        dnd.push(("mentionOnly", (policy == Policy::Mentioned).into()));
+    }
+    map(vec![
+        ("sound", map(vec![("mode", "default".into())])),
+        ("dnd", map(dnd)),
+    ])
 }
 
 /// A colour per receiver, like Android's ID colours (a fixed palette, picked by a hash).
@@ -579,6 +607,9 @@ impl App {
             .threema_id;
         let private = self.web_private_chats()?;
         let pinned = self.store.pinned_chats()?;
+        let marked_unread: HashSet<String> =
+            self.store.marked_unread_chats()?.into_iter().collect();
+        let notifications = self.store.all_chat_notifications()?;
         let mut list: Vec<Listed> = Vec::new();
         for (last, unread) in self.store.conversations()? {
             if private.contains(&last.conversation) {
@@ -586,28 +617,29 @@ impl App {
             }
             let key = last.conversation.clone();
             let count = self.store.message_count(&key)?;
+            let state = ListedState {
+                last: (last.id, last.updated_at, last.state),
+                unread,
+                starred: pinned.contains(&key),
+                marked_unread: marked_unread.contains(&key),
+                notifications: notifications.get(&key).copied(),
+            };
             let mut fields = vec![
                 ("type", receiver_type(&key).into()),
                 ("id", key.clone().into()),
                 ("position", 0.into()),
                 ("messageCount", count.into()),
                 ("unreadCount", unread.into()),
-                ("isStarred", pinned.contains(&key).into()),
+                ("isStarred", state.starred.into()),
+                ("isUnread", state.marked_unread.into()),
+                ("notifications", notification_settings(state.notifications)),
             ];
             // A chat without messages has no latest message (our list keeps a marker for it:
             // `empty` for an emptied chat, `none` for a group or list with no history yet).
             if last.kind != "empty" && last.kind != "none" {
                 fields.push(("latestMessage", self.web_message(&last, &user)));
             }
-            let value = map(fields);
-            let starred = pinned.contains(&key);
-            list.push((
-                key,
-                value,
-                (last.id, last.updated_at, last.state),
-                unread,
-                starred,
-            ));
+            list.push((key, map(fields), state));
         }
         // Starred (our pinned) first, like our own list.
         list.sort_by_key(|(key, ..)| pinned.iter().position(|p| p == key).unwrap_or(usize::MAX));
@@ -630,7 +662,7 @@ impl App {
         subscriptions.conversations = true;
         subscriptions.listed = list
             .iter()
-            .map(|(key, _, last, unread, starred)| (key.clone(), (*last, *unread, *starred)))
+            .map(|(key, _, state)| (key.clone(), state.clone()))
             .collect();
         Ok(Value::Array(
             list.into_iter().map(|(_, value, ..)| value).collect(),
@@ -864,11 +896,11 @@ impl App {
             }
             if subscriptions.conversations {
                 let mut listed = HashMap::new();
-                for (key, value, last, unread, starred) in &list {
-                    listed.insert(key.clone(), (*last, *unread, *starred));
+                for (key, value, state) in &list {
+                    listed.insert(key.clone(), state.clone());
                     let mode = match subscriptions.listed.get(key) {
                         None => "new",
-                        Some(state) if *state != (*last, *unread, *starred) => "modified",
+                        Some(sent) if sent != state => "modified",
                         Some(_) => continue,
                     };
                     out.push((

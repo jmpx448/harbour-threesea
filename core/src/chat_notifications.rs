@@ -77,6 +77,31 @@ impl Store {
         }))
     }
 
+    /// Every chat's setting that hasn't expired: one query instead of one per chat.
+    pub fn all_chat_notifications(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (Policy, Option<i64>)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT conversation, policy, until FROM chat_notifications
+             WHERE until IS NULL OR until > ?1",
+        )?;
+        let rows = statement.query_map([now_ms()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        let mut settings = std::collections::HashMap::new();
+        for row in rows {
+            let (conversation, policy, until) = row?;
+            if let Some(policy) = Policy::parse(&policy) {
+                settings.insert(conversation, (policy, until));
+            }
+        }
+        Ok(settings)
+    }
+
     /// Every chat whose notifications are off or limited right now (the chat list's bell):
     /// one query instead of one per chat.
     pub fn muted_chats(&self) -> Result<std::collections::HashSet<String>, StoreError> {

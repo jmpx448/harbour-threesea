@@ -1532,3 +1532,145 @@ async fn web_gets_no_contact_picture_while_they_are_not_shown() {
     app.set_app_setting("showProfilePictures", false).unwrap();
     assert!(!picture_sent(&mut app, &mut rx).await);
 }
+
+/// One update of the browser's chat list: its mode and the chat's model.
+fn conversation_updates(wires: &[Value]) -> Vec<(String, Value)> {
+    wires
+        .iter()
+        .filter(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from("conversation")))
+        .map(|wire| {
+            let args = saltyrtc::field(wire, "args").unwrap();
+            (
+                saltyrtc::field(args, "mode")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_owned(),
+                saltyrtc::field(wire, "data").unwrap().clone(),
+            )
+        })
+        .collect()
+}
+
+fn sent_values(rx: &mut UnboundedReceiver<ToWeb>) -> Vec<Value> {
+    let mut sent = Vec::new();
+    while let Ok(message) = rx.try_recv() {
+        if let ToWeb::Send(wire) = message {
+            sent.push(wire);
+        }
+    }
+    sent
+}
+
+/// A muted chat tells the browser so (it would notify of every message otherwise), and changing
+/// that on the phone reaches it.
+#[test]
+fn the_browser_hears_of_a_chats_notification_setting() {
+    use crate::chat_notifications::Policy;
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    app.store
+        .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+        .unwrap();
+    let list = app.web_conversations(1).unwrap();
+    let dnd = |chat: &Value| {
+        saltyrtc::field(saltyrtc::field(chat, "notifications").unwrap(), "dnd")
+            .unwrap()
+            .clone()
+    };
+    let mode = |dnd: &Value| saltyrtc::field(dnd, "mode").cloned().unwrap();
+    assert_eq!(mode(&dnd(&list[0])), Value::from("off"));
+
+    let changed = |app: &mut App, rx: &mut UnboundedReceiver<ToWeb>, setting| {
+        app.store
+            .set_chat_notifications("BBBBBBBB", setting)
+            .unwrap();
+        app.web_refresh();
+        let mut updates = conversation_updates(&sent_values(rx));
+        assert_eq!(updates.len(), 1);
+        let (mode, chat) = updates.remove(0);
+        assert_eq!(mode, "modified");
+        chat
+    };
+    let on = dnd(&changed(&mut app, &mut rx, Some((Policy::Never, None))));
+    assert_eq!(mode(&on), Value::from("on"));
+    assert_eq!(
+        saltyrtc::field(&on, "mentionOnly"),
+        Some(&Value::from(false))
+    );
+
+    let until = crate::messages::now_ms() + 60_000;
+    let limited = dnd(&changed(
+        &mut app,
+        &mut rx,
+        Some((Policy::Mentioned, Some(until))),
+    ));
+    assert_eq!(mode(&limited), Value::from("until"));
+    assert_eq!(
+        saltyrtc::field(&limited, "until"),
+        Some(&Value::from(until))
+    );
+    assert_eq!(
+        saltyrtc::field(&limited, "mentionOnly"),
+        Some(&Value::from(true))
+    );
+
+    assert_eq!(
+        mode(&dnd(&changed(&mut app, &mut rx, None))),
+        Value::from("off")
+    );
+}
+
+/// "Mark as unread" shows in the browser, and opening the chat there takes it away, as a chat
+/// without unread messages has nothing for the browser to acknowledge.
+#[tokio::test(flavor = "current_thread")]
+async fn a_chat_opened_in_the_browser_is_no_longer_marked_unread() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut media_events = app.take_media_events().unwrap();
+    let mut rx = browser(&mut app);
+    app.store
+        .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+        .unwrap();
+    app.web_conversations(1).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+
+    app.store.set_marked_unread("BBBBBBBB", true).unwrap();
+    app.web_refresh();
+    let updates = conversation_updates(&sent_values(&mut rx));
+    assert_eq!(
+        saltyrtc::field(&updates[0].1, "isUnread"),
+        Some(&Value::from(true))
+    );
+
+    let open = |id: &str| {
+        arp::message(
+            "update",
+            "activeConversation",
+            Some(arp::map(vec![
+                ("type", "contact".into()),
+                ("id", id.into()),
+            ])),
+            None,
+        )
+    };
+    let message = open("BBBBBBBB");
+    let incoming = Incoming::parse(&message).unwrap();
+    app.web_action(&incoming).await.unwrap().unwrap();
+    assert!(app.store.marked_unread_chats().unwrap().is_empty());
+    assert!(media_events.try_recv().is_ok(), "our own list hears of it");
+    app.web_refresh();
+    let updates = conversation_updates(&sent_values(&mut rx));
+    assert_eq!(
+        saltyrtc::field(&updates[0].1, "isUnread"),
+        Some(&Value::from(false))
+    );
+
+    // A private chat isn't the browser's to change.
+    app.store.set_private("CCCCCCCC", true).unwrap();
+    app.store.set_marked_unread("CCCCCCCC", true).unwrap();
+    let message = open("CCCCCCCC");
+    let incoming = Incoming::parse(&message).unwrap();
+    app.web_action(&incoming).await.unwrap().unwrap();
+    assert_eq!(app.store.marked_unread_chats().unwrap(), vec!["CCCCCCCC"]);
+}
