@@ -1580,13 +1580,17 @@ ApplicationWindow {
     function actionsSent() {
         if (!actionsSendLimit.running) return
         actionsSendLimit.stop()
+        leaveIfActionsDone()
+    }
+    // One that came just now is on its way, and ends the run when it has gone.
+    function leaveIfActionsDone() {
         if (actionsRunning === 0 && !NotificationActions.anyWaiting()) lifecycle.leaveIfUnwanted()
     }
     // As long as a dead connection takes to find out and come back (wakeLimit).
     Timer {
         id: actionsSendLimit
         interval: 45000
-        onTriggered: lifecycle.leaveIfUnwanted()
+        onTriggered: window.leaveIfActionsDone()
     }
     // Waiting behind a lock. The reply's words are in the chat's draft by then and the app says so
     // as it ends (appEnding), so nobody has to come back for it to end. With no core running there

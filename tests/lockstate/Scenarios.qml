@@ -148,6 +148,20 @@ QtObject {
                 check("gone", lifecycle.left, 1)
             }, 0],
         ],
+        // The send limit running out while another reply is on its way: that one ends the run.
+        replyOnItsWayHoldsTheEnd: [
+            [function() {
+                ready(false)
+                backend.hold("sendText")
+            }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                window.leaveIfActionsDone()
+                check("stays for it", lifecycle.left, 0)
+                backend.release("sendText")
+            }, 100],
+            [function() { check("gone", lifecycle.left, 1) }, 0],
+        ],
         updateNoticeGoesWithTheNewVersion: [
             [function() {
                 var n = { summary: "threesea-la-updated", closed: false, close: function() { n.closed = true } }
