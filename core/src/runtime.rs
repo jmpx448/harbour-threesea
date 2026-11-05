@@ -486,6 +486,9 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                         json!({"event": "serverMessage", "message": message, "canReconnect": can_reconnect})
                             .to_string(),
                     ),
+                    Some(FromConnection::WakeSettled) => {
+                        emit(json!({"event": "wakeSettled"}).to_string());
+                    }
                 }
             }
             event = async {

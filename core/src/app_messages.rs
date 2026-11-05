@@ -521,6 +521,7 @@ impl App {
             storage_failing: connection::StorageFailing::default(),
             failing_items: connection::FailingItems::default(),
             carried_events: core::cell::RefCell::default(),
+            wake_hold: connection::WakeHold::default(),
         };
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         let (from_tx, from_rx) = mpsc::unbounded_channel();
@@ -572,10 +573,21 @@ impl App {
         self.tell_connection(ToConnection::SendPending);
     }
 
-    /// Ask the connection to reconnect now (network changed, app woke up).
+    /// Wake the connection, without the user asking (timer, network changed, back in the app).
+    /// `waiting`: `wakeSettled` will follow.
     pub(crate) fn wake_connection(&mut self) -> Value {
-        self.tell_connection(ToConnection::Wake);
+        let waiting = self
+            .connection
+            .as_ref()
+            .is_some_and(|tx| tx.send(ToConnection::Wake).is_ok());
         // The loop's timer stands still while the phone sleeps, a pause goes by the clock.
+        self.retry_failed_transfers();
+        json!({ "waiting": waiting })
+    }
+
+    /// The user asked to connect now: that also ends a wait a server asked for.
+    pub(crate) fn connect_now(&mut self) -> Value {
+        self.tell_connection(ToConnection::ConnectNow);
         self.retry_failed_transfers();
         json!({})
     }
@@ -1456,6 +1468,7 @@ mod live_tests {
                         other => eprintln!("event: {other:?}"),
                     },
                     FromConnection::ServerMessage { message, .. } => eprintln!("server: {message}"),
+                    FromConnection::WakeSettled => {}
                 }
             }
         });

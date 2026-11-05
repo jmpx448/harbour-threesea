@@ -927,8 +927,10 @@ pub enum Command {
     },
     /// Current connection state.
     ConnectionState,
-    /// Reconnect now if disconnected.
+    /// "Connect now": reconnect now if disconnected, also while a server asked us to stay away.
     Reconnect,
+    /// The same without the user asking: timer, network change, back in the app.
+    Wake,
 }
 
 #[derive(Deserialize)]
@@ -2229,7 +2231,8 @@ impl App {
                 Ok(json!({}))
             }
             Command::ConnectionState => Ok(self.connection_json()),
-            Command::Reconnect => Ok(self.wake_connection()),
+            Command::Reconnect => Ok(self.connect_now()),
+            Command::Wake => Ok(self.wake_connection()),
         }
     }
 

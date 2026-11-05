@@ -125,7 +125,15 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   silence, reconnect if nothing comes back within another 60 s; backoff 1 s → 60 s. A rate limit on
   the incoming task's `FetchSender` ends the session too, and libthreema asks for at least 10 s:
   no attempt before that, wake-ups included, and the wait grows to 5 minutes while each login
-  meets the limit again (the waiting message repeats the lookup every time).
+  meets the limit again (the waiting message repeats the lookup every time). A close that says not
+  to come back by ourselves (`can_reconnect` false, mediator 41xx) means ten minutes by the clock:
+  only "Connect now" ends that early, not the timer, a network change or returning to the app.
+  A wake-up shortens an echo already out to 15 s; the device stays up until
+  something was received and 2 s went by without more (after a new login: until
+  `queue-send-complete` and, on the mediator, `reflection-queue-dry`, like Android's
+  `BaseServerConnection`), or the attempt failed, and until transfers running have ended, for at
+  most 45 s (`wakeSettled`). How long a session lasted, for its backoff, goes by the clock:
+  tokio's stands still while the device sleeps.
 - Outgoing (no libthreema task yet, LIB-51): patch 0003 encodes; we pick a fresh nonce, record it
   in the nonce table, send, and mark the message "sent" on the server's message-ack. Delivery and
   read receipts are delivery-receipt messages handled by libthreema and surfaced through

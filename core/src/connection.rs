@@ -128,8 +128,17 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// The least wait while the store fails: a new connection brings the message it failed on again,
 /// and a wake-up or "Connect now" tries at once anyway.
 const STORAGE_BACKOFF: Duration = Duration::from_secs(30);
-/// How long we stay away when a server told us not to come back by ourselves.
+/// How long we stay away when a server told us not to come back by ourselves. Only "Connect now"
+/// ends this early: what wakes the connection by itself would be coming back by ourselves.
 const HOLD_OFF: Duration = Duration::from_secs(600);
+/// How long an echo gets after a wake-up: the device stays up for this, the usual interval would
+/// outlast that.
+const WAKE_ECHO_LIMIT: Duration = Duration::from_secs(15);
+/// A wake-up is over this long after the last thing received, so that what comes in a burst gets
+/// handled with the device up.
+const WAKE_QUIET: Duration = Duration::from_secs(2);
+/// A wake-up that found the connection dead waits for the next attempt if it comes this soon.
+const WAKE_RETRY_SOON: Duration = Duration::from_secs(2);
 /// A session this long was a working connection: the next attempts start over.
 const STABLE_SESSION: Duration = Duration::from_secs(60);
 /// libthreema's rule for `RateLimitExceeded`: no new connection attempt before this.
@@ -173,8 +182,12 @@ pub enum ToConnection {
     },
     /// Answered once everything sent before this has been handled; dropped while disconnected.
     Flush(oneshot::Sender<()>),
-    /// Connect now if disconnected; if connected, verify the connection with an echo (15 s).
+    /// By itself (timer, network change, back in the app): connect now if disconnected, unless a
+    /// server told us to stay away; if connected, verify the connection with an echo. Answered with
+    /// [`FromConnection::WakeSettled`].
     Wake,
+    /// The user asked ("Connect now"): the same, and it also ends a wait a server asked for.
+    ConnectNow,
     /// Drop the connection and connect again at once (the server addresses changed).
     Reconnect,
     /// Multi-device: the linked devices (fails without the mediator).
@@ -297,6 +310,8 @@ pub enum FromConnection {
         message: String,
         can_reconnect: bool,
     },
+    /// What a wake-up was for has happened or won't soon: the device may sleep again.
+    WakeSettled,
 }
 
 /// Everything the connection needs; owned by the connection task.
@@ -321,6 +336,95 @@ pub struct ConnectionSetup {
     /// ([`waits_for_the_next_connection`]). In the store too (`FS_EVENTS_CARRIED`); here for when
     /// writing that failed, as it may well.
     pub carried_events: RefCell<Vec<CoreEvent>>,
+    /// What a wake-up is waiting for; it may take a new connection to find out.
+    pub wake_hold: WakeHold,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum WakeWait {
+    #[default]
+    Nothing,
+    /// For the first sign of life.
+    Answer,
+    /// Something came in: until this, unless more does.
+    QuietUntil(Instant),
+}
+
+/// How far the last wake-up has got. The device is held awake for it, which costs battery every
+/// few minutes, and letting go too early leaves a dead connection dead until the next time. So it
+/// lasts until something has been received and has stopped coming, or until nothing can come soon.
+/// After a login that takes the servers saying they have handed out what they kept (like Android's
+/// `BaseServerConnection`, which holds on until the queue is sent); if they never do, the UI's limit
+/// ends it.
+#[derive(Default)]
+pub struct WakeHold {
+    wait: core::cell::Cell<WakeWait>,
+    /// The chat server's queue isn't through yet.
+    chat_queue_open: core::cell::Cell<bool>,
+    /// The mediator's queue isn't through yet.
+    reflection_queue_open: core::cell::Cell<bool>,
+}
+
+impl WakeHold {
+    fn asked(&self) {
+        // Nothing was waiting for those queues, on a session that may be hours old.
+        if self.wait.get() == WakeWait::Nothing {
+            self.chat_queue_open.set(false);
+            self.reflection_queue_open.set(false);
+        }
+        self.wait.set(WakeWait::Answer);
+    }
+
+    /// A new session. Through the mediator the chat server only hands out to the leader.
+    fn logged_in(&self, through_mediator: bool) {
+        self.chat_queue_open.set(!through_mediator);
+        self.reflection_queue_open.set(through_mediator);
+        self.wait_for_the_queues();
+    }
+
+    fn promoted_to_leader(&self) {
+        self.chat_queue_open.set(true);
+        self.wait_for_the_queues();
+    }
+
+    fn wait_for_the_queues(&self) {
+        if self.wait.get() != WakeWait::Nothing {
+            self.wait.set(WakeWait::Answer);
+        }
+    }
+
+    fn chat_queue_through(&self, now: Instant) {
+        self.chat_queue_open.set(false);
+        self.heard(now);
+    }
+
+    fn reflection_queue_through(&self, now: Instant) {
+        self.reflection_queue_open.set(false);
+        self.heard(now);
+    }
+
+    /// The connection works, as far as it can be seen from here.
+    fn heard(&self, now: Instant) {
+        if self.wait.get() != WakeWait::Nothing
+            && !self.chat_queue_open.get()
+            && !self.reflection_queue_open.get()
+        {
+            self.wait.set(WakeWait::QuietUntil(now + WAKE_QUIET));
+        }
+    }
+
+    fn settles_at(&self) -> Option<Instant> {
+        match self.wait.get() {
+            WakeWait::QuietUntil(at) => Some(at),
+            WakeWait::Nothing | WakeWait::Answer => None,
+        }
+    }
+
+    fn settle(&self, tx: &mpsc::UnboundedSender<FromConnection>) {
+        if self.wait.take() != WakeWait::Nothing {
+            let _ = tx.send(FromConnection::WakeSettled);
+        }
+    }
 }
 
 /// What was being done when the store failed. Each of these has its own way of showing that it
@@ -841,6 +945,36 @@ fn backoff_after_session(backoff: Duration, session: Duration) -> Duration {
     }
 }
 
+/// How long something took, sleep of the device included: tokio's clock stands still for that, and
+/// a session in a pocket would never get to look like one that worked.
+struct Stopwatch {
+    awake: Instant,
+    wall: std::time::SystemTime,
+}
+
+impl Stopwatch {
+    fn start() -> Self {
+        Self {
+            awake: Instant::now(),
+            wall: std::time::SystemTime::now(),
+        }
+    }
+
+    /// The system clock may be set back: then it's what tokio's clock says.
+    fn elapsed(&self) -> Duration {
+        self.awake
+            .elapsed()
+            .max(self.wall.elapsed().unwrap_or_default())
+    }
+}
+
+/// Whether a wake-up keeps the device up for the next attempt, after a session or a failed login:
+/// only if that comes soon, and only after something that got through. Otherwise a wake-up that
+/// found the connection dead would let the device sleep with nothing connected for another round.
+fn next_attempt_is_worth_holding_for(came_up: bool, backoff: Duration) -> bool {
+    came_up && backoff <= WAKE_RETRY_SOON
+}
+
 /// The wait after the one just over.
 fn next_backoff(backoff: Duration, rate_limited: bool) -> Duration {
     let most = if rate_limited {
@@ -868,6 +1002,68 @@ fn note_storage_failure(
     }
 }
 
+/// Whether a wake-up that came by itself ends this wait. After a server told us to stay away it
+/// doesn't, until that time has passed by the clock: the wait's own timer stands still while the
+/// device sleeps, and would stretch ten minutes to hours in a pocket.
+fn wake_ends_wait(backoff: Duration, waited_by_the_clock: Duration) -> bool {
+    backoff < HOLD_OFF || waited_by_the_clock >= backoff
+}
+
+/// Wait for the backoff, or end it on a wake-up: after a rate limit, as soon as its floor allows.
+/// `false`: the app has gone away.
+async fn wait_for_next_attempt(
+    backoff: Duration,
+    earliest: Option<Instant>,
+    rx: &mut mpsc::UnboundedReceiver<ToConnection>,
+    tx: &mpsc::UnboundedSender<FromConnection>,
+    wake_hold: &WakeHold,
+) -> bool {
+    let began = std::time::SystemTime::now();
+    let wait = sleep(backoff);
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            () = &mut wait => return true,
+            message = rx.recv() => match message {
+                None => return false,
+                Some(ToConnection::ConnectNow | ToConnection::Reconnect) => match earliest {
+                    Some(at) if Instant::now() < at => wait.as_mut().reset(at),
+                    _ => return true,
+                },
+                Some(ToConnection::Wake) => {
+                    wake_hold.asked();
+                    let waited = began.elapsed().unwrap_or_default();
+                    match earliest {
+                        _ if !wake_ends_wait(backoff, waited) => wake_hold.settle(tx),
+                        Some(at) if Instant::now() < at => {
+                            wait.as_mut().reset(at);
+                            wake_hold.settle(tx);
+                        }
+                        _ => return true,
+                    }
+                }
+                Some(ToConnection::Devices(reply)) => {
+                    let _ = reply.send(Err(DeviceGroupError::NotConnected));
+                }
+                Some(ToConnection::DropDevices { reply, .. }) => {
+                    let _ = reply.send(Err(DeviceGroupError::NotConnected));
+                }
+                // Lost while offline (like Android's tasks, which need a connection too).
+                // Queued in the store: sent after connecting.
+                Some(ToConnection::ReflectSync) => {}
+                Some(ToConnection::NewDeviceSync { reply, .. }) => {
+                    // The mediator connection after activating multi-device did not come
+                    // up: the join cannot run (the UI rolls the activation back).
+                    tracing::warn!("device join failed: not connected");
+                    let reason = DeviceGroupError::NotConnected.to_string();
+                    let _ = reply.send(JoinOutcome::FailedBeforeHandover(reason));
+                }
+                Some(_) => {}, // queued in the store, sent after connecting
+            },
+        }
+    }
+}
+
 /// Run the connection until the app goes away (`rx` closed). Reconnects with backoff.
 pub async fn run(
     setup: ConnectionSetup,
@@ -877,8 +1073,13 @@ pub async fn run(
     let mut backoff = Duration::from_secs(1);
     loop {
         let _ = tx.send(FromConnection::State(ConnectionState::Connecting));
-        let started = Instant::now();
-        let result = Session::run(&setup, &mut rx, &tx).await;
+        let started = Stopwatch::start();
+        let session = Session::connect(&setup, &tx).await;
+        let came_up = session.is_ok();
+        let result = match session {
+            Ok(session) => session.run(&mut rx).await,
+            Err(error) => Err(error),
+        };
         let _ = tx.send(FromConnection::State(ConnectionState::Disconnected));
         let rate_limited = matches!(result, Err(ConnectionError::RateLimited));
         match result {
@@ -898,7 +1099,7 @@ pub async fn run(
                     can_reconnect,
                 });
                 if !can_reconnect {
-                    // E.g. another device took over this ID. Don't fight it; wait for a wake-up.
+                    // E.g. another device took over this ID. Don't fight it.
                     backoff = HOLD_OFF;
                 }
             }
@@ -919,7 +1120,7 @@ pub async fn run(
                 continue;
             }
             // 41xx: don't reconnect by ourselves (version, device limit, duplicate connection,
-            // reflection queue full); wait for a wake-up.
+            // reflection queue full).
             Err(ConnectionError::MediatorClosed { code, reason })
                 if (4100..4200).contains(&code) =>
             {
@@ -935,43 +1136,22 @@ pub async fn run(
             Err(error) => tracing::info!(%error, "chat server connection lost"),
             Ok(()) => {}
         }
-        backoff = backoff_after_session(backoff, started.elapsed());
+        // A login that failed isn't a session, however long the device slept in the middle of it.
+        let session_length = if came_up {
+            started.elapsed()
+        } else {
+            Duration::ZERO
+        };
+        backoff = backoff_after_session(backoff, session_length);
         let earliest = rate_limited.then(|| {
             backoff = backoff.max(RATE_LIMIT_FLOOR);
             tokio::time::Instant::now() + RATE_LIMIT_FLOOR
         });
-        // Wait for the backoff, or reconnect immediately on a wake-up: after a rate limit, as soon
-        // as its floor allows.
-        let wait = sleep(backoff);
-        tokio::pin!(wait);
-        loop {
-            tokio::select! {
-                () = &mut wait => break,
-                message = rx.recv() => match message {
-                    None => return,
-                    Some(ToConnection::Wake | ToConnection::Reconnect) => match earliest {
-                        Some(at) if tokio::time::Instant::now() < at => wait.as_mut().reset(at),
-                        _ => break,
-                    },
-                    Some(ToConnection::Devices(reply)) => {
-                        let _ = reply.send(Err(DeviceGroupError::NotConnected));
-                    }
-                    Some(ToConnection::DropDevices { reply, .. }) => {
-                        let _ = reply.send(Err(DeviceGroupError::NotConnected));
-                    }
-                    // Lost while offline (like Android's tasks, which need a connection too).
-                    // Queued in the store: sent after connecting.
-                    Some(ToConnection::ReflectSync) => {}
-                    Some(ToConnection::NewDeviceSync { reply, .. }) => {
-                        // The mediator connection after activating multi-device did not come
-                        // up: the join cannot run (the UI rolls the activation back).
-                        tracing::warn!("device join failed: not connected");
-                        let reason = DeviceGroupError::NotConnected.to_string();
-                        let _ = reply.send(JoinOutcome::FailedBeforeHandover(reason));
-                    }
-                    Some(_) => {}, // queued in the store, sent after connecting
-                },
-            }
+        if !next_attempt_is_worth_holding_for(came_up, backoff) {
+            setup.wake_hold.settle(&tx);
+        }
+        if !wait_for_next_attempt(backoff, earliest, &mut rx, &tx, &setup.wake_hold).await {
+            return;
         }
         backoff = next_backoff(backoff, rate_limited);
     }
@@ -1024,6 +1204,11 @@ impl Liveness {
     /// An echo went out, to be answered within `time`.
     fn echo_sent(&mut self, now: Instant, time: Duration) {
         self.echo_deadline = Some(now + time);
+    }
+
+    /// The echo that is out has to be answered by then at the latest.
+    fn echo_due_by(&mut self, at: Instant) {
+        self.echo_deadline = self.echo_deadline.map(|deadline| deadline.min(at));
     }
 
     /// When to act: send an echo after the silence, or give up on the one that is out.
@@ -1096,22 +1281,23 @@ impl Drop for Session<'_> {
 
 impl<'a> Session<'a> {
     async fn run(
-        setup: &'a ConnectionSetup,
+        mut self,
         rx: &mut mpsc::UnboundedReceiver<ToConnection>,
-        tx: &'a mpsc::UnboundedSender<FromConnection>,
     ) -> Result<(), ConnectionError> {
-        let mut session = Self::connect(setup, tx).await?;
-        let _ = tx.send(FromConnection::State(ConnectionState::Connected));
+        let _ = self
+            .tx
+            .send(FromConnection::State(ConnectionState::Connected));
         tracing::info!("connected to chat server");
-        while let Some(payload) = session.d2m_queue.pop_front() {
-            session.handle_d2m(payload).await?;
+        self.setup.wake_hold.logged_in(self.transport.is_mediator());
+        while let Some(payload) = self.d2m_queue.pop_front() {
+            self.handle_d2m(payload).await?;
         }
-        session.resume_carried_events().await?;
-        session.terminate_fs_if_pending().await?;
-        session.reflect_queued_syncs().await?;
-        session.send_pending().await?;
-        session.storage_works(StorageStep::Other);
-        session.payload_loop(rx).await
+        self.resume_carried_events().await?;
+        self.terminate_fs_if_pending().await?;
+        self.reflect_queued_syncs().await?;
+        self.send_pending().await?;
+        self.storage_works(StorageStep::Other);
+        self.payload_loop(rx).await
     }
 
     /// TCP straight to the chat server (no multi-device).
@@ -1297,6 +1483,7 @@ impl<'a> Session<'a> {
     async fn read_inbound(&mut self, buffer: &mut [u8]) -> Result<Inbound, TransportError> {
         let inbound = self.transport.read(buffer).await?;
         self.liveness.received(Instant::now());
+        self.setup.wake_hold.heard(Instant::now());
         Ok(inbound)
     }
 
@@ -3176,9 +3363,13 @@ impl<'a> Session<'a> {
                 self.reflection_backlog = false;
                 self.release_held_notifications(true);
                 self.storage_works(StorageStep::Reflected);
+                self.setup
+                    .wake_hold
+                    .reflection_queue_through(Instant::now());
             }
             // Only the leader receives from the chat server (Android's MonitoringLayer).
             D2mIncoming::RolePromotedToLeader => {
+                self.setup.wake_hold.promoted_to_leader();
                 self.e2e
                     .update_d2m_state(D2mRole::Leader)
                     .map_err(protocol_error)?;
@@ -3220,7 +3411,19 @@ impl<'a> Session<'a> {
             let next_held = (!self.reflection_backlog)
                 .then(|| self.held.iter().map(|(_, at)| *at).min())
                 .flatten();
+            // A notification that is being held goes out with the device up.
+            let wake_settles = self
+                .setup
+                .wake_hold
+                .settles_at()
+                .map(|at| self.held.iter().map(|(_, due)| *due).fold(at, Ord::max));
             tokio::select! {
+                () = async {
+                    match wake_settles {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.setup.wake_hold.settle(self.tx),
                 () = async {
                     match next_held {
                         Some(at) => tokio::time::sleep_until(at).await,
@@ -3296,10 +3499,15 @@ impl<'a> Session<'a> {
                         }
                     },
                     // Woken up (e.g. after the device slept): check the connection is still alive.
-                    Some(ToConnection::Wake) => if !self.liveness.awaiting_echo() {
-                        self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
-                        // Give the echo 15 s (instead of the usual interval) to come back.
-                        self.liveness.echo_sent(Instant::now(), Duration::from_secs(15));
+                    Some(ToConnection::Wake | ToConnection::ConnectNow) => {
+                        self.setup.wake_hold.asked();
+                        if self.liveness.awaiting_echo() {
+                            // Out since before the device slept, perhaps, with most of its time left.
+                            self.liveness.echo_due_by(Instant::now() + WAKE_ECHO_LIMIT);
+                        } else {
+                            self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
+                            self.liveness.echo_sent(Instant::now(), WAKE_ECHO_LIMIT);
+                        }
                     },
                 },
                 () = tokio::time::sleep_until(idle_deadline) => {
@@ -3389,6 +3597,7 @@ impl<'a> Session<'a> {
             IncomingPayload::QueueSendComplete => {
                 tracing::debug!("message queue drained");
                 self.storage_works(StorageStep::Incoming);
+                self.setup.wake_hold.chat_queue_through(Instant::now());
             }
             // Like Android's TaskManager: warn (unless our own cookie is new) and clear the
             // server's flag. Left set, every login of every device in the group gets it again
@@ -4082,6 +4291,19 @@ mod liveness_tests {
     }
 
     #[test]
+    fn a_wake_up_cuts_short_the_time_of_an_echo_that_is_out() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        liveness.echo_sent(start, ECHO_INTERVAL);
+        // The device slept with most of the minute left: nobody is up for that long.
+        liveness.echo_due_by(start + WAKE_ECHO_LIMIT);
+        assert_eq!(liveness.deadline(), start + WAKE_ECHO_LIMIT);
+        // Another wake-up doesn't give it more.
+        liveness.echo_due_by(start + WAKE_ECHO_LIMIT * 2);
+        assert_eq!(liveness.deadline(), start + WAKE_ECHO_LIMIT);
+    }
+
+    #[test]
     fn an_answer_ends_the_wait_for_an_echo() {
         let start = Instant::now();
         let mut liveness = Liveness::new(start);
@@ -4091,6 +4313,220 @@ mod liveness_tests {
         liveness.received(answered);
         assert!(!liveness.awaiting_echo());
         assert_eq!(liveness.deadline(), answered + ECHO_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    struct Waiting {
+        to: mpsc::UnboundedSender<ToConnection>,
+        rx: mpsc::UnboundedReceiver<ToConnection>,
+        tx: mpsc::UnboundedSender<FromConnection>,
+        from: mpsc::UnboundedReceiver<FromConnection>,
+        hold: WakeHold,
+    }
+
+    fn waiting() -> Waiting {
+        let (to, rx) = mpsc::unbounded_channel();
+        let (tx, from) = mpsc::unbounded_channel();
+        Waiting {
+            to,
+            rx,
+            tx,
+            from,
+            hold: WakeHold::default(),
+        }
+    }
+
+    impl Waiting {
+        /// How long the wait lasted, given what is in the channel when it begins.
+        async fn lasted(&mut self, backoff: Duration, earliest: Option<Instant>) -> Duration {
+            let start = Instant::now();
+            let goes_on =
+                wait_for_next_attempt(backoff, earliest, &mut self.rx, &self.tx, &self.hold).await;
+            assert!(goes_on);
+            start.elapsed()
+        }
+
+        fn settled(&mut self) -> bool {
+            matches!(self.from.try_recv(), Ok(FromConnection::WakeSettled))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_ends_the_ordinary_wait_and_stays_for_the_attempt() {
+        let mut wait = waiting();
+        wait.to.send(ToConnection::Wake).unwrap();
+        assert_eq!(wait.lasted(WAIT, None).await, Duration::ZERO);
+        assert!(!wait.settled(), "its outcome is the attempt's");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_by_itself_leaves_the_wait_a_server_asked_for() {
+        let mut wait = waiting();
+        wait.to.send(ToConnection::Wake).unwrap();
+        wait.to.send(ToConnection::Wake).unwrap();
+        assert_eq!(wait.lasted(HOLD_OFF, None).await, HOLD_OFF);
+        assert!(wait.settled(), "the device can go back to sleep");
+        assert!(wait.settled());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn connect_now_ends_the_wait_a_server_asked_for() {
+        let mut wait = waiting();
+        wait.to.send(ToConnection::ConnectNow).unwrap();
+        assert_eq!(wait.lasted(HOLD_OFF, None).await, Duration::ZERO);
+    }
+
+    /// The IPv6 switch, the forward secrecy switch, a device's name, multi-device on and off: all
+    /// of these need the new connection now, whatever it was waiting for. A link's next step
+    /// waits for that connection in the queue.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_changed_setting_ends_any_wait() {
+        for backoff in [WAIT, HOLD_OFF] {
+            let mut wait = waiting();
+            wait.to.send(ToConnection::Reconnect).unwrap();
+            wait.to.send(ToConnection::SendPending).unwrap();
+            assert_eq!(wait.lasted(backoff, None).await, Duration::ZERO);
+            assert!(matches!(wait.rx.try_recv(), Ok(ToConnection::SendPending)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn nothing_comes_before_the_floor_of_a_rate_limit() {
+        for wake in [
+            ToConnection::Wake,
+            ToConnection::ConnectNow,
+            ToConnection::Reconnect,
+        ] {
+            let mut wait = waiting();
+            wait.to.send(wake).unwrap();
+            let floor = Instant::now() + RATE_LIMIT_FLOOR;
+            assert_eq!(wait.lasted(WAIT, Some(floor)).await, RATE_LIMIT_FLOOR);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_app_going_away_ends_the_wait() {
+        let mut wait = waiting();
+        drop(wait.to);
+        assert!(!wait_for_next_attempt(HOLD_OFF, None, &mut wait.rx, &wait.tx, &wait.hold).await);
+    }
+
+    #[test]
+    fn the_clock_counts_for_the_wait_while_the_device_slept() {
+        assert!(wake_ends_wait(MAX_BACKOFF, Duration::ZERO));
+        assert!(wake_ends_wait(RATE_LIMIT_MAX_BACKOFF, Duration::ZERO));
+        assert!(!wake_ends_wait(HOLD_OFF, HOLD_OFF / 2));
+        assert!(wake_ends_wait(HOLD_OFF, HOLD_OFF));
+    }
+
+    /// A network whose address translation forgets us between wake-ups: every wake-up finds the
+    /// connection dead after a session that was minutes long by the clock, and little by tokio's.
+    /// Each must stay for the new connection, or only every second one gets it back.
+    #[test]
+    fn every_wake_up_of_a_pocket_gets_its_connection_back() {
+        let mut backoff = Duration::from_secs(1);
+        for _ in 0..6 {
+            let session = Stopwatch {
+                awake: Instant::now(),
+                wall: std::time::SystemTime::now() - Duration::from_secs(300),
+            };
+            backoff = backoff_after_session(backoff, session.elapsed());
+            assert!(next_attempt_is_worth_holding_for(true, backoff));
+            backoff = next_backoff(backoff, false);
+        }
+    }
+
+    #[test]
+    fn a_stopwatch_goes_by_whichever_clock_went_further() {
+        let awake = Stopwatch {
+            awake: Instant::now() - Duration::from_secs(90),
+            wall: std::time::SystemTime::now() + Duration::from_secs(3600),
+        };
+        assert!(awake.elapsed() >= Duration::from_secs(90), "clock set back");
+    }
+
+    #[test]
+    fn a_wake_up_stays_only_for_an_attempt_that_is_near() {
+        assert!(next_attempt_is_worth_holding_for(true, WAKE_RETRY_SOON));
+        assert!(!next_attempt_is_worth_holding_for(
+            true,
+            WAKE_RETRY_SOON * 2
+        ));
+        assert!(!next_attempt_is_worth_holding_for(false, WAKE_RETRY_SOON));
+        assert!(!next_attempt_is_worth_holding_for(true, HOLD_OFF));
+    }
+
+    #[test]
+    fn after_a_login_it_takes_the_chat_servers_queue() {
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.asked();
+        hold.logged_in(false);
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), None, "messages are still coming");
+        hold.chat_queue_through(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+    }
+
+    #[test]
+    fn through_the_mediator_it_takes_its_queue_and_the_leaders() {
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.asked();
+        hold.logged_in(true);
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), None);
+
+        // Another device leads: nothing more is coming from the chat server.
+        hold.reflection_queue_through(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+
+        // We lead after all: now it has a queue for us.
+        hold.promoted_to_leader();
+        assert_eq!(hold.settles_at(), None);
+        hold.chat_queue_through(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+    }
+
+    /// Nobody was waiting when the session began, so its queues needn't have been noted as through
+    /// by anything that counts: an echo's answer is enough for a wake-up hours later.
+    #[test]
+    fn a_later_wake_up_only_needs_an_answer() {
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.logged_in(false);
+        hold.asked();
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+    }
+
+    #[test]
+    fn a_wake_up_lasts_until_things_have_stopped_coming() {
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), None, "not waiting for anything");
+
+        hold.asked();
+        assert_eq!(hold.settles_at(), None, "no answer yet");
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+        let later = start + Duration::from_secs(1);
+        hold.heard(later);
+        assert_eq!(hold.settles_at(), Some(later + WAKE_QUIET), "more came");
+
+        hold.settle(&tx);
+        assert!(matches!(from.try_recv(), Ok(FromConnection::WakeSettled)));
+        assert_eq!(hold.settles_at(), None);
+        hold.settle(&tx);
+        assert!(from.try_recv().is_err(), "said once");
     }
 }
 
@@ -4267,6 +4703,7 @@ mod sync_order_tests {
             storage_failing: StorageFailing::default(),
             failing_items: FailingItems::default(),
             carried_events: RefCell::default(),
+            wake_hold: WakeHold::default(),
         };
         let mut fs = StoreFs {
             store: Rc::clone(&setup.store),
@@ -4584,6 +5021,87 @@ mod sync_order_tests {
             tx,
             awaiting_ack: Vec::new(),
         }
+    }
+
+    /// A session whose echo is out, with the server's end of its socket.
+    async fn session_awaiting_echo<'a>(
+        setup: &'a ConnectionSetup,
+        tx: &'a mpsc::UnboundedSender<FromConnection>,
+    ) -> (Session<'a>, TcpStream) {
+        let mut session = session(setup, tx).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        session.transport = Transport::Direct(stream);
+        session.liveness.echo_sent(Instant::now(), ECHO_INTERVAL);
+        (session, server)
+    }
+
+    /// The device stays up for as long as it takes, and no longer.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_is_over_soon_after_the_answer() {
+        use tokio::io::AsyncWriteExt as _;
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let (mut session, mut server) = session_awaiting_echo(&setup, &tx).await;
+        let (to, mut to_rx) = mpsc::unbounded_channel();
+        to.send(ToConnection::Wake).unwrap();
+        let start = Instant::now();
+        let answer_after = Duration::from_secs(1);
+        let answered_and_quiet = async {
+            sleep(answer_after).await;
+            server.write_all(&[0]).await.unwrap();
+            while !matches!(from.recv().await, Some(FromConnection::WakeSettled)) {}
+        };
+        tokio::select! {
+            ended = session.payload_loop(&mut to_rx) => panic!("ended: {:?}", ended.err()),
+            () = answered_and_quiet => {}
+        }
+        assert_eq!(start.elapsed(), answer_after + WAKE_QUIET);
+    }
+
+    /// The server's own word on its queue, wherever it stands among the session's steps.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_up_after_a_login_waits_for_the_queues_end() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _from) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        setup.wake_hold.asked();
+        setup.wake_hold.logged_in(false);
+        assert_eq!(setup.wake_hold.settles_at(), None);
+        session
+            .handle_instruction(CspProtocolInstruction {
+                state_update: None,
+                outgoing_frame: None,
+                incoming_payload: Some(IncomingPayload::QueueSendComplete),
+            })
+            .await
+            .unwrap();
+        assert!(setup.wake_hold.settles_at().is_some());
+    }
+
+    /// An echo sent before the device slept has most of a minute left; the wake-up is up for less.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_finds_a_dead_connection_within_its_time() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let (mut session, _server) = session_awaiting_echo(&setup, &tx).await;
+        let (to, mut to_rx) = mpsc::unbounded_channel();
+        to.send(ToConnection::Wake).unwrap();
+        let start = Instant::now();
+        let ended = session.payload_loop(&mut to_rx).await;
+        assert!(matches!(ended, Err(ConnectionError::Timeout)));
+        assert_eq!(start.elapsed(), WAKE_ECHO_LIMIT + ECHO_LAST_LOOK);
+        assert!(
+            !std::iter::from_fn(|| from.try_recv().ok())
+                .any(|event| matches!(event, FromConnection::WakeSettled)),
+            "it stays for the new connection"
+        );
     }
 
     /// A message `CREATOR` sends us, as the chat server hands it over (the same each time, for the
@@ -5333,6 +5851,7 @@ mod sync_order_tests {
             storage_failing: StorageFailing::default(),
             failing_items: FailingItems::default(),
             carried_events: RefCell::default(),
+            wake_hold: WakeHold::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut session = session(&setup, &tx).await;

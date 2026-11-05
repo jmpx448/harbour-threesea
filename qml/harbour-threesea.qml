@@ -647,21 +647,32 @@ ApplicationWindow {
     }
 
     // Wake up periodically while the device sleeps so a dead connection is noticed and
-    // re-established (aligned wakeups, Harbour-allowed). Keep the CPU up briefly for it.
+    // re-established (aligned wakeups, Harbour-allowed). The CPU stays up until the core says how
+    // it went (wakeSettled), usually right after the echo's answer.
     BackgroundJob {
         id: wakeJob
         enabled: backend.state === "ready" && backend.keepRunning
         frequency: BackgroundJob.FiveMinutes
         onTriggered: {
             window.checkGrace()
-            backend.call("reconnect")
-            finishLater.restart()
+            wakeLimit.restart()
+            backend.call("wake", {}, function(ok, result) {
+                if (!ok || !result.waiting) window.endWake()
+            })
         }
     }
+    // More than a dead connection takes to find out and come back: the echo's 15 s, then a new
+    // connection.
     Timer {
-        id: finishLater
-        interval: 15000
+        id: wakeLimit
+        interval: 45000
         onTriggered: wakeJob.finished()
+    }
+    function endWake() {
+        if (wakeLimit.running) {
+            wakeLimit.stop()
+            wakeJob.finished()
+        }
     }
 
     Timer {
@@ -1617,6 +1628,8 @@ ApplicationWindow {
                 }
             } else if (name === "serverMessage") {
                 Notices.show(data.message, Notice.Long, Notice.Center)
+            } else if (name === "wakeSettled") {
+                window.endWake()
             } else if (name === "safeServerCopyLeft") {
                 // From here: the user may have left the Safe page during the wait.
                 //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."
