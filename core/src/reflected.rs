@@ -257,7 +257,12 @@ pub fn apply(
             events.borrow_mut().extend(new_events);
             Ok(())
         }
-        Some(envelope::Content::SettingsSync(sync)) => Ok(crate::sync::settings_sync(store, sync)?),
+        Some(envelope::Content::SettingsSync(sync)) => {
+            let mut new_events = Vec::new();
+            crate::sync::settings_sync(store, sync, &mut new_events)?;
+            events.borrow_mut().extend(new_events);
+            Ok(())
+        }
         Some(envelope::Content::UserProfileSync(sync)) => {
             let mut new_events = Vec::new();
             crate::sync::user_profile_sync(store, sync, &mut new_events)?;

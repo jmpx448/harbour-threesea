@@ -77,6 +77,8 @@ pub enum CoreEvent {
     DownloadContactPicture(String),
     /// Our own profile (picture) changed.
     ProfileChanged,
+    /// The settings were changed on another device: what shows them loads them again.
+    SettingsChanged,
     /// An Android-backup import event for the UI (already shaped as `{"event": …}`); also
     /// used for the bulk-reload events an import ends with.
     AndroidBackup(Value),
@@ -183,6 +185,7 @@ impl CoreEvent {
                 private,
             } => json!({"event": "privateChanged", "identity": conversation, "private": private}),
             Self::ProfileChanged => json!({"event": "profileChanged"}),
+            Self::SettingsChanged => json!({"event": "settingsChanged"}),
             Self::AndroidBackup(event) => event.clone(),
             Self::MultiDeviceChanged => json!({"event": "multiDeviceChanged"}),
             Self::Notify(message) => {

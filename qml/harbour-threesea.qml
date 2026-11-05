@@ -1791,6 +1791,8 @@ ApplicationWindow {
                 window.notify(data.message, data.private === true, true)
             } else if (name === "messagesChanged") {
                 window.messagesChanged(data.messages)
+            } else if (name === "settingsChanged") {
+                window.loadAppSettings()
             } else if (name === "conversationRead") {
                 // Read in Threema Web, on another device, or from a notification.
                 window.clearNotification(data.identity)

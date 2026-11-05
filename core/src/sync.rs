@@ -743,7 +743,11 @@ pub fn group_sync(
     Ok(())
 }
 
-pub fn settings_sync(store: &Store, sync: SettingsSync) -> Result<(), StoreError> {
+pub fn settings_sync(
+    store: &Store,
+    sync: SettingsSync,
+    events: &mut Vec<CoreEvent>,
+) -> Result<(), StoreError> {
     let Some(settings_sync::Action::Update(update)) = sync.action else {
         return Ok(());
     };
@@ -789,13 +793,19 @@ pub fn settings_sync(store: &Store, sync: SettingsSync) -> Result<(), StoreError
             policy == settings::KeyboardDataCollectionPolicy::DenyDataCollection as i32;
     }
     if let Some(blocked) = synced.blocked_identities {
+        // Contact pages say whether someone is blocked.
+        if app.blocked_contacts != blocked.identities {
+            events.push(CoreEvent::ContactsChanged);
+        }
         app.blocked_contacts = blocked.identities;
     }
     if let Some(excluded) = synced.exclude_from_sync_identities {
         app.sync_excluded_ids = excluded.identities;
     }
     let json = serde_json::to_string(&app).unwrap_or_default();
-    store.set_setting(keys::APP_SETTINGS, &json)
+    store.set_setting(keys::APP_SETTINGS, &json)?;
+    events.push(CoreEvent::SettingsChanged);
+    Ok(())
 }
 
 /// A link another device says is confirmed, or says isn't there. One still waiting for its
@@ -832,6 +842,12 @@ pub fn user_profile_sync(
             target: crate::profile_pictures::OWN_PICTURE.to_owned(),
             blob,
         });
+    }
+    if profile.nickname.is_some()
+        || profile.profile_picture_share_with.is_some()
+        || profile.identity_links.is_some()
+    {
+        events.push(CoreEvent::ProfileChanged);
     }
     if let Some(nickname) = profile.nickname {
         if nickname.is_empty() {
@@ -1239,6 +1255,49 @@ mod tests {
 
     /// Deleted on another device: the chat is gone from the store here, and the app is told, as
     /// the picture and the media are for it to remove.
+    /// What is open on the screen shows it at once.
+    #[test]
+    fn a_change_from_another_device_tells_the_ui() {
+        let (_dir, store) = store();
+        let mut events = Vec::new();
+        let profile = |nickname: Option<&str>| UserProfileSync {
+            action: Some(user_profile_sync::Action::Update(
+                user_profile_sync::Update {
+                    user_profile: Some(d2d_sync::UserProfile {
+                        nickname: nickname.map(str::to_owned),
+                        ..Default::default()
+                    }),
+                },
+            )),
+        };
+        user_profile_sync(&store, profile(Some("Ann")), &mut events).unwrap();
+        assert!(matches!(events[..], [CoreEvent::ProfileChanged]));
+        events.clear();
+        user_profile_sync(&store, profile(None), &mut events).unwrap();
+        assert!(events.is_empty());
+
+        let settings = |blocked: Option<Vec<String>>| SettingsSync {
+            action: Some(settings_sync::Action::Update(settings_sync::Update {
+                settings: Some(d2d_sync::Settings {
+                    blocked_identities: blocked.map(|identities| Identities { identities }),
+                    ..Default::default()
+                }),
+            })),
+        };
+        settings_sync(&store, settings(None), &mut events).unwrap();
+        assert!(matches!(events[..], [CoreEvent::SettingsChanged]));
+        events.clear();
+        // Someone's page says they are blocked.
+        settings_sync(&store, settings(Some(vec![BOB.to_owned()])), &mut events).unwrap();
+        assert!(matches!(
+            events[..],
+            [CoreEvent::ContactsChanged, CoreEvent::SettingsChanged]
+        ));
+        events.clear();
+        settings_sync(&store, settings(Some(vec![BOB.to_owned()])), &mut events).unwrap();
+        assert!(matches!(events[..], [CoreEvent::SettingsChanged]));
+    }
+
     #[test]
     fn links_from_another_device_are_kept_and_one_waiting_here_stays() {
         use d2d_sync::user_profile::{

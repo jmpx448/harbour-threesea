@@ -20,14 +20,26 @@ Page {
 
     property int blockedCount: 0
 
-    Component.onCompleted: backend.call("settings", {}, function(ok, result) {
-        if (ok) page.settings = result
-    })
-    // Back from the block list: its number may have changed.
-    onStatusChanged: if (status === PageStatus.Active) {
+    function loadSettings() {
+        backend.call("settings", {}, function(ok, result) {
+            if (ok) page.settings = result
+        })
+    }
+    function loadBlockedCount() {
         backend.call("blockedContacts", {}, function(ok, result) {
             if (ok) page.blockedCount = result.blocked.length
         })
+    }
+
+    Component.onCompleted: loadSettings()
+    // Back from the block list: its number may have changed.
+    onStatusChanged: if (status === PageStatus.Active) loadBlockedCount()
+    Connections {
+        target: backend
+        onCoreEvent: if (name === "settingsChanged") {
+            page.loadSettings()
+            page.loadBlockedCount()
+        }
     }
 
     SilicaFlickable {
