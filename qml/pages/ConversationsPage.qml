@@ -198,6 +198,7 @@ Page {
     // Why the list could not be read: no chats and "no chats" are not the same.
     property string loadError
     property int pinnedCount: 0
+    readonly property bool canLockNow: !!(window.lockInfo && window.lockInfo.lock && window.lockInfo.lock.appLock)
 
     function pin(identity, pinned) {
         backend.call("setPinned", { identity: identity, pinned: pinned }, function() { page.reload() })
@@ -287,13 +288,16 @@ Page {
                 onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
             }
             MenuItem {
-                // Makes room for Connect now (four items at most). The Contacts page has it too.
-                visible: backend.connectionState !== "disconnected"
+                // Makes room for Connect now and Lock now (four items at most). The Contacts page
+                // has it too.
+                visible: backend.connectionState !== "disconnected" && !page.canLockNow
                 //% "New distribution list"
                 text: qsTrId("threesea-me-new-list")
                 onClicked: page.newList()
             }
             MenuItem {
+                // Offline with an app lock there are both of those to make room for.
+                visible: backend.connectionState !== "disconnected" || !page.canLockNow
                 //% "New group"
                 text: qsTrId("threesea-me-new-group")
                 onClicked: page.newGroup()
@@ -302,6 +306,13 @@ Page {
                 //% "Search"
                 text: qsTrId("threesea-me-search")
                 onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"))
+            }
+            // At once, whatever the grace time says (the phone is about to change hands).
+            MenuItem {
+                visible: page.canLockNow
+                //% "Lock now"
+                text: qsTrId("threesea-me-lock-now")
+                onClicked: window.lockNow()
             }
             // Offline: try now instead of waiting for the next attempt (like Jolla Mail's Sync).
             MenuItem {
