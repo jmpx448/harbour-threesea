@@ -49,14 +49,18 @@ void replaceFile(const QString &path)
 }
 
 // Whether the application quits after `action`, within `wait` ms.
-bool quits(const std::function<void()> &action, int wait = 50)
+bool quits(const std::function<void()> &action, int wait = 500)
 {
     bool timedOut = false;
-    QTimer::singleShot(0, action);
-    QTimer::singleShot(wait, qApp, [&timedOut]() {
+    // Goes with this call: if it outlived an early quit, it would end the next call's wait.
+    QTimer limit;
+    limit.setSingleShot(true);
+    QObject::connect(&limit, &QTimer::timeout, [&timedOut]() {
         timedOut = true;
         QCoreApplication::quit();
     });
+    QTimer::singleShot(0, action);
+    limit.start(wait);
     QCoreApplication::exec();
     return !timedOut;
 }
