@@ -34,7 +34,11 @@ All checks in one go (what CI is to run): `scripts/check.sh` (private data, logg
 format, clippy, tests, `cargo audit` if installed); `--full` adds libthreema's tests and the
 tests in the SDK, `--quick` does only the first three. `scripts/test-lockstate.sh` runs the real
 window QML on the real Silica with a fake backend and no window system (`tests/lockstate`): the
-app lock, calls and the page stack, one scenario per process, no device or emulator needed. `git config core.hooksPath scripts/hooks` runs the quick checks on
+app lock, calls and the page stack, one scenario per process, no device or emulator needed.
+`scripts/test-pages.sh` opens every page and dialog under `qml/pages` the same way, for both
+flavours, builds all rows of its lists, opens each row's menu, and fails on any warning from Qt or
+the QML engine (`tests/pageload`; the fake C++ side is generated from the bridge's headers, the
+fake core's answers are in `Results.js`). `git config core.hooksPath scripts/hooks` runs the quick checks on
 what is about to be committed, before every commit. The private-data check reads
 `.local/private-patterns` (local, ignored by git: one extended regex per line, e.g. test
 credentials) and reports only file names, never the match.

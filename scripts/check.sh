@@ -9,7 +9,7 @@
 #   lints, tests   cargo clippy (no warnings; twice, the emulator's `demo` feature too),
 #                  cargo test
 #   advisories     cargo audit, if installed
-#   libthreema     its library tests, and the list models', GIF decoder's, app lock's and
+#   libthreema     its library tests, and the list models', GIF decoder's, app lock's, pages' and
 #                  notification tokens' tests in the SDK
 #                  if its image is there (--full only: they take a while)
 # --quick: private data, logging and format only (the pre-commit hook, scripts/hooks).
@@ -95,6 +95,8 @@ if $full; then
         scripts/test-mediaimage.sh >/dev/null 2>&1 || fail "pictures (scripts/test-mediaimage.sh)"
         step "app lock (SDK)"
         scripts/test-lockstate.sh >/dev/null 2>&1 || fail "app lock (scripts/test-lockstate.sh)"
+        step "every page opens (SDK)"
+        scripts/test-pages.sh >/dev/null 2>&1 || fail "pages (scripts/test-pages.sh)"
         step "notification tokens (SDK)"
         scripts/test-notification-tokens.sh >/dev/null 2>&1 ||
             fail "notification tokens (scripts/test-notification-tokens.sh)"
