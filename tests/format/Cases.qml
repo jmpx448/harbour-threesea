@@ -101,6 +101,9 @@ QtObject {
     Component.onCompleted: {
         var i
         var now = 1700000000000
+        check("metres", Fmt.distance(120.4, "."), "120 m")
+        check("kilometres", Fmt.distance(1234, ","), "1,2 km")
+        check("far away", Fmt.distance(123456, "."), "123 km")
         check("fix now", Fmt.isRecentFix(new Date(now), now), true)
         check("fix a minute old", Fmt.isRecentFix(new Date(now - 60000), now), true)
         check("fix too old", Fmt.isRecentFix(new Date(now - 60001), now), false)

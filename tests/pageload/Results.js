@@ -145,6 +145,8 @@ var table = {
                            lists: { added: 0, existing: 0 },
                            pictures: { own: 0, contacts: 0, groups: 0, kept: 0, localAvatarsNotImported: 0, skipped: 0 },
                            nonces: { csp: 0, d2d: 0, existing: 0, skipped: 0, missing: 0 }, invalidRows: 0 },
+    findPlaces: { places: [{ name: "Cafe", latitude: 47.21, longitude: 8.81, distance: 120 },
+                           { name: "Lake", latitude: 47.3, longitude: 8.9, distance: 12340 }] },
     gifFavourites: { favourites: [] },
     recentEmoji: { emoji: [] },
     searchMessages: { messages: [] },

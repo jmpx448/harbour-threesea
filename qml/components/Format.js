@@ -190,6 +190,13 @@ function isRecentFix(timestamp, now) {
     return !isNaN(taken) && now - taken <= 60000
 }
 
+// A distance in metres, as a maps app gives it: "120 m", "1.2 km".
+function distance(metres, decimalPoint) {
+    if (metres < 1000) return Math.round(metres) + " m"
+    var km = metres / 1000
+    return (km < 100 ? km.toFixed(1).replace(".", decimalPoint) : String(Math.round(km))) + " km"
+}
+
 // A local path as a file: URL. Names come from senders and from the device's files: #, ? and % in
 // them are part of the name, and only encoded do they stay that (as a query or a fragment the rest
 // of the name would be lost, and %2F would lead to another folder). Some paths come as URLs already.
