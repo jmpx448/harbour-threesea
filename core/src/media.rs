@@ -202,7 +202,7 @@ impl MediaError {
 }
 
 /// Which of a message's files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaPart {
     File,
     Thumbnail,

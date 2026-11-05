@@ -4,15 +4,20 @@
 //!
 //! A file message's `body` (UI JSON) carries `fileState` / `thumbnailState`:
 //! 0 on the server, 1 downloading, 2 on the device, 3 failed; outgoing ones also `uploadState`:
-//! 1 uploading, 2 uploaded (the message can be sent), 3 failed. `fileOnDemand`: the user cleaned
-//! the file up, so it comes back only when asked for. `uploadRetry`, `fileRetry` and
+//! 1 uploading, 2 uploaded (the message can be sent), 3 failed. `fileOnDemand`: the user stopped its
+//! download or cleaned the file up, so it comes back only when asked for. `uploadRetry`, `fileRetry` and
 //! `thumbnailRetry`: how often that transfer failed and when it may try again by itself;
 //! `uploadedFile`: when the file part went up, if the rest of the upload didn't.
 //!
 //! Sending: the file is first stored in the (encrypted) media store, then uploaded from there,
 //! so a failed upload can be retried after a restart without the original file.
 
-use std::{rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+};
 
 use libthreema::model::message::{FileMessage, FileRenderingType};
 use rusqlite::{OptionalExtension as _, named_params, params};
@@ -364,6 +369,16 @@ impl Store {
             self.forget_transfer_tries(message, retry_field(part))?;
         }
         self.message(message)
+    }
+
+    /// The user stopped a file's download: it waits for a tap again, and doesn't come by itself.
+    pub fn set_download_cancelled(&self, message: i64) -> Result<Option<Message>, StoreError> {
+        self.conn.execute(
+            "UPDATE messages SET body = json_set(body, '$.fileOnDemand', json('true'))
+             WHERE id = ?1 AND kind = 'file'",
+            [message],
+        )?;
+        self.set_media_state(message, MediaPart::File, STATE_REMOTE)
     }
 
     /// A part's download failed. `transient`: it may try again by itself after a pause, as long as
@@ -1321,11 +1336,28 @@ fn save_decrypted(
 /// How many uploads and downloads are running. A wake-up holds the device up for them: a picture
 /// on a slow link would otherwise get the seconds the connection needs, wake-up after wake-up, and
 /// could run out of tries overnight.
-pub(crate) struct RunningTransfers(Rc<tokio::sync::watch::Sender<usize>>);
+pub(crate) struct RunningTransfers {
+    count: Rc<tokio::sync::watch::Sender<usize>>,
+    /// The uploads and downloads under way by message, for the user to stop. A number tells apart
+    /// a task and the one that took its place.
+    tasks: Rc<RefCell<HashMap<TransferKey, (u64, tokio::task::AbortHandle)>>>,
+    started: Cell<u64>,
+}
+
+/// What of a message is on its way: its upload, or a part's download.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum TransferKey {
+    Upload(i64),
+    Download(i64, MediaPart),
+}
 
 impl Default for RunningTransfers {
     fn default() -> Self {
-        Self(Rc::new(tokio::sync::watch::channel(0).0))
+        Self {
+            count: Rc::new(tokio::sync::watch::channel(0).0),
+            tasks: Rc::default(),
+            started: Cell::new(0),
+        }
     }
 }
 
@@ -1341,8 +1373,8 @@ impl Drop for RunningTransfer {
 impl RunningTransfers {
     /// It counts from here on, before its task first runs.
     pub(crate) fn track<T: Future>(&self, transfer: T) -> impl Future<Output = T::Output> + use<T> {
-        self.0.send_modify(|running| *running += 1);
-        let counted = RunningTransfer(Rc::clone(&self.0));
+        self.count.send_modify(|running| *running += 1);
+        let counted = RunningTransfer(Rc::clone(&self.count));
         async move {
             let _counted = counted;
             transfer.await
@@ -1350,12 +1382,44 @@ impl RunningTransfers {
     }
 
     pub(crate) fn none_running(&self) -> bool {
-        *self.0.borrow() == 0
+        *self.count.borrow() == 0
     }
 
     pub(crate) async fn ended(&self) {
         // The sender is ours, it can't be gone.
-        let _ = self.0.subscribe().wait_for(|running| *running == 0).await;
+        let _ = self
+            .count
+            .subscribe()
+            .wait_for(|running| *running == 0)
+            .await;
+    }
+
+    /// Start a transfer the user can stop.
+    fn spawn(&self, key: TransferKey, transfer: impl Future<Output = ()> + 'static) {
+        let number = self.started.get() + 1;
+        self.started.set(number);
+        let tasks = Rc::clone(&self.tasks);
+        let task = tokio::task::spawn_local(self.track(async move {
+            transfer.await;
+            let mut tasks = tasks.borrow_mut();
+            if tasks
+                .get(&key)
+                .is_some_and(|(running, _)| *running == number)
+            {
+                tasks.remove(&key);
+            }
+        }));
+        self.tasks
+            .borrow_mut()
+            .insert(key, (number, task.abort_handle()));
+    }
+
+    /// Stop it, if it is running. The task goes at its next wait, and with it whatever it holds:
+    /// memory, its place in the queue, a connection, a file it was writing.
+    fn abort(&self, key: TransferKey) {
+        if let Some((_, task)) = self.tasks.borrow_mut().remove(&key) {
+            task.abort();
+        }
     }
 }
 
@@ -1689,6 +1753,36 @@ impl App {
         Ok(json!({}))
     }
 
+    /// `cancelTransfer`: stop a message's running upload or file download. An upload counts as
+    /// failed with no try planned, as nothing starts it again but a tap: the message stays, with
+    /// what was uploaded so far on record. A download goes back to waiting for a tap, which also
+    /// keeps it from coming by itself again.
+    pub(crate) fn cancel_transfer(&mut self, id: i64) -> Result<Value, ApiError> {
+        let message = self
+            .store
+            .message(id)?
+            .filter(|message| message.kind == "file")
+            .ok_or_else(|| ApiError::Internal("no such file".into()))?;
+        self.check_readable(&message.conversation)?;
+        let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
+        let mut changed = None;
+        if message.outgoing && body["uploadState"].as_i64() == Some(STATE_LOADING) {
+            self.transfers.abort(TransferKey::Upload(id));
+            changed = self.store.set_upload_failed(id, false, now_ms())?;
+        }
+        if body["fileState"].as_i64() == Some(STATE_LOADING) {
+            self.transfers
+                .abort(TransferKey::Download(id, MediaPart::File));
+            changed = self.store.set_download_cancelled(id)?;
+        }
+        if let Some(changed) = changed {
+            let _ = self
+                .media_events
+                .send(CoreEvent::MessagesChanged(vec![changed]));
+        }
+        Ok(json!({}))
+    }
+
     /// Online, with a connection or a pause just ended: transfers that failed get another try by
     /// themselves, so a voice message sent on a bad connection does not sit behind its clock until
     /// it is tapped (user report 2026-10-28). Offline there is no use: the next connection comes
@@ -1742,13 +1836,16 @@ impl App {
                 return;
             }
         }
-        tokio::task::spawn_local(self.transfers.track(upload(
-            Rc::clone(&self.store),
-            self.https.clone(),
-            Arc::clone(&self.media),
-            self.media_events.clone(),
-            message,
-        )));
+        self.transfers.spawn(
+            TransferKey::Upload(message),
+            upload(
+                Rc::clone(&self.store),
+                self.https.clone(),
+                Arc::clone(&self.media),
+                self.media_events.clone(),
+                message,
+            ),
+        );
     }
 
     /// A media task reported progress: an upload may have finished, so send what's pending; one
@@ -1909,13 +2006,16 @@ impl App {
                 return;
             }
         }
-        tokio::task::spawn_local(self.transfers.track(download(
-            Rc::clone(&self.store),
-            self.https.clone(),
-            Arc::clone(&self.media),
-            self.media_events.clone(),
-            job,
-        )));
+        self.transfers.spawn(
+            TransferKey::Download(message, part),
+            download(
+                Rc::clone(&self.store),
+                self.https.clone(),
+                Arc::clone(&self.media),
+                self.media_events.clone(),
+                job,
+            ),
+        );
     }
 
     fn download_job(&self, message: i64, part: MediaPart) -> Option<Download> {
@@ -5066,5 +5166,120 @@ mod tests {
             save_target(dir.path(), "a.pdf", b"two"),
             dir.path().join("a (1).pdf")
         );
+    }
+
+    /// A stopped upload isn't started again by anything but the user: not by the next connection,
+    /// any pause, or a restart.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancelled_upload_waits_for_a_tap() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                app.connection_state.set("connected");
+                app.store
+                    .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+                    .unwrap();
+                let id = outgoing_file(&app.store, 1, 1);
+                app.store.set_upload_state(id, STATE_FAILED).unwrap();
+                app.retry_upload(id).unwrap();
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOADING));
+
+                app.cancel_transfer(id).unwrap();
+                app.transfers.ended().await;
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+
+                let much_later = now_ms() + 1_000 * RETRY_PAUSE_MAX_MS;
+                let retries = app.store.transfers_to_retry(much_later, &[], 0).unwrap();
+                assert!(retries.uploads.is_empty());
+                assert!(retries.next_at.is_none());
+                app.retry_failed_transfers();
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_FAILED));
+                assert!(app.store.unfinished_uploads().unwrap().is_empty());
+
+                app.retry_upload(id).unwrap();
+                assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOADING));
+                app.cancel_transfer(id).unwrap();
+            })
+            .await;
+    }
+
+    /// A stopped download waits for a tap too, even of a kind that comes by itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancelled_download_waits_for_a_tap() {
+        let (_dir, mut app) = app();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let id = received_file(&app.store, 1, 1);
+                app.store
+                    .set_media_state(id, MediaPart::Thumbnail, STATE_LOCAL)
+                    .unwrap();
+                let images = vec!["image".to_owned()];
+                assert!(!app.store.media_to_download(&images, 0).unwrap().is_empty());
+                app.download_file(id).unwrap();
+                assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOADING));
+
+                app.cancel_transfer(id).unwrap();
+                app.transfers.ended().await;
+                assert_eq!(state(&app.store, id, "fileState"), Some(STATE_REMOTE));
+                assert!(app.store.media_to_download(&images, 0).unwrap().is_empty());
+                assert!(
+                    app.store
+                        .transfers_to_retry(now_ms(), &images, 0)
+                        .unwrap()
+                        .downloads
+                        .is_empty()
+                );
+
+                app.download_file(id).unwrap();
+                assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOADING));
+                app.cancel_transfer(id).unwrap();
+            })
+            .await;
+    }
+
+    /// What isn't running stays as it is: a file here isn't taken for one on its way.
+    #[test]
+    fn cancelling_changes_nothing_when_nothing_runs() {
+        let (_dir, mut app) = app();
+        let id = outgoing_file(&app.store, 1, 1);
+        app.store.set_upload_state(id, STATE_LOCAL).unwrap();
+        app.cancel_transfer(id).unwrap();
+        assert_eq!(state(&app.store, id, "uploadState"), Some(STATE_LOCAL));
+    }
+
+    /// Stopping a transfer drops what it holds at once, and it no longer counts as running. The
+    /// end of a task replaced meanwhile leaves its successor stoppable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stopping_a_transfer_lets_go_of_what_it_holds() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let transfers = RunningTransfers::default();
+                let key = TransferKey::Upload(1);
+                let held = Rc::new(());
+                let in_task = Rc::clone(&held);
+                transfers.spawn(key, async move {
+                    let _held = in_task;
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                assert_eq!(Rc::strong_count(&held), 2);
+                transfers.abort(key);
+                transfers.ended().await;
+                assert_eq!(Rc::strong_count(&held), 1);
+                assert!(transfers.none_running());
+
+                transfers.spawn(key, async {});
+                let in_task = Rc::clone(&held);
+                transfers.spawn(key, async move {
+                    let _held = in_task;
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                assert!(transfers.tasks.borrow().contains_key(&key));
+                transfers.abort(key);
+                transfers.ended().await;
+                assert_eq!(Rc::strong_count(&held), 1);
+            })
+            .await;
     }
 }

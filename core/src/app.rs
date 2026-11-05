@@ -444,6 +444,10 @@ pub enum Command {
     RetryUpload {
         message: i64,
     },
+    /// Stop a running upload or file download.
+    CancelTransfer {
+        message: i64,
+    },
     /// All groups.
     Groups,
     /// One group (`key`: its conversation key).
@@ -2405,6 +2409,7 @@ impl App {
                 }
             }
             Command::RetryUpload { message } => self.retry_upload(message),
+            Command::CancelTransfer { message } => self.cancel_transfer(message),
             Command::SaveFile { message, directory } => {
                 if self.in_background.get() {
                     self.save_file_in_background(message, directory)
