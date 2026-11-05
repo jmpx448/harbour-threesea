@@ -425,7 +425,7 @@ fn wake_settled(app: &mut App, emit: &Emit) {
     }
 }
 
-async fn run_maintenance(app: &mut App, emit: &Emit) {
+pub(crate) async fn run_maintenance(app: &mut App, emit: &Emit) {
     app.maintenance_ran_at = std::time::SystemTime::now();
     for event in app.maintenance().await {
         emit(json!({ "event": event }).to_string());

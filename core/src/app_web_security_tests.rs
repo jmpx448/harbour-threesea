@@ -2190,3 +2190,63 @@ fn nothing_of_a_private_chats_removals_reaches_the_browser() {
     app.web_refresh();
     assert!(removed_messages(&sent_values(&mut rx)).is_empty());
 }
+
+/// Keep messages runs with nobody asking: what it takes goes from the browser's open chat too.
+#[test]
+fn keep_messages_takes_expired_messages_out_of_the_browser() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(&mut app);
+    let old = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "old", 1_000)
+        .unwrap()
+        .unwrap();
+    app.store
+        .conn
+        .execute("UPDATE messages SET received_at = created_at", [])
+        .unwrap();
+    let kept = app
+        .store
+        .insert_incoming("BBBBBBBB", 2, "text", "new", crate::messages::now_ms())
+        .unwrap()
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+
+    app.store.set_setting(keys::AUTO_DELETE_DAYS, "7").unwrap();
+    assert!(app.auto_delete_scheduled());
+    app.web_refresh();
+    assert_eq!(
+        removed_messages(&sent_values(&mut rx)),
+        [("BBBBBBBB".to_owned(), vec![old.id.to_string()])]
+    );
+    assert!(app.store.message(kept.id).unwrap().is_some());
+}
+
+/// Maintenance runs outside any command, so it has to bring the browsers up to date itself. Without
+/// a license it stops before going to the network, which doesn't change what is asked here.
+#[tokio::test(flavor = "current_thread")]
+async fn maintenance_brings_the_browsers_up_to_date() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    assert!(!app.license_valid().unwrap(), "no network in this test");
+    let mut rx = browser(&mut app);
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+        .unwrap()
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+
+    app.store.remove_message(message.id).unwrap();
+    let emit: crate::runtime::Emit = Box::new(|_| {});
+    crate::runtime::run_maintenance(&mut app, &emit).await;
+    assert_eq!(
+        removed_messages(&sent_values(&mut rx)),
+        [("BBBBBBBB".to_owned(), vec![message.id.to_string()])]
+    );
+}
