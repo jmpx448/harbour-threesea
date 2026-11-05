@@ -534,10 +534,16 @@ fn outgoing_message(
                 Some(crate::app_media::file_keys(&file)),
             )
         }
-        // What this contact got of our picture from another device: it needn't go out from here too
-        // (a removal; a picture only if that device's upload is ours as well).
+        // What this contact got of our picture from another device needn't go out from here too.
+        // A picture only if that device's upload is ours as well: another blob on record would
+        // send ours again with every switch between devices.
         ContactMessageBody::SetProfilePicture(picture) => {
-            store.picture_sent(&conversation, Some(&picture.blob_id))?;
+            if store
+                .picture_upload()?
+                .is_some_and(|upload| upload.blob_id.0 == picture.blob_id.0)
+            {
+                store.picture_sent(&conversation, Some(&picture.blob_id))?;
+            }
             return Ok(());
         }
         ContactMessageBody::DeleteProfilePicture(_) => {
@@ -1485,5 +1491,52 @@ mod tests {
             text()
         )));
         assert!(waiting(stranger_text(5, Vec::new())));
+    }
+
+    /// Another device's upload doesn't replace what this contact has from ours on record, which
+    /// would send it again; our own upload counts.
+    #[test]
+    fn only_our_own_upload_counts_as_sent_from_another_device() {
+        use libthreema::{common::BlobId, model::message::SetProfilePictureMessage};
+
+        use crate::profile_pictures::{Distribution, Share, Upload};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store.set_picture_share(Share::Everyone).unwrap();
+        let ours = Upload {
+            blob_id: BlobId([1; 16]),
+            key: [2; 32],
+            size: 1,
+            uploaded_at: crate::messages::now_ms(),
+        };
+        store.set_picture_upload(Some(&ours)).unwrap();
+        store.picture_sent("B0B0B0B0", Some(&ours.blob_id)).unwrap();
+        let reflect = |to: &str, blob: [u8; 16]| {
+            let set = ContactMessageBody::SetProfilePicture(SetProfilePictureMessage {
+                blob_id: BlobId(blob),
+                size: 1,
+                key: [3; 32],
+            });
+            apply(
+                &store,
+                "ABCD1234".parse().unwrap(),
+                reflected_outgoing(to, 1, set),
+                &Rc::default(),
+            )
+            .unwrap();
+        };
+        let has_it = |to: &str| {
+            matches!(
+                store.picture_distribution(to, true).unwrap(),
+                Distribution::None
+            )
+        };
+
+        reflect("B0B0B0B0", [9; 16]);
+        assert!(has_it("B0B0B0B0"));
+
+        assert!(!has_it("C0C0C0C0"));
+        reflect("C0C0C0C0", [1; 16]);
+        assert!(has_it("C0C0C0C0"));
     }
 }
