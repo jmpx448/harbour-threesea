@@ -60,6 +60,14 @@ const REFRESH_MS: u64 = 10_000;
 /// ... and this often while none answers, as without a network.
 const REFRESH_UNREACHABLE_MS: u64 = 60_000;
 
+/// The pauses before the next try at the SFU credentials for an announced call.
+const CREDENTIALS_RETRY: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+    std::time::Duration::from_secs(600),
+];
+
 /// Calls received more than this long ago are dropped after 3 failed peeks in a row (spec).
 const STALE_AFTER_MS: i64 = 10 * 3600 * 1000;
 
@@ -108,13 +116,23 @@ impl Context {
     /// Check and store an announced call with its line in the chat, then refresh the group; the
     /// notification waits for that, an announcement read late is of a call long over.
     async fn on_start(&self, conversation: String, caller: String, start: GroupCallStartMessage) {
-        let credentials = match self.credentials(false).await {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                tracing::warn!(kind = error.kind(), "group call: no SFU credentials");
-                return;
-            }
+        // The message is acknowledged and won't come again, so it waits for a working network here.
+        let Some(credentials) = with_retries(&CREDENTIALS_RETRY, || self.credentials(false)).await
+        else {
+            tracing::warn!("group call announcement dropped: no SFU credentials");
+            return;
         };
+        // The user may have turned group calls off during that time.
+        if self
+            .store
+            .setting(keys::GROUP_CALLS)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("0")
+        {
+            return;
+        }
         if !group_calls::sfu_url_allowed(
             &start.sfu_base_url,
             &credentials.allowed_sfu_hostname_suffixes,
@@ -385,6 +403,24 @@ fn queue_call_start(
         }),
     )?;
     Ok(!receivers.is_empty())
+}
+
+/// `attempt`, then again after each of `pauses`, until it works.
+async fn with_retries<T, F, Fut>(pauses: &[std::time::Duration], mut attempt: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ApiError>>,
+{
+    let mut pauses = pauses.iter();
+    loop {
+        match attempt().await {
+            Ok(value) => return Some(value),
+            Err(error) => {
+                tracing::warn!(kind = error.kind(), "group call: no SFU credentials");
+                tokio::time::sleep(*pauses.next()?).await;
+            }
+        }
+    }
 }
 
 /// A status line in a group's chat, for the UI too; none in a group that is gone or left.
@@ -1404,6 +1440,32 @@ mod app_tests {
             })
             .unwrap();
         (dir, app, key)
+    }
+
+    /// A flaky directory request leaves the announcement waiting, bounded.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn an_announcement_outlasts_failing_credentials_for_a_while() {
+        let tries = std::cell::Cell::new(0);
+        let third = with_retries(&CREDENTIALS_RETRY, || {
+            tries.set(tries.get() + 1);
+            let result = if tries.get() < 3 {
+                Err(ApiError::NoIdentity)
+            } else {
+                Ok(7)
+            };
+            async move { result }
+        })
+        .await;
+        assert_eq!((third, tries.get()), (Some(7), 3));
+
+        tries.set(0);
+        let never: Option<u8> = with_retries(&CREDENTIALS_RETRY, || {
+            tries.set(tries.get() + 1);
+            async { Err(ApiError::NoIdentity) }
+        })
+        .await;
+        assert_eq!(never, None);
+        assert_eq!(tries.get(), CREDENTIALS_RETRY.len() + 1);
     }
 
     #[test]
