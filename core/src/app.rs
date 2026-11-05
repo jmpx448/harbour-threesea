@@ -3993,6 +3993,40 @@ mod tests {
         assert_eq!(stored_draft(&mut app)["text"], serde_json::Value::Null);
     }
 
+    /// A caption within its limit can be too long once escaped for the message's JSON: refused
+    /// before anything is stored or uploaded, 1:1 and in a group, and not failing at sending.
+    #[test]
+    fn a_caption_too_long_once_escaped_is_refused_up_front() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let group = "g:ABCD1234:0000000000000001";
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: group.to_owned(),
+                identity: crate::groups::parse_key(group).unwrap(),
+                name: "Crew".into(),
+                members: vec!["ABCD1234".to_owned()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let escaped = "a\n".repeat(3000);
+        assert_eq!(escaped.len(), 6000);
+        for chat in ["ABCD1234", group] {
+            let reply = send_file(&mut app, chat, &escaped);
+            assert_eq!(reply["error"]["kind"], "messageTooLong", "{reply}");
+            assert_eq!(stored_messages(&app, chat), 0);
+
+            let reply = send_file(&mut app, chat, &"a".repeat(6000));
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(stored_messages(&app, chat), 1);
+        }
+    }
+
     /// Private chats ABCD1234 (with a message) and EFGH5678, a plain chat IJKL9012, hidden with a
     /// pass for `files` files of ABCD1234.
     fn app_with_write_pass(files: u32) -> (tempfile::TempDir, App) {

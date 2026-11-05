@@ -1963,20 +1963,7 @@ impl<'a> Session<'a> {
     /// server's answer to it isn't known, and it would be tried again at every login, with
     /// everything queued behind it waiting.
     fn fits_a_frame(&self, body: &Outgoing) -> bool {
-        // The receiver doesn't matter for the encoding.
-        let body = match body {
-            Outgoing::Contact(body) => OutgoingMessageBody::Contact(OutgoingContactMessageBody {
-                receiver_identity: self.setup.identity,
-                body: body.clone(),
-            }),
-            Outgoing::Group(group_identity, body) => {
-                OutgoingMessageBody::Group(OutgoingGroupMessageBody {
-                    group_identity: *group_identity,
-                    body: body.clone(),
-                })
-            }
-        };
-        encode_message_body(&body).1.len() <= crate::messages::MESSAGE_BODY_MAX
+        body_fits_a_frame(self.setup.identity, body)
     }
 
     /// Before a message's first byte goes out: someone may have it from here on, and the chat hears
@@ -4146,6 +4133,33 @@ fn body_for_receiver(
         });
     }
     body.clone()
+}
+
+/// Whether `body` fits a frame, however it is wrapped. `identity` is anyone's: the receiver doesn't
+/// matter for the encoding.
+fn body_fits_a_frame(identity: ThreemaId, body: &Outgoing) -> bool {
+    let body = match body {
+        Outgoing::Contact(body) => OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+            receiver_identity: identity,
+            body: body.clone(),
+        }),
+        Outgoing::Group(group_identity, body) => {
+            OutgoingMessageBody::Group(OutgoingGroupMessageBody {
+                group_identity: *group_identity,
+                body: body.clone(),
+            })
+        }
+    };
+    encode_message_body(&body).1.len() <= crate::messages::MESSAGE_BODY_MAX
+}
+
+/// Whether this file message to `chat` will fit a frame when its upload is done.
+pub(crate) fn file_fits_a_frame(chat: &str, file: libthreema::model::message::FileMessage) -> bool {
+    let body = match crate::groups::parse_key(chat) {
+        Some(group) => Outgoing::Group(group, GroupMessageBody::File(file)),
+        None => Outgoing::Contact(ContactMessageBody::File(file)),
+    };
+    ThreemaId::try_from("ECHOECHO").is_ok_and(|anyone| body_fits_a_frame(anyone, &body))
 }
 
 /// A chat's messages read at `at`, for the other devices.

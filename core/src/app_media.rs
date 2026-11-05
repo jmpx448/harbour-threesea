@@ -1116,6 +1116,23 @@ impl App {
         self.store_outgoing_file(identity, conversation, file)
     }
 
+    /// Whether a file about to be stored will fit a frame as a message once uploaded, with its
+    /// caption escaped for the message's JSON: only here can the user still be told why. Later it
+    /// would upload and then fail at sending.
+    fn file_fits_a_frame(chat: &str, body: &Value) -> bool {
+        let mut uploaded = body.clone();
+        uploaded["uploadState"] = json!(STATE_LOCAL);
+        // What the upload will add takes the same room whatever its value.
+        let blob = libthreema::common::BlobId([0; 16]);
+        let keys = FileKeys {
+            key: Zeroizing::new([0; 32]),
+            blob_id: Some(blob),
+            thumbnail_blob_id: (body["thumbnail"] == true).then_some(blob),
+        };
+        outgoing_file_message(&uploaded, &keys)
+            .is_some_and(|file| crate::connection::file_fits_a_frame(chat, file))
+    }
+
     fn store_outgoing_file(
         &mut self,
         identity: String,
@@ -1214,6 +1231,9 @@ impl App {
             // A list's copy is not uploaded (each member's copy is).
             "uploadState": if matches!(conversation, Conversation::List(_)) { STATE_LOCAL } else { STATE_LOADING },
         });
+        if !Self::file_fits_a_frame(&identity, &body) {
+            return Err(ApiError::MessageTooLong);
+        }
         let message = self.store.insert_outgoing(
             &identity,
             libthreema::common::MessageId::random().0,
