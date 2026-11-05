@@ -1437,6 +1437,8 @@ pub struct App {
     pub(crate) detached: crate::detached::DetachedWork,
     /// How many times we left a group call: a join that was under way is no use by now.
     pub(crate) group_call_leaves: u64,
+    /// The groups whose call we are joining, with the SFU still to answer.
+    pub(crate) group_calls_joining: Vec<String>,
     /// The command handled went to a blocking thread: its reply comes later.
     pub(crate) reply_later: bool,
     /// How many of those are still to be finished.
@@ -1549,6 +1551,7 @@ impl App {
             current_change: None,
             detached: crate::detached::DetachedWork::default(),
             group_call_leaves: 0,
+            group_calls_joining: Vec::new(),
             reply_later: false,
             file_work_running: 0,
             file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),

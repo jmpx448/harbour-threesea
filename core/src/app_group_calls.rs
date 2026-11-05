@@ -737,10 +737,13 @@ impl App {
 
     /// The call this line announces was found running: a notification, unless we are in it.
     pub(crate) fn on_group_call_running(&self, message: &Message, call_id: &[u8; 32]) {
+        // Joining counts: the answer may take a while beside the core loop, and whichever of the
+        // group's calls this line announces, the join ends up in the one that runs.
         if self
             .group_call
             .as_ref()
             .is_some_and(|joined| joined.call_id == *call_id)
+            || self.group_calls_joining.contains(&message.conversation)
         {
             return;
         }
@@ -812,6 +815,7 @@ impl App {
             .decode(fingerprint.to_ascii_lowercase().as_bytes())
             .map_err(|_| ApiError::Internal("invalid fingerprint".into()))?;
         let leaves = self.group_call_leaves;
+        self.group_calls_joining.push(conversation.clone());
         self.detached_then(
             crate::detached::Lane::Free,
             {
@@ -819,6 +823,13 @@ impl App {
                 move |app| async move { app.join_at_sfu(&conversation, &fingerprint, create).await }
             },
             move |app, joined| {
+                if let Some(at) = app
+                    .group_calls_joining
+                    .iter()
+                    .position(|joining| *joining == conversation)
+                {
+                    app.group_calls_joining.remove(at);
+                }
                 let (call, new, response) = joined?;
                 // Left while the SFU took its time: the page has gone, and the SFU drops someone
                 // who never shows up.
@@ -1393,6 +1404,7 @@ impl App {
     /// `groupCallLeave`: we left (the media engine closed the connection).
     pub(crate) fn group_call_leave(&mut self) -> Value {
         self.group_call_leaves += 1;
+        self.group_calls_joining.clear();
         crate::group_call_frames::reset([0; 32]);
         if let Some(call) = self.group_call.take() {
             self.group_call_refresh(&call.conversation);
@@ -1404,6 +1416,7 @@ impl App {
     /// leave asks for (nothing is left to show it).
     pub(crate) fn group_call_forget(&mut self) {
         self.group_call_leaves += 1;
+        self.group_calls_joining.clear();
         crate::group_call_frames::reset([0; 32]);
         self.group_call = None;
     }
@@ -1574,6 +1587,16 @@ mod app_tests {
         app.group_call = Some(super::tests::call());
         app.on_group_call_running(&message, &[1; 32]);
         assert!(events.try_recv().is_err(), "we are in this call");
+        app.group_call = None;
+        app.group_calls_joining.push(key.clone());
+        app.on_group_call_running(&message, &[2; 32]);
+        assert!(
+            events.try_recv().is_err(),
+            "we are about to be in this call"
+        );
+        app.group_call_leave();
+        let _left = events.try_recv();
+        app.group_call = Some(super::tests::call());
 
         app.on_group_call_running(&message, &[2; 32]);
         let notify = events.try_recv().unwrap();
