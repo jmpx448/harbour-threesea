@@ -5541,32 +5541,65 @@ mod sync_order_tests {
             libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
         );
         setup.store.upsert_contact(&contact).unwrap();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let session = session(&setup, &tx).await;
-        // Whatever is still to be seen to before this send stays.
-        session.events.borrow_mut().push(CoreEvent::GroupsChanged);
+        // A session of no state a session can be in: it gets replaced, with a line in the chat.
         setup
             .store
             .conn
             .execute_batch(
-                "CREATE TRIGGER refuse BEFORE INSERT ON nonces
-                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+                "UPDATE fs_sessions SET my_2dh_key = NULL, my_2dh_counter = NULL,
+                     my_4dh_key = NULL, my_4dh_counter = NULL,
+                     peer_2dh_key = NULL, peer_2dh_counter = NULL,
+                     peer_4dh_key = NULL, peer_4dh_counter = NULL",
             )
             .unwrap();
+        let sessions = || -> Vec<Vec<u8>> {
+            setup
+                .store
+                .conn
+                .prepare("SELECT session_id FROM fs_sessions")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = sessions();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        // Whatever is still to be seen to before this send stays.
+        session.events.borrow_mut().push(CoreEvent::GroupsChanged);
+        let refuse = "CREATE TRIGGER refuse BEFORE INSERT ON nonces
+                      BEGIN SELECT RAISE(ABORT, 'disk full'); END;";
+        setup.store.conn.execute_batch(refuse).unwrap();
 
         assert!(session.encode(CREATOR, 1, 1, text()).await.is_err());
 
         assert!(setup.store.conn.is_autocommit(), "no step left open");
-        assert!(setup.store.fs_peers().unwrap().is_empty(), "undone");
+        assert_eq!(sessions(), before, "undone");
         assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
-        let queued = session.events.borrow();
-        assert_eq!(queued.len(), 1, "{queued:?}");
-        assert!(matches!(queued[0], CoreEvent::GroupsChanged));
-        assert!(
-            !sent_to_ui(&mut rx)
-                .iter()
-                .any(|event| matches!(event, CoreEvent::MessageAdded { .. }))
-        );
+        {
+            let queued = session.events.borrow();
+            assert_eq!(queued.len(), 1, "{queued:?}");
+            assert!(matches!(queued[0], CoreEvent::GroupsChanged));
+        }
+        assert!(sent_to_ui(&mut rx).is_empty());
+
+        // This test is about that line: once it can be written, it is there.
+        setup
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(sessions(), before);
+        assert!(matches!(
+            sent_to_ui(&mut rx).as_slice(),
+            [CoreEvent::MessageAdded { message }] if message.body == "fsReset"
+        ));
     }
 
     /// Sending with forward security: the session, its ratchet and the nonces of what goes out.
