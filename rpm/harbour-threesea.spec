@@ -21,7 +21,7 @@ Summary:    Unofficial Threema client for Sailfish OS
 Version:    0.2.0
 Release:    1
 License:    AGPLv3
-URL:        https://github.com/threema-ch/threema-android
+URL:        https://github.com/penttimus/harbour-threesea
 Source0:    %{name}-%{version}.tar.bz2
 Requires:   sailfishsilica-qt5 >= 0.10.9
 # The database key lives in Sailfish Secrets; not every image ships the daemon (the 5.1 emulator
