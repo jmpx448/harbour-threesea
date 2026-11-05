@@ -3,10 +3,18 @@
 //! state is not `Send`, so everything stays on this one thread; the bridge talks to it only via
 //! a channel of JSON strings and a callback.
 
-use std::{sync::Arc, thread::JoinHandle};
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -25,11 +33,29 @@ pub struct CoreRequest {
 /// Receives every JSON message (replies and events) from the core thread.
 pub type Emit = Box<dyn Fn(String) + Send>;
 
-/// Handle to a running core thread. Dropping it stops the core and joins the thread.
+/// How long [`CoreHandle::quit`] lets the core finish what it is doing and what is queued.
+const QUIT_GRACE: Duration = Duration::from_secs(3);
+/// How long it then gives the core to end after being told to drop what it is waiting for.
+const QUIT_CUT_OFF: Duration = Duration::from_secs(2);
+/// Of that, how long the end waits for blocking tasks; those left run on until the process ends.
+const QUIT_BLOCKING_TASKS: Duration = Duration::from_secs(1);
+
+/// What [`CoreHandle::quit`] tells the core thread.
+#[derive(Default)]
+struct QuitSignal {
+    /// The process is ending: nothing holds the thread's end back for long.
+    quitting: AtomicBool,
+    /// Drop what the core is waiting for.
+    cut_off: Notify,
+}
+
+/// Handle to a running core thread. Dropping it stops the core and joins the thread, however long
+/// that takes.
 pub struct CoreHandle {
     tx: Option<mpsc::UnboundedSender<CoreRequest>>,
     thread: Option<JoinHandle<()>>,
     media: Arc<MediaStore>,
+    quit: Arc<QuitSignal>,
 }
 
 impl CoreHandle {
@@ -61,6 +87,8 @@ impl CoreHandle {
             }
         };
         let core_media = Arc::clone(&media);
+        let quit = Arc::new(QuitSignal::default());
+        let core_quit = Arc::clone(&quit);
         let thread = std::thread::Builder::new()
             .name("threesea-core".into())
             .spawn(move || {
@@ -92,16 +120,42 @@ impl CoreHandle {
                 };
                 drop(db_key);
                 emit(json!({"event": "started", "version": crate::VERSION}).to_string());
-                // A LocalSet: the chat server connection runs as a local task next to the
-                // command loop (libthreema state is not `Send`).
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&runtime, run_loop(app, rx, emit));
+                drive(runtime, run_loop(app, rx, emit), &core_quit);
             })?;
         Ok(Self {
             tx: Some(tx),
             thread: Some(thread),
             media,
+            quit,
         })
+    }
+
+    /// Stop the core for the end of the process, without waiting on it for long: what is queued
+    /// and running gets [`QUIT_GRACE`], then a wait that goes on is dropped. All of that is what a
+    /// killed process leaves too, which every command has to bear: the store's writes stand or
+    /// fall together, an export is a `.part` file until it is done, and an import that was cut
+    /// off fills in the rest when run again. Returns whether the thread has ended; if not, it
+    /// still runs and can still emit, so the caller leaves the process at once.
+    pub fn quit(self) -> bool {
+        self.quit_within(QUIT_GRACE, QUIT_CUT_OFF)
+    }
+
+    fn quit_within(mut self, grace: Duration, cut_off: Duration) -> bool {
+        self.quit.quitting.store(true, Ordering::SeqCst);
+        drop(self.tx.take());
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        let ended = finished_within(&thread, grace) || {
+            self.quit.cut_off.notify_one();
+            finished_within(&thread, cut_off)
+        };
+        if ended {
+            let _ = thread.join();
+        } else {
+            tracing::warn!("the core did not stop in time");
+        }
+        ended
     }
 
     /// The media store, readable from any thread.
@@ -131,6 +185,36 @@ impl Drop for CoreHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+fn finished_within(thread: &JoinHandle<()>, wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    while !thread.is_finished() {
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// Runs the core's work until it ends or a quit cuts it off.
+///
+/// A `LocalSet`: the chat server connection runs as a local task next to the command loop
+/// (libthreema state is not `Send`). Dropping the work drops the `App` with it, which closes the
+/// store as on any other end.
+fn drive(runtime: tokio::runtime::Runtime, work: impl Future<Output = ()>, quit: &QuitSignal) {
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, async {
+        tokio::select! {
+            () = work => {}
+            () = quit.cut_off.notified() => tracing::warn!("quitting: cut off what the core was doing"),
+        }
+    });
+    drop(local);
+    if quit.quitting.load(Ordering::SeqCst) {
+        runtime.shutdown_timeout(QUIT_BLOCKING_TASKS);
     }
 }
 
@@ -748,6 +832,99 @@ mod tests {
             }
         };
         assert_eq!(reply["result"]["kind"], "file", "{reply}");
+    }
+
+    fn started_core(
+        dir: &std::path::Path,
+    ) -> (CoreHandle, std::sync::mpsc::Receiver<serde_json::Value>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let emit: Emit = Box::new(move |message| {
+            let message = serde_json::from_str(&message).unwrap();
+            let _ = tx.lock().unwrap().send(message);
+        });
+        let core = CoreHandle::start(start_config(dir), Zeroizing::new([1; 32]), emit).unwrap();
+        let first: serde_json::Value = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(first["event"], "started", "{first}");
+        (core, rx)
+    }
+
+    #[test]
+    fn a_quit_still_answers_what_was_asked_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, said) = started_core(dir.path());
+        core.send(json!({"id": 7, "cmd": "status"}).to_string());
+        assert!(core.quit());
+        assert!(
+            said.try_iter().any(|message| message["reply"] == 7),
+            "the request in the queue was answered"
+        );
+    }
+
+    #[test]
+    fn a_quit_gives_up_on_a_core_that_does_not_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let (release, stuck) = std::sync::mpsc::channel::<()>();
+        let stuck = std::sync::Mutex::new(stuck);
+        // Held up in saying that it started, where no signal reaches it.
+        let emit: Emit = Box::new(move |_| {
+            let _ = stuck.lock().unwrap().recv();
+        });
+        let core =
+            CoreHandle::start(start_config(dir.path()), Zeroizing::new([1; 32]), emit).unwrap();
+        let began = Instant::now();
+        assert!(!core.quit_within(Duration::from_millis(50), Duration::from_millis(50)));
+        assert!(began.elapsed() < Duration::from_secs(10));
+        drop(release);
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_quit_drops_a_wait_that_goes_on() {
+        struct Gone(Arc<AtomicBool>);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let gone = Arc::new(AtomicBool::new(false));
+        let waiting = Gone(Arc::clone(&gone));
+        let quit = QuitSignal::default();
+        quit.cut_off.notify_one();
+        drive(
+            runtime(),
+            async move {
+                let _waiting = waiting;
+                std::future::pending::<()>().await;
+            },
+            &quit,
+        );
+        assert!(gone.load(Ordering::SeqCst), "and with it what it holds");
+    }
+
+    #[test]
+    fn a_quit_does_not_wait_for_a_blocking_task_to_the_end() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let quit = QuitSignal::default();
+        quit.quitting.store(true, Ordering::SeqCst);
+        quit.cut_off.notify_one();
+        let began = Instant::now();
+        drive(
+            runtime(),
+            async move {
+                let _ = tokio::task::spawn_blocking(move || blocked.recv()).await;
+            },
+            &quit,
+        );
+        // The task only ends after the drop below, so the end got there without it.
+        assert!(began.elapsed() < Duration::from_secs(10));
+        drop(release);
     }
 
     #[test]

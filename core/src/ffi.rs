@@ -603,6 +603,22 @@ pub unsafe extern "C" fn threesea_core_stop(core: *mut ThreeseaCore) {
     }
 }
 
+/// Stop the core thread for the end of the process, waiting only a few seconds. True: the thread
+/// has ended, as after [`threesea_core_stop`]. False: it still runs and can still call back, so
+/// the caller keeps `user_data` alive and leaves the process with `_exit`. Either way the handle
+/// is gone.
+///
+/// # Safety
+/// `core` must come from `threesea_core_start` and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn threesea_core_quit(core: *mut ThreeseaCore) -> bool {
+    if core.is_null() {
+        return true;
+    }
+    // SAFETY: caller contract.
+    unsafe { Box::from_raw(core) }.0.quit()
+}
+
 /// The core's mark of a removal of the ID that never finished (ADR 0018): -1 none, else whether
 /// linked devices remain (0 or 1).
 ///
