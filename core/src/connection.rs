@@ -3178,6 +3178,20 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// An envelope encrypted for the device group, its nonce noted as used: a replay of it is
+    /// refused here, and a device joining later gets the nonce along.
+    fn seal_envelope(&self, envelope: &[u8]) -> Result<Vec<u8>, ConnectionError> {
+        let (nonce, encrypted) = self
+            .device_group_key()?
+            .encrypt_envelope(envelope)
+            .map_err(protocol_error)?;
+        self.setup
+            .store
+            .add_d2d_nonce(&nonce)
+            .map_err(storage_error)?;
+        Ok(encrypted)
+    }
+
     /// Reflect a D2D envelope content to the other devices and wait for the mediator's ack
     /// (multi-device only; without it nothing happens).
     async fn reflect(
@@ -3197,10 +3211,7 @@ impl<'a> Session<'a> {
             protocol_version: libthreema::protobuf::d2d::ProtocolVersion::V03 as u32,
             content: Some(content),
         };
-        let (_, encrypted) = self
-            .device_group_key()?
-            .encrypt_envelope(&envelope.encode_to_vec())
-            .map_err(protocol_error)?;
+        let encrypted = self.seal_envelope(&envelope.encode_to_vec())?;
         let id = self.next_reflect_id;
         self.next_reflect_id = self.next_reflect_id.wrapping_add(1).max(0x8000_0000);
         self.transport
@@ -6458,6 +6469,27 @@ mod sync_order_tests {
         assert!(!full.fails_every_time());
         let rule = e2e_error(CspE2eProtocolError::DesyncError("storage[19]: x".into()));
         assert!(rule.fails_every_time());
+    }
+
+    /// Our own envelope comes back from a malicious mediator: already seen, here and on a device
+    /// that joins later, which gets the used nonces along.
+    #[tokio::test(flavor = "current_thread")]
+    async fn our_own_envelopes_count_as_seen() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let sealed = session
+            .seal_envelope(&prost::Message::encode_to_vec(&read_update()))
+            .unwrap();
+        assert_eq!(setup.store.all_d2d_nonces().unwrap().len(), 1);
+        assert!(matches!(
+            crate::reflected::open(&setup.store, &key, &sealed),
+            Err(crate::reflected::ReflectedError::Replay)
+        ));
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
