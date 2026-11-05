@@ -2022,7 +2022,9 @@ impl App {
     }
 
     /// `androidBackupSchedule`: persist what was given (the password only when non-empty,
-    /// at least 8 characters like Android's backup wizard).
+    /// at least 8 characters like Android's backup wizard). Automatic backups need a folder and a
+    /// password to run with, given here or stored: refused before anything is stored, or the
+    /// setting would read "Daily" while no backup is ever written.
     pub(crate) fn android_backup_schedule(
         &mut self,
         directory: Option<String>,
@@ -2031,21 +2033,34 @@ impl App {
         keep: Option<u32>,
     ) -> Result<Value, ApiError> {
         use crate::store::keys;
-        if let Some(directory) = directory.as_deref().filter(|d| !d.is_empty()) {
+        let directory = directory.filter(|d| !d.is_empty());
+        let password = password.filter(|p| !p.is_empty());
+        if password.as_ref().is_some_and(|p| p.chars().count() < 8) {
+            return Err(ApiError::PasswordTooShort);
+        }
+        match interval.as_deref() {
+            None | Some("off") => {}
+            Some("daily" | "weekly") => {
+                if directory.is_none() && self.store.setting(keys::ANDROID_EXPORT_DIR)?.is_none() {
+                    return Err(ApiError::BackupNoFolder);
+                }
+                if password.is_none()
+                    && self.store.setting(keys::ANDROID_EXPORT_PASSWORD)?.is_none()
+                {
+                    return Err(ApiError::BackupNoPassword);
+                }
+            }
+            Some(_) => return Err(ApiError::Internal("unknown interval".into())),
+        }
+        if let Some(directory) = directory.as_deref() {
             self.store
                 .set_setting(keys::ANDROID_EXPORT_DIR, directory)?;
         }
-        if let Some(password) = password.as_ref().filter(|p| !p.is_empty()) {
-            if password.chars().count() < 8 {
-                return Err(ApiError::PasswordTooShort);
-            }
+        if let Some(password) = password.as_ref() {
             self.store
                 .set_setting(keys::ANDROID_EXPORT_PASSWORD, password)?;
         }
         if let Some(interval) = interval.as_deref() {
-            if !matches!(interval, "off" | "daily" | "weekly") {
-                return Err(ApiError::Internal("unknown interval".into()));
-            }
             self.store
                 .set_setting(keys::ANDROID_EXPORT_INTERVAL, interval)?;
         }
@@ -2392,6 +2407,59 @@ mod export_tests {
             .android_backup_export(Some(folder), Some(Zeroizing::new("long enough".into())))
             .unwrap_err();
         assert_eq!(error.kind(), "backupRunning");
+    }
+
+    /// "Daily" with nothing to write with would never write a backup: refused, and what else came
+    /// with the call isn't half stored. Given in the same call or stored before, it works.
+    #[test]
+    fn automatic_backup_needs_a_folder_and_a_password() {
+        use crate::store::keys;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let long = || Some(Zeroizing::new("long enough".to_owned()));
+        let daily = || Some("daily".to_owned());
+        let folder = || Some("/some/folder".to_owned());
+
+        let error = app
+            .android_backup_schedule(None, long(), daily(), None)
+            .unwrap_err();
+        assert_eq!(error.kind(), "backupNoFolder");
+        assert_eq!(
+            app.store.setting(keys::ANDROID_EXPORT_PASSWORD).unwrap(),
+            None
+        );
+        let error = app
+            .android_backup_schedule(folder(), None, daily(), None)
+            .unwrap_err();
+        assert_eq!(error.kind(), "backupNoPassword");
+        assert_eq!(app.store.setting(keys::ANDROID_EXPORT_DIR).unwrap(), None);
+        let error = app
+            .android_backup_schedule(
+                folder(),
+                Some(Zeroizing::new("short".into())),
+                daily(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), "passwordTooShort");
+        assert_eq!(app.store.setting(keys::ANDROID_EXPORT_DIR).unwrap(), None);
+        assert_eq!(
+            app.android_export_status().unwrap()["interval"],
+            "off",
+            "nothing was switched on"
+        );
+        // Off needs nothing, and neither do the other settings.
+        app.android_backup_schedule(None, None, Some("off".into()), Some(5))
+            .unwrap();
+
+        let status = app
+            .android_backup_schedule(folder(), long(), daily(), None)
+            .unwrap();
+        assert_eq!(status["interval"], "daily");
+        let status = app
+            .android_backup_schedule(None, None, Some("weekly".into()), None)
+            .unwrap();
+        assert_eq!(status["interval"], "weekly", "from what is stored");
     }
 
     #[test]
