@@ -740,7 +740,8 @@ impl Shared {
         } else {
             self.store.set_setting(keys::LINKED_EMAIL, &email)?;
             if pending {
-                self.store.set_setting(keys::LINKED_EMAIL_PENDING, "1")?;
+                self.store
+                    .set_setting(crate::store::keys::LINKED_EMAIL_PENDING, "1")?;
             } else {
                 self.store.delete_setting(keys::LINKED_EMAIL_PENDING)?;
             }
@@ -769,10 +770,22 @@ impl Shared {
         {
             return Ok(false);
         }
-        self.store.delete_setting(keys::LINKED_EMAIL_PENDING)?;
+        if !self.email_link_confirmed(&email)? {
+            return Ok(false);
+        }
         tracing::info!("e-mail link confirmed");
         let change = crate::app_multidevice::SyncChange::Profile { picture: false };
         self.reflect_change(change, &json!({})).await;
+        Ok(true)
+    }
+
+    /// The directory says `asked` is linked. The address may have changed during the question, and
+    /// then that answer says nothing about the one waiting now. Whether it was the one.
+    fn email_link_confirmed(&self, asked: &str) -> Result<bool, ApiError> {
+        if self.store.setting(keys::LINKED_EMAIL)?.as_deref() != Some(asked) {
+            return Ok(false);
+        }
+        self.store.delete_setting(keys::LINKED_EMAIL_PENDING)?;
         Ok(true)
     }
 
@@ -1506,6 +1519,32 @@ mod contact_policy_tests {
 
     // No identity here: an answer other than `phoneInvalid` would mean it went further, towards
     // the network.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_answer_about_the_old_address_confirms_no_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        for (key, value) in [
+            (crate::store::keys::LINKED_EMAIL, "new@example.com"),
+            (crate::store::keys::LINKED_EMAIL_PENDING, "1"),
+        ] {
+            app.store.set_setting(key, value).unwrap();
+        }
+        assert!(!app.email_link_confirmed("old@example.com").unwrap());
+        assert!(
+            app.store
+                .setting(crate::store::keys::LINKED_EMAIL_PENDING)
+                .unwrap()
+                .is_some()
+        );
+        assert!(app.email_link_confirmed("new@example.com").unwrap());
+        assert!(
+            app.store
+                .setting(crate::store::keys::LINKED_EMAIL_PENDING)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_national_number_is_refused_before_any_network_access() {
         let dir = tempfile::tempdir().unwrap();
