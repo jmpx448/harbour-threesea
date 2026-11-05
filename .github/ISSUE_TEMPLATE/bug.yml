@@ -44,7 +44,7 @@ body:
     attributes:
       label: Log (optional)
       description: |
-        Settings → Advanced → Log → "Detailed", reproduce the problem, then in the phone's
-        terminal (developer mode): `devel-su journalctl --since "-10min" | grep -i threesea`. Threesea doesn't log message
-        content, keys or phone numbers, but please look through it before posting.
-      render: text
+        Settings → Advanced → Log → "Detailed", then reproduce the problem. Settings → Advanced →
+        View log, pull up at the bottom of the log and choose "Save support package": it goes to
+        Downloads as `threesea-log-….txt`. Threesea doesn't log message content, keys, phone
+        numbers or e-mail addresses, but please look through it before attaching it here.
