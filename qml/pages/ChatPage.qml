@@ -1970,7 +1970,6 @@ Page {
             }
             MenuItem {
                 visible: !page.selecting && page.groupCallsOn && !page.groupCallRunning && !page.readOnly
-                         && window.appSettings.threemaCalls !== false
                 enabled: groupCalls.state === "idle" && calls.state === "idle"
                 //% "Start group call"
                 text: qsTrId("threesea-me-start-group-call")

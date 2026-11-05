@@ -51,9 +51,9 @@ Page {
 
             TextSwitch {
                 // Android's group call policy (linked devices know it too). The feature mask
-                // keeps the bit, as on Android: off only means this device stays out.
+                // keeps the bit, as on Android: off only means this device stays out. Its own
+                // setting, also as on Android: Threema calls are the 1:1 calls.
                 visible: groupCalls.supported
-                enabled: window.appSettings.threemaCalls !== false
                 automaticCheck: false
                 checked: window.appSettings.groupCalls !== false
                 //% "Group calls"
