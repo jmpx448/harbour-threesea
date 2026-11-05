@@ -41,8 +41,8 @@ Dialog {
 
             Repeater {
                 model: [
-                    //% "Your ID itself is not revoked: you can restore it later from Threema Safe or an ID backup — without one of them, the ID is lost. Chats and media come back only from a Data backup, and only after the ID is restored."
-                    qsTrId("threesea-la-delete-data-comes-back"),
+                    //% "Your ID itself is not revoked: you can restore it later from Threema Safe, an ID backup or a Data backup — without one of them, the ID is lost. Chats and media come back only from a Data backup."
+                    qsTrId("threesea-la-delete-data-comes-back-data-backup"),
                     //% "Pictures saved to the Threesea folder in Pictures, and backups and files you exported, stay on this device. A Threema Safe backup stays on the server."
                     qsTrId("threesea-la-delete-data-stays")
                 ]
@@ -69,8 +69,8 @@ Dialog {
 
             TextSwitch {
                 id: understood
-                //% "I have a Threema Safe or ID backup, or no longer need this ID"
-                text: qsTrId("threesea-la-delete-data-have-backup")
+                //% "I have a Threema Safe, ID or Data backup, or no longer need this ID"
+                text: qsTrId("threesea-la-delete-data-have-a-backup")
             }
         }
 

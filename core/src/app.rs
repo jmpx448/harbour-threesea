@@ -164,6 +164,10 @@ pub enum Command {
     /// `metadata` = contacts, groups, distribution lists and pictures (offline, no sending
     /// side effects, synchronous); `history` = messages, media and reactions as a background
     /// job reporting `androidBackupProgress`/`androidBackupDone` events.
+    AndroidBackupRestore {
+        path: String,
+        password: Zeroizing<String>,
+    },
     AndroidBackupImport {
         path: String,
         password: Zeroizing<String>,
@@ -1011,6 +1015,9 @@ pub enum ApiError {
     /// merged into this one.
     #[error("backup belongs to another identity")]
     BackupOtherIdentity,
+    /// A Data backup without an ID was to bring one.
+    #[error("this backup holds no Threema ID")]
+    BackupNoIdentity,
     /// An Android data backup that cannot be read (damaged, truncated, not a backup).
     #[error("{0}")]
     BackupInvalid(String),
@@ -1213,6 +1220,7 @@ impl ApiError {
             Self::BackupDecrypt => "backupDecrypt",
             Self::BackupVersion(_) => "backupVersion",
             Self::BackupOtherIdentity => "backupIdentity",
+            Self::BackupNoIdentity => "backupNoIdentity",
             Self::BackupInvalid(_) => "backupInvalid",
             Self::BackupWrite(_) => "backupWrite",
             Self::BackupNoRoom => "backupNoRoom",
@@ -1908,6 +1916,12 @@ impl App {
             Command::AndroidBackupInspect { path, password } => {
                 self.detached(Lane::Free, |app| async move {
                     app.android_backup_inspect(path, password).await
+                })
+                .await
+            }
+            Command::AndroidBackupRestore { path, password } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.android_backup_restore(path, password).await
                 })
                 .await
             }

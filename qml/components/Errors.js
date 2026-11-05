@@ -29,6 +29,9 @@ function text(kind, message) {
     case "backupVersion":
         //% "This backup's format is not supported."
         return qsTrId("threesea-la-error-backup-version")
+    case "backupNoIdentity":
+        //% "This backup holds no Threema ID. Restore the ID from Threema Safe or an ID backup, then import this backup in Settings, Backup, Data backup."
+        return qsTrId("threesea-la-error-backup-no-identity")
     case "backupInvalid":
         //% "The file could not be read as a Threema backup."
         return qsTrId("threesea-la-error-backup-invalid")

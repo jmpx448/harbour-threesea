@@ -67,8 +67,8 @@ Page {
             }
 
             InfoLabel {
-                //% "Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe or an ID backup."
-                text: qsTrId("threesea-la-identity-intro")
+                //% "Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe, an ID backup or a Data backup. A Data backup brings your chats as well."
+                text: qsTrId("threesea-la-identity-intro-data-backup")
             }
 
             ErrorLabel { id: errorLabel }
@@ -90,6 +90,11 @@ Page {
                     //% "Restore ID backup"
                     text: qsTrId("threesea-bt-restore-backup")
                     onClicked: pageStack.push(Qt.resolvedUrl("RestoreBackupPage.qml"))
+                }
+                Button {
+                    //% "Restore from Data backup"
+                    text: qsTrId("threesea-bt-restore-data-backup")
+                    onClicked: pageStack.push(Qt.resolvedUrl("DataBackupRestorePage.qml"))
                 }
             }
 

@@ -41,8 +41,8 @@ Page {
             }
 
             InfoLabel {
-                //% "Paste the ID backup (80 characters in groups of four, like XXXX-XXXX-…) and enter the password you chose when you created it."
-                text: qsTrId("threesea-la-restore-intro")
+                //% "Paste the ID backup (80 characters in groups of four, like XXXX-XXXX-…) and enter the password you chose when you created it. It brings your ID. Chats come from a Data backup, which Settings, Backup can import afterwards."
+                text: qsTrId("threesea-la-restore-intro-data-backup")
             }
 
             TextArea {

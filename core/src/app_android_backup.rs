@@ -116,6 +116,25 @@ fn looks_like_image(data: &[u8]) -> bool {
     data.starts_with(&[0xff, 0xd8]) || data.starts_with(&[0x89, b'P', b'N', b'G'])
 }
 
+/// A restore's reading of the archive, nothing changed yet: the ID in it, and all the metadata.
+fn read_for_restore(
+    path: &std::path::Path,
+    password: &str,
+) -> Result<(String, ClientKey, Metadata), ApiError> {
+    let mut archive = Archive::open(path, password)?;
+    android_backup::read_version(&mut archive)?;
+    if !archive.has_entry("identity") {
+        return Err(ApiError::BackupNoIdentity);
+    }
+    let encrypted = android_backup::read_identity_backup(&mut archive)?;
+    let (_, identity) = libthreema::id_backup::decrypt_identity_backup(password, &encrypted)
+        .map_err(|_| ApiError::BackupDecrypt)?;
+    let threema_id = identity.threema_id.to_string();
+    let public_key = identity.client_key.public_key().to_string();
+    let data = load_metadata(path, password, &threema_id, &public_key)?;
+    Ok((threema_id, identity.client_key, data))
+}
+
 fn load_metadata(
     path: &std::path::Path,
     password: &str,
@@ -275,17 +294,29 @@ impl Shared {
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))??;
-        // Nothing depends on them but the check on receiving, which only gains: not in the step of
-        // the rest, whose transaction would stand open across the pauses.
-        let csp_nonces =
-            crate::android_backup::nonces::add_in_steps(&self.store, false, &data.csp_nonces)
-                .await?;
-        let d2d_nonces =
-            crate::android_backup::nonces::add_in_steps(&self.store, true, &data.d2d_nonces)
-                .await?;
+        let nonces = self.add_android_nonces(&data).await?;
+        self.finish_android_metadata(&own_id, data, nonces)
+    }
+
+    /// Nothing depends on them but the check on receiving, which only gains: not in the step of
+    /// the rest, whose transaction would stand open across the pauses. Added, CSP and D2D.
+    async fn add_android_nonces(&self, data: &Metadata) -> Result<(usize, usize), ApiError> {
+        let csp = crate::android_backup::nonces::add_in_steps(&self.store, false, &data.csp_nonces)
+            .await?;
+        let d2d = crate::android_backup::nonces::add_in_steps(&self.store, true, &data.d2d_nonces)
+            .await?;
+        Ok((csp, d2d))
+    }
+
+    fn finish_android_metadata(
+        &self,
+        own_id: &str,
+        data: Metadata,
+        (csp_nonces, d2d_nonces): (usize, usize),
+    ) -> Result<Value, ApiError> {
         let existing_nonces =
             (data.csp_nonces.len() + data.d2d_nonces.len()).saturating_sub(csp_nonces + d2d_nonces);
-        let mut summary = self.apply_android_metadata(&own_id, data)?;
+        let mut summary = self.apply_android_metadata(own_id, data)?;
         summary["nonces"]["csp"] = csp_nonces.into();
         summary["nonces"]["d2d"] = d2d_nonces.into();
         summary["nonces"]["existing"] = existing_nonces.into();
@@ -296,6 +327,54 @@ impl Shared {
         );
         self.reflect_owed_pictures();
         Ok(summary)
+    }
+
+    /// `androidBackupRestore {path, password}`: a device with no ID yet takes the ID from a Data
+    /// backup, as from an ID backup (the license first, the directory says its server group), and
+    /// with it the contacts, groups, lists and pictures. The history follows like any import's
+    /// (`androidBackupImport`, scope `history`).
+    pub(crate) async fn android_backup_restore(
+        &self,
+        path: String,
+        password: Zeroizing<String>,
+    ) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
+        let _ = self.license()?;
+        let (threema_id, client_key, data) = tokio::task::spawn_blocking(move || {
+            read_for_restore(std::path::Path::new(&path), &password)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))??;
+        let private =
+            crate::directory::fetch_identity_private(&self.https, &threema_id, &client_key).await?;
+        self.adopt_data_backup(&threema_id, &client_key, private, data)
+            .await
+    }
+
+    /// The local half of [`Self::android_backup_restore`]. The used nonces go in before the ID:
+    /// with it the connection starts, and they are what refuses a replay of what Android received.
+    /// A failure after the ID stands isn't an answer to the restore, which has happened: `imported`
+    /// is null then, and the regular import that follows says what is wrong.
+    async fn adopt_data_backup(
+        &self,
+        threema_id: &str,
+        client_key: &ClientKey,
+        private: crate::directory::PrivateIdentityData,
+        data: Metadata,
+    ) -> Result<Value, ApiError> {
+        let nonces = self.add_android_nonces(&data).await?;
+        self.store_adopted_identity(threema_id, client_key, private)?;
+        // Android's backup holds no nickname for us, as an ID backup doesn't.
+        self.store
+            .set_setting(crate::store::keys::NICKNAME_UNANSWERED, "ask")?;
+        tracing::info!("identity restored from a Data backup");
+        let imported = self
+            .finish_android_metadata(threema_id, data, nonces)
+            .unwrap_or_else(|error| {
+                tracing::warn!(kind = error.kind(), "Data backup metadata not imported");
+                Value::Null
+            });
+        Ok(json!({ "identity": threema_id, "imported": imported }))
     }
 }
 
@@ -718,6 +797,119 @@ mod tests {
             })
             .unwrap();
         app
+    }
+
+    fn app_without_identity(dir: &std::path::Path) -> App {
+        App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap()
+    }
+
+    /// A valid archive of the current version whose `identity` entry is gone.
+    fn backup_without_identity(dir: &std::path::Path) -> String {
+        use std::io::Write as _;
+        let path = dir.join("no-identity.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, "test-password");
+        writer.start_file("settings", options).unwrap();
+        writer.write_all(b"\"version\",\"27\"\n").unwrap();
+        writer.finish().unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_data_backup_brings_the_id_and_what_goes_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_without_identity(dir.path());
+        let password = Zeroizing::new("test-password".to_owned());
+        let (threema_id, client_key, data) =
+            read_for_restore(std::path::Path::new(&fixture()), &password).unwrap();
+        assert_eq!(threema_id, "ABCD1234");
+        assert_eq!(*client_key.as_bytes(), [7; 32]);
+        // Nothing yet from reading it.
+        assert!(app.store.identity().unwrap().is_none());
+        let private = crate::directory::PrivateIdentityData {
+            server_group: "a1".into(),
+            email: None,
+            mobile_no: None,
+        };
+        let reply = app
+            .adopt_data_backup(&threema_id, &client_key, private, data)
+            .await
+            .unwrap();
+        assert_eq!(reply["identity"], "ABCD1234");
+        assert_eq!(reply["imported"]["contacts"]["added"], 3, "{reply}");
+        assert!(
+            reply["imported"]["nonces"]["csp"].as_u64().unwrap() > 0,
+            "{reply}"
+        );
+
+        let identity = app.store.identity().unwrap().unwrap();
+        assert_eq!(identity.threema_id, "ABCD1234");
+        assert_eq!(identity.server_group, "a1");
+        assert_eq!(*identity.client_key, [7; 32]);
+        assert!(app.store.contact("B0B0B0B0").unwrap().is_some());
+        // Asked for the nickname like an ID backup's; nobody restored asks about Threema Safe.
+        assert_eq!(app.profile_json().unwrap()["askNickname"], true);
+        assert_eq!(app.safe_status().unwrap()["askSetup"], false);
+
+        // From here it is an import like any other: of this ID, and nothing new in it.
+        let again = app
+            .android_backup_import(fixture(), password, "metadata")
+            .await
+            .unwrap();
+        assert_eq!(again["contacts"]["added"], 0, "{again}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_data_backup_restore_changes_nothing_when_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_without_identity(dir.path());
+        let restore = |password: &str, path: String| {
+            app.android_backup_restore(path, Zeroizing::new(password.to_owned()))
+        };
+        // The license comes first.
+        assert!(matches!(
+            restore("test-password", fixture()).await,
+            Err(ApiError::NoLicense)
+        ));
+        app.store
+            .set_setting(crate::store::keys::LICENSE_KEY, "XXXXX-XXXXX")
+            .unwrap();
+        assert!(matches!(
+            restore("wrong", fixture()).await,
+            Err(ApiError::BackupDecrypt)
+        ));
+        // A file that can't say whose it is: no ID to restore.
+        assert!(matches!(
+            restore("test-password", backup_without_identity(dir.path())).await,
+            Err(ApiError::BackupNoIdentity)
+        ));
+        assert!(app.store.identity().unwrap().is_none());
+
+        // And never over an ID that is there.
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path(), [8; 32]);
+        assert!(matches!(
+            app.android_backup_restore(fixture(), Zeroizing::new("test-password".into()))
+                .await,
+            Err(ApiError::IdentityExists)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

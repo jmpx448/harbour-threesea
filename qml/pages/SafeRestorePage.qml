@@ -56,8 +56,8 @@ Page {
             }
 
             InfoLabel {
-                //% "Enter your Threema ID and your Threema Safe password. Your profile, contacts, groups and settings are restored with it."
-                text: qsTrId("threesea-la-restore-safe-intro")
+                //% "Enter your Threema ID and your Threema Safe password. Your profile, contacts, groups and settings are restored with it. Chats come from a Data backup, which Settings, Backup can import afterwards."
+                text: qsTrId("threesea-la-restore-safe-intro-data-backup")
             }
 
             TextField {

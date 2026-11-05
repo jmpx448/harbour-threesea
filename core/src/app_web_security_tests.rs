@@ -1723,6 +1723,8 @@ async fn an_existing_id_is_not_replaced() {
         json!({"id": 1, "cmd": "createIdentity"}),
         json!({"id": 2, "cmd": "restoreIdentityBackup", "backup": "x", "password": "y"}),
         json!({"id": 3, "cmd": "safeRestore", "identity": "ABCD1234", "password": "y"}),
+        json!({"id": 4, "cmd": "androidBackupRestore", "path": "/nowhere", "password": "y"}),
+        json!({"id": 5, "cmd": "safeSearchId", "email": "someone@example.org"}),
     ] {
         let reply: serde_json::Value =
             serde_json::from_str(&app.handle(&command.to_string()).await).unwrap();

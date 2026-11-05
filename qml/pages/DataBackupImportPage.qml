@@ -32,7 +32,13 @@ Page {
     Component.onDestruction: password = ""
 
     // Started once the page is shown, not when the dialog preloads it.
-    onStatusChanged: if (status === PageStatus.Active && phase === "") importMetadata()
+    // A restore of the ID (DataBackupRestorePage) has brought the first part along with it.
+    onStatusChanged: {
+        if (status === PageStatus.Active && phase === "") {
+            if (imported) importHistory()
+            else importMetadata()
+        }
+    }
 
     function importMetadata() {
         phase = "metadata"

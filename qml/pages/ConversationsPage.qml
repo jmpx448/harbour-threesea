@@ -254,6 +254,7 @@ Page {
     }
     function firstRunFree() {
         return status === PageStatus.Active && !window.stackHeld && !pageStack.busy
+                && window.pendingDataImport === null
     }
     function askSafeSetup() {
         var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"), { firstRun: true })

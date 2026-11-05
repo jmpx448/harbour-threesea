@@ -144,6 +144,9 @@ ApplicationWindow {
             }
         })
     }
+    // A Data backup brought the ID (the setup's restore page): its import goes on over the chat
+    // list, once the state has put that there. Its password stays no longer than that.
+    property var pendingDataImport: null
     // Starting, locked or mid-transition: once that is over (the timer below).
     property bool pendingSafe: false
     function showSafe() {
@@ -748,7 +751,7 @@ ApplicationWindow {
         // After start-up or a page transition.
         running: !window.stackHeld && (window.pendingLink.length > 0 || window.pendingChat.length > 0
                                        || window.pendingUpdate || window.pendingWebSessions
-                                       || window.pendingSafe
+                                       || window.pendingSafe || window.pendingDataImport !== null
                                        || window.pendingShare !== null)
         interval: 300
         repeat: true
@@ -762,11 +765,18 @@ ApplicationWindow {
                 window.pendingUpdate = false
                 window.pendingWebSessions = false
                 window.pendingSafe = false
+                window.pendingDataImport = null
                 return
             }
             // Also wait while the stored data is locked (passphrase).
             if (backend.state === "starting" || backend.state === "locked" || backend.state === "removing"
                     || pageStack.busy || shownState !== backend.state) return
+            if (window.pendingDataImport !== null && backend.state === "ready") {
+                var restored = window.pendingDataImport
+                window.pendingDataImport = null
+                pageStack.push(Qt.resolvedUrl("pages/DataBackupImportPage.qml"), restored)
+                return
+            }
             if (window.pendingLink.length > 0) window.openLink(window.pendingLink, window.pendingLinkFromMessage)
             // showChat() and showShare() ask again for later if they still can't.
             var chat = window.pendingChat
@@ -2110,6 +2120,8 @@ ApplicationWindow {
             if (backend.state === "ready") {
                 window.clearNotification("license")
                 window.checkSafeWarning()
+            } else {
+                window.pendingDataImport = null
             }
             window.runNotificationActions()
         }
