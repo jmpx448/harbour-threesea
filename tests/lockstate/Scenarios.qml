@@ -220,6 +220,29 @@ QtObject {
                 check("then", dbus.retained, 1)
             }, 0],
         ],
+        // The core runs and took no copy: the run ends all the same, and says the reply is lost.
+        waitingReplyWithoutACopyEndsTheRunAtTheLimit: [
+            [function() {
+                ready(true)
+                backend.refused["setDraft"] = "internal"
+            }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                check("stays for now", lifecycle.left, 0)
+                window.limitActionsWait()
+                check("gone", lifecycle.left, 1)
+            }, 0],
+        ],
+        // No core: the process holds the only copy.
+        waitingReplyStaysBehindThePassphrase: [
+            [function() { backend.state = "locked" }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                window.limitActionsWait()
+                check("stays", lifecycle.left, 0)
+            }, 0],
+        ],
         // A refused reply goes to its draft first.
         refusedReplyEndsTheRunWhenKept: [
             [function() {

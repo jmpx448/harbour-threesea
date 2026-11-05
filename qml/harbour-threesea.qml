@@ -1594,13 +1594,18 @@ ApplicationWindow {
         interval: 45000
         onTriggered: window.leaveIfActionsDone()
     }
-    // Waiting behind a lock. The reply's words are in the chat's draft by then and the app says so
-    // as it ends (appEnding), so nobody has to come back for it to end. With no core running there
-    // is no draft: the process holds the only copy and stays for it, with nothing connected.
+    // Waiting behind a lock. As it ends the app says what became of the reply (appEnding): in the
+    // chat's draft, or to be written again if the core refused that. So nobody has to come back for
+    // it to end. Behind the passphrase no core runs and there is no draft: the process holds the
+    // only copy and stays for it, with nothing connected.
     Timer {
         id: actionsWaitLimit
         interval: 600000
-        onTriggered: if (window.runUnwanted() && NotificationActions.allRepliesKept()) lifecycle.leaveIfUnwanted()
+        onTriggered: window.limitActionsWait()
+    }
+
+    function limitActionsWait() {
+        if (runUnwanted() && backend.state !== "locked") lifecycle.leaveIfUnwanted()
     }
 
     function markNotifiedRead(identity, done) {
