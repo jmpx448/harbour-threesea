@@ -7,8 +7,8 @@ import "../../components/Verification.js" as Verification
 
 // My profile (Settings, and the first row of Contacts), laid out like a contact's page: the
 // People card with picture, nickname and ID, then nickname, revocation password, linked e-mail
-// and number, who gets the picture, the public key; picture, QR code and removing the ID in the
-// pulley (Android: My ID).
+// and number, who gets the picture, the public key; sharing the ID, QR code and removing the ID in
+// the pulley, the picture by tapping it, copying the ID by holding it down (Android: My ID).
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -81,6 +81,8 @@ Page {
         }
     }
 
+    IdentityShare { id: identityShare }
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
@@ -99,6 +101,11 @@ Page {
                         })
                     })
                 })
+            }
+            MenuItem {
+                //% "Share my ID"
+                text: qsTrId("threesea-me-share-my-id")
+                onClicked: identityShare.shareIdentity(page.profile.identity || backend.identity)
             }
             MenuItem {
                 //% "My QR code"
@@ -159,7 +166,12 @@ Page {
                         width: parent.width
                         text: page.profile.identity || backend.identity
                         font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.secondaryColor
+                        color: identityArea.pressed ? Theme.highlightColor : Theme.secondaryColor
+                        MouseArea {
+                            id: identityArea
+                            anchors.fill: parent
+                            onPressAndHold: identityMenu.open(menuHost)
+                        }
                     }
                 }
             }
@@ -168,7 +180,12 @@ Page {
             Item {
                 id: menuHost
                 width: parent.width
-                height: pictureMenu.height
+                height: pictureMenu.height + identityMenu.height
+            }
+
+            IdentityMenu {
+                id: identityMenu
+                identity: page.profile.identity || backend.identity
             }
 
             ContextMenu {

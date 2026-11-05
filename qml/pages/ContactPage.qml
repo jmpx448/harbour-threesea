@@ -134,6 +134,8 @@ Page {
                                            function() { page.load() })
                 title: page.contact.displayName || page.identity
                 description: page.identity
+                descriptionHoldable: true
+                onDescriptionHeld: identityMenu.open(menuHost)
                 source: page.contact.pictureVersion > 0
                         ? "image://threesea/contact/" + page.identity + "?" + page.contact.pictureVersion : ""
                 Row {
@@ -150,6 +152,18 @@ Page {
                         color: Theme.secondaryColor
                     }
                 }
+            }
+
+            // The ID's menu opens right under the card.
+            Item {
+                id: menuHost
+                width: parent.width
+                height: identityMenu.height
+            }
+
+            IdentityMenu {
+                id: identityMenu
+                identity: page.identity
             }
 
             // Only when the name on the card is our own one for them (else it is the nickname).
