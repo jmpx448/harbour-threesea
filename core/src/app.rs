@@ -1902,12 +1902,15 @@ impl App {
                 if private_chats {
                     self.unlocked = true;
                     self.update_media_gate();
+                    // Their names again, in a private group's call that went on.
+                    self.emit_group_call_participants();
                 }
                 self.lock_status()
             }
             Command::Lock { pending_files } => {
                 self.unlocked = false;
                 self.update_media_gate();
+                self.group_calls_locked();
                 if let Some(files) = pending_files {
                     self.grant_write_pass(files);
                 }

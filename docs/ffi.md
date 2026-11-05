@@ -67,8 +67,10 @@ keeps its candidates and a hangup until then.
 
 A group call also shows in its chat (Full, ADR 0012) as status lines: `groupCallStarted|<name>`,
 `groupCallYouStarted`, `groupCallEnded`. The first comes without `notify`; a `messageNotify` follows
-once a peek found the call running. In a private chat while locked the line has no name, and no
-`groupCall` event comes for that group.
+once a peek found the call running. In a private chat while locked the line has no name, no
+`groupCall` event comes for that group, and `groupCallParticipants {conversation, participants}`
+comes with empty names. On locking, `groupCallsLocked {keep}` names the groups whose running calls
+the UI may keep; the private ones come back when their chat refreshes.
 
 Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCallOffer {sdp}`,
 `groupCallParticipants {participants}`, `groupCallChannelSend {data}`, `groupCallAlone`, and

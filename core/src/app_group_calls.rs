@@ -1229,9 +1229,28 @@ impl App {
                 })
             })
             .collect();
-        self.emit_group_call(
-            json!({ "event": "groupCallParticipants", "participants": participants }),
-        );
+        self.emit_group_call(json!({
+            "event": "groupCallParticipants",
+            "conversation": call.conversation,
+            "participants": participants,
+        }));
+    }
+
+    /// The app locked (§7.8): the UI forgets the running calls of private groups, and of the call
+    /// we are in, which goes on, keeps no names of a private group's people.
+    pub(crate) fn group_calls_locked(&self) {
+        if !self.calls_supported {
+            return;
+        }
+        let keep: Vec<String> = self
+            .store
+            .groups_with_calls()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|conversation| !self.store.is_private(conversation).unwrap_or(true))
+            .collect();
+        self.emit_group_call(json!({ "event": "groupCallsLocked", "keep": keep }));
+        self.emit_group_call_participants();
     }
 
     /// `groupCallMute {muted}`: tell the others (the media engine mutes the microphone itself).
@@ -1503,6 +1522,42 @@ mod app_tests {
         }));
         assert_eq!(running.to_json(&app.store, false)["event"], "internal");
         assert_eq!(running.to_json(&app.store, true)["event"], "groupCall");
+    }
+
+    #[test]
+    fn locking_takes_a_private_groups_people_from_the_ui_but_not_the_call() {
+        let (_dir, mut app, key) = app_with_group(false);
+        let mut events = app.take_media_events().unwrap();
+        app.store.set_private(&key, true).unwrap();
+        app.store.add_group_call(&stored_call(&key, 1)).unwrap();
+        let open = crate::groups::key(&libthreema::common::GroupIdentity {
+            creator_identity: "BBBBBBBB".parse().unwrap(),
+            group_id: 8,
+        });
+        app.store.add_group_call(&stored_call(&open, 2)).unwrap();
+        let mut call = super::tests::call();
+        call.conversation = key.clone();
+        call.participants = vec![2];
+        call.peers
+            .insert(2, Peer::authenticated_for_test(2, "CCCCCCCC"));
+        app.group_call = Some(call);
+
+        app.group_calls_locked();
+        let forget = events.try_recv().unwrap().to_json(&app.store, false);
+        assert_eq!(forget["event"], "groupCallsLocked");
+        assert_eq!(forget["keep"], json!([open]));
+        let people = events.try_recv().unwrap();
+        let locked = people.to_json(&app.store, false);
+        assert_eq!(locked["event"], "groupCallParticipants");
+        assert_eq!(locked["participants"][0]["id"], 2);
+        assert_eq!(locked["participants"][0]["authenticated"], true);
+        assert!(!locked.to_string().contains("CCCCCCCC"), "{locked}");
+        assert!(
+            app.group_call.is_some(),
+            "the call we are in goes on behind the lock"
+        );
+        let unlocked = people.to_json(&app.store, true);
+        assert_eq!(unlocked["participants"][0]["identity"], "CCCCCCCC");
     }
 
     #[test]

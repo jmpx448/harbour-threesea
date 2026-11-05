@@ -140,6 +140,20 @@ fn hidden_body(message: &Message) -> Value {
     }
 }
 
+/// `groupCallParticipants` with what the media engine needs and nothing of who they are.
+fn without_names(event: &Value) -> Value {
+    let mut event = event.clone();
+    if let Some(participants) = event["participants"].as_array_mut() {
+        for participant in participants {
+            for name in ["identity", "nickname", "name"] {
+                participant[name] = Value::from("");
+            }
+            participant["pictureVersion"] = Value::from(0);
+        }
+    }
+    event
+}
+
 impl CoreEvent {
     /// JSON event for the bridge. While the app is locked, events about private chats carry no
     /// content, so it never reaches the UI layer (ADR 0009: hidden by the core, not only the
@@ -225,6 +239,13 @@ impl CoreEvent {
                     && event["conversation"].as_str().is_some_and(hidden) =>
             {
                 json!({"event": "internal"})
+            }
+            // A call we are in goes on behind the lock, without its people's names.
+            Self::Call(event)
+                if event["event"] == "groupCallParticipants"
+                    && event["conversation"].as_str().is_some_and(hidden) =>
+            {
+                without_names(event)
             }
             Self::Call(event) => event.clone(),
             // Handled inside the core.

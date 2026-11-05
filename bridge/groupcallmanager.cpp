@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "groupcallmanager.h"
 
+#include <QStringList>
 #include <QDateTime>
 #include <QDebug>
 
@@ -215,6 +216,20 @@ void GroupCallManager::onCoreEvent(const QString &name, const QVariantMap &data)
             return;
         }
         emit runningChanged();
+    } else if (name == QLatin1String("groupCallsLocked")) {
+        const QStringList keep = data.value(QStringLiteral("keep")).toStringList();
+        bool changed = false;
+        for (auto it = m_calls.begin(); it != m_calls.end();) {
+            if (keep.contains(it.key())) {
+                ++it;
+            } else {
+                it = m_calls.erase(it);
+                changed = true;
+            }
+        }
+        if (changed) {
+            emit runningChanged();
+        }
     } else if (name == QLatin1String("groupCallOffer")) {
 #ifdef THREESEA_FULL
         m_engine->updateOffer(data.value(QStringLiteral("sdp")).toString());
