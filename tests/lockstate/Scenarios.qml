@@ -103,6 +103,32 @@ QtObject {
         backend.state = "ready"
     }
 
+    // The viewer's list as the core gives it: of `ids`, newest first, page by page.
+    function mediaOf(ids) {
+        return function(args) {
+            var start = 0
+            if (args.before) start = ids.indexOf(Number(args.before)) + 1
+            var end = Math.min(ids.length, start + args.limit)
+            var messages = ids.slice(start, end).map(function(id) {
+                return { id: id, mediaKind: "image", body: { mediaType: "image/jpeg", fileState: 2 } }
+            })
+            return { messages: messages, next: end < ids.length ? String(ids[end - 1]) : null }
+        }
+    }
+    function openViewer(id, more) {
+        var properties = { objectName: "viewer", identity: chat, messageId: id }
+        for (var key in more) properties[key] = more[key]
+        return push("pages/ImageViewerPage.qml", properties)
+    }
+    function shownRows(viewer) {
+        return viewer.rows.map(function(row) { return row.id }).join(" ")
+    }
+    function range(from, to) {
+        var list = []
+        for (var i = from; i >= to; --i) list.push(i)
+        return list
+    }
+
     readonly property var dbus: fakes.dbus
     readonly property var lifecycle: fakes.lifecycle
 
@@ -1834,6 +1860,150 @@ QtObject {
                 checkStack("")
                 check("no lock", window.locked, false)
             }, 0],
+        ],
+        // The viewer's last picture deleted under the lock: the lock stays, the viewer goes after it.
+        viewerEmptiedUnderTheLock: [
+            [function() {
+                ready(true)
+                backend.results["chatMedia"] = mediaOf([5])
+            }, 100],
+            [function() { push("pages/ChatPage.qml", { identity: chat }) }, 50],
+            [function() { openViewer(5) }, 100],
+            [function() { window.lockNow() }, 100],
+            [function() {
+                checkStack("conversations chat viewer unlock")
+                backend.coreEvent("messagesChanged", { messages: [{ id: 5, conversation: chat, kind: "deleted" }] })
+            }, 200],
+            [function() {
+                checkStack("conversations chat viewer unlock")
+                unlock()
+            }, 200],
+            [function() { checkStack("conversations chat") }, 0],
+        ],
+        // The same under a call's page.
+        viewerEmptiedUnderACall: [
+            [function() {
+                ready(false)
+                backend.results["chatMedia"] = mediaOf([5])
+            }, 100],
+            [function() { push("pages/ChatPage.qml", { identity: chat }) }, 50],
+            [function() { openViewer(5) }, 100],
+            [function() {
+                calls.identity = chat
+                calls.state = "active"
+            }, 200],
+            [function() {
+                check("the call's page is up", stack.currentPage.objectName, "call")
+                backend.coreEvent("chatDeleted", { identity: chat })
+            }, 200],
+            [function() {
+                check("the call's page stays", stack.currentPage.objectName, "call")
+                check("the viewer waits", !!page("viewer"), true)
+                calls.state = "ended"
+                calls.state = "idle"
+            }, 600],
+            [function() { check("the viewer has gone", !!page("viewer"), false) }, 0],
+        ],
+        // A file arriving while the list is on its way: every row once, at the message opened.
+        viewerFileDuringLoad: [
+            [function() {
+                ready(false)
+                backend.results["chatMedia"] = mediaOf([7, 6, 5])
+                backend.hold("chatMedia")
+            }, 100],
+            [function() { openViewer(6) }, 50],
+            [function() {
+                backend.coreEvent("messageAdded", { message: { id: 8, conversation: chat, kind: "file" } })
+            }, 700],
+            [function() {
+                check("no second answer to get in between", countSent("chatMedia"), 1)
+                backend.results["chatMedia"] = mediaOf([8, 7, 6, 5])
+                backend.release("chatMedia")
+            }, 300],
+            [function() {
+                var viewer = page("viewer")
+                check("each once, in order", shownRows(viewer), "5 6 7 8")
+                check("at the one opened", viewer.currentItem.message, 6)
+            }, 0],
+        ],
+        // A deletion while the list is on its way isn't lost.
+        viewerDeletionDuringLoad: [
+            [function() {
+                ready(false)
+                backend.results["chatMedia"] = mediaOf([7, 6, 5])
+                backend.hold("chatMedia")
+            }, 100],
+            [function() { openViewer(6) }, 50],
+            [function() {
+                backend.coreEvent("messagesChanged", { messages: [{ id: 7, conversation: chat, kind: "deleted" }] })
+                backend.release("chatMedia")
+            }, 5],
+            [function() { backend.results["chatMedia"] = mediaOf([6, 5]) }, 300],
+            [function() {
+                var viewer = page("viewer")
+                check("gone", shownRows(viewer), "5 6")
+                check("at the one opened", viewer.currentItem.message, 6)
+            }, 0],
+        ],
+        // More files at once than one page of the answer: all of them, also in a long list.
+        viewerManyNewFiles: [
+            [function() {
+                ready(false)
+                backend.results["chatMedia"] = mediaOf(range(1200, 1))
+            }, 100],
+            [function() { openViewer(600) }, 500],
+            [function() {
+                var viewer = page("viewer")
+                check("all there", viewer.rows.length, 1200)
+                check("in the model", viewer.currentItem.parent.count, 1200)
+                check("at the one opened", viewer.currentItem.message, 600)
+                backend.results["chatMedia"] = mediaOf(range(1275, 1))
+                backend.coreEvent("messageAdded", { message: { id: 1275, conversation: chat, kind: "file" } })
+            }, 800],
+            [function() {
+                var viewer = page("viewer")
+                check("all new ones", viewer.rows.length, 1275)
+                check("in the model", viewer.currentItem.parent.count, 1275)
+                check("the last is the newest", viewer.rows[1274].id, 1275)
+                check("stays", viewer.currentItem.message, 600)
+                check("its place known", viewer.rowOf[1275], 1274)
+            }, 0],
+        ],
+        // Told only that something changed: what is gone goes. All of it: the viewer leaves.
+        viewerFollowsBulkChanges: [
+            [function() {
+                ready(false)
+                backend.results["chatMedia"] = mediaOf([7, 6, 5])
+            }, 100],
+            [function() { push("pages/ChatPage.qml", { identity: chat }) }, 50],
+            [function() { openViewer(7, { newestFirst: true }) }, 100],
+            [function() {
+                backend.results["chatMedia"] = mediaOf([7, 5])
+                backend.coreEvent("chatsChanged", {})
+            }, 100],
+            [function() {
+                var viewer = page("viewer")
+                check("one less", shownRows(viewer), "7 5")
+                check("stays", viewer.currentItem.message, 7)
+                backend.results["chatMedia"] = mediaOf([])
+                backend.coreEvent("chatsChanged", {})
+            }, 200],
+            [function() { checkStack("conversations chat") }, 0],
+        ],
+        // The chat deleted: nothing of it stays on the screen.
+        viewerLeavesWithItsChat: [
+            [function() {
+                ready(false)
+                backend.results["chatMedia"] = mediaOf([7, 6])
+            }, 100],
+            [function() { push("pages/ChatPage.qml", { identity: chat }) }, 50],
+            [function() { openViewer(7) }, 100],
+            [function() { backend.coreEvent("chatDeleted", { identity: "BBBBBBBB" }) }, 100],
+            [function() {
+                checkStack("conversations chat viewer")
+                backend.coreEvent("chatDeleted", { identity: chat })
+            }, 200],
+            [function() { checkStack("conversations chat") }, 0],
         ],
     })
 

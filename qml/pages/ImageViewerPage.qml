@@ -29,7 +29,16 @@ FullscreenContentPage {
     property bool listReady
     property int startIndex
     property bool overlayShown: true
+    // The model's rows in its order and each id's place in them, so that keeping up with changes
+    // doesn't go through the model row by row.
+    property var rows: []
     property var rowOf: ({})
+    // The list is being got or filled in. What changes meanwhile might not be in the answer, and
+    // the rows aren't there to apply it to: it asks for the list again afterwards.
+    property bool fetching
+    property bool fetchAgain
+    // Nothing left to show: on the way back.
+    property bool gone
     readonly property var currentItem: slideshow.item ? slideshow.item.currentItem : null
     readonly property bool zoomed: currentItem !== null && currentItem.zoomed
 
@@ -41,78 +50,190 @@ FullscreenContentPage {
         return { id: message.id, kind: message.mediaKind, body: JSON.stringify(message.body) }
     }
 
-    // The list comes whole, before the view is made: the view goes round in a circle, so with only
-    // part of the chat in it, the end of that part would lead to the wrong picture.
-    function load(before, found) {
+    function viewable(message) {
+        return message.mediaKind === "video" || Fmt.isPicture(message.body.mediaType)
+    }
+
+    // All of it, newest first; with what went wrong, if something did.
+    function fetchAll(before, found, done) {
         var args = { identity: identity, kinds: viewedKinds, limit: 500 }
         if (before) args.before = before
-        backend.call("chatMedia", args, function(ok, result) {
+        backend.call("chatMedia", args, function(ok, result, kind) {
+            if (page.gone) return
             if (!ok) {
-                show(found)
+                done(found, kind)
                 return
             }
             for (var i = 0; i < result.messages.length; ++i) {
-                var message = result.messages[i]
-                if (message.mediaKind === "video" || Fmt.isPicture(message.body.mediaType)) found.push(row(message))
+                if (page.viewable(result.messages[i])) found.push(page.row(result.messages[i]))
             }
-            if (result.next) page.load(result.next, found)
-            else page.show(found)
+            if (result.next) page.fetchAll(result.next, found, done)
+            else done(found, "")
         })
     }
 
+    // The list comes whole, before the view is made: the view goes round in a circle, so with only
+    // part of the chat in it, the end of that part would lead to the wrong picture.
     // `found`: newest first. The message opened is shown in any case.
     function show(found) {
-        var rows = newestFirst ? found : found.reverse()
+        var wanted = newestFirst ? found : found.reverse()
         var start = -1
-        for (var i = 0; i < rows.length && start < 0; ++i) {
-            if (rows[i].id === messageId) start = i
+        for (var i = 0; i < wanted.length && start < 0; ++i) {
+            if (wanted[i].id === messageId) start = i
         }
         if (start < 0) {
-            rows = [{ id: messageId, kind: animated ? "gif" : "image", body: JSON.stringify({ fileState: 2 }) }]
+            wanted = [{ id: messageId, kind: animated ? "gif" : "image", body: JSON.stringify({ fileState: 2 }) }]
             start = 0
         }
-        for (var j = 0; j < rows.length; ++j) media.append(rows[j])
-        indexRows()
+        rows = wanted
+        reindex(0)
         startIndex = start
-        listReady = true
+        fill()
     }
 
-    function indexRows() {
-        var rows = {}
-        for (var i = 0; i < media.count; ++i) rows[media.get(i).id] = i
-        rowOf = rows
+    // A chat can have thousands: not all in one go on the thread that draws.
+    function fill() {
+        if (gone) return
+        media.append(rows.slice(media.count, media.count + 500))
+        if (media.count < rows.length) {
+            nextChunk.restart()
+            return
+        }
+        listReady = true
+        fetched()
+    }
+
+    function fetched() {
+        fetching = false
+        if (fetchAgain) {
+            fetchAgain = false
+            refresh()
+        }
+    }
+
+    function reindex(from) {
+        for (var i = from; i < rows.length; ++i) rowOf[rows[i].id] = i
+    }
+
+    function removeRow(index) {
+        delete rowOf[rows[index].id]
+        rows.splice(index, 1)
+        media.remove(index)
     }
 
     // One message changed: its row takes that over, or goes with it.
     function applyChange(message) {
-        var row = rowOf[message.id]
-        if (row === undefined) return
+        var index = rowOf[message.id]
+        if (index === undefined) return
         if (message.kind !== "file") {
-            media.remove(row)
-            indexRows()
-            if (media.count === 0) pageStack.pop(pageStack.previousPage(page), PageStackAction.Immediate)
+            removeRow(index)
+            reindex(index)
+            if (rows.length === 0) close()
             return
         }
         var body = JSON.stringify(message.body)
-        if (media.get(row).body !== body) media.setProperty(row, "body", body)
+        if (rows[index].body !== body) {
+            rows[index].body = body
+            media.setProperty(index, "body", body)
+        }
     }
 
-    // New ones are the newest ones: those above the newest row known.
+    // New ones are the newest ones: those above the newest row known, however many there are.
     function addNew() {
-        backend.call("chatMedia", { identity: identity, kinds: viewedKinds, limit: 30 }, function(ok, result) {
-            if (!ok) return
-            var added = []
-            for (var i = 0; i < result.messages.length; ++i) {
+        if (fetching) {
+            fetchAgain = true
+            return
+        }
+        fetching = true
+        fetchNew("", [])
+    }
+
+    function fetchNew(before, added) {
+        var args = { identity: identity, kinds: viewedKinds, limit: 30 }
+        if (before) args.before = before
+        backend.call("chatMedia", args, function(ok, result) {
+            if (page.gone) return
+            if (!ok) {
+                page.fetched()
+                return
+            }
+            var reached = false
+            for (var i = 0; i < result.messages.length && !reached; ++i) {
                 var message = result.messages[i]
-                if (page.rowOf[message.id] !== undefined) break
-                if (message.mediaKind === "video" || Fmt.isPicture(message.body.mediaType)) added.push(page.row(message))
+                reached = page.rowOf[message.id] !== undefined
+                if (!reached && page.viewable(message)) added.push(page.row(message))
+            }
+            if (!reached && result.next) {
+                page.fetchNew(result.next, added)
+                return
             }
             for (var j = added.length - 1; j >= 0; --j) {
+                page.rows.splice(page.newestFirst ? 0 : page.rows.length, 0, added[j])
                 if (page.newestFirst) media.insert(0, added[j])
                 else media.append(added[j])
             }
-            page.indexRows()
+            page.reindex(0)
+            page.fetched()
         })
+    }
+
+    // Changes told only as "something changed": bulk ones, Keep messages, a message
+    // deleted in Threema Web. The list as the core has it now takes over, row by row.
+    function refresh() {
+        if (fetching) {
+            fetchAgain = true
+            return
+        }
+        fetching = true
+        fetchAll("", [], function(found, failure) {
+            // A private chat that locked keeps what it shows, under the lock; the chat that's
+            // gone doesn't.
+            if (failure === "contactNotFound" || failure === "groupNotFound") close()
+            else if (!failure) reconcile(page.newestFirst ? found : found.reverse())
+            if (!page.gone) page.fetched()
+        })
+    }
+
+    function reconcile(wanted) {
+        var kept = {}
+        for (var i = 0; i < wanted.length; ++i) kept[wanted[i].id] = true
+        for (var j = rows.length - 1; j >= 0; --j) {
+            if (!kept[rows[j].id]) removeRow(j)
+        }
+        if (wanted.length === 0) {
+            close()
+            return
+        }
+        for (var k = 0; k < wanted.length; ++k) {
+            if (k < rows.length && rows[k].id === wanted[k].id) {
+                if (rows[k].body !== wanted[k].body) {
+                    rows[k].body = wanted[k].body
+                    media.setProperty(k, "body", wanted[k].body)
+                }
+                continue
+            }
+            var later = k + 1
+            while (later < rows.length && rows[later].id !== wanted[k].id) ++later
+            if (later < rows.length) {
+                media.move(later, k, 1)
+                rows.splice(k, 0, rows.splice(later, 1)[0])
+                --k
+            } else {
+                rows.splice(k, 0, wanted[k])
+                media.insert(k, wanted[k])
+            }
+        }
+        reindex(0)
+    }
+
+    function close() {
+        gone = true
+        nextChunk.stop()
+        newArrived.stop()
+        rows = []
+        rowOf = {}
+        media.clear()
+        leaving.start()
     }
 
     function act(what) {
@@ -155,12 +276,32 @@ FullscreenContentPage {
             media.append({ id: -1, kind: "image", body: JSON.stringify({ fileState: 2 }) })
             listReady = true
         } else {
-            load("", [])
+            fetching = true
+            fetchAll("", [], function(found) { page.show(found) })
         }
     }
 
     ListModel {
         id: media
+    }
+
+    Timer {
+        id: nextChunk
+        interval: 1
+        onTriggered: page.fill()
+    }
+
+    // Only from the top of a stack at rest: the lock's or a call's page must stay where it is, and
+    // a pop during a transition would do nothing.
+    Timer {
+        id: leaving
+        interval: 50
+        repeat: true
+        onTriggered: {
+            if (pageStack.busy || window.stackHeld || pageStack.currentPage !== page) return
+            stop()
+            pageStack.pop(undefined, PageStackAction.Immediate)
+        }
     }
 
     // A file arriving is several events.
@@ -173,11 +314,20 @@ FullscreenContentPage {
     Connections {
         target: page.single ? null : backend
         onCoreEvent: {
-            if (name === "messageAdded") {
-                if (data.message.conversation === page.identity && data.message.kind === "file") newArrived.restart()
+            if (page.gone) return
+            if (name === "chatDeleted") {
+                if (data.identity === page.identity) page.close()
+            } else if (name === "chatsChanged") {
+                page.refresh()
+            } else if (name === "messageAdded") {
+                if (data.message.conversation !== page.identity || data.message.kind !== "file") return
+                if (page.fetching) page.fetchAgain = true
+                else newArrived.restart()
             } else if (name === "messagesChanged") {
                 for (var i = 0; i < data.messages.length; ++i) {
-                    if (data.messages[i].conversation === page.identity) page.applyChange(data.messages[i])
+                    if (data.messages[i].conversation !== page.identity) continue
+                    if (page.fetching) page.fetchAgain = true
+                    else page.applyChange(data.messages[i])
                 }
             }
         }
@@ -337,7 +487,7 @@ FullscreenContentPage {
     BusyIndicator {
         anchors.centerIn: parent
         size: BusyIndicatorSize.Large
-        running: !page.listReady
+        running: !page.listReady && !page.gone
     }
 
     Item {
