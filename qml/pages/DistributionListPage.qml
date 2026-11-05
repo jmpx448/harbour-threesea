@@ -98,7 +98,8 @@ Page {
                 //% "Rename"
                 text: qsTrId("threesea-me-rename")
                 onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("GroupNameDialog.qml"), { name: page.list.name })
+                    var dialog = pageStack.push(Qt.resolvedUrl("GroupNameDialog.qml"),
+                                                { name: page.list.name, distributionList: true })
                     dialog.accepted.connect(function() { page.update({ name: dialog.name }) })
                 }
             }
