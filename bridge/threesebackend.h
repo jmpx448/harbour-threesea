@@ -296,10 +296,12 @@ public:
     static bool callsSupported();
     // Send a picked file to a contact (`asPhoto`: re-encoded picture with thumbnail, else the
     // file as it is). The input's text goes along as `caption`. Callback like `call`.
-    // A video as media: `frame` is a grabToImage() result of its thumbnail, `seconds` its length
-    // (0: unknown).
+    // A video as media: `frame` is a grabToImage() result of its thumbnail (none: no thumbnail),
+    // `seconds` its length (0: unknown). One whose metadata can't be taken out is refused
+    // (`videoKeepsMetadata`), or with `keepMetadata`, the user having said so, goes as a plain file.
     Q_INVOKABLE void sendVideo(const QString &identity, const QString &path, const QVariant &frame,
-                               double seconds, const QString &caption, const QJSValue &callback);
+                               double seconds, const QString &caption, const QJSValue &callback,
+                               bool keepMetadata = false);
     Q_INVOKABLE void sendFile(const QString &identity, const QString &path, bool asPhoto,
                               const QString &caption, const QJSValue &callback = QJSValue());
     // Send the voice recorder's finished recording (AAC, or PCM that the core encodes as Opus).

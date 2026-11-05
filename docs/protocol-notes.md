@@ -370,9 +370,12 @@ videos without them whatever else happens to the file (scaled or not, Lite or Fu
 GStreamer's muxer wrote. It keeps only the boxes a player needs and only sound and picture tracks
 (Android's output has no others); the rest become zero-filled `free` boxes of the same size, so
 sample offsets hold and the streams stay byte for byte. The samples of a dropped track are zeroed
-too, the times in `mvhd`, `tkhd` and `mdhd` become 0, handler names are blanked and a trailer behind
-the last box is cut. Decisions in ADR 0025. Limits: the codecs' own streams aren't looked into
-(an H.264 SEI could say something), nor is what lies in an `mdat` outside any track's samples.
+too, the times in `mvhd`, `tkhd` and `mdhd` become 0, handler names, the vendor and encoder name in
+sample descriptions and data reference strings are blanked, and a trailer behind the last box is
+cut. Every kept track's chunks must lie in a kept `mdat`, or it isn't a video we can vouch for. A file
+that fails any of this is refused with `videoKeepsMetadata`, and goes only if the user says so (ADR
+0025). Limits: the codecs' own streams aren't looked into (an H.264 SEI could say something), nor
+what lies in an `mdat` outside any track's samples, nor sample descriptions' inner boxes.
 
 Width and height in the file message are the picture's as shown (`tkhd`, with its rotation), not
 the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg"), as on Android

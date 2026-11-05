@@ -395,6 +395,11 @@ ApplicationWindow {
         list.push(caption)
         captionsOnTheirWay[identity] = list
     }
+    function captionNotOnItsWay(identity, caption) {
+        var list = captionsOnTheirWay[identity] || []
+        var at = list.indexOf(caption)
+        if (at >= 0) list.splice(at, 1)
+    }
     // This caption, or without one any at all.
     function captionOnItsWay(identity, caption) {
         var list = captionsOnTheirWay[identity] || []
@@ -406,11 +411,7 @@ ApplicationWindow {
     // file the page took back, so that the bridge leaves it in place (removeTempSources).
     function fileAnswer(chat, alive, identity, file) {
         return function(ok, result, kind, message) {
-            if (file.caption) {
-                var list = captionsOnTheirWay[identity] || []
-                var at = list.indexOf(file.caption)
-                if (at >= 0) list.splice(at, 1)
-            }
+            if (file.caption) captionNotOnItsWay(identity, file.caption)
             if (alive.yes) {
                 var kept = chat.fileAnswered(file, ok, result, kind, message)
                 chat.sendNext()

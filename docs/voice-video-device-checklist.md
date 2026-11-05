@@ -79,6 +79,13 @@ Settings → Media & storage → Video size: "Small (480 px)".
 6. A video with a position in it (the camera with location on; `exiftool` or a media info app shows
    `GPS`), sent as media and saved by the recipient.
    - Expect: no position, no phone model and no recording time in the recipient's copy.
+7. Share a video to Threesea from the Gallery, into a chat, then send it.
+   - Expect: it goes as media with its thumbnail, like one picked in the chat, and steps 5 and 6 hold.
+8. Send a `.webm` or `.mkv` through the video picker.
+   - Expect: a dialog says the file keeps its metadata, "Send as it is" sends it as a plain file
+     with its own name and caption, "Don't send" brings the caption back and sends nothing.
+9. The same, leaving the chat right after tapping send.
+   - Expect: a notice that it was not sent, the caption is in the chat's draft next time.
 
 ## F. Chat background and text size
 

@@ -17,13 +17,23 @@ offsets to rewrite, so a player can't get a file that differs in anything but wh
 list of what stays, not of what goes.
 
 A file that can't be vouched for (another container, a damaged one, sample tables that don't add up,
-a track to drop in a fragmented file) goes out with rendering `file`, unchanged, not as media. A
-plain file is what the user can recognise as "the file as it is", and files are never changed. No
-second MP4 writer, and no refusing to send.
+samples that aren't in the file, a track to drop in a fragmented file) is refused with its own error
+(`videoKeepsMetadata`), and nothing of it stays. The chat asks what to do, saying what the file
+keeps: send it as it is (`keepMetadata`, then as a plain file, unchanged, under its own name), or
+don't send it. Sending it unasked would break what the first part promises at exactly the rare
+moment nobody is looking, and silently dropping it would lose the user's video. No second MP4 writer.
+
+Where there is nobody to ask, it isn't sent, and a notice says so: a chat being left (videos still
+waiting go to the core at once, without a thumbnail, and captures of ours go with the refusal, as
+for any file refused then), and a forward. A video picked "as a file" is the user's file and isn't
+touched; every other way a video reaches a chat goes through the core's cleaning, a shared one and
+one the thumbnailer has no frame for included.
 
 ## Consequences
 
 Subtitle and time code tracks go too; Android's re-encoding drops those as well. WebM, MKV and AVI
-never show as media to the recipient. Forwarding a media video cleans it as well: running it twice
-changes nothing, and a list's members get the same bytes. The codecs' own streams are not looked
-into.
+never show as media to the recipient: each one asks first, and goes as a file. A received WebM sent
+as media can't be forwarded; saving it and sending it as a file can. Forwarding a media video cleans
+it as well: running it twice changes nothing, and a list's members get the same bytes. The codecs'
+own streams are not looked into, nor is an `mdat` outside any track's samples, nor sample entries'
+inner boxes (`avcC` and the like) beyond their vendor and encoder name fields.

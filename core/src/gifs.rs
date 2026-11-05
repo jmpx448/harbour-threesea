@@ -255,6 +255,7 @@ impl App {
             height: favourite.height,
             duration: None,
             encode: None,
+            keep_metadata: false,
         });
         self.attachments.clear();
         result

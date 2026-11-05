@@ -90,9 +90,10 @@ void FilePreparer::run()
     request.insert(QStringLiteral("mediaType"), mediaType);
 
     // Videos as media (Threema shows them with their thumbnail and plays them), scaled down
-    // where Settings → Media & storage → Video size asks for it and the phone can.
-    const QImage videoFrame = m_videoFrame.isNull() ? QImage() : opaquePart(m_videoFrame);
-    if (mediaType.startsWith(QLatin1String("video/")) && !videoFrame.isNull()
+    // where Settings → Media & storage → Video size asks for it and the phone can. Also without a
+    // thumbnail (the thumbnailer failed, or took too long): the core still has to see them, to
+    // take out their metadata, as it doesn't for files.
+    if (mediaType.startsWith(QLatin1String("video/"))
             && request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")) {
         // The frame is only the thumbnail, a square whatever the video is: the core takes the
         // size it announces from the file it sends.
@@ -111,8 +112,11 @@ void FilePreparer::run()
         }
 #endif
         request.insert(QStringLiteral("path"), path);
-        const QImage frame = limited(videoFrame, ThumbnailSide).convertToFormat(QImage::Format_RGB32);
-        emit prepared(request, QByteArray(), encode(frame, "JPEG", 80), QString());
+        const QImage frame = m_videoFrame.isNull() ? QImage() : opaquePart(m_videoFrame);
+        const QByteArray thumbnail = frame.isNull()
+            ? QByteArray()
+            : encode(limited(frame, ThumbnailSide).convertToFormat(QImage::Format_RGB32), "JPEG", 80);
+        emit prepared(request, QByteArray(), thumbnail, QString());
         return;
     }
 

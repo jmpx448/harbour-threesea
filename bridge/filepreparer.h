@@ -21,7 +21,7 @@ public:
     // `scratchPath`: where a scaled-down video may be written (the cache's capture folder,
     // emptied at every start); empty: send videos as they are.
     FilePreparer(const QString &path, const QVariantMap &request, const QString &scratchPath = QString());
-    // A video: its first frame (from the thumbnailer) becomes the thumbnail.
+    // A video: its first frame (from the thumbnailer) becomes the thumbnail, if there is one.
     void setVideoFrame(const QImage &frame) { m_videoFrame = frame; }
     void run() override;
 

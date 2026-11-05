@@ -140,6 +140,8 @@ pub struct OutgoingFile {
     pub height: Option<u32>,
     pub duration: Option<f64>,
     pub encode: Option<String>,
+    /// See `sendFile`'s `keepMetadata`.
+    pub keep_metadata: bool,
 }
 
 /// In a file message's body: the blob's nonce, if it came as a deprecated image (hex).
@@ -1095,7 +1097,11 @@ impl App {
                 }
                 Ok(json!({}))
             }
-            Err(error @ (ApiError::MessageTooLong | ApiError::FileTooLarge)) => Err(error),
+            Err(
+                error @ (ApiError::MessageTooLong
+                | ApiError::FileTooLarge
+                | ApiError::VideoKeepsMetadata),
+            ) => Err(error),
             Err(error) => {
                 tracing::warn!(kind = error.kind(), "file under a write pass refused");
                 Err(ApiError::Locked)
@@ -1147,18 +1153,22 @@ impl App {
             });
         }
         // Sent as media it is the picture that counts, not what the file says about itself, and
-        // the recipient gets told the real size. What can't be vouched for goes out as a file.
+        // the recipient gets told the real size. What can't be vouched for leaves only if the user
+        // said so, and then as what it is: a plain file, as it was picked.
         if file.rendering == "media" && file.media_type.starts_with("video/") {
-            if let Ok(size) = crate::mp4::clean(&mut data) {
-                if let Some((width, height)) = size {
-                    file.width = Some(width);
-                    file.height = Some(height);
+            match crate::mp4::clean(&mut data) {
+                Ok(size) => {
+                    if let Some((width, height)) = size {
+                        file.width = Some(width);
+                        file.height = Some(height);
+                    }
                 }
-            } else {
-                tracing::info!("video goes out as a file: its metadata can't be removed");
-                file.rendering = "file".to_owned();
-                file.width = None;
-                file.height = None;
+                Err(crate::mp4::NotCleanable) if file.keep_metadata => {
+                    file.rendering = "file".to_owned();
+                    file.width = None;
+                    file.height = None;
+                }
+                Err(crate::mp4::NotCleanable) => return Err(ApiError::VideoKeepsMetadata),
             }
         }
         if data.len() > media::MAX_BLOB_SIZE {
@@ -1849,6 +1859,7 @@ impl App {
                     height: dimension("height"),
                     duration: body["duration"].as_f64(),
                     encode: None,
+                    keep_metadata: false,
                 });
                 self.attachments.clear();
                 result
@@ -2849,26 +2860,25 @@ mod tests {
         let (recording, samples) = fixture::video(1920, 1080, true);
         let source = dir.path().join("VID_20261105_120000.mp4");
         std::fs::write(&source, &recording).unwrap();
-        let send = |app: &mut App, rendering: &str, media_type: &str| {
-            let reply = app
-                .send_file(OutgoingFile {
-                    identity: "BBBBBBBB".to_owned(),
-                    path: Some(source.to_string_lossy().into_owned()),
-                    name: Some("VID_20261105_120000.mp4".to_owned()),
-                    media_type: media_type.to_owned(),
-                    caption: None,
-                    rendering: rendering.to_owned(),
-                    width: Some(512),
-                    height: Some(512),
-                    duration: None,
-                    encode: None,
-                })
-                .unwrap();
+        let file = |rendering: &str, media_type: &str, keep_metadata: bool| OutgoingFile {
+            identity: "BBBBBBBB".to_owned(),
+            path: Some(source.to_string_lossy().into_owned()),
+            name: Some("VID_20261105_120000.mp4".to_owned()),
+            media_type: media_type.to_owned(),
+            caption: None,
+            rendering: rendering.to_owned(),
+            width: Some(512),
+            height: Some(512),
+            duration: None,
+            encode: None,
+            keep_metadata,
+        };
+        let stored = |app: &App, reply: &Value| {
             let id = reply["id"].as_i64().unwrap();
             let body = app.store.message(id).unwrap().unwrap().body;
             let body: Value = serde_json::from_str(&body).unwrap();
-            let stored = app.media.read(id, MediaPart::File).unwrap().unwrap();
-            (body, stored.to_vec())
+            let bytes = app.media.read(id, MediaPart::File).unwrap().unwrap();
+            (body, bytes.to_vec())
         };
         let contains = |data: &[u8], needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
 
@@ -2876,13 +2886,14 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let (body, stored) = send(&mut app, "media", "video/mp4");
+                let reply = app.send_file(file("media", "video/mp4", false)).unwrap();
+                let (body, bytes) = stored(&app, &reply);
                 for secret in fixture::SECRETS {
-                    assert!(!contains(&stored, secret));
+                    assert!(!contains(&bytes, secret));
                 }
-                assert_eq!(stored.len(), recording.len());
+                assert_eq!(bytes.len(), recording.len());
                 assert_eq!(
-                    &stored[samples..][..fixture::PICTURE.len()],
+                    &bytes[samples..][..fixture::PICTURE.len()],
                     fixture::PICTURE
                 );
                 assert_eq!(body["rendering"], "media");
@@ -2892,28 +2903,113 @@ mod tests {
                     (&json!(1080), &json!(1920))
                 );
                 assert_eq!(body["name"], "video.mp4");
-                assert_eq!(body["size"], stored.len());
+                assert_eq!(body["size"], bytes.len());
 
                 // Sent as a file, it is the user's file, unchanged.
-                let (body, stored) = send(&mut app, "file", "video/mp4");
-                assert_eq!(stored, recording);
+                let reply = app.send_file(file("file", "video/mp4", false)).unwrap();
+                let (body, bytes) = stored(&app, &reply);
+                assert_eq!(bytes, recording);
                 assert_eq!(body["rendering"], "file");
-                assert_eq!(body["name"], "VID_20261105_120000.mp4");
-
-                // Another container can't be vouched for: not as media.
-                std::fs::write(&source, b"\x1aE\xdf\xa3 a webm file").unwrap();
-                let (body, stored) = send(&mut app, "media", "video/webm");
-                assert_eq!(stored, b"\x1aE\xdf\xa3 a webm file");
-                assert_eq!(body["rendering"], "file");
-                assert_eq!(body["width"], Value::Null);
                 assert_eq!(body["name"], "VID_20261105_120000.mp4");
 
                 // A photo sent as media says nothing with its name either.
                 std::fs::write(&source, b"\xff\xd8\xff").unwrap();
-                let (body, _) = send(&mut app, "media", "image/jpeg");
-                assert_eq!(body["name"], "image.jpg");
+                let reply = app.send_file(file("media", "image/jpeg", false)).unwrap();
+                assert_eq!(stored(&app, &reply).0["name"], "image.jpg");
             })
             .await;
+    }
+
+    /// What can't be cleaned doesn't leave unless the user says so, and nothing of it stays.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_video_that_cant_be_cleaned_waits_for_the_user() {
+        let (dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let webm = b"\x1aE\xdf\xa3 a webm file";
+        let source = dir.path().join("VID_20261105_120000.webm");
+        std::fs::write(&source, webm).unwrap();
+        let request = |keep: Option<bool>| {
+            let mut request = json!({
+                "id": 1, "cmd": "sendFile", "identity": "BBBBBBBB", "rendering": "media",
+                "mediaType": "video/webm", "name": "VID_20261105_120000.webm",
+                "path": source.to_string_lossy(),
+            });
+            if let Some(keep) = keep {
+                request["keepMetadata"] = json!(keep);
+            }
+            request.to_string()
+        };
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                for keep in [None, Some(false)] {
+                    let reply: Value =
+                        serde_json::from_str(&app.handle(&request(keep)).await).unwrap();
+                    assert_eq!(reply["error"]["kind"], "videoKeepsMetadata", "{reply}");
+                }
+                assert!(
+                    app.store
+                        .conversation_messages("BBBBBBBB", 10)
+                        .unwrap()
+                        .is_empty(),
+                    "nothing stored, nothing on its way"
+                );
+
+                let reply: Value =
+                    serde_json::from_str(&app.handle(&request(Some(true))).await).unwrap();
+                assert_eq!(reply["ok"], true, "{reply}");
+                let id = reply["result"]["id"].as_i64().unwrap();
+                let body = app.store.message(id).unwrap().unwrap().body;
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["rendering"], "file");
+                assert_eq!(body["name"], "VID_20261105_120000.webm");
+                assert_eq!(body["width"], Value::Null);
+                let bytes = app.media.read(id, MediaPart::File).unwrap().unwrap();
+                assert_eq!(bytes.as_slice(), webm);
+            })
+            .await;
+    }
+
+    /// Someone else's video that can't be cleaned isn't passed on with what it says either.
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_a_video_that_cant_be_cleaned_is_refused() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let body = json!({"rendering": "media", "mediaType": "video/webm", "name": "a.webm",
+                          "size": 4, "fileState": STATE_LOCAL});
+        let received = app
+            .store
+            .insert_incoming("BBBBBBBB", 1, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap();
+        app.media
+            .write(received.id, MediaPart::File, b"\x1aE\xdf\xa3")
+            .unwrap();
+        assert!(matches!(
+            app.forward_message(received.id, "CCCCCCCC"),
+            Err(ApiError::VideoKeepsMetadata)
+        ));
     }
 
     /// Every way of writing brings an archived chat back, a list's copies their members' chats too.
@@ -3003,6 +3099,7 @@ mod tests {
                     height: None,
                     duration: None,
                     encode: None,
+                    keep_metadata: false,
                 })
                 .unwrap();
             })

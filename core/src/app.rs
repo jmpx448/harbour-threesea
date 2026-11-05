@@ -409,6 +409,10 @@ pub enum Command {
         /// `opus`: attachment 0 is 16-bit mono PCM at 48 kHz, to be sent as Ogg Opus.
         #[serde(default)]
         encode: Option<String>,
+        /// The user said so: a video to send as media whose metadata can't be taken out goes as
+        /// a plain file, as it is. Without this it is refused.
+        #[serde(default)]
+        keep_metadata: bool,
     },
     /// Save a file message's file (decrypted) into `directory`; returns `{path}`.
     SaveFile {
@@ -1063,6 +1067,10 @@ pub enum ApiError {
     /// Linking failed with the ID already handed over, and the new device may be in the group.
     #[error("linking failed after the handover; the new device may be linked")]
     LinkUncertain,
+    /// A video to send as media whose metadata can't be taken out (docs/decisions/0025): only with
+    /// `keepMetadata`, as a plain file.
+    #[error("the video keeps its metadata")]
+    VideoKeepsMetadata,
     /// Only GIFs can be favourite GIFs.
     #[error("not a GIF")]
     NotGif,
@@ -1163,6 +1171,7 @@ impl ApiError {
             Self::ContactNotFound => "contactNotFound",
             Self::MessageTooLong => "messageTooLong",
             Self::FileTooLarge => "fileTooLarge",
+            Self::VideoKeepsMetadata => "videoKeepsMetadata",
             Self::NotGif => "notGif",
             Self::GroupCallNotRunning => "groupCallNotRunning",
             Self::GroupCallFull => "groupCallFull",
@@ -2013,6 +2022,7 @@ impl App {
                 height,
                 duration,
                 encode,
+                keep_metadata,
             } => {
                 let file = crate::app_media::OutgoingFile {
                     identity,
@@ -2025,6 +2035,7 @@ impl App {
                     height,
                     duration,
                     encode,
+                    keep_metadata,
                 };
                 // Only this command: nothing else that ends in sending a file uses a pass.
                 if self.take_write_pass(&file.identity) {

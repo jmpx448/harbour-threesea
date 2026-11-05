@@ -1121,6 +1121,13 @@ Page {
             draftSaver.restart()
             return ""
         }
+        if (kind === "videoKeepsMetadata") {
+            // Its caption stays on its way, in the stored draft, until the user has answered.
+            if (file.caption.length > 0) window.captionSent(identity, file.caption)
+            metadataQuestions = metadataQuestions.concat([file])
+            askAboutMetadata()
+            return file.path
+        }
         Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
         attachments = [{ path: file.path, photo: file.photo, name: file.name, video: file.video === true }]
                       .concat(attachments)
@@ -1151,11 +1158,58 @@ Page {
         if (editing) beforeEdit.text = kept
         else setInput(kept)
     }
+    // Videos whose metadata can't be taken out, for the user to decide about one at a time
+    // (ADR 0025). It waits for the chat to be what is showing.
+    property var metadataQuestions: []
+    property bool askingAboutMetadata
+    function askAboutMetadata() {
+        if (askingAboutMetadata || metadataQuestions.length === 0
+                || status !== PageStatus.Active || pageStack.busy) {
+            return
+        }
+        var file = metadataQuestions[0]
+        var alive = pageAlive
+        var answered = false
+        function answer(send) {
+            if (answered || !alive.yes) return
+            answered = true
+            askingAboutMetadata = false
+            metadataQuestions = metadataQuestions.slice(1)
+            if (send) {
+                file.keepMetadata = true
+                sendQueue = [file].concat(sendQueue)
+                if (!sendingQueue) sendNext()
+            } else {
+                backend.removeCapture(file.path)
+                if (file.caption.length > 0) {
+                    window.captionNotOnItsWay(identity, file.caption)
+                    restoreCaption(file)
+                    draftSaver.restart()
+                }
+            }
+        }
+        askingAboutMetadata = true
+        var dialog = pageStack.push(Qt.resolvedUrl("VideoMetadataDialog.qml"),
+                                    { name: file.name || file.path.split("/").pop() })
+        dialog.accepted.connect(function() { answer(true) })
+        dialog.rejected.connect(function() { answer(false) })
+        // Taken off the stack by something else (the app lock): no answer, so not sent.
+        dialog.done.connect(function() { if (dialog.result === DialogResult.None) answer(false) })
+    }
+    Connections {
+        target: pageStack
+        onBusyChanged: page.askAboutMetadata()
+    }
     // An answer can outlive the page: see window.fileAnswer.
     property var pageAlive: ({ yes: true })
     function sendNow(file) {
-        backend.sendFile(identity, file.path, file.photo, file.caption,
-                         window.fileAnswer(page, pageAlive, identity, file))
+        var answer = window.fileAnswer(page, pageAlive, identity, file)
+        if (file.video) {
+            backend.sendVideo(identity, file.path, file.frame, file.seconds || 0, file.caption, answer,
+                              file.keepMetadata === true)
+        } else {
+            backend.sendFile(identity, file.path, file.photo, file.caption, answer)
+        }
     }
     function sendNext() {
         if (sendQueue.length === 0) {
@@ -1166,7 +1220,8 @@ Page {
         var queue = sendQueue.slice()
         var file = queue.shift()
         sendQueue = queue
-        if (file.video) {
+        // What can't be cleaned goes on, the user having said so, with what it had.
+        if (file.video && !file.keepMetadata) {
             videoPreparer.start(file)
             return
         }
@@ -1604,15 +1659,22 @@ Page {
         // Nobody asked for that here: a notification opened another chat, or private chats closed.
         if (dropAttachments()) window.captureDiscarded()
         // Files still waiting to be sent go to the core at once, in their order; a video's
-        // thumbnail is made here, so a waiting video goes as a file. A thumbnail still on its
+        // thumbnail is made here, so a waiting video goes without one. A thumbnail still on its
         // way finds the path empty, and doesn't send it twice.
         if (videoPreparer.path.length > 0) {
-            var preparing = videoPreparer.path
+            var preparing = videoPreparer.file
             videoPreparer.path = ""
-            sendNow({ path: preparing, photo: false, caption: videoPreparer.file.caption })
+            sendNow(preparing)
         }
         for (var i = 0; i < sendQueue.length; ++i) sendNow(sendQueue[i])
         saveDraft()
+        // Nobody left to answer: not sent, and the caption is in the stored draft.
+        for (var q = 0; q < metadataQuestions.length; ++q) {
+            var unanswered = metadataQuestions[q]
+            backend.removeCapture(unanswered.path)
+            if (unanswered.caption.length > 0) window.captionNotOnItsWay(identity, unanswered.caption)
+            Notices.show(Errors.text("videoKeepsMetadata"), Notice.Long, Notice.Center)
+        }
         stopTyping()
         // Going back to this same chat further down, that one is the open one already.
         var below = pageStack.currentPage
@@ -1629,6 +1691,7 @@ Page {
         }
     }
     onStatusChanged: {
+        if (status === PageStatus.Active) askAboutMetadata()
         if (status === PageStatus.Deactivating) {
             stopTyping()
             saveDraft()
@@ -2800,7 +2863,7 @@ Page {
     }
 
     // A video's thumbnail (first frame, from the system thumbnailer) and length, then it is
-    // sent as media; without a frame it goes out as a plain file.
+    // sent as media, without a thumbnail if there is no frame.
     Item {
         id: videoPreparer
         // Off screen, not invisible: grabToImage only renders visible items.
@@ -2822,13 +2885,12 @@ Page {
         }
         function finish(image) {
             giveUp.stop()
-            var path = videoPreparer.path
-            if (path.length === 0) return
+            if (videoPreparer.path.length === 0) return
             videoPreparer.path = ""
             var entry = file
-            var sent = window.fileAnswer(page, page.pageAlive, page.identity, entry)
-            if (image) backend.sendVideo(page.identity, path, image, seconds, entry.caption, sent)
-            else backend.sendFile(page.identity, path, false, entry.caption, sent)
+            entry.frame = image
+            entry.seconds = seconds
+            page.sendNow(entry)
             frame.path = ""
             durationProbe.source = ""
         }

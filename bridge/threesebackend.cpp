@@ -768,7 +768,8 @@ void ThreeseBackend::addGifFavourite(const QString &path, const QJSValue &callba
 }
 
 void ThreeseBackend::sendVideo(const QString &identity, const QString &path, const QVariant &frame,
-                               double seconds, const QString &caption, const QJSValue &callback)
+                               double seconds, const QString &caption, const QJSValue &callback,
+                               bool keepMetadata)
 {
     const quint64 id = m_nextId++;
     const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
@@ -788,6 +789,9 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
     request.insert(QStringLiteral("rendering"), QStringLiteral("media"));
     if (seconds > 0) {
         request.insert(QStringLiteral("duration"), seconds);
+    }
+    if (keepMetadata) {
+        request.insert(QStringLiteral("keepMetadata"), true);
     }
     // Where a scaled-down copy may go (Settings → Media & storage → Video size). Nothing is
     // written unless the video is really scaled; the file goes once the core has read it.
