@@ -735,6 +735,7 @@ ApplicationWindow {
         frequency: BackgroundJob.FiveMinutes
         onTriggered: {
             window.checkGrace()
+            lifecycle.checkInstallation()
             wakeLimit.restart()
             backend.call("wake", {}, function(ok, result) {
                 if (!ok || !result.waiting) window.endWake()
@@ -1150,6 +1151,11 @@ ApplicationWindow {
             replyEnded(kept)
             return
         }
+        // Said by the version before this one, about this one being there.
+        if (n.summary === qsTrId("threesea-la-updated") || n.summary === qsTrId("threesea-la-removed")) {
+            n.close()
+            return
+        }
         var actions = n.remoteActions || []
         var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
         if (n.summary === qsTrId("threesea-la-reply-not-sent")) {
@@ -1314,6 +1320,36 @@ ApplicationWindow {
               qsTrId("threesea-la-locked-notification"), appLockedBody())
     }
 
+    // The package under this process has changed (bridge/applifecycle.h).
+    function installationChanged(removed, windowOpen, windowAsked) {
+        if (removed && !windowOpen) {
+            // Nothing of a removed app stays on the screen, and none of its actions would work.
+            forgetNotifications()
+        } else if (removed) {
+            //% "Threesea was removed from this device"
+            plainNotification("installChanged", qsTrId("threesea-la-removed"),
+                              //% "Close it to end it."
+                              qsTrId("threesea-la-removed-body"))
+        } else if (windowOpen) {
+            //% "Threesea was updated"
+            plainNotification("installChanged", qsTrId("threesea-la-updated"),
+                              //% "Close it and open it again to use the new version."
+                              qsTrId("threesea-la-updated-body"))
+        } else if (windowAsked) {
+            // A tap on the icon or a notification that this process ends on instead of answering.
+            plainNotification("installChanged", qsTrId("threesea-la-updated"),
+                              //% "Tap to open the new version."
+                              qsTrId("threesea-la-updated-open-body"))
+        } else if (backend.keepRunning) {
+            // It was receiving messages without a window, and now it isn't.
+            plainNotification("installChanged", qsTrId("threesea-la-updated"),
+                              //% "Open it to receive messages again."
+                              qsTrId("threesea-la-updated-closed-body"))
+        } else {
+            clearNotification("installChanged")
+        }
+    }
+
     // The app ends, and nobody keeps the grace time from here on: under a lock the words leave the
     // screen, as the next start may be far away. What waited in memory ends here, and a promise to
     // send it must not stay behind. All this reaches lipstick or doesn't before the process is
@@ -1356,7 +1392,7 @@ ApplicationWindow {
         var added = 0
         Object.keys(notifications).forEach(function(key) {
             // Who wrote what isn't in these.
-            if (["appLocked", "locked", "license", "serverMessage", "replyNotSent"].indexOf(key) >= 0
+            if (["appLocked", "locked", "license", "serverMessage", "replyNotSent", "installChanged"].indexOf(key) >= 0
                     || key.indexOf("replyNotSent:") === 0) return
             added += Math.max(notifications[key].itemCount, 1)
             if (closeNotification(key)) dbus.releaseToken(key)
@@ -1514,18 +1550,22 @@ ApplicationWindow {
         leaveAfterActions()
     }
 
-    // With Keep running off and no window, a run started for a notification's action ends with it
-    // (lifecycle.leaveIfUnwanted, which knows about the window). The core answering isn't enough:
-    // a reply it has stored would stay unsent until the app is next opened, and that may be days.
-    // A wake-up asks the server for an answer after what is on its way, and says how it went.
+    // With Keep running off or the package changed under it, and no window, a run ends with a
+    // notification's action (lifecycle.leaveIfUnwanted, which knows about the window). The core
+    // answering isn't enough: a reply it has stored would stay unsent until the app is next opened,
+    // and that may be days. A wake-up asks the server for an answer after what is on its way, and
+    // says how it went.
     property bool actionsCame: false
     property int actionsRunning: 0
     function actionEnded() {
         actionsRunning = actionsRunning - 1
         leaveAfterActions()
     }
+    function runUnwanted() {
+        return !backend.keepRunning || lifecycle.packageChanged()
+    }
     function leaveAfterActions() {
-        if (!actionsCame || backend.keepRunning || actionsRunning > 0) return
+        if (!actionsCame || !runUnwanted() || actionsRunning > 0) return
         if (NotificationActions.anyWaiting()) {
             actionsWaitLimit.restart()
             return
@@ -1554,7 +1594,7 @@ ApplicationWindow {
     Timer {
         id: actionsWaitLimit
         interval: 600000
-        onTriggered: if (!backend.keepRunning && NotificationActions.allRepliesKept()) lifecycle.leaveIfUnwanted()
+        onTriggered: if (window.runUnwanted() && NotificationActions.allRepliesKept()) lifecycle.leaveIfUnwanted()
     }
 
     function markNotifiedRead(identity, done) {
@@ -1815,6 +1855,11 @@ ApplicationWindow {
             window.actionsCame = true
             window.leaveAfterActions()
         }
+    }
+
+    Connections {
+        target: lifecycle
+        onInstallationChanged: window.installationChanged(removed, windowOpen, windowAsked)
     }
 
     Connections {

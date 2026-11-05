@@ -89,6 +89,10 @@ QtObject {
         // How often the window said that this run has done what it was for.
         property int left: 0
         function leaveIfUnwanted() { left = left + 1 }
+        function checkInstallation() { }
+        signal installationChanged(bool removed, bool windowOpen, bool windowAsked)
+        property bool changed: false
+        function packageChanged() { return changed }
     }
     property QtObject calls: QtObject {
         property string state: "idle"

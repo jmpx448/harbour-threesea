@@ -45,6 +45,7 @@ SOURCES += \
     bridge/emojihighlighter.cpp \
     bridge/filepreparer.cpp \
     bridge/mediareader.cpp \
+    bridge/installcheck.cpp \
     bridge/jsonlistmodel.cpp \
     bridge/main.cpp \
     bridge/mediaimageprovider.cpp \
@@ -70,6 +71,7 @@ HEADERS += \
     bridge/emojihighlighter.h \
     bridge/filepreparer.h \
     bridge/mediareader.h \
+    bridge/installcheck.h \
     bridge/jsonlistmodel.h \
     bridge/mediaimageprovider.h \
     bridge/peerimage.h \

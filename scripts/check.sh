@@ -102,6 +102,8 @@ if $full; then
         step "notification tokens (SDK)"
         scripts/test-notification-tokens.sh >/dev/null 2>&1 ||
             fail "notification tokens (scripts/test-notification-tokens.sh)"
+        step "the process's end (SDK)"
+        scripts/test-lifecycle.sh >/dev/null 2>&1 || fail "the process's end (scripts/test-lifecycle.sh)"
         step "voice recorder (SDK)"
         scripts/test-voicerecorder.sh >/dev/null 2>&1 || fail "voice recorder (scripts/test-voicerecorder.sh)"
     fi

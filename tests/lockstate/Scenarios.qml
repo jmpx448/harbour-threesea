@@ -107,6 +107,65 @@ QtObject {
     readonly property var lifecycle: fakes.lifecycle
 
     readonly property var scenarios: ({
+        // The package changing under the process: a word about it, and the old one's goes.
+        updateWithAWindowUpSaysSo: [
+            [function() { ready(false) }, 100],
+            [function() {
+                lifecycle.installationChanged(false, true, false)
+                var n = window.notifications["installChanged"]
+                check("told", n.summary, "threesea-la-updated")
+                check("what to do", n.body, "threesea-la-updated-body")
+                check("tapping it opens the app", n.remoteActions[0].method, "activate")
+                lifecycle.installationChanged(false, false, false)
+                check("Keep running off: nothing is missed", window.notifications["installChanged"], undefined)
+                backend.keepRunning = true
+                lifecycle.installationChanged(false, false, false)
+                check("ended, which is news", window.notifications["installChanged"].body, "threesea-la-updated-closed-body")
+            }, 0],
+        ],
+        // Asked for the window after an update: it can't start the new version itself.
+        updateAskedForTheWindowSaysToTap: [
+            [function() { ready(false) }, 100],
+            [function() {
+                lifecycle.installationChanged(false, false, true)
+                var n = window.notifications["installChanged"]
+                check("told", n.summary, "threesea-la-updated")
+                check("what to do", n.body, "threesea-la-updated-open-body")
+                check("tapping it opens the app", n.remoteActions[0].method, "activate")
+            }, 0],
+        ],
+        // A reply after an update goes out from here, and then this process ends, Keep running or not.
+        replyAfterAnUpdateEndsTheRun: [
+            [function() {
+                backend.keepRunning = true
+                lifecycle.changed = true
+                ready(false)
+            }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                check("sent", countSent("sendText"), 1)
+                check("a wake-up asks how it went", countSent("wake"), 1)
+                check("gone", lifecycle.left, 1)
+            }, 0],
+        ],
+        updateNoticeGoesWithTheNewVersion: [
+            [function() {
+                var n = { summary: "threesea-la-updated", closed: false, close: function() { n.closed = true } }
+                window.takeOver(n)
+                check("closed", n.closed, true)
+                check("not kept", window.notifications["installChanged"], undefined)
+                check("nor as something else", window.notifications["private"], undefined)
+            }, 0],
+        ],
+        removalLeavesNoNotifications: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("words") }, 100],
+            [function() {
+                check("one", !!window.notifications[chat], true)
+                lifecycle.installationChanged(true, false, false)
+                check("gone", window.notifications[chat], undefined)
+            }, 0],
+        ],
         // Keep running off and started by a notification's action: it stays until the reply has
         // gone out, and no longer.
         replyEndsTheRunWhenItHasGone: [

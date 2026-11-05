@@ -47,20 +47,34 @@ bool DBusInterface::registerOnBus()
     return true;
 }
 
+bool DBusInterface::windowRefused() const
+{
+    return m_windowGuard && m_windowGuard();
+}
+
 void DBusInterface::openChat(const QString &identity)
 {
+    if (windowRefused()) {
+        return;
+    }
     emit called();
     emit openChatRequested(identity);
 }
 
 void DBusInterface::activate()
 {
+    if (windowRefused()) {
+        return;
+    }
     emit called();
     emit activateRequested();
 }
 
 void DBusInterface::showUpdate()
 {
+    if (windowRefused()) {
+        return;
+    }
     emit called();
     emit activateRequested();
     emit showUpdateRequested();
@@ -68,6 +82,9 @@ void DBusInterface::showUpdate()
 
 void DBusInterface::showWebSessions()
 {
+    if (windowRefused()) {
+        return;
+    }
     emit called();
     emit activateRequested();
     emit showWebSessionsRequested();
@@ -75,6 +92,9 @@ void DBusInterface::showWebSessions()
 
 void DBusInterface::activate(const QStringList &urls)
 {
+    if (windowRefused()) {
+        return;
+    }
     emit called();
     emit activateRequested();
     for (const QString &url : urls) {

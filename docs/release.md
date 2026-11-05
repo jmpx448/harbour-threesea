@@ -63,6 +63,13 @@ devices, `armv7hl` for older ones), then in the terminal:
 remove the installed one first (`devel-su pkcon remove harbour-threesea`; the data stays in the
 home directory), then install the other.
 
+An app that keeps running notices a new or removed package by itself, by a file of the package in
+/usr/share: without a window it ends within minutes or at the next tap on its icon (a notification
+then opens the new version, or another tap), and with a window it says so and ends when that is
+closed. Lite has no package scripts for this (Harbour restricts them); Full's stop and restart the
+running instance at the end of the transaction, too. Versions before this keep running on the old
+files until they are closed or the phone restarts.
+
 The launcher keeps an app's icon in memory, so a new icon in an update shows only after the home
 screen restarts: reboot, or `systemctl --user restart lipstick` in the terminal.
 

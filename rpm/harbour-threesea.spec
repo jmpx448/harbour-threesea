@@ -113,6 +113,7 @@ ln -s ../harbour-threesea.service \
 %endif
 
 %if %{with full}
+# Lite has no scripts (Harbour restricts them): the app notices itself (bridge/applifecycle.h).
 # Full keeps running in the background, so an update used to leave the old version running
 # until the user turned that off, closed the app and reopened it. Stop the running instance
 # (SIGTERM quits it cleanly) and start the new one in the background for each user who had

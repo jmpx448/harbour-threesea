@@ -7,6 +7,8 @@
 #include <QStringList>
 #include <QTimer>
 
+#include <functional>
+
 // Session-bus entry points for notification actions (lipstick only delivers them via D-Bus):
 // "default" calls openChat() so tapping opens the chat, "reply" (an input action: lipstick appends
 // the typed text) calls reply(), "read" calls markRead(). Service name follows
@@ -36,6 +38,9 @@ public:
 
     explicit DBusInterface(QObject *parent = nullptr);
     bool registerOnBus();
+    // Asked first thing for a call that wants the window: true means no window from this process
+    // (see AppLifecycle), and the call is dropped.
+    void setWindowGuard(std::function<bool()> guard) { m_windowGuard = std::move(guard); }
     // The token for this chat's notification actions; `renew`: a new one (a new notification).
     Q_INVOKABLE QString actionToken(const QString &identity, bool renew = false);
     // The chat's notification closed, by a tap on one of its actions as well: the grace starts.
@@ -54,8 +59,10 @@ private:
     // Removes tokens past their grace; the timer comes back for the next one.
     void pruneTokens();
     bool tokenValid(const QString &identity, const QString &token) const;
+    bool windowRefused() const;
 
     QTimer m_tokenPrune;
+    std::function<bool()> m_windowGuard;
 
 public slots:
     Q_SCRIPTABLE void openChat(const QString &identity);

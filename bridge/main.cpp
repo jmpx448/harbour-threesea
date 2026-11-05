@@ -278,8 +278,11 @@ int main(int argc, char *argv[])
     showUnlessCalled.setSingleShot(true);
     QObject::connect(&showUnlessCalled, &QTimer::timeout, view.data(), [&view]() { view->show(); });
     QObject::connect(dbus, &DBusInterface::called, &showUnlessCalled, &QTimer::stop);
-    AppLifecycle *lifecycle = new AppLifecycle(view.data(), [backend]() { return backend->keepRunning(); }, view->engine());
+    AppLifecycle *lifecycle = new AppLifecycle(view.data(), [backend]() { return backend->keepRunning(); },
+                                               InstallCheck(SailfishApp::pathToMainQml().toLocalFile().toLocal8Bit()),
+                                               view->engine());
     view->rootContext()->setContextProperty(QStringLiteral("lifecycle"), lifecycle);
+    dbus->setWindowGuard([lifecycle]() { return lifecycle->refuseWindow(); });
     QObject::connect(dbus, &DBusInterface::backgroundRequested, lifecycle, &AppLifecycle::leaveIfUnwanted);
 
     view->setSource(SailfishApp::pathToMainQml());
