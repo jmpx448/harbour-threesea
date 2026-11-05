@@ -452,6 +452,7 @@ impl App {
         };
         result.map_err(|_| "badRequest")?;
         self.tell_connection(crate::connection::ToConnection::SendPending);
+        self.send_group_pictures();
         Ok(())
     }
 }

@@ -2495,6 +2495,8 @@ mod tests {
                     "DROP TABLE awaiting_reflection;
                      ALTER TABLE messages DROP COLUMN written_out;
                      DROP TABLE picture_restored; DROP TABLE synced_pictures;
+                     DROP TABLE group_picture_sends;
+                     ALTER TABLE groups DROP COLUMN picture_pending;
                      PRAGMA user_version = 35;",
                 )
                 .unwrap();

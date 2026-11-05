@@ -209,6 +209,8 @@ const MIGRATIONS: &[&str] = &[
     crate::profile_pictures::MIGRATION_RESTORED,
     // 39: pictures another device of the group changed, until they are stored here
     crate::profile_pictures::MIGRATION_SYNCED_PICTURES,
+    // 40: who is to get a group's picture once it has been uploaded anew; a newer one on its way
+    crate::groups::MIGRATION_PICTURE_SENDS,
 ];
 
 /// Setting keys.

@@ -72,6 +72,8 @@ pub enum CoreEvent {
     RemoveGroupPicture(String),
     /// Internal: a group's picture changed; download it (group key).
     DownloadGroupPicture(String),
+    /// Internal: someone is to get a group's picture from us: `group_picture_sends`.
+    SendGroupPictures,
     /// Internal: a contact's picture changed (descriptor persisted in `picture_downloads`);
     /// download it.
     DownloadContactPicture(String),
@@ -215,6 +217,7 @@ impl CoreEvent {
             | Self::SyncQueued
             | Self::RemoveGroupPicture(_)
             | Self::DownloadGroupPicture(_)
+            | Self::SendGroupPictures
             | Self::DownloadContactPicture(_)
             | Self::SyncPicture { .. }
             | Self::GroupDeleted(_)
@@ -691,6 +694,7 @@ impl StoreConversations {
                     events.push(CoreEvent::GroupsChanged);
                 }
                 if !outcome.state_sent_to.is_empty() {
+                    events.push(CoreEvent::SendGroupPictures);
                     events.push(CoreEvent::AnnounceGroupCall {
                         conversation: crate::groups::key(&group_identity),
                         receivers: outcome.state_sent_to,

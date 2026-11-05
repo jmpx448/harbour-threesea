@@ -1007,7 +1007,8 @@ mod tests {
                 .execute_batch(
                     "ALTER TABLE messages DROP COLUMN written_out;
                      ALTER TABLE groups DROP COLUMN kicked;
-                     DROP TABLE synced_pictures;
+                     DROP TABLE synced_pictures; DROP TABLE group_picture_sends;
+                     ALTER TABLE groups DROP COLUMN picture_pending;
                      DROP TABLE group_member_lookups; DROP TABLE group_picture_syncs;
                      DROP TABLE chat_tones;
                      DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;

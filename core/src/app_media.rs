@@ -1379,6 +1379,7 @@ impl App {
             CoreEvent::RemoveGroupPicture(key) => self.media.remove_picture(key),
             CoreEvent::WebSessionResume(hash) => self.web_resume(hash),
             CoreEvent::DownloadGroupPicture(key) => self.download_group_picture(key.clone()),
+            CoreEvent::SendGroupPictures => self.send_group_pictures(),
             CoreEvent::DownloadContactPicture(identity) => {
                 self.download_contact_picture(identity.clone());
             }

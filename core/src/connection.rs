@@ -2573,6 +2573,7 @@ impl<'a> Session<'a> {
                             )));
                         }
                         if let Some(conversation) = requeued.state_of.take() {
+                            self.emit(CoreEvent::SendGroupPictures);
                             self.emit(CoreEvent::AnnounceGroupCall {
                                 conversation,
                                 receivers: vec![peer.clone()],

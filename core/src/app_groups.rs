@@ -40,6 +40,26 @@ pub(crate) fn title(
         .join(", ")
 }
 
+/// A group's picture, encrypted and uploaded for its members (persisted).
+async fn upload_group_picture(
+    https: &crate::https::HttpsClient,
+    data: &[u8],
+) -> Result<GroupPicture, media::MediaError> {
+    let mut key = [0_u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    let blob_id = media::upload(
+        https,
+        &media::encrypt_blob(&key, MediaPart::File, data),
+        true,
+    )
+    .await?;
+    Ok(GroupPicture {
+        blob_id,
+        key,
+        size: u32::try_from(data.len()).unwrap_or(u32::MAX),
+    })
+}
+
 /// The blob expired, or the key is wrong, or it is far too large: no later try changes that.
 pub(crate) fn picture_is_gone(error: &media::MediaError) -> bool {
     matches!(
@@ -281,6 +301,7 @@ impl App {
         }
         self.tell_connection(ToConnection::SendPending);
         if !added.is_empty() {
+            self.send_group_pictures();
             self.announce_running_group_call(key, added);
         }
         self.group_info(key)
@@ -359,9 +380,64 @@ impl App {
                         }
                     }
                 }
-                Err(error) => tracing::warn!(%error, "group picture download failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "group picture download failed");
+                    // Whatever no later try changes: nothing limits these tries otherwise.
+                    if !error.is_transient()
+                        && let Err(error) = store.group_picture_gone(&key, &picture)
+                    {
+                        tracing::warn!(%error, "gone group picture not noted");
+                    }
+                }
             }
         });
+    }
+
+    /// Whoever is to get a group's picture from us: uploaded anew, then sent to them. What fails
+    /// stays noted, for the next `resume_picture_downloads`.
+    pub(crate) fn send_group_pictures(&self) {
+        let Ok(keys) = self.store.groups_owing_picture() else {
+            return;
+        };
+        for key in keys {
+            let store = Rc::clone(&self.store);
+            let https = self.https.clone();
+            let media = std::sync::Arc::clone(&self.media);
+            let connection = self.connection.clone();
+            tokio::task::spawn_local(async move {
+                let Ok(Some(group)) = store.group(&key) else {
+                    return;
+                };
+                let on_device = if group.picture_version == 0 {
+                    Ok(None)
+                } else {
+                    media.read_picture(&key)
+                };
+                let fresh = match on_device {
+                    Ok(Some(data)) => match upload_group_picture(&https, &data).await {
+                        Ok(picture) => Some(picture),
+                        Err(error) => {
+                            tracing::warn!(%error, "group picture not uploaded");
+                            return;
+                        }
+                    },
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::warn!(%error, "group picture not read");
+                        return;
+                    }
+                };
+                match store.finish_group_picture_sends(&key, group.picture_version, fresh) {
+                    Ok(true) => {
+                        if let Some(connection) = &connection {
+                            let _ = connection.send(ToConnection::SendPending);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "group picture not queued"),
+                }
+            });
+        }
     }
 
     /// `setGroupPicture` (creator): attachment 0 is the JPEG (prepared by the bridge); uploaded
@@ -374,23 +450,14 @@ impl App {
             .next()
             .filter(|data| !data.is_empty())
             .ok_or_else(|| ApiError::Internal("no picture".into()))?;
-        let mut picture_key = [0_u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut picture_key);
-        let blob_id = media::upload(
-            &self.https,
-            &media::encrypt_blob(&picture_key, MediaPart::File, &data),
-            true,
-        )
-        .await
-        .map_err(|e| ApiError::Network(e.to_string()))?;
+        let picture = upload_group_picture(&self.https, &data)
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
         self.media
             .write_picture(key, &data)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let picture = GroupPicture {
-            blob_id,
-            key: picture_key,
-            size: u32::try_from(data.len()).unwrap_or(u32::MAX),
-        };
+        // Everyone gets it now.
+        self.store.forget_group_picture_sends(key)?;
         self.store.group_outbox_add(
             key,
             &group.members,
@@ -408,6 +475,7 @@ impl App {
     pub(crate) fn remove_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
         self.store.cancel_synced_picture(key)?;
+        self.store.forget_group_picture_sends(key)?;
         self.store.group_outbox_add(
             key,
             &group.members,
@@ -603,6 +671,7 @@ impl App {
                 self.apply_synced_picture(target);
             }
         }
+        self.send_group_pictures();
         // What the other devices are still owed: a picture not on the mirror yet, a member whose
         // lookup failed or never got to run.
         if self.store.own_picture_sync_owed().unwrap_or(false) {
@@ -867,6 +936,70 @@ mod tests {
             )
         );
         assert_eq!(queued.len(), 3);
+    }
+
+    /// Set here or on another device, it is on the device: a new upload for whoever is added, and
+    /// only once that has worked does anything go out, after the setup and the name.
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_added_waits_for_a_new_upload_of_a_picture_that_is_here() {
+        let (_dir, mut app) = app();
+        let key = own_group(&mut app, &["AAAAAAAA"]);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        group.picture_version = 7;
+        app.store.upsert_group(&group).unwrap();
+
+        app.store.outbox_clear(&key).unwrap();
+        // The upload itself is never run here: the test has no network.
+        let tasks = tokio::task::LocalSet::new();
+        let entered = tasks.enter();
+        app.set_group_members(&key, &["AAAAAAAA".to_owned(), "BBBBBBBB".to_owned()])
+            .unwrap();
+        drop(entered);
+        let sent = |app: &App| -> Vec<String> {
+            queued(app, &key).into_iter().map(|entry| entry.0).collect()
+        };
+        assert_eq!(sent(&app), [OUTBOX_GROUP_SETUP, OUTBOX_GROUP_NAME]);
+        assert_eq!(
+            app.store.groups_owing_picture().unwrap(),
+            std::slice::from_ref(&key)
+        );
+
+        // An upload that took longer than a newer picture: they stay for the next try.
+        let fresh = GroupPicture {
+            blob_id: BlobId([8; 16]),
+            key: [9; 32],
+            size: 3,
+        };
+        assert!(
+            !app.store
+                .finish_group_picture_sends(&key, 6, Some(fresh.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            app.store.groups_owing_picture().unwrap(),
+            std::slice::from_ref(&key)
+        );
+
+        assert!(
+            app.store
+                .finish_group_picture_sends(&key, 7, Some(fresh.clone()))
+                .unwrap()
+        );
+        assert!(app.store.groups_owing_picture().unwrap().is_empty());
+        let queued = queued(&app, &key);
+        assert_eq!(
+            queued[2],
+            (
+                groups::OUTBOX_GROUP_SET_PICTURE.to_owned(),
+                fresh.to_json(),
+                vec!["BBBBBBBB".to_owned()]
+            )
+        );
+        // The next one's starting point, should the file ever be gone.
+        let group = app.store.group(&key).unwrap().unwrap();
+        assert_eq!(group.picture, Some(fresh));
+        assert_eq!(group.picture_version, 7);
+        assert!(app.store.groups_with_pending_picture().unwrap().is_empty());
     }
 
     /// A picture that says it is too large isn't even asked for (the test has no network).

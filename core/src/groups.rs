@@ -85,6 +85,18 @@ pub(crate) const MIGRATION_SYNC: &str = r#"
     ) WITHOUT ROWID;
     INSERT OR REPLACE INTO settings (key, value) VALUES ('group_contacts_to_reflect', '1');"#;
 
+/// What it takes to hand a group's picture on (store migration 40). `group_picture_sends`: who is to
+/// get the picture from us, its creator, which is uploaded anew for them first (csp.struct.yml,
+/// _Active Group State Resync Steps_). `picture_pending`: the creator's newer picture is yet to
+/// reach this device, while an older one is here.
+pub(crate) const MIGRATION_PICTURE_SENDS: &str = "
+    CREATE TABLE group_picture_sends (
+        key       TEXT NOT NULL,
+        receiver  TEXT NOT NULL,
+        PRIMARY KEY (key, receiver)
+    ) WITHOUT ROWID;
+    ALTER TABLE groups ADD COLUMN picture_pending INTEGER NOT NULL DEFAULT 0;";
+
 /// _Recently resynced_ lasts an hour (both directions).
 const RESYNC_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
@@ -352,12 +364,13 @@ impl Store {
         Ok(false)
     }
 
-    /// Groups whose picture descriptor is known but whose image never made it onto the device
+    /// Groups whose picture descriptor is known but whose image didn't make it onto the device
     /// (version 0): their downloads are tried again on reconnect and by maintenance.
     pub fn groups_with_pending_picture(&self) -> Result<Vec<String>, StoreError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT key FROM groups WHERE picture IS NOT NULL AND picture_version = 0")?;
+        let mut statement = self.conn.prepare(
+            "SELECT key FROM groups
+             WHERE picture IS NOT NULL AND (picture_version = 0 OR picture_pending != 0)",
+        )?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -575,6 +588,7 @@ impl Store {
     pub(crate) fn store_new_group_picture(&self, group: &Group) -> Result<(), StoreError> {
         let step = self.step()?;
         self.upsert_group(group)?;
+        self.set_group_picture_pending(&group.key, false)?;
         if self.multi_device()?.is_some() {
             self.conn.execute(
                 "INSERT OR IGNORE INTO group_picture_syncs (key) VALUES (?1)",
@@ -583,6 +597,114 @@ impl Store {
         }
         step.commit()?;
         Ok(())
+    }
+
+    fn set_group_picture_pending(&self, key: &str, pending: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE groups SET picture_pending = ?2 WHERE key = ?1",
+            params![key, pending],
+        )?;
+        Ok(())
+    }
+
+    /// The blob of this picture is gone for good: not asked for again. The group keeps what it
+    /// has, and a set-profile-picture from its creator is a new try, whatever it says.
+    pub(crate) fn group_picture_gone(
+        &self,
+        key: &str,
+        picture: &GroupPicture,
+    ) -> Result<(), StoreError> {
+        let Some(mut group) = self.group(key)? else {
+            return Ok(());
+        };
+        if group.picture.as_ref() != Some(picture) {
+            return Ok(());
+        }
+        let step = self.step()?;
+        group.picture = None;
+        self.upsert_group(&group)?;
+        self.set_group_picture_pending(key, false)?;
+        step.commit()?;
+        Ok(())
+    }
+
+    /// `receivers` are to get our group's picture once it has been uploaded anew.
+    fn owe_group_picture(&self, key: &str, receivers: &[String]) -> Result<(), StoreError> {
+        for receiver in receivers {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO group_picture_sends (key, receiver) VALUES (?1, ?2)",
+                params![key, receiver],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Groups whose picture someone is waiting for.
+    pub(crate) fn groups_owing_picture(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT DISTINCT key FROM group_picture_sends")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every member gets what the group's picture is now, or everyone is told it has none.
+    pub(crate) fn forget_group_picture_sends(&self, key: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM group_picture_sends WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
+    /// The upload for those waiting has ended: `fresh`, the picture as uploaded, or `None` if this
+    /// device has no picture of the group to upload. In one store step, and only while the group
+    /// has the picture (`version`) that was uploaded; otherwise those waiting stay for the next
+    /// try. Whoever left the group meanwhile gets nothing. Returns whether something is to be sent.
+    pub(crate) fn finish_group_picture_sends(
+        &self,
+        key: &str,
+        version: i64,
+        fresh: Option<GroupPicture>,
+    ) -> Result<bool, StoreError> {
+        let step = self.step()?;
+        let Some(mut group) = self.group(key)? else {
+            self.forget_group_picture_sends(key)?;
+            step.commit()?;
+            return Ok(false);
+        };
+        if group.picture_version != version {
+            return Ok(false);
+        }
+        let receivers: Vec<String> = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT receiver FROM group_picture_sends WHERE key = ?1")?;
+            let rows = statement.query_map([key], |row| row.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let receivers: Vec<String> = receivers
+            .into_iter()
+            .filter(|receiver| !group.left && group.members.contains(receiver))
+            .collect();
+        self.forget_group_picture_sends(key)?;
+        if !receivers.is_empty() {
+            if let Some(fresh) = fresh {
+                group.picture = Some(fresh);
+                self.upsert_group(&group)?;
+            }
+            match &group.picture {
+                Some(picture) => self.group_outbox_add(
+                    key,
+                    &receivers,
+                    OUTBOX_GROUP_SET_PICTURE,
+                    &picture.to_json(),
+                )?,
+                None => {
+                    self.group_outbox_add(key, &receivers, OUTBOX_GROUP_DELETE_PICTURE, &json!({}))?
+                }
+            }
+        }
+        step.commit()?;
+        Ok(!receivers.is_empty())
     }
 
     pub(crate) fn group_picture_syncs(&self) -> Result<Vec<String>, StoreError> {
@@ -624,6 +746,7 @@ impl Store {
             .execute("DELETE FROM group_member_lookups WHERE key = ?1", [key])?;
         self.conn
             .execute("DELETE FROM group_picture_syncs WHERE key = ?1", [key])?;
+        self.forget_group_picture_sends(key)?;
         self.cancel_synced_picture(key)?;
         // Its calls' keys, and the marks of who was resynced lately (`resync_allowed`).
         self.conn
@@ -1232,6 +1355,8 @@ fn receive_steps(
             if group.picture.as_ref() != Some(&picture) || group.picture_version == 0 {
                 group.picture = Some(picture);
                 store.upsert_group(&group)?;
+                // Until it is here, also with an older one showing meanwhile.
+                store.set_group_picture_pending(&key, true)?;
                 // From the creator: newer than what another device said of it.
                 store.cancel_synced_picture(&key)?;
                 outcome.download_picture = Some(key.clone());
@@ -1467,7 +1592,7 @@ pub(crate) fn resync_restored(
     if group.members.is_empty() {
         return Ok(false);
     }
-    if group.picture.is_some() {
+    if group.picture.is_some() || group.picture_version != 0 {
         send_state(store, group, &group.members)?;
     } else {
         send_setup_and_name(store, group, &group.members)?;
@@ -1515,7 +1640,13 @@ pub fn send_name_and_picture(
     send_picture(store, group, receivers)
 }
 
+/// The group's picture for `receivers` of ours. One that is on the device is uploaded anew first, as
+/// the blob told of last may be gone by now, and may be another device's old picture or none at all
+/// if the picture was set there (`App::send_group_pictures`).
 fn send_picture(store: &Store, group: &Group, receivers: &[String]) -> Result<(), StoreError> {
+    if group.picture_version != 0 {
+        return store.owe_group_picture(&group.key, receivers);
+    }
     match &group.picture {
         Some(picture) => store.group_outbox_add(
             &group.key,
@@ -3337,5 +3468,179 @@ mod tests {
             store.receiver_done(BOB, entry.message_id).unwrap(),
             vec![group.key.clone()]
         );
+    }
+
+    /// The picture was set on another device or last uploaded long ago: what is said of it here
+    /// may be nothing, or an old blob. What is on the device goes, uploaded anew.
+    #[test]
+    fn a_member_asking_gets_the_picture_on_the_device() {
+        let (_dir, store) = store();
+        let mut group = own_group(USER, &[BOB]);
+        group.picture_version = 5;
+        store.upsert_group(&group).unwrap();
+        let picture = GroupPicture {
+            blob_id: libthreema::common::BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        };
+
+        run(
+            &store,
+            BOB,
+            USER,
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+        );
+
+        // Not "deleted", though no blob is known here, and nothing until the upload has worked.
+        let kinds =
+            || -> Vec<String> { outbox_kinds(&store).into_iter().map(|(k, _)| k).collect() };
+        assert_eq!(kinds(), [OUTBOX_GROUP_SETUP, OUTBOX_GROUP_NAME]);
+        assert_eq!(store.groups_owing_picture().unwrap(), [group.key.clone()]);
+
+        assert!(
+            store
+                .finish_group_picture_sends(&group.key, 5, Some(picture.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            kinds(),
+            [
+                OUTBOX_GROUP_SETUP,
+                OUTBOX_GROUP_NAME,
+                OUTBOX_GROUP_SET_PICTURE
+            ]
+        );
+        assert_eq!(
+            store.group(&group.key).unwrap().unwrap().picture,
+            Some(picture)
+        );
+        assert!(store.groups_owing_picture().unwrap().is_empty());
+    }
+
+    /// Its file is gone, or the picture was removed meanwhile: the truth, as far as it is known.
+    #[test]
+    fn a_member_asking_hears_of_no_picture_if_there_is_none_to_upload() {
+        let (_dir, store) = store();
+        let mut group = own_group(USER, &[BOB]);
+        group.picture_version = 5;
+        store.upsert_group(&group).unwrap();
+        run(
+            &store,
+            BOB,
+            USER,
+            GroupMessageBody::SyncRequest(GroupSyncRequestMessage),
+        );
+        assert!(
+            store
+                .finish_group_picture_sends(&group.key, 5, None)
+                .unwrap()
+        );
+        assert_eq!(
+            outbox_kinds(&store).pop().unwrap().0,
+            OUTBOX_GROUP_DELETE_PICTURE
+        );
+    }
+
+    #[test]
+    fn who_is_gone_from_the_group_meanwhile_gets_no_picture() {
+        let (_dir, store) = store();
+        let mut group = own_group(USER, &[BOB]);
+        group.picture_version = 5;
+        store.upsert_group(&group).unwrap();
+        store
+            .owe_group_picture(&group.key, &[BOB.to_owned()])
+            .unwrap();
+        group.members = vec![];
+        store.upsert_group(&group).unwrap();
+        assert!(
+            !store
+                .finish_group_picture_sends(&group.key, 5, None)
+                .unwrap()
+        );
+        assert!(store.groups_owing_picture().unwrap().is_empty());
+        assert!(outbox_kinds(&store).is_empty());
+    }
+
+    /// Expired for good: no more tries at each reconnect, and the next word from the creator is a
+    /// new try, even with the same blob.
+    #[test]
+    fn a_picture_gone_from_the_server_is_not_asked_for_again() {
+        let (_dir, store) = store();
+        let picture = GroupPicture {
+            blob_id: libthreema::common::BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        };
+        let mut group = own_group(CREATOR, &[CREATOR]);
+        group.picture = Some(picture.clone());
+        store.upsert_group(&group).unwrap();
+        assert_eq!(
+            store.groups_with_pending_picture().unwrap(),
+            [group.key.clone()]
+        );
+
+        // Of an older try: the descriptor stays.
+        let older = GroupPicture {
+            blob_id: libthreema::common::BlobId([3; 16]),
+            ..picture.clone()
+        };
+        store.group_picture_gone(&group.key, &older).unwrap();
+        assert_eq!(
+            store.groups_with_pending_picture().unwrap(),
+            [group.key.clone()]
+        );
+
+        store.group_picture_gone(&group.key, &picture).unwrap();
+        assert!(store.groups_with_pending_picture().unwrap().is_empty());
+
+        let outcome = run(
+            &store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::SetProfilePicture(
+                libthreema::model::message::SetProfilePictureMessage {
+                    blob_id: picture.blob_id,
+                    key: picture.key,
+                    size: picture.size,
+                },
+            ),
+        );
+        assert_eq!(outcome.download_picture, Some(group.key.clone()));
+    }
+
+    /// A newer picture that failed to arrive is tried again, with the older one showing meanwhile.
+    #[test]
+    fn a_newer_picture_stays_pending_until_it_is_here() {
+        let (_dir, store) = store();
+        let mut group = own_group(CREATOR, &[CREATOR]);
+        group.picture_version = 5;
+        store.upsert_group(&group).unwrap();
+        let picture = GroupPicture {
+            blob_id: libthreema::common::BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        };
+        run(
+            &store,
+            CREATOR,
+            CREATOR,
+            GroupMessageBody::SetProfilePicture(
+                libthreema::model::message::SetProfilePictureMessage {
+                    blob_id: picture.blob_id,
+                    key: picture.key,
+                    size: picture.size,
+                },
+            ),
+        );
+        let mut stored = store.group(&group.key).unwrap().unwrap();
+        assert_eq!(stored.picture_version, 5);
+        assert_eq!(
+            store.groups_with_pending_picture().unwrap(),
+            [group.key.clone()]
+        );
+
+        stored.picture_version = 6;
+        store.store_new_group_picture(&stored).unwrap();
+        assert!(store.groups_with_pending_picture().unwrap().is_empty());
     }
 }
