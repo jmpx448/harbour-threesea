@@ -1135,7 +1135,7 @@ impl App {
             tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
         }
         self.android_export_scheduled();
-        if self.auto_delete_scheduled() {
+        if self.expire_messages() {
             events.push("chatsChanged");
         }
         let before = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();

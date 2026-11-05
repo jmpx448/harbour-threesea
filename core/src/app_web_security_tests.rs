@@ -2216,8 +2216,7 @@ fn keep_messages_takes_expired_messages_out_of_the_browser() {
     sent_values(&mut rx);
 
     app.store.set_setting(keys::AUTO_DELETE_DAYS, "7").unwrap();
-    assert!(app.auto_delete_scheduled());
-    app.web_refresh();
+    assert!(app.expire_messages());
     assert_eq!(
         removed_messages(&sent_values(&mut rx)),
         [("BBBBBBBB".to_owned(), vec![old.id.to_string()])]

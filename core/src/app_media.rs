@@ -1688,6 +1688,14 @@ impl App {
         removed > 0
     }
 
+    /// Maintenance's auto-delete. The browsers hear of it at once: what comes next in maintenance
+    /// can wait on the network for long.
+    pub(crate) fn expire_messages(&mut self) -> bool {
+        let removed = self.auto_delete_scheduled();
+        self.web_refresh();
+        removed
+    }
+
     /// Remove the media of a message that is gone (deleted, removed).
     pub(crate) fn forget_media(&self, id: i64) {
         self.media.remove(id);
