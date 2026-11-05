@@ -193,9 +193,9 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   contact for the ID (revoked, or another key for a predefined contact), when its sender is blocked,
   and by Keep messages. Android discards these. If it is read on another device meanwhile (update or read receipt), it comes
   in read; no other update is kept for it.
-  At most 1000 wait, the oldest stay. One beyond that is acknowledged and only on the other devices;
-  it is logged with a count and the count shows on the linked devices page, for good (no content,
-  no sender).
+  At most 1000 wait, the oldest stay. One beyond that is acknowledged and not kept here; it is logged
+  with a count, and the count shows on the linked devices page until the user clears it there (no
+  content, no sender).
 - Typing reflected from a leading device shows, except while the mediator is still handing out its
   backlog at login: those can be old.
 - The CSP nonces an envelope tells of (`IncomingMessage.nonce`, `OutgoingMessage.nonces`) go into

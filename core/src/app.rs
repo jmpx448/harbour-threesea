@@ -687,8 +687,10 @@ pub enum Command {
         #[serde(default)]
         show_inactive: Option<bool>,
     },
-    /// Multi-device (Threema Desktop): `{active}`.
+    /// Multi-device (Threema Desktop): `{active, reflectedLeftOut}`.
     MultiDevice,
+    /// The user has seen how many reflected messages weren't kept: the count starts over.
+    ClearReflectedLeftOut,
     /// The device group's devices: `{devices: [{id, current, label, platform, ...}]}`.
     LinkedDevices,
     /// Remove devices (hex ids) from the device group; returns the remaining devices.
@@ -2361,6 +2363,10 @@ impl App {
                 Ok(json!({}))
             }
             Command::MultiDevice => self.multi_device_json(),
+            Command::ClearReflectedLeftOut => {
+                self.store.clear_reflected_left_out()?;
+                self.multi_device_json()
+            }
             Command::LinkedDevices => {
                 self.detached(Lane::Free, |app| async move {
                     app.linked_devices_checked().await

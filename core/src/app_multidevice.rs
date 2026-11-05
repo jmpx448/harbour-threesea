@@ -2827,4 +2827,19 @@ mod tests {
         assert_eq!(left[0].sender, "D0D0D0D0");
         assert!(app.store.owed_member_lookups().unwrap().is_empty());
     }
+
+    /// The count of what wasn't kept goes when the user says so.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_count_of_what_wasnt_kept_can_be_cleared() {
+        let (_dir, mut app) = app();
+        app.store.note_reflected_left_out().unwrap();
+        let reply: serde_json::Value = serde_json::from_str(
+            &app.handle(r#"{"id":1,"cmd":"clearReflectedLeftOut"}"#)
+                .await,
+        )
+        .unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["result"]["reflectedLeftOut"], 0);
+        assert_eq!(app.store.reflected_left_out().unwrap(), 0);
+    }
 }

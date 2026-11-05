@@ -111,6 +111,7 @@ var table = {
     forwardSecurity: { on: true, multiDevice: false },
     logText: { text: "a line\n" },
     multiDevice: { active: true, reflectedLeftOut: 2 },
+    clearReflectedLeftOut: { active: true, reflectedLeftOut: 0 },
     linkedDevices: { devices: [{ id: "01", current: true, label: "This phone", platform: "unknown", platformDetails: "",
                                  appVersion: "1", connectedSince: 1700000000000, lastDisconnectAt: null },
                                { id: "02", current: false, label: "", alias: "A computer", platform: "desktop",

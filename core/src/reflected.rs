@@ -41,8 +41,8 @@ use crate::{
 const NONCE_LEN: usize = 24;
 
 /// How many reflected messages may wait for their sender's contact (at most a frame each, so some
-/// 8 MB). The oldest stay. A message beyond this is on the other device only, which is counted, and
-/// shown with the linked devices (`multiDevice`).
+/// 8 MB). The oldest stay. A message beyond this isn't kept here, which is counted, and shown with
+/// the linked devices until the user clears it (`multiDevice`, `clearReflectedLeftOut`).
 pub(crate) const REFLECTED_WAITING_MAX: i64 = 1000;
 
 /// A reflected envelope could not be used. It is still acknowledged, as the mediator would

@@ -263,6 +263,10 @@ impl Store {
             .unwrap_or(0))
     }
 
+    pub fn clear_reflected_left_out(&self) -> Result<(), StoreError> {
+        self.set_setting(crate::store::keys::REFLECTED_LEFT_OUT, "0")
+    }
+
     /// One more of those: the count now.
     pub fn note_reflected_left_out(&self) -> Result<i64, StoreError> {
         let count = self.reflected_left_out()?.saturating_add(1);

@@ -20,7 +20,7 @@ Page {
     property bool offline: false
     // This device's label, as the other devices show it.
     property string label: ""
-    // Messages received on another device from someone unknown here, with no room to wait here.
+    // Messages received on another device that this one didn't keep (no room to wait for a contact).
     property int leftOut: 0
 
     // Keyed, so a reload keeps the rows, and a running remorse with them.
@@ -132,6 +132,15 @@ Page {
 
         PullDownMenu {
             MenuItem {
+                visible: page.active && page.leftOut > 0
+                //% "Clear count of messages not kept"
+                text: qsTrId("threesea-me-clear-reflected-left-out")
+                onClicked: backend.call("clearReflectedLeftOut", {}, function(ok, result, kind, message) {
+                    if (ok) page.leftOut = result.reflectedLeftOut
+                    else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                })
+            }
+            MenuItem {
                 visible: page.active
                 //% "Remove all linked devices"
                 text: qsTrId("threesea-me-remove-all-devices")
@@ -160,11 +169,11 @@ Page {
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * x
-                visible: page.leftOut > 0
+                visible: page.active && page.leftOut > 0
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.highlightColor
-                //% "%n message(s) from people unknown on this phone are only on your other devices."
+                //% "%n message(s) received on your other devices weren't kept on this phone."
                 text: qsTrId("threesea-la-reflected-left-out", page.leftOut)
             }
         }
