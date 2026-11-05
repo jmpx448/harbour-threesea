@@ -615,6 +615,51 @@ fn web_messages_carry_their_history() {
     assert_eq!(events(&line), None);
 }
 
+/// A file gets a name it can be saved under, in the chat and with its data alike.
+#[test]
+fn web_files_have_a_name_to_save_under() {
+    let (_dir, app) = fixture();
+    let name = |id: u64, body: serde_json::Value| {
+        let (_, file) = web_file_message(&app, id, &body);
+        let message = app
+            .store
+            .conversation_messages("BBBBBBBB", 1)
+            .unwrap()
+            .remove(0);
+        app.media
+            .write(message.id, MediaPart::File, b"data")
+            .unwrap();
+        let reply = app.web_blob_reply("BBBBBBBB", message.id).unwrap();
+        let in_reply = saltyrtc::field(&reply, "data")
+            .and_then(|data| saltyrtc::field(data, "name"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let in_chat = saltyrtc::field(&file, "name")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        assert_eq!(in_chat, in_reply);
+        in_chat
+    };
+    assert_eq!(
+        name(0xAB, json!({"mediaType": "application/pdf"})),
+        "threesea-20251104-234640-00000000000000ab.pdf"
+    );
+    assert_eq!(
+        name(2, json!({"mediaType": "application/pdf", "name": "report"})),
+        "report.pdf"
+    );
+    assert_eq!(
+        name(3, json!({"mediaType": "application/pdf", "name": "a.txt"})),
+        "a.txt"
+    );
+    assert_eq!(
+        name(4, json!({"mediaType": "application/x-unknown", "name": ""})),
+        "threesea-20251104-234640-0000000000000004"
+    );
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {

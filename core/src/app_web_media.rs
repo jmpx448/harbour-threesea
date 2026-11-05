@@ -78,6 +78,53 @@ impl WebThumbnails {
     }
 }
 
+/// A message's time for a file name: `20261105-143000`, in UTC (the core knows no time zone).
+fn file_name_time(ms: i64) -> String {
+    let seconds = ms.div_euclid(1000);
+    let (days, time) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Days since 1970-01-01 to a date (Howard Hinnant's civil_from_days).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
+}
+
+/// The name a browser gets for a message's file: its own, safe to save, with an extension from the
+/// media type if it has none; without a name (the protocol doesn't ask for one) one from the
+/// message's time and ID, like Android.
+pub(crate) fn web_file_name(message: &Message, body: &serde_json::Value) -> String {
+    let media_type = body["mediaType"].as_str().unwrap_or_default();
+    let generated;
+    let name = match body["name"].as_str().filter(|name| !name.trim().is_empty()) {
+        Some(name) => name,
+        None => {
+            generated = format!(
+                "threesea-{}-{:016x}",
+                file_name_time(message.created_at),
+                message.message_id
+            );
+            &generated
+        }
+    };
+    crate::app_media::safe_file_name(Some(name), media_type)
+}
+
 impl App {
     /// A message's file part, if on the device.
     fn web_media(&self, message: i64, part: MediaPart) -> Option<Vec<u8>> {
@@ -246,7 +293,7 @@ impl App {
         Ok(None)
     }
 
-    fn web_blob_reply(&self, key: &str, id: i64) -> Option<Value> {
+    pub(crate) fn web_blob_reply(&self, key: &str, id: i64) -> Option<Value> {
         let data = self.web_media(id, MediaPart::File)?;
         let message = self.store.message(id).ok().flatten()?;
         let body: serde_json::Value = serde_json::from_str(&message.body).unwrap_or_default();
@@ -263,7 +310,7 @@ impl App {
                         .unwrap_or("application/octet-stream")
                         .into(),
                 ),
-                ("name", body["name"].as_str().unwrap_or("file").into()),
+                ("name", web_file_name(&message, &body).into()),
             ])),
         ))
     }
@@ -372,5 +419,17 @@ impl App {
             Some(map(receiver_args(&key))),
             Some(map(vec![("messageId", id.to_string().into())])),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_name_time;
+
+    #[test]
+    fn a_files_time_reads_as_a_date() {
+        assert_eq!(file_name_time(0), "19700101-000000");
+        assert_eq!(file_name_time(951_786_061_999), "20000229-010101");
+        assert_eq!(file_name_time(1_767_225_599_000), "20251231-235959");
     }
 }

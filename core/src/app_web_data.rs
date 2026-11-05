@@ -668,7 +668,10 @@ impl App {
                 fields.push((
                     "file",
                     map(vec![
-                        ("name", body["name"].as_str().unwrap_or("file").into()),
+                        (
+                            "name",
+                            crate::app_web_media::web_file_name(message, body).into(),
+                        ),
                         ("size", size.into()),
                         ("type", media_type.into()),
                         ("inApp", (body["rendering"] == "media").into()),
