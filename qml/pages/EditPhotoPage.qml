@@ -99,7 +99,7 @@ Dialog {
             var lines = strokes.slice()
             lines.pop()
             strokes = lines
-            drawing.requestPaint()
+            drawing.repaint()
         }
         history = kinds
     }
@@ -243,29 +243,51 @@ Dialog {
                     Canvas {
                         id: drawing
                         anchors.fill: parent
-                        onWidthChanged: requestPaint()
-                        onHeightChanged: requestPaint()
+                        // A finger's move adds a short piece: only that is painted, on what is
+                        // there. All of it again only when the size changes or a line goes.
+                        property bool paintAll: true
+                        property int paintedLine: 0
+                        property int paintedPoints: 0
+                        function repaint() {
+                            paintAll = true
+                            requestPaint()
+                        }
+                        onWidthChanged: repaint()
+                        onHeightChanged: repaint()
                         onPaint: {
                             var context = getContext("2d")
-                            context.clearRect(0, 0, width, height)
+                            if (paintAll) {
+                                context.clearRect(0, 0, width, height)
+                                paintAll = false
+                                paintedLine = 0
+                                paintedPoints = 0
+                            }
                             context.lineCap = "round"
                             context.lineJoin = "round"
                             var longest = Math.max(width, height)
-                            for (var i = 0; i < dialog.strokes.length; ++i) {
-                                var stroke = dialog.strokes[i]
-                                var points = stroke.points
-                                context.lineWidth = stroke.width * longest
-                                context.strokeStyle = stroke.color
+                            var lines = dialog.strokes
+                            for (var i = paintedLine; i < lines.length; ++i) {
+                                var points = lines[i].points
+                                var done = i === paintedLine ? paintedPoints : 0
+                                if (done >= points.length) continue
+                                context.lineWidth = lines[i].width * longest
+                                context.strokeStyle = lines[i].color
                                 context.beginPath()
-                                context.moveTo(points[0] * width, points[1] * height)
-                                // A single point is a dot: a line too short to see, with its round ends.
+                                // From where it was left, or a dot: a line too short to see, with
+                                // its round ends.
+                                var from = Math.max(0, done - 2)
+                                context.moveTo(points[from] * width, points[from + 1] * height)
                                 if (points.length === 2) {
                                     context.lineTo(points[0] * width + 0.01, points[1] * height)
                                 }
-                                for (var at = 2; at < points.length; at += 2) {
+                                for (var at = from + 2; at < points.length; at += 2) {
                                     context.lineTo(points[at] * width, points[at + 1] * height)
                                 }
                                 context.stroke()
+                            }
+                            if (lines.length > 0) {
+                                paintedLine = lines.length - 1
+                                paintedPoints = lines[paintedLine].points.length
                             }
                         }
                     }
