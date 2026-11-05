@@ -135,7 +135,7 @@ ApplicationWindow {
                 safeWarningShown = 0
                 clearNotification("safeFailing")
             } else if (days !== safeWarningShown) {
-                var quiet = safeWarningShown > 0
+                var quiet = safeWarningShown > 0 || !!notifications["safeFailing"]
                 safeWarningShown = days
                 //% "Threema Safe backup failing"
                 plainNotification("safeFailing", qsTrId("threesea-la-safe-failing-notification"),
@@ -1287,18 +1287,16 @@ ApplicationWindow {
             return
         }
         var actions = n.remoteActions || []
-        // About backups: the next check says it again if it still holds.
-        if (actions.some(function(action) { return action.method === "showSafe" })) {
-            n.close()
-            return
-        }
         // Of a call this process knows nothing about.
         if (actions.some(function(action) { return action.method === "answerCall" })) {
             n.close()
             return
         }
         var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
-        if (n.summary === qsTrId("threesea-la-reply-not-sent")) {
+        if (actions.length > 0 && actions[0].method === "showSafe") {
+            // Still the news it was; checkSafeWarning() takes a failing Safe's away if it is over.
+            identity = n.summary === qsTrId("threesea-la-safe-failing-notification") ? "safeFailing" : "backupReminder"
+        } else if (n.summary === qsTrId("threesea-la-reply-not-sent")) {
             // It opens the chat, but isn't that chat's notification.
             identity = identity ? "replyNotSent:" + identity : "replyNotSent"
         } else if (!identity && actions.length > 0 && actions[0].method === "activate") {
