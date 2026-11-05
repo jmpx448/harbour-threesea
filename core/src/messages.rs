@@ -1184,6 +1184,16 @@ impl Store {
         Ok(ids)
     }
 
+    /// The key of every chat holding more than the app's own status lines (a call is a message).
+    pub fn chats_with_conversation(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT conversation FROM messages
+             WHERE kind <> 'status' OR body LIKE 'call|%'",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The key of every chat that holds a message, private ones too.
     pub fn chats_with_messages(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self.conn.prepare("SELECT chat FROM chat_summaries")?;

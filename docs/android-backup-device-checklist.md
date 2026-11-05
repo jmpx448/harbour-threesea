@@ -85,6 +85,9 @@ device as the main one.
    - A few chats: texts in order, photos/videos/files open, voice messages play, quotes,
      stars, reactions, a poll with its votes.
    - Group and contact pictures.
+   - The chat of a contact deleted while that chat was private, or of one without a contact row
+     before: it is in the list, and the person is a contact again (on Android a hidden contact's
+     chat can't be opened, so the file writes them as not hidden; a restore here does the same).
 5. Send yourself one message from another device right after the restore: it should arrive
    once (the used nonces went along). Older messages must not show up a second time.
 6. Afterwards, on that Android device, the ID is now active there as well: unless you use

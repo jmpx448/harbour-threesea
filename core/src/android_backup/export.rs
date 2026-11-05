@@ -546,6 +546,12 @@ impl Export {
             "identity_id",
         ]);
         let archived = self.store.archived_chats()?;
+        // Android doesn't list the chat of a hidden contact, so it would restore unreachable. There
+        // a chat always has a contact in the list (deleting one empties the chat), and a restore
+        // of this file, there or here, makes it one. Status lines alone are no reason to: a group
+        // member can have those.
+        let spoken_with: std::collections::HashSet<String> =
+            self.store.chats_with_conversation()?.into_iter().collect();
         for contact in &contacts {
             use libthreema::protobuf::d2d_sync::contact as pc;
             let identity = contact.identity.to_string();
@@ -565,7 +571,9 @@ impl Export {
                 contact.last_name.as_deref().unwrap_or(""),
                 contact.nickname.as_deref().unwrap_or(""),
                 &last_update(&identity),
-                if contact.acquaintance_level == pc::AcquaintanceLevel::GroupOrDeleted {
+                if contact.acquaintance_level == pc::AcquaintanceLevel::GroupOrDeleted
+                    && !spoken_with.contains(&identity)
+                {
                     "1"
                 } else {
                     "0"

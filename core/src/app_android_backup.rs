@@ -2575,7 +2575,9 @@ mod export_tests {
     }
 
     /// A contact deleted while their private chat is hidden: the chat stays, and so it stays in the
-    /// backup, its contact row beside it, and comes back from there.
+    /// backup, its contact row beside it, and comes back from there. Not hidden in the file: on
+    /// Android the chat of a hidden contact can't be reached, so the person is a contact again.
+    /// Someone known from a group with no more than a status line in their chat stays hidden.
     #[tokio::test(flavor = "current_thread")]
     async fn the_chat_of_a_deleted_contact_is_in_the_backup() {
         use libthreema::protobuf::d2d_sync::contact as pc;
@@ -2589,24 +2591,23 @@ mod export_tests {
             .unwrap();
         a.store.set_private("B0B0B0B0", true).unwrap();
         a.delete_contact("B0B0B0B0").unwrap();
+        // test_contact: group-or-deleted.
+        a.store
+            .upsert_contact(&crate::contacts::test_contact("C0C0C0C0"))
+            .unwrap();
+        a.store.insert_status("C0C0C0C0", "fsUnavailable").unwrap();
 
         let out = tempfile::tempdir().unwrap();
         let done = run_export(&a, out.path(), 0).await;
-        assert_eq!(done["summary"]["chats"], 1, "{done}");
         assert_eq!(done["summary"]["skipped"].get("chatsWithoutContact"), None);
 
         let dir_b = tempfile::tempdir().unwrap();
         let b = restored(dir_b.path(), done["path"].as_str().unwrap()).await;
         let rows = b.store.conversation_messages("B0B0B0B0", 10).unwrap();
         assert!(rows.iter().any(|m| m.body == "kept"));
-        assert_eq!(
-            b.store
-                .contact("B0B0B0B0")
-                .unwrap()
-                .unwrap()
-                .acquaintance_level,
-            pc::AcquaintanceLevel::GroupOrDeleted
-        );
+        let level = |id: &str| b.store.contact(id).unwrap().unwrap().acquaintance_level;
+        assert_eq!(level("B0B0B0B0"), pc::AcquaintanceLevel::Direct);
+        assert_eq!(level("C0C0C0C0"), pc::AcquaintanceLevel::GroupOrDeleted);
     }
 
     /// A chat left by an older version with no contact row can't be restored: that is said, until
