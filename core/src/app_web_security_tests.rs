@@ -79,41 +79,61 @@ fn web_subscription_ends_when_chat_becomes_private() {
     );
 }
 
-/// A chat read anywhere: the browser showing it hears that each message is read, or its unread
-/// divider returns; in parts it can take, and a browser not showing the chat hears nothing.
+/// A chat read anywhere: the browser showing it hears that each message it holds is read, or its
+/// unread divider returns; in parts it can take. Rows it hasn't loaded come with their page, and a
+/// browser not showing the chat hears nothing.
 #[test]
 fn reading_a_chat_clears_the_unread_flags_in_the_browser() {
     let (_dir, mut app) = fixture();
     let mut rx = browser(&mut app);
-    for id in 1..=60 {
-        app.store
-            .insert_incoming("BBBBBBBB", id, "text", "hi", 1)
-            .unwrap()
-            .unwrap();
-    }
-    app.store
-        .insert_incoming("CCCCCCCC", 1, "text", "hi", 1)
-        .unwrap()
-        .unwrap();
-    app.web_messages(1, "BBBBBBBB", None).unwrap();
-    wires(&mut rx);
+    let unread = |app: &App, chat: &str, ids: core::ops::RangeInclusive<u64>| {
+        for id in ids {
+            app.store
+                .insert_incoming(chat, id, "text", "hi", 1)
+                .unwrap()
+                .unwrap();
+        }
+    };
+    let cleared = |updates: &[String]| {
+        assert!(updates.iter().all(|update| update.contains("modified")));
+        updates
+            .iter()
+            .map(|update| update.matches("\"unread\": false").count())
+            .sum::<usize>()
+    };
 
+    unread(&app, "CCCCCCCC", 1..=1);
     app.mark_read("CCCCCCCC").unwrap();
     assert!(wires(&mut rx).is_empty());
 
+    // Only the newest page loaded of 60.
+    unread(&app, "BBBBBBBB", 1..=60);
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    wires(&mut rx);
+    let older = app.store.conversation_messages("BBBBBBBB", 60).unwrap()[0].clone();
     app.mark_read("BBBBBBBB").unwrap();
     let updates = wires(&mut rx);
-    assert_eq!(updates.len(), 2, "60 messages in pages of 50");
-    let unread = updates
-        .iter()
-        .map(|update| update.matches("\"unread\": false").count())
-        .sum::<usize>();
-    assert_eq!(unread, 60, "{updates:?}");
-    assert!(updates.iter().all(|update| update.contains("modified")));
+    assert_eq!(updates.len(), 1, "one page loaded");
+    assert_eq!(cleared(&updates), 50, "{updates:?}");
+
+    // Nor does any other change of a row it doesn't hold reach it.
+    app.web_on_core_event(&CoreEvent::MessagesChanged(vec![older]));
+    assert!(wires(&mut rx).is_empty());
 
     // Nothing left to tell.
     app.mark_read("BBBBBBBB").unwrap();
     assert!(wires(&mut rx).is_empty());
+
+    // Both pages loaded: all of them, in pages.
+    unread(&app, "CCCCCCCC", 2..=61);
+    let (_, page) = app.web_messages(1, "CCCCCCCC", None).unwrap();
+    let oldest = page[0]["id"].as_str().unwrap().to_owned();
+    app.web_messages(1, "CCCCCCCC", Some(&oldest)).unwrap();
+    wires(&mut rx);
+    app.mark_read("CCCCCCCC").unwrap();
+    let updates = wires(&mut rx);
+    assert_eq!(updates.len(), 2, "60 messages in pages of 50");
+    assert_eq!(cleared(&updates), 60, "{updates:?}");
 }
 
 /// A private group's or list's name and members stay on the device: never in the receiver lists,

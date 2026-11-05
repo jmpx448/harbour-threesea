@@ -133,8 +133,19 @@ pub(crate) struct Subscriptions {
     server_said: HashSet<String>,
 }
 
-#[cfg(test)]
 impl Subscriptions {
+    /// Whether this browser holds that message of a chat it shows. Anything else comes with a
+    /// later page, in the state of that moment, and threema-web discards updates of rows it
+    /// doesn't hold.
+    fn holds(&self, chat: &str, id: i64) -> bool {
+        self.chats.contains_key(chat)
+            && self
+                .sent_messages
+                .get(chat)
+                .is_some_and(|sent| sent.contains_key(&id))
+    }
+
+    #[cfg(test)]
     pub(crate) fn shows(&self, chat: &str) -> bool {
         self.chats.contains_key(chat)
     }
@@ -1088,15 +1099,16 @@ impl App {
     /// its unread divider comes back when the chat is opened again. Not as an event for the UI,
     /// which goes by `conversationRead` and would load every row of a large read.
     pub(crate) fn web_messages_read(&mut self, conversation: &str, read: &[ReadMessage]) {
-        if !self
-            .web
-            .subscriptions
-            .values()
-            .any(|subscriptions| subscriptions.chats.contains_key(conversation))
-        {
-            return;
-        }
-        for bundle in read.chunks(PAGE as usize) {
+        let held: Vec<&ReadMessage> = read
+            .iter()
+            .filter(|message| {
+                self.web
+                    .subscriptions
+                    .values()
+                    .any(|subscriptions| subscriptions.holds(conversation, message.id))
+            })
+            .collect();
+        for bundle in held.chunks(PAGE as usize) {
             let rows: Vec<Message> = bundle
                 .iter()
                 .filter_map(|message| self.store.message(message.id).ok().flatten())
@@ -1125,11 +1137,7 @@ impl App {
                         if self.store.is_private(&message.conversation).unwrap_or(true) {
                             continue;
                         }
-                        if subscriptions
-                            .chats
-                            .get(&message.conversation)
-                            .is_some_and(|newest| message.id <= *newest)
-                        {
+                        if subscriptions.holds(&message.conversation, message.id) {
                             changed
                                 .entry(message.conversation.as_str())
                                 .or_default()
