@@ -107,6 +107,31 @@ Page {
                 onClicked: backend.vibrateGroups = !checked
             }
 
+            // The tone and vibration of an incoming call; they ring with notifications off too.
+            SectionHeader {
+                visible: calls.supported
+                //% "Calls"
+                text: qsTrId("threesea-se-notifications-calls")
+            }
+
+            ToneButton {
+                visible: calls.supported
+                tone: backend.toneCalls
+                //% "Ringtone"
+                label: qsTrId("threesea-la-call-tone")
+                //% "System call tone"
+                defaultText: qsTrId("threesea-la-call-tone-system")
+                onChosen: backend.toneCalls = tone
+            }
+
+            TextSwitch {
+                visible: calls.supported
+                automaticCheck: false
+                checked: backend.vibrateCalls
+                text: qsTrId("threesea-la-notification-vibrate")
+                onClicked: backend.vibrateCalls = !checked
+            }
+
             // Android's in-app sounds and vibration: a message arriving in the chat the user
             // is reading needs no notification, only a hint.
             SectionHeader {

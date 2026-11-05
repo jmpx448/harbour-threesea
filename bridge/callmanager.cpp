@@ -95,7 +95,8 @@ QDBusMessage ngfCall(const QString &method)
 } // namespace
 
 // The call's tone through ngfd: incoming, the system's VoIP ringtone (profile tone, vibration,
-// volume keys); outgoing while the other side rings, the tone generator's ringback (`ring`).
+// volume keys), with what the user chose instead: `audio` and `media.vibra` are among what ngfd
+// takes from a client (its transform plugin's allow list); outgoing while the other side rings, the tone generator's ringback (`ring`).
 // At most one at a time.
 void CallManager::setTone(Tone tone)
 {
@@ -111,6 +112,14 @@ void CallManager::setTone(Tone tone)
     QVariantMap properties;
     if (tone == Tone::Ringback) {
         properties.insert(QStringLiteral("tonegen.pattern"), QStringLiteral("ring"));
+    } else {
+        const QString chosen = m_backend->toneCalls();
+        if (!chosen.isEmpty()) {
+            properties.insert(QStringLiteral("audio"), chosen);
+        }
+        if (!m_backend->vibrateCalls()) {
+            properties.insert(QStringLiteral("media.vibra"), false);
+        }
     }
     play << (tone == Tone::Ringtone ? QStringLiteral("voip_ringtone") : QStringLiteral("indicator")) << properties;
     auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(play), this);

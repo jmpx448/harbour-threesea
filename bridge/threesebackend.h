@@ -71,6 +71,9 @@ class ThreeseBackend : public QObject
     Q_PROPERTY(bool vibrateGroups READ vibrateGroups WRITE setVibrateGroups NOTIFY notificationSettingsChanged)
     Q_PROPERTY(QString toneChats READ toneChats WRITE setToneChats NOTIFY notificationSettingsChanged)
     Q_PROPERTY(QString toneGroups READ toneGroups WRITE setToneGroups NOTIFY notificationSettingsChanged)
+    // An incoming call's tone ("": the system's) and whether it vibrates. Device-local.
+    Q_PROPERTY(QString toneCalls READ toneCalls WRITE setToneCalls NOTIFY notificationSettingsChanged)
+    Q_PROPERTY(bool vibrateCalls READ vibrateCalls WRITE setVibrateCalls NOTIFY notificationSettingsChanged)
     // Opt-in: match the address book (hashed) against Threema, daily. Device-local.
     Q_PROPERTY(bool addressBookSync READ addressBookSync WRITE setAddressBookSync NOTIFY notificationSettingsChanged)
     // Last address book match (ms since epoch), 0: never.
@@ -200,6 +203,18 @@ public:
     void setToneGroups(const QString &path)
     {
         QSettings().setValue(QStringLiteral("toneGroups"), path);
+        emit notificationSettingsChanged();
+    }
+    QString toneCalls() const { return QSettings().value(QStringLiteral("toneCalls")).toString(); }
+    void setToneCalls(const QString &path)
+    {
+        QSettings().setValue(QStringLiteral("toneCalls"), path);
+        emit notificationSettingsChanged();
+    }
+    bool vibrateCalls() const { return QSettings().value(QStringLiteral("vibrateCalls"), true).toBool(); }
+    void setVibrateCalls(bool on)
+    {
+        QSettings().setValue(QStringLiteral("vibrateCalls"), on);
         emit notificationSettingsChanged();
     }
     int videoSize() const { return qBound(0, QSettings().value(QStringLiteral("videoSize"), 0).toInt(), 2); }
