@@ -354,6 +354,11 @@ mod tests {
         app.store
             .upsert_contact(&contacts::test_contact("ABCD1234"))
             .unwrap();
+        // A page of messages makes the export yield once its file is there. With nothing to read,
+        // one poll can run it to the end if each blocking step is done before it is looked at.
+        app.store
+            .insert_incoming("ABCD1234", 1, "text", "hello", 1)
+            .unwrap();
         app
     }
 
