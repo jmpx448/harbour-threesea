@@ -315,7 +315,8 @@ Item {
             bottom: parent.bottom
             margins: Theme.paddingMedium
         }
-        text: "GIF"
+        //% "GIF"
+        text: qsTrId("threesea-la-gif")
         font.pixelSize: Theme.fontSizeExtraSmall
         font.bold: true
         color: "white"

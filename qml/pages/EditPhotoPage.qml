@@ -137,7 +137,7 @@ Dialog {
                 Rectangle {
                     id: frame
                     color: "transparent"
-                    border { width: 2; color: Theme.highlightColor }
+                    border { width: Math.max(1, Theme.paddingSmall / 4); color: Theme.highlightColor }
 
                     MouseArea {
                         anchors.fill: parent
