@@ -147,8 +147,8 @@ Page {
                     //% "Share"
                     text: qsTrId("threesea-bt-share")
                     onClicked: {
-                        shareAction.resources = [{ name: "id-backup.txt", data: page.backup,
-                                                   type: "text/plain", status: page.backup }]
+                        // As text, not as data: a share method could write that to a file of its own.
+                        shareAction.resources = [{ type: "text/plain", status: page.backup }]
                         shareAction.trigger()
                         page.handedOver = true
                     }
