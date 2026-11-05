@@ -77,6 +77,11 @@ Page {
         PullDownMenu {
             busy: page.refreshing
             MenuItem {
+                // The chat list's, which this page is attached to; there it gives way while offline.
+                text: qsTrId("threesea-me-new-list")
+                onClicked: pageStack.find(function(p) { return p.objectName === "conversations" }).newList()
+            }
+            MenuItem {
                 //% "Refresh"
                 text: qsTrId("threesea-me-refresh")
                 enabled: !page.refreshing

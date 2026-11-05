@@ -169,6 +169,10 @@ Page {
                 identity: page.identity
                 name: page.group.title || ""
             }
+            ExportChatButton {
+                identity: page.identity
+                name: page.group.title || ""
+            }
             ChatNotificationsButton {
                 visible: !page.group.left
                 identity: page.identity

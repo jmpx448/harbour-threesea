@@ -190,7 +190,7 @@ Settings → Media and storage: "Download on mobile data" with pictures ticked, 
 
 ## M. Export a chat
 
-1. A chat with pictures → pull down → "Export chat" → with pictures, no password.
+1. A chat with pictures → swipe left to its details → "Export chat" → with pictures, no password.
    - Expect: "Saved to Downloads"; the ZIP holds `messages.txt` and the pictures. Open it on a
      computer and read the text: one line per message, times in your own time zone, "Me" for
      yours.

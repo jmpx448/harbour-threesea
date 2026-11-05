@@ -728,29 +728,6 @@ Page {
         })
     }
 
-    // The whole chat as a ZIP in Downloads (Android's "Export chat"). The core writes the file;
-    // the words in it — "Me" and the times' offset — come from here, like all texts.
-    function exportChat(media, password) {
-        //% "Exporting chat"
-        Notices.show(qsTrId("threesea-la-exporting-chat"), Notice.Short, Notice.Center)
-        backend.call("exportChat", {
-            identity: page.identity,
-            media: media,
-            password: password,
-            directory: StandardPaths.download,
-            //% "Me"
-            me: qsTrId("threesea-la-mention-me"),
-            offsetMinutes: -new Date().getTimezoneOffset()
-        }, function(ok, result, kind, message) {
-            if (ok) {
-                //% "Saved to Downloads"
-                Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
-            } else {
-                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-            }
-        })
-    }
-
     // Save a file to Downloads; then open it with the system's app, or tell where it is.
     function saveFile(id, open) {
         backend.call("saveFile", { message: id, directory: StandardPaths.download },
@@ -1955,18 +1932,6 @@ Page {
                 onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"),
                                           { identity: page.identity,
                                             chatName: page.contact.displayName || page.identity })
-            }
-            MenuItem {
-                visible: !page.selecting
-                //% "Export chat"
-                text: qsTrId("threesea-me-export-chat")
-                onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("ExportChatDialog.qml"),
-                                                { chatName: page.contact.displayName || page.identity })
-                    dialog.accepted.connect(function() {
-                        page.exportChat(dialog.media, dialog.password)
-                    })
-                }
             }
             MenuItem {
                 visible: !page.selecting && page.groupCallsOn && !page.groupCallRunning && !page.readOnly

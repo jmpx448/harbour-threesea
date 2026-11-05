@@ -109,6 +109,10 @@ Page {
                 identity: page.identity
                 name: page.list.displayName || ""
             }
+            ExportChatButton {
+                identity: page.identity
+                name: page.list.displayName || ""
+            }
             InfoLabel {
                 //% "Each recipient gets the messages as a normal message from you; they don't see who else got them."
                 text: qsTrId("threesea-la-distribution-list-info")

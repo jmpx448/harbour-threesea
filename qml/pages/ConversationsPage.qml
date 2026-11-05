@@ -239,6 +239,8 @@ Page {
                 onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
             }
             MenuItem {
+                // Makes room for Connect now (four items at most). The Contacts page has it too.
+                visible: backend.connectionState !== "disconnected"
                 //% "New distribution list"
                 text: qsTrId("threesea-me-new-list")
                 onClicked: page.newList()

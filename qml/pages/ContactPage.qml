@@ -107,20 +107,6 @@ Page {
                 })
             }
             MenuItem {
-                // Sharing the profile picture with selected contacts (Settings); not with
-                // ECHOECHO or gateway IDs, which never get it.
-                visible: typeof page.contact.pictureRecipient === "boolean"
-                         && page.identity !== "ECHOECHO" && page.identity.charAt(0) !== "*"
-                text: page.contact.pictureRecipient
-                      //% "Stop sharing profile picture"
-                      ? qsTrId("threesea-me-stop-sharing-picture")
-                      //% "Share profile picture"
-                      : qsTrId("threesea-me-share-picture")
-                onClicked: backend.call("setProfilePictureRecipient",
-                                        { identity: page.identity, share: !page.contact.pictureRecipient },
-                                        function(ok, result) { if (ok) page.contact = result })
-            }
-            MenuItem {
                 visible: (page.contact.verification || 0) < 2
                 //% "Verify by QR code"
                 text: qsTrId("threesea-me-verify-qr")
@@ -130,7 +116,8 @@ Page {
                 }
             }
             MenuItem {
-                visible: !page.noContact
+                // Not saved yet: added first (four items at most).
+                visible: !page.noContact && page.contact.hidden !== true
                 //% "Edit"
                 text: qsTrId("threesea-me-edit")
                 onClicked: page.edit()
@@ -202,6 +189,11 @@ Page {
                 identity: page.identity
                 name: page.contact.displayName || page.identity
             }
+            ExportChatButton {
+                visible: !page.noContact
+                identity: page.identity
+                name: page.contact.displayName || page.identity
+            }
 
             ChatNotificationsButton {
                 visible: !page.noContact
@@ -245,6 +237,20 @@ Page {
                 //% "Typing indicator"
                 label: qsTrId("threesea-la-contact-typing")
                 onChanged: page.contact = contact
+            }
+
+            TextSwitch {
+                // Sharing the profile picture with selected contacts (Settings); not with
+                // ECHOECHO or gateway IDs, which never get it.
+                visible: !page.noContact && typeof page.contact.pictureRecipient === "boolean"
+                         && page.identity !== "ECHOECHO" && page.identity.charAt(0) !== "*"
+                automaticCheck: false
+                checked: page.contact.pictureRecipient === true
+                //% "Share profile picture"
+                text: qsTrId("threesea-la-contact-share-picture")
+                onClicked: backend.call("setProfilePictureRecipient",
+                                        { identity: page.identity, share: !page.contact.pictureRecipient },
+                                        function(ok, result) { if (ok) page.contact = result })
             }
 
             SectionHeader {

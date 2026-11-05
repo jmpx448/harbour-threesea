@@ -342,6 +342,30 @@ ApplicationWindow {
         }
     }
 
+    // The whole chat as a ZIP in Downloads. The core writes the file; the words in it — "Me" and
+    // the times' offset — come from here, like all texts. Here and not on the page that asks for
+    // it, whose answer would be lost with the page in a long export.
+    function exportChat(identity, media, password) {
+        //% "Exporting chat"
+        Notices.show(qsTrId("threesea-la-exporting-chat"), Notice.Short, Notice.Center)
+        backend.call("exportChat", {
+            identity: identity,
+            media: media,
+            password: password,
+            directory: StandardPaths.download,
+            //% "Me"
+            me: qsTrId("threesea-la-mention-me"),
+            offsetMinutes: -new Date().getTimezoneOffset()
+        }, function(ok, result, kind, message) {
+            if (ok) {
+                //% "Saved to Downloads"
+                Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
+            } else {
+                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            }
+        })
+    }
+
     // Opens a page whose commands need the PIN (ADR 0009; the core checks it each time): asks
     // first if a lock exists and hands the page its `pin`. `opened(page)`, if given, gets the
     // page. The X on the PIN page goes back without opening anything.

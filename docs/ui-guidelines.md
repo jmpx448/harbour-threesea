@@ -19,7 +19,9 @@ does. Sources are listed at the end; re-check them before building a new page.
   none (e.g. delivery/read state), drawn in the same monochrome style and tinted via Theme.
 - **Navigation:** page stack + swipe back. No hamburger menus, no tab bars, no floating action
   buttons. Avoid deep stacks; `pageStack.replace()` for flows (onboarding).
-- **Pulley menus:** ≤ 4 items (Jolla apps use 1–3); most-used item closest to the list.
+- **Pulley menus:** ≤ 4 items (Jolla apps use 1–3); most-used item closest to the list. One
+  exception: the chat's attachment menu (push-up) has up to six. Silica's image, video and content
+  pickers are separate pages, and one picker for all would put a step before the photos.
   Pulleys are for **actions**. Details of the current object (e.g. the contact of a chat) are an
   **attached page** (`pageStack.pushAttached`), reached by swiping left — like Jolla Messages.
 - **Dialogs:** accept = swipe forward / DialogHeader, cancel = swipe back. No OK/Cancel buttons.
