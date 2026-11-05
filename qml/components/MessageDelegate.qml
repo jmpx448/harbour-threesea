@@ -20,8 +20,15 @@ ListItem {
     property bool outgoing: model.outgoing
     // This message, for the parts in Loaders below: there `item` is the Loader's own property.
     readonly property Item message: item
-    // The neighbour in this newest-first model (index + 1).
-    property var olderMessage: null
+    // The neighbour in this newest-first model (index + 1): only what the layout asks of it, and
+    // as plain values, so a new row that leaves the neighbour as it was changes nothing further.
+    property bool hasOlder: false
+    property real olderCreatedAt: 0
+    property bool olderOutgoing: false
+    property string olderSender: ""
+    property string olderKind: ""
+    // The list is moving, by a flick or the quick scroll: what can wait for it, waits.
+    property bool listMoving: false
     // The contact understands any emoji; otherwise only thumbs up/down (legacy reactions).
     property bool anyReaction: true
     // Distribution lists have no reactions at all, not even the thumbs.
@@ -78,10 +85,7 @@ ListItem {
     readonly property bool isLocation: model.kind === "location"
     // The core sends `mentions` only when the text (or caption) has @[ID] tags.
     readonly property bool hasMentions: !!model.mentions && (model.kind === "text" || isFile)
-    // In the view, not only built: a GIF scrolled past needn't be decoded frame by frame.
-    readonly property bool onScreen: ListView.view
-                                     && y + height > ListView.view.contentY
-                                     && y < ListView.view.contentY + ListView.view.height
+    readonly property Item chatView: ListView.view
     // Shown as StyledText (mentionLabel): mentions, or Threema's emoji pictures (Settings →
     // Appearance → Emoji style); otherwise the plain LinkedLabel.
     readonly property bool richText: hasMentions
@@ -106,12 +110,12 @@ ListItem {
     readonly property real unreadGap: showUnread ? unreadLine.height + 2 * Theme.paddingMedium : 0
     readonly property string dayText: Fmt.day(model.createdAt)
     // The oldest message's day is in the page's day band already.
-    readonly property bool showDay: !!olderMessage && Fmt.day(olderMessage.createdAt) !== dayText
+    readonly property bool showDay: hasOlder && Fmt.day(olderCreatedAt) !== dayText
     // Group chats: who wrote it (shown above the first bubble of a run); empty in 1:1 chats.
     property string senderName: ""
-    readonly property bool firstOfRun: showDay || !olderMessage || olderMessage.kind === "status"
-                                       || olderMessage.outgoing !== outgoing
-                                       || olderMessage.sender !== model.sender
+    readonly property bool firstOfRun: showDay || !hasOlder || olderKind === "status"
+                                       || olderOutgoing !== outgoing
+                                       || olderSender !== (model.sender || "")
     readonly property real maxTextWidth: width - Theme.itemSizeLarge - 2 * Theme.paddingMedium
     readonly property color textColor: highlighted || outgoing ? Theme.highlightColor : Theme.primaryColor
     readonly property real topGap: firstOfRun ? Theme.paddingLarge : Theme.paddingSmall
@@ -479,7 +483,11 @@ ListItem {
                 FileContent {
                     messageId: model.id
                     body: model.body
-                    onScreen: message.onScreen
+                    // In the view, not only built: a GIF scrolled past needn't be decoded frame
+                    // by frame. Only a GIF asks, so other bubbles don't follow the scrolling.
+                    onScreen: !isGif || (!!message.chatView
+                                         && message.y + message.height > message.chatView.contentY
+                                         && message.y < message.chatView.contentY + message.chatView.height)
                     maxWidth: message.maxTextWidth
                     highlighted: message.highlighted
                     textColor: message.textColor

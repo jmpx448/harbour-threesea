@@ -2747,7 +2747,11 @@ Page {
 
             delegate: MessageDelegate {
                 width: listView.width
-                olderMessage: index + 1 < messages.count ? messages.get(index + 1) : null
+                hasOlder: index + 1 < messages.count
+                olderCreatedAt: index + 1 < messages.count ? messages.fieldAt(index + 1, "createdAt") || 0 : 0
+                olderOutgoing: index + 1 < messages.count && messages.fieldAt(index + 1, "outgoing") === true
+                olderSender: index + 1 < messages.count ? messages.fieldAt(index + 1, "sender") || "" : ""
+                olderKind: index + 1 < messages.count ? messages.fieldAt(index + 1, "kind") || "" : ""
                 showUnread: model.id === page.unreadMarkerId
                 anyReaction: page.contact.reactions !== false
                 canReact: !page.isList
