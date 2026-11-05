@@ -15,13 +15,14 @@ small and debuggable; secrets inside messages are wiped on both sides after use.
 | `threesea_data_removal_mark(data_dir)` | The core's mark of a removal of the ID that never finished (the app was killed in it): -1 none, else whether linked devices remain (0 or 1). The bridge then finishes it. |
 | `threesea_data_remove(data_dir)` | With the core stopped: removes everything in the data directory (database, media, logs), the last step of removing the ID (ADR 0018). False if something stayed. |
 | `threesea_core_version()` / `threesea_string_free()` | Version string. |
+| `threesea_core_log(level, message)` | A line from the bridge (Qt warnings, QML errors) into the core's outputs, the journal and the in-app log file. `level`: `debug`, `info`, anything else is a warning. Callable at any time; before `threesea_core_start` it goes to the journal only. The same rules apply as to the core's own lines (CLAUDE.md §7.3). |
 | `threesea_core_send_data(core, request_json, data, len, thumbnail, len)` | A request with binary attachments (`sendFile`, pictures); never blocks. |
 | `threesea_media_read(core, message, thumbnail, &len)` / `threesea_picture_read(core, name, &len)` | Decrypted media for the UI's image providers (other threads). NULL while the message's private chat is hidden (ADR 0009); of a contact's picture also while "Show profile pictures" is off (their `pictureVersion` is 0 then, too). |
 | `threesea_voice_decode(core, message, &len)` | Opus voice message → 16-bit PCM (no platform decoder); NULL as above. |
 | `threesea_video_size(path, &width, &height)` | A video's picture size as shown, from its index (MP4, QuickTime); false if it can't be told. For deciding whether to scale it (Full). |
 | `threesea_buffer_free(buffer, len)` | Wipes and frees a buffer from the readers above or the key functions. |
 | `threesea_qr_decode(grey, width, height)` | First QR code in a grey image (camera scanning); no core needed. |
-| `threesea_group_call_encrypt` / `_decrypt` / `_vp8_packets` | Group call frame encryption on GStreamer's threads (ADR 0012). |
+| `threesea_group_call_encrypt` / `_decrypt`, `threesea_group_call_vp8_packets` | Group call frame encryption on GStreamer's threads (ADR 0012). |
 | `threesea_call_vp8_filter` | Whether a received VP8 frame may reach the decoder (its size), on GStreamer's threads. |
 | `threesea_key_wrap` / `_unwrap` / `_wrapped` | The database key wrapped with a passphrase (scrypt; "Encrypt stored data", ADR 0009). |
 
@@ -144,7 +145,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `editMessage` | `identity`, `messageId` (hex), `text` | changed message JSON; our text messages: unsent ones are just changed, sent ones need the contact's `EDIT_MESSAGE_SUPPORT` and < 6 h (`notSupportedByContact`, `messageTooOld`); `EditMessage` via the outbox |
 | `deleteMessage` | `identity`, `messageId` (hex), `outgoing`, `everyone` | `{removed: true}` (this device, or never sent) or the placeholder message JSON (kind `deleted`); for everyone: ours, `DELETE_MESSAGE_SUPPORT`, < 6 h |
 | `sendFile` | `identity`, `rendering` (`media`/`file`), `mediaType`, `name`, `caption`, `width`, `height`, `path` (if no attachment) + attachments (file, JPEG thumbnail) via `threesea_core_send_data` | the outgoing message JSON (kind `file`, `uploadState` 1); stored encrypted, uploaded, then sent. The reply comes when the file is stored: reading, encoding and encrypting it run on a blocking thread, one file at a time and in the order asked, and requests behind it are answered meanwhile, so this reply (and `saveFile`'s) can come after theirs. The bridge's `backend.sendFile(identity, path, asPhoto, caption, cb)` prepares photos (≤ 2048 px JPEG, EXIF and text dropped, 512 px thumbnail); `backend.holdPicture(message, crop, rotation, marks)` then `sendHeldPicture(held, identity, cb)` does the same from the picture of a message, edited in memory (ADR 0029). An in-app capture is removed once answered, unless `cb` returns its path on a refusal: then it stays for another try. A video sent as media loses its metadata here in the core (`core/src/mp4.rs`, protocol-notes.md), its `width` and `height` come from the file, and pictures and videos sent as media get a generic `name`. A GIF sent as a picture keeps only its frames, timing and loop count (`core/src/gif.rs`), and one that doesn't add up is refused with kind `pictureKeepsMetadata`. A video it can't clean is refused with kind `videoKeepsMetadata`, nothing stored, unless the request has `keepMetadata: true` (the user's answer, ADR 0025): then rendering `file`, unchanged. `backend.sendVideo(identity, path, frame, seconds, caption, cb, keepMetadata)`; without a frame, no thumbnail. |
-| (voice) | `backend.sendVoice(identity, path, durationMs, cb)` → `sendFile` with `audio/aac`, rendering `media`, `duration` (s) | QML context objects `voiceRecorder` (`available`, `recording`, `duration`, `start/stop/cancel`, `finished(path, duration)`) and `voicePlayer` (`messageId`, `playing`, `position`, `duration`, `play(id)/pause/stop/seek`; `play` decrypts on a worker, then `messageId` changes, or `failed` says it can't be played; `videoPlayer` likewise, with `loading`) |
+| (voice) | `backend.sendVoice(identity, durationMs, cb)`, called from `voiceRecorder.finished` or for a held recording: takes the recording from `voiceRecorder` (no file path crosses) → `sendFile` with `audio/aac`, rendering `media`, `duration` (s); raw PCM goes with `encode: "opus"` and the core makes Ogg Opus of it | QML context objects `voiceRecorder` (`available`, `recording`, `paused`, `held`, `previewing`, `previewPosition`, `owner`, `duration`; `start(owner)/stop/cancel/pause/resume/hold`, `startPreview/pausePreview/seekPreview`; `finished(duration)`, `discarded`, `failed(error)`, `previewFailed`) and `voicePlayer` (`messageId`, `playing`, `position`, `duration`, `play(id)/pause/stop/seek`; `play` decrypts on a worker, then `messageId` changes, or `failed` says it can't be played; `videoPlayer` likewise, with `loading`) |
 | `retryUpload` | `message` (local id) | `{}`; an upload that failed tries again, with its automatic tries starting over. By itself it tries again after growing pauses (1 min to 8 h, five times) while connected, unless the server refused it or the file can't be read. An upload cut short by the end of the process counts as such a try and shows as failed until its pause ends. |
 | `resendMessage` | `message` (local id) | `{}`; an outgoing message marked failed goes back in the queue, in its place in the chat, under the same message ID (a poll's setup or closing: a new one). A file goes up anew first, `fileNotDownloaded` if it is no longer on the device. Not for a list's own copy. |
 | `cancelTransfer` | `message` (local id) | `{}`; stops a running upload (now `uploadState` 3 with no try planned, so only `retryUpload` starts it again; the message stays) or file download (now `fileState` 0 and `fileOnDemand`, so only `downloadFile` does). Nothing happens if neither is running. |
@@ -215,7 +216,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `importChatTones` | `tones` `{key: path}` | `{}`; the tones the app kept in its settings file until 0.2.0, also those of hidden private chats |
 | `exportChat` | `identity`, `media`, `directory`, `password?`, `me?`, `offsetMinutes?` | `{path, name, messages, files}`; a non-empty `password` under 8 characters: `passwordTooShort` |
 | `parseLink` | `url` | `{action: contact\|compose\|add\|license\|verifyMobile, identity, text, key, code}` or error `linkInvalid` (protocol-notes "Threema links") |
-| `myQrCode` | – | `{text, size, modules}`: `3mid:<ID>,<public key hex>` and its QR modules (`size`² chars `0`/`1`) |
+| `myQrCode` | – | `{text, size, bits}`: `3mid:<ID>,<public key hex>` and its QR modules (`bits`: `size`² chars `0`/`1`) |
 | `verifyQrCode` | `text` | contact JSON; fully verified if the key matches, a new contact added only then (errors `qrInvalid`, `qrExpired`, `qrMismatch`). Camera frames / pictures are decoded first with the C function `threesea_qr_decode(grey, width, height)` |
 | `callTurnServers` | `identity` (who the call is with) | `{urls, username, password, relayOnly}` for the media engine (`identity/turn_cred`, cached until expiry; `relayOnly`: the peer is unverified or not a contact, or the setting `relayThreemaCalls` is on; then the dual-stack servers, like Android) |
 | `callStart` | `identity`, `sdp` (engine's offer), `video` | `{callId}`; the SDP is patched (`sdp.rs`) and sent as call-offer. Only with `calls: true` in the start config (Chum, ADR 0012). Refused with `contactRevoked`, `contactBlocked` or `contactUnknown` (block unknown senders) for someone the signalling wouldn't reach |
@@ -242,15 +243,15 @@ Contact JSON: `{identity, displayName, firstName, lastName, nickname, verificati
 workVerified, inactive, invalid, hidden (out of the contact list: known from a group, or deleted), neededByGroup (hidden, and a member of a group we are in: nothing to delete), canEdit, canDelete (contact supports edits / deletions for everyone), reactions (contact has REACTION_SUPPORT: any emoji;
 else only 👍/👎, which can't be withdrawn), canCall (O2O_AUDIO_CALL_SUPPORT), publicKey (hex)}`.
 
-Error kinds (mapped to translated text in `qml/components/Errors.js`): `noLicense`,
-`noIdentity`, `licenseFormat`, `server` (message from Threema, shown as-is), `rateLimited` (the directory's 429),
-`serverUnexplained` (it said no without a reason), `reportRefused`, `identityExists`, `serverTrouble` (a
-Threema server's unexpected status or unreadable answer; its text stays out of the UI), `network`,
-`backupDecrypt`, `backupVersion`, `backupNoIdentity`, `passwordTooShort`, `passwordTooLong`, `safeNotFound`,
-`safeTooLarge`, `safeDamaged`,
-`identityFormat`, `idSearchInput`, `contactInvalid`, `contactIsSelf`, `contactNotFound`, `messageTooLong`,
-`storeKey`, `storeDamaged`, `storeTooNew`, `diskFull`, `upgradeNoRoom`, `storeUnreadable` (the store failed, see
-`fatal`; the message is only a code for support), `internal`.
+Error kinds: the full list is `ApiError::kind` in `core/src/app.rs` (and `StoreError::kind` in
+`core/src/store.rs` for the store's failures); `qml/components/Errors.js` gives each its translated
+text, and the test `every_error_kind_has_a_text` keeps the two in step. Some that need a word here:
+`server` (message from Threema, shown as-is), `rateLimited` (the directory's 429),
+`serverUnexplained` (it said no without a reason), `serverTrouble` (a Threema server's unexpected
+status or unreadable answer; its text stays out of the UI), `storeKey`, `storeDamaged`,
+`storeTooNew`, `diskFull`, `upgradeNoRoom`, `storeUnreadable` (the store failed, see `fatal`; the
+message is only a code for support), and `internal` (no text of its own: "Something went wrong.").
+Commands name their own kinds in the tables above.
 
 QML usage: `backend.call("checkLicense", {licenseKey: k}, function(ok, result, kind, message) {…})`. A `null` result
 stays `null` in the callback; a reply without one (an error) gives an empty object.
@@ -273,7 +274,7 @@ stays `null` in the callback; a reply without one (an error) gives an empty obje
 | `confirmLinking` / `cancelLinking` | – | the linked devices once the new device registered (`devices` may be empty if the connection dropped right after) / `{}`. Errors of `confirmLinking`: `linkFailed` before the ID left this device (a device group made just for this is left again); `linkRemoved` after it, with the group removed again through the mediator; `linkUncertain` after it, when the new device may be linked: multi-device stays on and Linked devices shows the truth. Can take up to about 11 minutes in the worst case; the core answers nothing else meanwhile |
 | `groupCallRefresh` | `conversation` | `{}`; the state comes as the `groupCall` event (ADR 0012) |
 | `groupCallJoin` | `conversation`, `fingerprint` (hex SHA-256 of our DTLS certificate), `create` | `{offer, candidates, participantId}` for the media engine |
-| `groupCallChannel` | `data` (base64, from the SFU's data channel) | `{}`; answers go out as `groupCallSend` events |
+| `groupCallChannel` | `data` (base64, from the SFU's data channel) | `{}`; answers go out as `groupCallChannelSend` events |
 | `groupCallMute` / `groupCallCamera` | `muted` / `on` | `{}` (tells the others; the engine switches the device) |
 | `groupCallTick` / `groupCallLeave` | – | every second while in a call (rekeying, state) / leave |
 | `webSetEnabled` | `enabled` | like `webSessions`: the Threema Web switch; off refuses `webPair`, `webStart` and wake-ups (`webDisabled`) and disconnects running sessions (telling the browser `disable`), keeping the pairings the browser stored |
@@ -287,6 +288,11 @@ stays `null` in the callback; a reply without one (an error) gives an empty obje
 | `webRemoveServer` | `host` | like `webSessions`: take back an allowed server's permission and pin, and remove its sessions |
 | `recentEmoji` / `useEmoji` | – / `emoji` | `{emoji: [text]}` newest first / record one as used |
 
+Threema Web events: `{"event": "webSession", id, state, error?}` (`connecting`, `waiting` for the
+browser, `connected`, `stopped`; `error`: a fixed failure code, never the server's words) and
+`{"event": "webCertificateChanged", id, host}` (a self-hosted server shows another certificate:
+`webAcceptCertificate` or `webDeclineCertificate`).
+
 ## D-Bus (notification actions)
 
 Service `org.threesea.harbour-threesea`, object `/`, interface `org.threesea.harbourthreesea`:
@@ -298,6 +304,9 @@ current token are ignored, since any process on the session bus could call the s
 lipstick calls through a helper (`mliteremoteaction`) the sandbox can't identify (audits S07/D04).
 For a non-blank reply the window then says that it wasn't sent, without its chat or text.
 Lipstick raises the app window for non-input actions (Mark as read); quick reply stays in Events.
+Also: `answerCall(token)` / `declineCall(token)` (the incoming call's notification, Full; its own
+token, so nobody else on the bus can turn the microphone on), `showWebSessions()` (Threema Web's
+notification) and `showSafe()` (the backup notifications).
 The window runs Reply and Mark as read only once it knows the app lock is open: otherwise they wait
 in memory for the PIN or passphrase (ADR 0009).
 
