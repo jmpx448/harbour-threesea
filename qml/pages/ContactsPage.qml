@@ -69,6 +69,11 @@ Page {
         })
     }
 
+    // Offline with an app lock the chat list's pulley has no room for New group; a refresh is no
+    // use offline, so it makes room here (four items at most).
+    readonly property bool newGroupHere: backend.connectionState === "disconnected"
+                                         && !!(window.lockInfo && window.lockInfo.lock && window.lockInfo.lock.appLock)
+
     // What the search field in the header narrows the list to. The contacts model is shared.
     property string query
     ListFilter {
@@ -91,11 +96,19 @@ Page {
         PullDownMenu {
             busy: page.refreshing
             MenuItem {
-                // The chat list's, which this page is attached to; there it gives way while offline.
+                // The chat list's, which this page is attached to; there it gives way while offline
+                // or with an app lock.
                 text: qsTrId("threesea-me-new-list")
                 onClicked: pageStack.find(function(p) { return p.objectName === "conversations" }).newList()
             }
             MenuItem {
+                // The chat list's too, when it has given way there as well.
+                visible: page.newGroupHere
+                text: qsTrId("threesea-me-new-group")
+                onClicked: pageStack.find(function(p) { return p.objectName === "conversations" }).newGroup()
+            }
+            MenuItem {
+                visible: !page.newGroupHere
                 //% "Refresh"
                 text: qsTrId("threesea-me-refresh")
                 enabled: !page.refreshing

@@ -307,7 +307,8 @@ Page {
                 onClicked: page.newList()
             }
             MenuItem {
-                // Offline with an app lock there are both of those to make room for.
+                // Offline with an app lock there are both of those to make room for; then the
+                // Contacts page has it, in place of its Refresh.
                 visible: backend.connectionState !== "disconnected" || !page.canLockNow
                 //% "New group"
                 text: qsTrId("threesea-me-new-group")

@@ -26,6 +26,9 @@ does. Sources are listed at the end; re-check them before building a new page.
 - **Pulley menus:** ≤ 4 items (Jolla apps use 1–3); most-used item closest to the list. One
   exception: the chat's attachment menu (push-up) has up to six. Silica's image, video and content
   pickers are separate pages, and one picker for all would put a step before the photos.
+  What gives way on the chat list stays one swipe away on the Contacts page: New distribution list
+  while offline or with an app lock, and offline with an app lock also New group, for which the
+  Contacts page's Refresh (no use offline) makes room.
   Pulleys are for **actions**. Details of the current object (e.g. the contact of a chat) are an
   **attached page** (`pageStack.pushAttached`), reached by swiping left — like Jolla Messages.
 - **Dialogs:** accept = swipe forward / DialogHeader, cancel = swipe back. No OK/Cancel buttons.
