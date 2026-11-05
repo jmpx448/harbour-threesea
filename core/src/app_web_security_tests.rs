@@ -1674,3 +1674,37 @@ async fn a_chat_opened_in_the_browser_is_no_longer_marked_unread() {
     app.web_action(&incoming).await.unwrap().unwrap();
     assert_eq!(app.store.marked_unread_chats().unwrap(), vec!["CCCCCCCC"]);
 }
+
+/// The chat server's words reach a browser that is open, which the phone in a pocket doesn't
+/// show. What has no words of the server's stays with the phone.
+#[test]
+fn the_browser_hears_what_the_chat_server_says() {
+    use crate::connection::OfflineReason;
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    app.web_subscribe_receivers(1);
+
+    app.web_server_said(&OfflineReason::ServerAlert("Maintenance tonight".into()));
+    app.web_server_said(&OfflineReason::Server("Your ID was revoked".into()));
+    app.web_server_said(&OfflineReason::LoginRefused);
+    let sent = sent_values(&mut rx);
+    assert_eq!(sent.len(), 2);
+    for (wire, kind, text) in [
+        (&sent[0], "warning", "Maintenance tonight"),
+        (&sent[1], "error", "Your ID was revoked"),
+    ] {
+        assert_eq!(saltyrtc::field(wire, "type"), Some(&Value::from("update")));
+        assert_eq!(
+            saltyrtc::field(wire, "subType"),
+            Some(&Value::from("alert"))
+        );
+        let args = saltyrtc::field(wire, "args").unwrap();
+        assert_eq!(saltyrtc::field(args, "type"), Some(&Value::from(kind)));
+        assert_eq!(
+            saltyrtc::field(args, "source"),
+            Some(&Value::from("server"))
+        );
+        let data = saltyrtc::field(wire, "data").unwrap();
+        assert_eq!(saltyrtc::field(data, "message"), Some(&Value::from(text)));
+    }
+}

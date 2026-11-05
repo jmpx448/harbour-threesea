@@ -16,6 +16,7 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     app::{ApiError, App},
     chat_notifications::Policy,
+    connection::OfflineReason,
     contacts,
     distribution_lists::DistributionList,
     group_call_handshake::public_bytes,
@@ -818,6 +819,30 @@ impl App {
         }
         for (session, message) in out {
             self.send_web(session, message);
+        }
+    }
+
+    /// What the chat server said goes to the browsers too (`update/alert`): the phone may be in a
+    /// pocket. An alert is a warning, the words it closes a connection with an error, like
+    /// Android's `AlertHandler`.
+    pub(crate) fn web_server_said(&mut self, reason: &OfflineReason) {
+        let (kind, text) = match reason {
+            OfflineReason::ServerAlert(text) => ("warning", text),
+            OfflineReason::Server(text) => ("error", text),
+            OfflineReason::Mediator(_) | OfflineReason::LoginRefused => return,
+        };
+        let alert = arp::message(
+            "update",
+            "alert",
+            Some(map(vec![
+                ("type", kind.into()),
+                ("source", "server".into()),
+            ])),
+            Some(map(vec![("message", text.as_str().into())])),
+        );
+        let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
+        for session in sessions {
+            self.send_web(session, alert.clone());
         }
     }
 

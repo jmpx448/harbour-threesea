@@ -316,8 +316,10 @@ pub struct LinkedDevice {
 /// login, as from outside it all looks like a bad network otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfflineReason {
-    /// An alert or a close error, in the words of the chat server (Android's `ServerMessageModel`).
+    /// A close error, in the words of the chat server (Android's `ServerMessageModel`).
     Server(String),
+    /// An alert, in the words of the chat server: the connection goes on.
+    ServerAlert(String),
     /// The mediator closed the connection with a code that rules out reconnecting by itself: the
     /// UI words it, by the code.
     Mediator(u16),
@@ -329,7 +331,9 @@ impl OfflineReason {
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            Self::Server(text) => serde_json::json!({ "kind": "server", "text": text }),
+            Self::Server(text) | Self::ServerAlert(text) => {
+                serde_json::json!({ "kind": "server", "text": text })
+            }
             Self::Mediator(code) => serde_json::json!({ "kind": "mediator", "code": code }),
             Self::LoginRefused => serde_json::json!({ "kind": "loginRefused" }),
         }
@@ -3835,7 +3839,9 @@ impl<'a> Session<'a> {
             }
             IncomingPayload::ServerAlert(alert) => {
                 tracing::info!("chat server sent an alert");
-                if let Some(reason) = server_reason(&alert.0) {
+                let text = plain_server_text(&alert.0);
+                if !text.is_empty() {
+                    let reason = OfflineReason::ServerAlert(text);
                     let _ = self.tx.send(FromConnection::OfflineReason(reason));
                 }
             }
@@ -5343,6 +5349,10 @@ mod sync_order_tests {
     fn the_ui_gets_a_reason_in_words_or_by_its_code() {
         assert_eq!(
             OfflineReason::Server("maintenance".into()).to_json(),
+            serde_json::json!({ "kind": "server", "text": "maintenance" })
+        );
+        assert_eq!(
+            OfflineReason::ServerAlert("maintenance".into()).to_json(),
             serde_json::json!({ "kind": "server", "text": "maintenance" })
         );
         assert_eq!(
