@@ -955,9 +955,18 @@ Page {
     }
 
     // The emoji panel in place of the keyboard (EmojiPanel). Its height is the keyboard's when
-    // known, so switching between the two doesn't move the chat.
+    // known, so switching between the two doesn't move the chat; each orientation has its own,
+    // and at most half of the page's height, for the messages and the input to stay in view.
     property bool emojiPanelOpen: false
-    property real keyboardHeight: Math.round(Screen.height * 0.38)
+    property real portraitKeyboardHeight: 0
+    property real landscapeKeyboardHeight: 0
+    // The screen's side along the page's height (Silica's _screenHeight): steady while the
+    // keyboard comes and goes.
+    readonly property real pageSide: page.isPortrait ? Screen.height : Screen.width
+    readonly property real emojiPanelHeight: {
+        var known = page.isPortrait ? portraitKeyboardHeight : landscapeKeyboardHeight
+        return Math.min(known > 0 ? known : Math.round(pageSide * 0.38), Math.round(pageSide * 0.5))
+    }
     // Inserting a message row (someone wrote while the user types) steals the input's focus
     // and closes the keyboard. That steal takes the focus with it, while the user's own
     // dismissal keeps it on the input (FocusBehavior.KeepFocus), so a close without focus
@@ -969,9 +978,18 @@ Page {
     Connections {
         target: Qt.inputMethod
         onKeyboardRectangleChanged: {
-            var h = Qt.inputMethod.keyboardRectangle.height
+            // Which side of the rectangle is the keyboard's height, as Silica's own keyboard
+            // observer has it (private/VirtualKeyboardObserver.qml): the rectangle doesn't turn
+            // with the page.
+            var rect = Qt.inputMethod.keyboardRectangle
+            var h = page.isPortrait !== window._transpose ? rect.height : rect.width
             if (Qt.inputMethod.visible && h > Theme.itemSizeLarge) {
-                page.keyboardHeight = h
+                // During a turn the rectangle can be ahead of the page, and then this reads its
+                // long side, which no keyboard is.
+                if (h < page.pageSide * 0.75) {
+                    if (page.isPortrait) page.portraitKeyboardHeight = h
+                    else page.landscapeKeyboardHeight = h
+                }
             } else if (h === 0 && !page.emojiPanelOpen && page.status === PageStatus.Active
                        && page.inputField && !page.inputField.activeFocus
                        && Date.now() - page.lastInsertAt < 1000) {
@@ -2243,7 +2261,7 @@ Page {
                 right: parent.right
                 bottom: parent.bottom
             }
-            height: page.emojiPanelOpen ? page.keyboardHeight : 0
+            height: page.emojiPanelOpen ? page.emojiPanelHeight : 0
             visible: height > 0
             clip: true
             reactionMode: page.reactionTarget !== null
