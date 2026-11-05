@@ -203,11 +203,19 @@ Page {
     }
 
     // Display name of a group member (sender of an incoming message).
+    function showDetails(message) {
+        pageStack.push(Qt.resolvedUrl("MessageDetailsPage.qml"), { message: message, chat: page })
+    }
+
+    function participantName(identity) {
+        return isGroup ? memberName(identity) : (identity === page.identity ? contact.displayName : identity)
+    }
+
     // The voters' names for the poll pages.
     function pollNames(poll) {
         var names = {}
         for (var voter in (poll.votes || {})) {
-            names[voter] = isGroup ? memberName(voter) : (voter === identity ? contact.displayName : voter)
+            names[voter] = participantName(voter)
         }
         return names
     }
@@ -3095,8 +3103,8 @@ Page {
                 onLocationRequested: page.openLocation(model.body)
                 onStarToggled: backend.call("setStarred", { message: model.id, starred: !model.starred },
                                             function(ok, result) { if (ok && result) page.addMessage(result) })
-                onDetailsRequested: pageStack.push(Qt.resolvedUrl("MessageDetailsPage.qml"),
-                                                   { message: messages.get(index) })
+                onDetailsRequested: page.showDetails(messages.get(index))
+                onReactionsRequested: page.showDetails(messages.get(index))
                 onResendRequested: page.tell("resendMessage", { message: model.id })
                 onCancelTransferRequested: page.tell("cancelTransfer", { message: model.id })
                 onShareRequested: window.messageOut.shareText(Fmt.copyText(model.kind, model.text, model.body, model.mentions))

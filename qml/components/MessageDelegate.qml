@@ -76,6 +76,8 @@ ListItem {
     signal resendRequested()
     signal cancelTransferRequested()
     signal shareRequested()
+    // Held a reaction: who reacted.
+    signal reactionsRequested()
     signal locationRequested()
     signal pollRequested()
     signal closePollRequested()
@@ -482,6 +484,7 @@ ListItem {
                         anchors.fill: parent
                         enabled: !message.selectionMode
                         onClicked: message.quotedRequested()
+                        onPressAndHold: message.openMenu()
                     }
                 }
             }
@@ -712,8 +715,9 @@ ListItem {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    enabled: !item.selectionMode && !item.readOnly
-                    onClicked: item.toggleReaction(modelData.emoji)
+                    enabled: !item.selectionMode
+                    onClicked: if (!item.readOnly) item.toggleReaction(modelData.emoji)
+                    onPressAndHold: item.reactionsRequested()
                 }
             }
         }

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import "../components/Format.js" as Fmt
 
 // A message's times and ids (Android's message details): created/sent/delivered/read for ours,
 // sent/received/read for incoming ones, edit or deletion time, message id, file type and size.
 // Times the app didn't record (older messages, a "read" receipt without "received") are left out.
+// Then who reacted with what.
 // Follows delivery receipts while open.
 Page {
     id: page
@@ -15,6 +17,15 @@ Page {
     readonly property bool outgoing: message.outgoing === true
     readonly property bool deleted: message.kind === "deleted"
     readonly property bool isFile: message.kind === "file" && !!message.body
+    // The chat, which knows who is who there, also for whoever reacts while this is open.
+    property var chat: null
+    readonly property var reactions: Fmt.reactionSenders(message.reactions)
+
+    function names(senders) {
+        return senders.map(function(sender) {
+            return sender === "" ? qsTrId("threesea-la-you") : page.chat ? page.chat.participantName(sender) : sender
+        }).join(", ")
+    }
 
     function when(ms) {
         var date = new Date(ms)
@@ -111,6 +122,40 @@ Page {
                 //% "Message ID"
                 label: qsTrId("threesea-la-details-message-id")
                 value: page.message.messageId || ""
+            }
+
+            SectionHeader {
+                visible: page.reactions.length > 0
+                //% "Reactions"
+                text: qsTrId("threesea-he-reactions")
+            }
+            Repeater {
+                model: page.reactions
+                // Like the chips: Threema's picture (Settings → Appearance), else the system's glyph.
+                Item {
+                    width: column.width
+                    height: Math.max(emoji.height, reactors.height) + Theme.paddingMedium
+                    Label {
+                        id: emoji
+                        x: Theme.horizontalPageMargin
+                        width: Theme.iconSizeMedium
+                        textFormat: backend.threemaEmoji ? Text.StyledText : Text.PlainText
+                        text: backend.threemaEmoji ? Fmt.markEmoji(modelData.emoji, Math.round(font.pixelSize * 1.2))
+                                                   : modelData.emoji
+                    }
+                    Label {
+                        id: reactors
+                        anchors {
+                            left: emoji.right
+                            leftMargin: Theme.paddingMedium
+                            right: parent.right
+                            rightMargin: Theme.horizontalPageMargin
+                        }
+                        wrapMode: Text.Wrap
+                        text: page.names(modelData.senders)
+                        color: Theme.highlightColor
+                    }
+                }
             }
         }
 

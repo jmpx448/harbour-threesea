@@ -98,7 +98,57 @@ QtObject {
         ["", ""],
     ]
 
+    function actionsOf(list) {
+        var a = Fmt.selectionActions(list)
+        return [a.copy, a.save, a.shareText].join()
+    }
+
+    function checkMessageActions() {
+        check("copy, text", Fmt.copyText("text", "hi", null, null), "hi")
+        check("copy, a mention", Fmt.copyText("text", "hi @[ABCD1234]", null, { ABCD1234: "Ann" }), "hi @Ann")
+        check("copy, a caption", Fmt.copyText("file", "", { caption: "see @[ABCD1234]" }, { ABCD1234: "Ann" }), "see @Ann")
+        check("copy, no caption", Fmt.copyText("file", "", { caption: "" }, null), "")
+        check("copy, a place", Fmt.copyText("location", "", { latitude: 1.5, longitude: -2 }, null), "1.500000, -2.000000")
+        check("copy, a poll", Fmt.copyText("poll", "", {}, null), "")
+        check("copy, deleted", Fmt.copyText("deleted", "", null, null), "")
+
+        var text = { kind: "text", text: "hi" }
+        var photo = { kind: "file", body: { fileState: 2 } }
+        var captioned = { kind: "file", body: { fileState: 2, caption: "hi" } }
+        var away = { kind: "file", body: { fileState: 0, caption: "hi" } }
+        var deleted = { kind: "deleted" }
+        // copy, save, share text
+        check("selection, nothing", actionsOf([]), "false,false,false")
+        check("selection, a text", actionsOf([text]), "true,false,true")
+        check("selection, texts", actionsOf([text, text]), "true,false,false")
+        check("selection, a photo", actionsOf([photo]), "false,true,false")
+        check("selection, photos", actionsOf([photo, captioned]), "false,true,false")
+        check("selection, a captioned photo", actionsOf([captioned]), "true,true,true")
+        check("selection, captioned photos", actionsOf([captioned, captioned]), "true,true,false")
+        check("selection, a file not here", actionsOf([away]), "true,false,true")
+        check("selection, one of them not here", actionsOf([photo, away]), "false,false,false")
+        check("selection, text and photo", actionsOf([text, captioned]), "true,false,false")
+        check("selection, deleted among them", actionsOf([text, deleted]), "false,false,false")
+
+        // A failed file with its thumbnail gone: thumbnail first, the file's old state seen.
+        check("download, thumbnail first, file still away", Fmt.downloadStep(false, 0), "waiting")
+        check("download, thumbnail first, file failed before", Fmt.downloadStep(false, 3), "waiting")
+        check("download, seen running", Fmt.downloadStep(false, 1), "running")
+        check("download, still running", Fmt.downloadStep(true, 1), "running")
+        check("download, failed", Fmt.downloadStep(true, 3), "failed")
+        check("download, here", Fmt.downloadStep(true, 2), "ended")
+        check("download, here without being seen", Fmt.downloadStep(false, 2), "ended")
+        check("download, stopped", Fmt.downloadStep(true, 0), "ended")
+
+        var senders = Fmt.reactionSenders([{ emoji: "a", sender: "ABCD1234" }, { emoji: "b", sender: "" },
+                                           { emoji: "a", sender: "" }, { emoji: "a", sender: "EFGH5678" }])
+        check("who reacted, by emoji", senders.length, 2)
+        check("who reacted, we first", senders[0].senders.join(), ",ABCD1234,EFGH5678")
+        check("who reacted, nobody", Fmt.reactionSenders(null).length, 0)
+    }
+
     Component.onCompleted: {
+        checkMessageActions()
         var i
         var now = 1700000000000
         check("metres", Fmt.distance(120.4, "."), "120 m")

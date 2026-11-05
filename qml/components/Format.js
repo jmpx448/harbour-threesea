@@ -479,6 +479,24 @@ function reactionGroups(reactions) {
     return groups
 }
 
+// Who reacted with what: [{emoji, senders}], `sender` as in the reactions ("" for us, first).
+function reactionSenders(reactions) {
+    var groups = []
+    var byEmoji = {}
+    for (var i = 0; reactions && i < reactions.length; ++i) {
+        var reaction = reactions[i]
+        var group = byEmoji[reaction.emoji]
+        if (!group) {
+            group = { emoji: reaction.emoji, senders: [] }
+            byEmoji[reaction.emoji] = group
+            groups.push(group)
+        }
+        if (reaction.sender === "") group.senders.unshift("")
+        else group.senders.push(reaction.sender)
+    }
+    return groups
+}
+
 // Did we react with this emoji?
 function reactedWith(reactions, emoji) {
     for (var i = 0; reactions && i < reactions.length; ++i) {
