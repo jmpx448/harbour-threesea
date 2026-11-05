@@ -1123,6 +1123,34 @@ impl RefusedLogins {
     }
 }
 
+/// The event queue as it was, back in place on leaving a scope unless [`Self::disarm`]ed: for writes
+/// that are undone on the way out, so that nothing they announced stays announced.
+struct EventsKept<'a> {
+    events: &'a EventSink,
+    before: Option<Vec<CoreEvent>>,
+}
+
+impl<'a> EventsKept<'a> {
+    fn new(events: &'a EventSink) -> Self {
+        Self {
+            events,
+            before: Some(events.borrow().clone()),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.before = None;
+    }
+}
+
+impl Drop for EventsKept<'_> {
+    fn drop(&mut self) {
+        if let Some(before) = self.before.take() {
+            *self.events.borrow_mut() = before;
+        }
+    }
+}
+
 /// The wait before the next attempt, given the wait so far and how long the session lasted. A
 /// working connection starts over, unless the server told us to stay away: then how long the
 /// session lasted says nothing (another device took over after an hour, say), and coming back at
@@ -2407,6 +2435,8 @@ impl<'a> Session<'a> {
         // Nothing is awaited from here on: what this message writes, the ratchet of its session and
         // its nonces, makes one commit. If that fails, nothing goes out and the ratchet is as it was.
         let step = self.setup.store.step().map_err(storage_error)?;
+        let events_kept = EventsKept::new(&self.events);
+        let mut line = None;
         if use_fs {
             let (inner_type, inner_data) = encode_message_body(&body);
             let group_identity = if let OutgoingMessageBody::Group(group) = &body {
@@ -2428,7 +2458,7 @@ impl<'a> Session<'a> {
                     if replaced {
                         // First the Terminate for the old session, then the new one's Init.
                         payloads.extend(self.take_fs_controls(receiver)?);
-                        self.show_fs_line(receiver, "fsReset")?;
+                        line = self.fs_line(receiver, "fsReset")?;
                     }
                     for control in encapsulation.prelude {
                         payloads.extend(self.encode_control(
@@ -2444,6 +2474,7 @@ impl<'a> Session<'a> {
                 Err(error) => {
                     tracing::warn!(%error, "cannot encapsulate; message not sent");
                     step.commit().map_err(storage_error)?;
+                    events_kept.disarm();
                     return Ok(None);
                 }
             }
@@ -2478,6 +2509,11 @@ impl<'a> Session<'a> {
             ),
         };
         step.commit().map_err(storage_error)?;
+        events_kept.disarm();
+        // Only now that its row holds.
+        if let Some(message) = line {
+            self.emit(CoreEvent::MessageAdded { message });
+        }
         match encoded {
             Ok(payload) => {
                 payloads.push(payload);
@@ -2809,14 +2845,21 @@ impl<'a> Session<'a> {
 
     /// A forward secrecy status line, from where no event passes through [`Self::handle_fs_event`].
     fn show_fs_line(&self, peer: &str, code: &str) -> Result<(), ConnectionError> {
-        let store = &self.setup.store;
-        if crate::providers::shows_fs_status(store, &self.setup.config, peer)
-            .map_err(storage_error)?
-            && let Some(message) = store.insert_status(peer, code).map_err(storage_error)?
-        {
+        if let Some(message) = self.fs_line(peer, code)? {
             self.emit(CoreEvent::MessageAdded { message });
         }
         Ok(())
+    }
+
+    /// Such a line stored, if this chat shows them; its announcement is up to the caller.
+    fn fs_line(&self, peer: &str, code: &str) -> Result<Option<Message>, ConnectionError> {
+        let store = &self.setup.store;
+        if !crate::providers::shows_fs_status(store, &self.setup.config, peer)
+            .map_err(storage_error)?
+        {
+            return Ok(None);
+        }
+        store.insert_status(peer, code).map_err(storage_error)
     }
 
     /// The control messages for `peer` waiting in the event queue, encoded, so that they go out
@@ -5485,6 +5528,45 @@ mod sync_order_tests {
         session.run_incoming_task(again).await.unwrap();
         assert_eq!(setup.store.message_count(CREATOR).unwrap(), 1);
         assert!(!session.events.borrow().is_empty());
+    }
+
+    /// A send that fails halfway is undone, and so is whatever it announced: the session it would
+    /// have replaced is still there, with no line in the chat saying otherwise.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_send_that_fails_halfway_announces_nothing() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let mut contact = setup.store.contact(CREATOR).unwrap().unwrap();
+        contact.feature_mask = libthreema::common::FeatureMask(
+            libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+        );
+        setup.store.upsert_contact(&contact).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        // Whatever is still to be seen to before this send stays.
+        session.events.borrow_mut().push(CoreEvent::GroupsChanged);
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON nonces
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+
+        assert!(session.encode(CREATOR, 1, 1, text()).await.is_err());
+
+        assert!(setup.store.conn.is_autocommit(), "no step left open");
+        assert!(setup.store.fs_peers().unwrap().is_empty(), "undone");
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
+        let queued = session.events.borrow();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert!(matches!(queued[0], CoreEvent::GroupsChanged));
+        assert!(
+            !sent_to_ui(&mut rx)
+                .iter()
+                .any(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+        );
     }
 
     /// Sending with forward security: the session, its ratchet and the nonces of what goes out.
