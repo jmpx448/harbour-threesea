@@ -232,8 +232,8 @@ fn waits_for_sender(
 /// Apply what has waited for a sender who has a contact by now ([`waits_for_sender`]), each in a
 /// store step of its own. What they'd be stopped for now (the block list, or "block unknown senders"
 /// for a stranger, as on a device that leads: ADR 0019) goes, contact or not, and no lookup is owed
-/// for it. Who the directory has said doesn't exist takes it with them; for the rest the lookup
-/// stays owed.
+/// for it. For the rest the lookup stays owed, until the directory answers
+/// ([`crate::sync::members_looked_up`]).
 pub fn apply_waiting(
     store: &Rc<Store>,
     config: &libthreema::common::config::Config,
@@ -267,12 +267,7 @@ pub fn apply_waiting(
             continue;
         }
         if store.contact(&sender)?.is_none() {
-            if store.recently_invalid(&sender) {
-                tracing::warn!("a reflected message's sender doesn't exist, message dropped");
-                store.reflected_done(id)?;
-            } else {
-                owed.push(sender);
-            }
+            owed.push(sender);
             continue;
         }
         let announced = events.borrow().len();
@@ -1431,23 +1426,19 @@ mod tests {
         );
     }
 
-    /// Nothing waits for an ID the directory says doesn't exist.
+    /// Nothing waits for an ID the directory says doesn't exist, or whose answer can't be used
+    /// (a predefined contact with another key), and nothing asks for them again.
     #[test]
-    fn a_reflected_message_from_an_invalid_id_goes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
-        store
-            .set_identity(&crate::store::StoredIdentity {
-                threema_id: "ABCD1234".into(),
-                client_key: zeroize::Zeroizing::new([9; 32]),
-                server_group: "01".into(),
-            })
-            .unwrap();
-        let events: EventSink = Rc::default();
-        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &events);
-        store.note_invalid_ids(&["C0C0C0C0".to_owned()]);
-        apply_waiting(&store, &test_config(), &events).unwrap();
-        assert!(store.reflected_waiting().unwrap().is_empty());
+    fn a_reflected_message_goes_with_an_answer_that_gives_no_contact() {
+        use crate::contacts::Lookup;
+        for answer in [Lookup::Invalid, Lookup::Refused] {
+            let (_dir, store) = with_identity();
+            apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+            crate::sync::members_looked_up(&store, vec![("C0C0C0C0".to_owned(), answer)]).unwrap();
+            assert!(store.reflected_waiting().unwrap().is_empty());
+            apply_waiting(&store, &test_config(), &Rc::default()).unwrap();
+            assert!(store.owed_member_lookups().unwrap().is_empty());
+        }
     }
 
     /// A store failure while applying what waited leaves it waiting, with nothing announced.

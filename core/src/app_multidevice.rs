@@ -2778,4 +2778,53 @@ mod tests {
             Ok(ToConnection::ApplyWaitingReflected)
         ));
     }
+
+    fn waiting(app: &App, sender: &str, created_at: i64) {
+        app.store
+            .keep_reflected(&crate::multidevice::WaitingReflected {
+                id: 0,
+                sender: sender.into(),
+                conversation: sender.into(),
+                message_id: 1,
+                created_at,
+                read_at: None,
+                message: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    /// Keep messages holds for what waits for a contact as well.
+    #[test]
+    fn keep_messages_takes_what_waits_too() {
+        let (_dir, mut app) = app();
+        let now = crate::messages::now_ms();
+        let old = now - 40 * 24 * 3_600_000;
+        waiting(&app, "C0C0C0C0", old);
+        waiting(&app, "D0D0D0D0", now);
+        assert!(!app.auto_delete_scheduled());
+        assert_eq!(app.store.reflected_waiting().unwrap().len(), 2);
+        app.store
+            .set_setting(crate::store::keys::AUTO_DELETE_DAYS, "30")
+            .unwrap();
+        app.auto_delete_scheduled();
+        let left = app.store.reflected_waiting().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].sender, "D0D0D0D0");
+    }
+
+    /// Blocking someone takes what waits for their contact, and the lookup for it.
+    #[test]
+    fn blocking_takes_what_waits_from_them() {
+        let (_dir, mut app) = app();
+        waiting(&app, "C0C0C0C0", 1);
+        waiting(&app, "D0D0D0D0", 1);
+        app.store
+            .owe_member_lookups(&["C0C0C0C0".to_owned()])
+            .unwrap();
+        app.set_blocked("C0C0C0C0", true).unwrap();
+        let left = app.store.reflected_waiting().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].sender, "D0D0D0D0");
+        assert!(app.store.owed_member_lookups().unwrap().is_empty());
+    }
 }

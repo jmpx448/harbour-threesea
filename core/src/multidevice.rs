@@ -315,6 +315,27 @@ impl Store {
         Ok(())
     }
 
+    /// Keep messages: those older than `cutoff` go. How many did.
+    pub fn reflected_forget_older(&self, cutoff: i64) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "DELETE FROM reflected_waiting WHERE created_at < ?1",
+            [cutoff],
+        )?)
+    }
+
+    /// `sender` won't get a contact, or is blocked: what waited for them goes, and with it the
+    /// lookup that was for it.
+    pub fn reflected_forget_sender(&self, sender: &str) -> Result<(), StoreError> {
+        let forgotten = self
+            .conn
+            .execute("DELETE FROM reflected_waiting WHERE sender = ?1", [sender])?;
+        if forgotten > 0 {
+            tracing::warn!(forgotten, "reflected messages that waited dropped");
+            self.member_lookups_answered(&[sender])?;
+        }
+        Ok(())
+    }
+
     pub fn reflected_done(&self, id: i64) -> Result<(), StoreError> {
         self.conn
             .execute("DELETE FROM reflected_waiting WHERE id = ?1", [id])?;

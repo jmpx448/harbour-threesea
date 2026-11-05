@@ -2106,6 +2106,12 @@ impl App {
                 return false;
             }
         };
+        // What waits for its sender's contact holds a message too.
+        match self.store.reflected_forget_older(now - days_ms(days)) {
+            Ok(0) => {}
+            Ok(forgotten) => tracing::info!(forgotten, "auto-delete took waiting messages"),
+            Err(error) => tracing::warn!(%error, "auto-delete of waiting messages failed"),
+        }
         let _ = self
             .store
             .set_setting(keys::AUTO_DELETE_LAST, &now.to_string());

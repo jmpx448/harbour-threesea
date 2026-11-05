@@ -422,6 +422,9 @@ impl App {
         }
         self.save_app_settings(&settings)?;
         tracing::info!(blocked, "block list changed");
+        if blocked {
+            self.store.reflected_forget_sender(&id)?;
+        }
         Ok(match self.store.contact(&id)? {
             Some(contact) => self.contact_value(&contact),
             None => json!({}),

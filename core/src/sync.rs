@@ -588,6 +588,9 @@ pub(crate) fn members_looked_up(
     for (identity, result) in results {
         let waiting = store.take_member_lookups(&identity)?;
         let found = matches!(result, Lookup::Found(_));
+        if !found && store.contact(&identity)?.is_none() {
+            store.reflected_forget_sender(&identity)?;
+        }
         if let Lookup::Found(contact) = result
             && store.contact(&identity)?.is_none()
         {
@@ -848,6 +851,9 @@ pub fn settings_sync(
         // Contact pages say whether someone is blocked.
         if app.blocked_contacts != blocked.identities {
             events.push(CoreEvent::ContactsChanged);
+        }
+        for identity in &blocked.identities {
+            store.reflected_forget_sender(identity)?;
         }
         app.blocked_contacts = blocked.identities;
     }
