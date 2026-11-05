@@ -52,8 +52,8 @@ Page {
 
             ChoiceBox {
                 options: [
-                    //% "Threema"
-                    qsTrId("threesea-me-emoji-threema"),
+                    //% "Twemoji"
+                    qsTrId("threesea-me-emoji-twemoji"),
                     //% "System"
                     qsTrId("threesea-me-emoji-system")
                 ]

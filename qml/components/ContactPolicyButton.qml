@@ -18,9 +18,9 @@ ChoiceBox {
 
     options: [
         appDefault
-            //% "Like in Settings (on)"
+            //% "Same as in Settings (on)"
             ? qsTrId("threesea-me-policy-default-on")
-            //% "Like in Settings (off)"
+            //% "Same as in Settings (off)"
             : qsTrId("threesea-me-policy-default-off"),
         //% "Always"
         qsTrId("threesea-me-policy-send"),

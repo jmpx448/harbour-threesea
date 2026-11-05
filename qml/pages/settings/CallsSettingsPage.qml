@@ -44,7 +44,7 @@ Page {
                 checked: window.appSettings.relayThreemaCalls === true
                 //% "Always relay calls"
                 text: qsTrId("threesea-la-relay-calls")
-                //% "Calls go through a Threema server, which keeps your IP address hidden from the other side. The sound may be a little worse."
+                //% "Calls go through a Threema server, which keeps your IP address hidden from the other side. Call quality may be lower."
                 description: qsTrId("threesea-la-relay-calls-description")
                 onClicked: page.setSetting("relayThreemaCalls", !checked)
             }
@@ -58,7 +58,7 @@ Page {
                 checked: window.appSettings.groupCalls !== false
                 //% "Group calls"
                 text: qsTrId("threesea-la-group-calls")
-                //% "Groups can have calls everyone in the group can join."
+                //% "You can start group calls and join the ones running in your groups."
                 description: qsTrId("threesea-la-group-calls-description")
                 onClicked: page.setSetting("groupCalls", !checked)
             }
@@ -72,9 +72,9 @@ Page {
                 enabled: window.appSettings.threemaCalls !== false
                 automaticCheck: false
                 checked: window.appSettings.videoCalls !== false
-                //% "Video calls"
+                //% "Video in one-to-one calls"
                 text: qsTrId("threesea-la-video-calls")
-                //% "Calls can show the camera of both sides; each side turns its camera on when it wants."
+                //% "One-to-one calls can show the camera of both sides; each side turns its camera on when it wants."
                 description: qsTrId("threesea-la-video-calls-description")
                 onClicked: page.setSetting("videoCalls", !checked)
             }
@@ -90,7 +90,7 @@ Page {
                           //% "Highest quality"
                           qsTrId("threesea-la-video-quality-max")]
                 choice: Math.max(0, ["auto", "low", "max"].indexOf(window.appSettings.videoQuality))
-                //% "Both sides use the lower of their two settings."
+                //% "Both sides use the lower of their two settings. Relayed calls use Standard at most."
                 description: qsTrId("threesea-la-video-quality-description")
                 onChosen: backend.call("setVideoQuality", { quality: ["auto", "low", "max"][index] },
                                        function(ok, result) { if (ok) window.appSettings = result })
