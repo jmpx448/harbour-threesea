@@ -11,6 +11,7 @@ use crate::{
     app::App,
     app_web_data::receiver_type,
     media::MediaPart,
+    messages::Message,
     profile_pictures::{OWN_PICTURE, contact_picture_name},
     providers::CoreEvent,
     web::{
@@ -34,6 +35,49 @@ fn receiver_args(key: &str) -> Vec<(&'static str, Value)> {
     vec![("type", receiver_type(key).into()), ("id", key.into())]
 }
 
+/// How many messages' thumbnail fields are kept: what a chat list and a page of messages show.
+const THUMBNAILS_KEPT: usize = 128;
+
+/// The `thumbnail` fields made lately, so that what is sent again and again needn't be made again.
+/// Only while a browser is connected and the lock doesn't change: see `web_refresh`. Only for chats
+/// that aren't private; every way to a browser leaves those out long before this.
+#[derive(Default)]
+pub(crate) struct WebThumbnails {
+    /// By row and message id: the row of a removed message can be used again. `None`: there is a
+    /// thumbnail, and it can't be read.
+    fields: std::collections::BTreeMap<(i64, u64), Option<Value>>,
+    /// How many were made.
+    #[cfg(test)]
+    pub(crate) made: u32,
+}
+
+impl WebThumbnails {
+    fn get(&self, message: &Message) -> Option<Option<Value>> {
+        self.fields.get(&(message.id, message.message_id)).cloned()
+    }
+
+    fn insert(&mut self, message: &Message, field: Option<Value>) {
+        // The oldest first: the rows of chats that have moved on.
+        if self.fields.len() >= THUMBNAILS_KEPT {
+            self.fields.pop_first();
+        }
+        self.fields.insert((message.id, message.message_id), field);
+        #[cfg(test)]
+        {
+            self.made += 1;
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.fields.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
 impl App {
     /// A message's file part, if on the device.
     fn web_media(&self, message: i64, part: MediaPart) -> Option<Vec<u8>> {
@@ -45,15 +89,26 @@ impl App {
     }
 
     /// The `thumbnail` field of a file message (size within 350 px, 50 px preview), if its
-    /// thumbnail is on the device.
-    pub(crate) fn web_thumbnail_field(&self, message: i64) -> Option<Value> {
-        let thumbnail = self.web_media(message, MediaPart::Thumbnail)?;
-        let (width, height, preview) = images::thumbnail_info(&thumbnail)?;
-        Some(map(vec![
-            ("width", width.into()),
-            ("height", height.into()),
-            ("preview", Value::Binary(preview)),
-        ]))
+    /// thumbnail is on the device. A message's thumbnail doesn't change, and it takes decoding,
+    /// scaling and encoding a picture on this thread: once while it is wanted.
+    pub(crate) fn web_thumbnail_field(&self, message: &Message) -> Option<Value> {
+        let cached = self.web.thumbnails.borrow().get(message);
+        if let Some(field) = cached {
+            return field;
+        }
+        let thumbnail = self.web_media(message.id, MediaPart::Thumbnail)?;
+        let field = images::thumbnail_info(&thumbnail).map(|(width, height, preview)| {
+            map(vec![
+                ("width", width.into()),
+                ("height", height.into()),
+                ("preview", Value::Binary(preview)),
+            ])
+        });
+        self.web
+            .thumbnails
+            .borrow_mut()
+            .insert(message, field.clone());
+        field
     }
 
     /// Pictures and files; `None` if `incoming` isn't about them, `Some(Ok(None))` if the reply

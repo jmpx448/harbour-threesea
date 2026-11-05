@@ -111,6 +111,9 @@ pub(crate) struct RefreshState {
     /// How many times they were.
     #[cfg(test)]
     pub(crate) receiver_builds: u32,
+    /// How many chats were made for the browser by a refresh.
+    #[cfg(test)]
+    pub(crate) conversation_builds: usize,
 }
 
 /// What a connected browser subscribed to, and what it has been sent.
@@ -208,8 +211,20 @@ struct ListedState {
     notifications: Option<(Policy, Option<i64>)>,
 }
 
-/// A chat as listed for the browser: key, its Conversation model, what changes it.
-type Listed = (String, Value, ListedState);
+/// A chat as listed for the browser, ready to become a Conversation of its model (which takes
+/// more: [`App::web_listed_conversation`]).
+struct Listed {
+    last: Message,
+    unread: i64,
+    position: usize,
+    state: ListedState,
+}
+
+impl Listed {
+    fn key(&self) -> &str {
+        &self.last.conversation
+    }
+}
 
 /// `contact`, `group` or `distributionList`.
 pub(crate) fn receiver_type(key: &str) -> &'static str {
@@ -573,7 +588,7 @@ impl App {
                 if let Some(caption) = body["caption"].as_str().filter(|c| !c.is_empty()) {
                     fields.push(("caption", caption.into()));
                 }
-                if let Some(thumbnail) = self.web_thumbnail_field(message.id) {
+                if let Some(thumbnail) = self.web_thumbnail_field(message) {
                     fields.push(("thumbnail", thumbnail));
                 }
                 fields.push((
@@ -738,13 +753,8 @@ impl App {
         ]))
     }
 
-    /// The chat list (without private chats), newest first; key, newest message ID, unread.
+    /// The chat list (without private chats), newest first, starred (our pinned) ones on top.
     fn web_conversation_list(&self) -> Result<Vec<Listed>, ApiError> {
-        let user = self
-            .store
-            .identity()?
-            .ok_or(ApiError::NoIdentity)?
-            .threema_id;
         let private = self.web_private_chats()?;
         let pinned = self.store.pinned_chats()?;
         let marked_unread: HashSet<String> =
@@ -755,58 +765,76 @@ impl App {
             if private.contains(&last.conversation) {
                 continue;
             }
-            let key = last.conversation.clone();
-            let count = self.store.message_count(&key)?;
+            let key = &last.conversation;
             let state = ListedState {
                 last: (last.id, last.updated_at, last.state),
                 unread,
-                starred: pinned.contains(&key),
-                marked_unread: marked_unread.contains(&key),
-                notifications: notifications.get(&key).copied(),
+                starred: pinned.contains(key),
+                marked_unread: marked_unread.contains(key),
+                notifications: notifications.get(key).copied(),
             };
-            let mut fields = vec![
-                ("type", receiver_type(&key).into()),
-                ("id", key.clone().into()),
-                ("position", 0.into()),
-                ("messageCount", count.into()),
-                ("unreadCount", unread.into()),
-                ("isStarred", state.starred.into()),
-                ("isUnread", state.marked_unread.into()),
-                ("notifications", notification_settings(state.notifications)),
-            ];
-            // A chat without messages has no latest message (our list keeps a marker for it:
-            // `empty` for an emptied chat, `none` for a group or list with no history yet).
-            if last.kind != "empty" && last.kind != "none" {
-                fields.push(("latestMessage", self.web_message(&last, &user)));
-            }
-            list.push((key, map(fields), state));
+            list.push(Listed {
+                last,
+                unread,
+                position: 0,
+                state,
+            });
         }
-        // Starred (our pinned) first, like our own list.
-        list.sort_by_key(|(key, ..)| pinned.iter().position(|p| p == key).unwrap_or(usize::MAX));
-        for (position, (_, value, ..)) in list.iter_mut().enumerate() {
-            if let Value::Map(fields) = value {
-                for (name, field) in fields.iter_mut() {
-                    if name.as_str() == Some("position") {
-                        *field = position.into();
-                    }
-                }
-            }
+        list.sort_by_key(|listed| {
+            pinned
+                .iter()
+                .position(|p| p == listed.key())
+                .unwrap_or(usize::MAX)
+        });
+        for (position, listed) in list.iter_mut().enumerate() {
+            listed.position = position;
         }
         Ok(list)
     }
 
+    /// A listed chat in the browser's model.
+    fn web_listed_conversation(&self, listed: &Listed, user: &str) -> Result<Value, ApiError> {
+        let key = listed.key();
+        let mut fields = vec![
+            ("type", receiver_type(key).into()),
+            ("id", key.into()),
+            ("position", listed.position.into()),
+            ("messageCount", self.store.message_count(key)?.into()),
+            ("unreadCount", listed.unread.into()),
+            ("isStarred", listed.state.starred.into()),
+            ("isUnread", listed.state.marked_unread.into()),
+            (
+                "notifications",
+                notification_settings(listed.state.notifications),
+            ),
+        ];
+        // A chat without messages has no latest message (our list keeps a marker for it:
+        // `empty` for an emptied chat, `none` for a group or list with no history yet).
+        if listed.last.kind != "empty" && listed.last.kind != "none" {
+            fields.push(("latestMessage", self.web_message(&listed.last, user)));
+        }
+        Ok(map(fields))
+    }
+
     /// `response/conversations`; subscribes the session to the list.
     pub(crate) fn web_conversations(&mut self, session: i64) -> Result<Value, ApiError> {
+        let user = self
+            .store
+            .identity()?
+            .ok_or(ApiError::NoIdentity)?
+            .threema_id;
         let list = self.web_conversation_list()?;
+        let conversations = list
+            .iter()
+            .map(|listed| self.web_listed_conversation(listed, &user))
+            .collect::<Result<Vec<_>, _>>()?;
         let subscriptions = self.web.subscriptions.entry(session).or_default();
         subscriptions.conversations = true;
         subscriptions.listed = list
-            .iter()
-            .map(|(key, _, state)| (key.clone(), state.clone()))
+            .into_iter()
+            .map(|listed| (listed.last.conversation, listed.state))
             .collect();
-        Ok(Value::Array(
-            list.into_iter().map(|(_, value, ..)| value).collect(),
-        ))
+        Ok(Value::Array(conversations))
     }
 
     /// The receiver's key from `args` (`type`, `id`), unless it is private or unknown.
@@ -1245,6 +1273,7 @@ impl App {
             self.web_blobs_changed();
         }
         if self.web.subscriptions.is_empty() {
+            self.web.thumbnails.borrow_mut().clear();
             return;
         }
         // Nothing written and no new subscription since the last refresh: nothing to tell
@@ -1271,14 +1300,42 @@ impl App {
         if self.web.refresh.last == Some(now) {
             return;
         }
+        if self
+            .web
+            .refresh
+            .last
+            .is_some_and(|last| last.3 != self.unlocked)
+        {
+            self.web.thumbnails.borrow_mut().clear();
+        }
         let Ok(Some(identity)) = self.store.identity() else {
             return;
         };
+        let user = identity.threema_id;
+        let list = if self.web.subscriptions.values().any(|s| s.conversations) {
+            self.web_conversation_list()
+        } else {
+            Ok(Vec::new())
+        };
         // Which chats are private isn't known: nothing goes out, the next refresh tries again.
-        let (Ok(list), Ok(private)) = (self.web_conversation_list(), self.web_private_chats())
-        else {
+        let (Ok(list), Ok(private)) = (list, self.web_private_chats()) else {
             return;
         };
+        // Only what someone has to hear about is made for the browser: nearly all of the list, a
+        // picture to scale for each chat ending in one, stays as it was.
+        let mut conversations: HashMap<&str, Value> = HashMap::new();
+        for subscriptions in self.web.subscriptions.values().filter(|s| s.conversations) {
+            for listed in &list {
+                if subscriptions.listed.get(listed.key()) != Some(&listed.state)
+                    && !conversations.contains_key(listed.key())
+                {
+                    let Ok(conversation) = self.web_listed_conversation(listed, &user) else {
+                        return;
+                    };
+                    conversations.insert(listed.key(), conversation);
+                }
+            }
+        }
         // An error reading the count: as if it had changed.
         let source = self
             .store
@@ -1316,7 +1373,10 @@ impl App {
                 self.web.refresh.receiver_builds += 1;
             }
         }
-        let user = identity.threema_id;
+        #[cfg(test)]
+        {
+            self.web.refresh.conversation_builds += conversations.len();
+        }
         let mut out: Vec<(i64, Value)> = Vec::new();
         let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
         for session in sessions {
@@ -1333,8 +1393,12 @@ impl App {
             let removed = self.web_removed_messages(&mut subscriptions);
             out.extend(removed.into_iter().map(|update| (session, update)));
             if subscriptions.conversations {
-                let listed: HashSet<&String> = list.iter().map(|(key, ..)| key).collect();
-                for key in subscriptions.listed.keys().filter(|k| !listed.contains(*k)) {
+                let listed: HashSet<&str> = list.iter().map(Listed::key).collect();
+                for key in subscriptions
+                    .listed
+                    .keys()
+                    .filter(|k| !listed.contains(k.as_str()))
+                {
                     out.push((
                         session,
                         arp::message(
@@ -1372,11 +1436,12 @@ impl App {
             }
             if subscriptions.conversations {
                 let mut listed = HashMap::new();
-                for (key, value, state) in &list {
-                    listed.insert(key.clone(), state.clone());
+                for chat in &list {
+                    let key = chat.key();
+                    listed.insert(key.to_owned(), chat.state.clone());
                     let mode = match subscriptions.listed.get(key) {
                         None => "new",
-                        Some(sent) if sent != state => "modified",
+                        Some(sent) if *sent != chat.state => "modified",
                         Some(_) => continue,
                     };
                     out.push((
@@ -1385,7 +1450,7 @@ impl App {
                             "update",
                             "conversation",
                             Some(map(vec![("mode", mode.into())])),
-                            Some(value.clone()),
+                            conversations.get(key).cloned(),
                         ),
                     ));
                 }

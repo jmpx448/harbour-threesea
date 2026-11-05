@@ -45,6 +45,16 @@ fn fit(image: &DynamicImage, max: u32) -> DynamicImage {
     image.resize(max, max, FilterType::Triangle)
 }
 
+/// The size [`fit`] comes to, without scaling anything.
+fn fitted_size(width: u32, height: u32, max: u32) -> (u32, u32) {
+    if width <= max && height <= max {
+        return (width, height);
+    }
+    let ratio = (f64::from(max) / f64::from(width)).min(f64::from(max) / f64::from(height));
+    let side = |length: u32| ((f64::from(length) * ratio).round() as u32).max(1);
+    (side(width), side(height))
+}
+
 /// JPEG (transparency flattened onto white, like FilePreparer's thumbnails).
 fn jpeg(image: &DynamicImage, quality: u8) -> Option<Vec<u8>> {
     let rgba = image.to_rgba8();
@@ -75,12 +85,8 @@ pub fn scaled_jpeg(bytes: &[u8], max: u32, quality: u8) -> Option<Vec<u8>> {
 #[must_use]
 pub fn thumbnail_info(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let image = decode(bytes)?;
-    let shown = fit(&image, THUMBNAIL_MAX);
-    Some((
-        shown.width(),
-        shown.height(),
-        jpeg(&fit(&image, PREVIEW_MAX), 50)?,
-    ))
+    let (width, height) = fitted_size(image.width(), image.height(), THUMBNAIL_MAX);
+    Some((width, height, jpeg(&fit(&image, PREVIEW_MAX), 50)?))
 }
 
 /// An image the browser sends: its size and our 512 px JPEG thumbnail; `None` if not a JPEG or
@@ -110,6 +116,30 @@ mod tests {
             .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn the_size_comes_out_as_scaling_would() {
+        for (width, height) in [
+            (1000, 500),
+            (500, 1000),
+            (351, 350),
+            (350, 350),
+            (20, 10),
+            (1000, 1),
+            (3, 2000),
+            (1279, 853),
+            (853, 1279),
+            (1024, 1023),
+        ] {
+            let image = DynamicImage::ImageRgb8(image::RgbImage::new(width, height));
+            let scaled = fit(&image, THUMBNAIL_MAX);
+            assert_eq!(
+                fitted_size(width, height, THUMBNAIL_MAX),
+                (scaled.width(), scaled.height()),
+                "{width}x{height}"
+            );
+        }
     }
 
     #[test]

@@ -2432,6 +2432,80 @@ fn a_group_setup_reaches_the_browser_as_receiver_then_chat() {
     assert!(position("receiver", &key) < position("conversation", &key));
 }
 
+/// A message coming in tells the browser of its chat; the others stay as they were, with no picture
+/// to read, scale and encode for those ending in one. Only a session that has the list gets any of
+/// this.
+#[test]
+fn a_store_write_makes_only_what_changed_for_the_browser() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    for (n, identity) in [(1, "BBBBBBBB"), (2, "CCCCCCCC")] {
+        let body = json!({"thumbnailState": crate::app_media::STATE_LOCAL,
+                          "mediaType": "image/png", "name": "p"});
+        let message = app
+            .store
+            .insert_incoming(identity, n, "file", &body.to_string(), 2)
+            .unwrap()
+            .unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(400, 200))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        app.media
+            .write(message.id, MediaPart::Thumbnail, &png.into_inner())
+            .unwrap();
+    }
+    let mut rx = browser(&mut app);
+    let builds = |app: &App| app.web.refresh.conversation_builds;
+    let made = |app: &App| app.web.thumbnails.borrow().made;
+
+    // Without a session having the list, none of it is even looked at.
+    app.web_subscribe_receivers(1);
+    app.store.set_setting("something", "1").unwrap();
+    app.web_refresh();
+    assert_eq!((builds(&app), made(&app)), (0, 0));
+
+    // The list is complete, with a thumbnail for each chat ending in a picture.
+    app.web_conversations(1).unwrap();
+    assert_eq!(made(&app), 2);
+    app.web_refresh();
+    assert_eq!(builds(&app), 0, "the session has just got all of them");
+    sent_values(&mut rx);
+
+    // Another chat changes: that one is made.
+    app.store
+        .upsert_contact(&crate::contacts::test_contact("DDDDDDDD"))
+        .unwrap();
+    app.store
+        .insert_incoming("DDDDDDDD", 3, "text", "hi", 3)
+        .unwrap();
+    app.web_refresh();
+    assert_eq!((builds(&app), made(&app)), (1, 2));
+    let sent = sent_values(&mut rx);
+    assert!(
+        sent.iter()
+            .any(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from("conversation"))),
+        "{sent:?}"
+    );
+
+    // A write that changes nothing in the list: nothing is made.
+    app.store.set_setting("something", "2").unwrap();
+    app.web_refresh();
+    assert_eq!((builds(&app), made(&app)), (1, 2));
+
+    // A chat ending in a picture changes and is told of, with its picture as it was.
+    app.store.set_marked_unread("BBBBBBBB", true).unwrap();
+    app.web_refresh();
+    assert_eq!((builds(&app), made(&app)), (2, 2));
+    let sent = format!("{:?}", sent_values(&mut rx));
+    assert!(sent.contains("preview"), "{sent}");
+
+    // Nobody is connected any more: nothing stays.
+    app.web.subscriptions.clear();
+    app.web_refresh();
+    assert!(app.web.thumbnails.borrow().is_empty());
+}
+
 /// A message coming in doesn't build all receivers again. Everything that changes what the browser
 /// may see of them does, however it is written; above all a chat going private and back (§7.8).
 #[test]

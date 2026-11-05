@@ -194,6 +194,7 @@ pub(crate) struct WebSessions {
     pub(crate) pending_blobs: Vec<crate::app_web_media::PendingBlob>,
     /// When the browsers were last brought up to date (app_web_data::web_refresh).
     pub(crate) refresh: crate::app_web_data::RefreshState,
+    pub(crate) thumbnails: std::cell::RefCell<crate::app_web_media::WebThumbnails>,
     /// Since when the connection to the chat server has been up.
     pub(crate) connected_since: Option<std::time::Instant>,
     events: tokio::sync::mpsc::Sender<WebEvent>,
@@ -210,6 +211,7 @@ impl Default for WebSessions {
             subscriptions: HashMap::new(),
             pending_blobs: Vec::new(),
             refresh: crate::app_web_data::RefreshState::default(),
+            thumbnails: std::cell::RefCell::default(),
             connected_since: None,
             events,
             events_rx: Some(events_rx),
