@@ -1457,7 +1457,8 @@ ApplicationWindow {
                 var path = resource.filePath || ""
                 if (path.length > 0) {
                     files.push({ path: path, name: path.split("/").pop(),
-                                 photo: /\.(jpe?g|png|webp|bmp)$/i.test(path) })
+                                 photo: /\.(jpe?g|png|webp|bmp)$/i.test(path),
+                                 video: /\.(mp4|m4v|mov|3gp|webm|mkv|avi|mpe?g)$/i.test(path) })
                 } else if (resource.data) {
                     text += (text.length > 0 ? "\n" : "") + resource.data
                 }
