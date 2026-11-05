@@ -236,11 +236,11 @@ impl App {
     /// contacts, groups, distribution lists, pictures and used nonces (Android's hashes, so
     /// messages Android already received are refused as replays) into the running identity,
     /// entirely offline and without any sending side effect — dedicated store writes only, no message
-    /// is queued, no lookup made, nothing distributed. Existing local data wins: a contact
-    /// whose stored key differs is a counted conflict and keeps its picture and chat as they are,
-    /// pictures only fill empty slots, an
-    /// existing group's membership and left state stay untouched. Running it again adds
-    /// nothing. Message history is not part of this scope.
+    /// is queued, no lookup made, nothing distributed (the contact refresh that follows when contacts
+    /// were added is a separate step, [`Self::refresh_imported_contacts`]). Existing local data wins:
+    /// a contact whose stored key differs is a counted conflict and keeps its picture and chat as they
+    /// are, pictures only fill empty slots, an existing group's membership and left state stay
+    /// untouched. Running it again adds nothing. Message history is not part of this scope.
     pub(crate) async fn android_backup_import(
         &mut self,
         path: String,
@@ -270,6 +270,15 @@ impl App {
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))??;
         self.apply_android_metadata(&own_id, data)
+    }
+
+    /// Right after an import that added contacts: the regular contact refresh, under the regular
+    /// conditions (a valid license, the directory not resting). If it fails the next maintenance
+    /// tries again, the last refresh being forgotten. Returns whether something changed.
+    pub(crate) async fn refresh_imported_contacts(&mut self) -> bool {
+        std::mem::take(&mut self.imported_contacts_unchecked)
+            && self.license_valid().unwrap_or(false)
+            && self.refresh_contacts(false).await.unwrap_or(false)
     }
 
     /// `scope: "history"`: messages, media and reactions as a background job on the core
@@ -375,7 +384,7 @@ impl App {
                             pc::AcquaintanceLevel::Direct
                         },
                         activity_state: pc::ActivityState::Active,
-                        // Unknown offline; the periodic contact refresh fills it in.
+                        // Unknown offline; the refresh after the import fills it in.
                         feature_mask: FeatureMask(0),
                         sync_state: pc::SyncState::Initial,
                         work_last_full_sync_at: None,
@@ -397,6 +406,13 @@ impl App {
                     added += 1;
                 }
             }
+        }
+        if added > 0 {
+            // Added with what they support unknown, so editing, deleting, polls and calls stay
+            // off for them, and a refresh from the last day would keep it so until tomorrow.
+            self.store
+                .delete_setting(crate::store::keys::CONTACTS_REFRESHED_AT)?;
+            self.imported_contacts_unchecked = true;
         }
         let contacts_summary = json!({
             "added": added, "existing": existing, "updated": updated,
@@ -747,6 +763,21 @@ mod tests {
         assert_eq!(summary["contacts"]["added"], 3);
         assert_eq!(summary["contacts"]["keyConflicts"], 0);
         assert_eq!(summary["groups"]["added"], 2);
+        // What the new contacts support is looked up next, not after the next day's refresh.
+        assert!(app.imported_contacts_unchecked);
+        assert!(
+            app.store
+                .setting(crate::store::keys::CONTACTS_REFRESHED_AT)
+                .unwrap()
+                .is_none()
+        );
+        // Without a license nothing goes to the directory, and the request isn't kept for later:
+        // the forgotten refresh time has maintenance do it.
+        assert!(!app.refresh_imported_contacts().await);
+        assert!(!app.imported_contacts_unchecked);
+        app.store
+            .set_setting(crate::store::keys::CONTACTS_REFRESHED_AT, "1")
+            .unwrap();
         assert_eq!(summary["lists"]["added"], 1);
         assert_eq!(summary["pictures"]["own"], true);
         assert_eq!(summary["pictures"]["contacts"], 1);
@@ -848,6 +879,14 @@ mod tests {
             .unwrap();
         assert_eq!(again["contacts"]["added"], 0);
         assert_eq!(again["contacts"]["existing"], 3);
+        assert!(!app.imported_contacts_unchecked, "nobody new");
+        assert_eq!(
+            app.store
+                .setting(crate::store::keys::CONTACTS_REFRESHED_AT)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
         assert_eq!(again["groups"]["added"], 0);
         assert_eq!(again["groups"]["existing"], 2);
         assert_eq!(again["lists"]["added"], 0);

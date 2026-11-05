@@ -460,6 +460,9 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     emit(json!({ "event": event }).to_string());
                 }
                 settle_command(&mut app, &mut media_events, &emit);
+                if app.refresh_imported_contacts().await {
+                    emit(json!({ "event": "contactsChanged" }).to_string());
+                }
                 // An ID may just have been created/restored (or removed).
                 if let Some(started) = app.ensure_connection() {
                     connection = Some(started);

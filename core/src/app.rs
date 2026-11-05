@@ -1362,6 +1362,8 @@ pub struct App {
     pub(crate) pending_ui_events: Vec<&'static str>,
     /// A running Android history import's cancel flag (set true when it ends).
     pub(crate) android_import: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    /// A data backup added contacts: what they support is unknown until the next refresh.
+    pub(crate) imported_contacts_unchecked: bool,
     /// A running Android-format export's done flag.
     pub(crate) android_export: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// Tells the running export to give up (the ID is being removed).
@@ -1451,6 +1453,7 @@ impl App {
             turn_servers: None,
             pending_ui_events: Vec::new(),
             android_import: None,
+            imported_contacts_unchecked: false,
             android_export: None,
             android_export_cancel: Arc::default(),
             last_import_attempt: None,
