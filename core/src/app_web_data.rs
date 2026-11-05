@@ -28,7 +28,7 @@ use crate::{
     group_call_handshake::public_bytes,
     groups::Group,
     media::PictureStamp,
-    messages::{Message, OutgoingState},
+    messages::{Message, OutgoingState, ReadMessage},
     profile_pictures::OWN_PICTURE,
     providers::CoreEvent,
     web::{
@@ -1082,6 +1082,27 @@ impl App {
             ));
         }
         updates
+    }
+
+    /// Messages were read, here or in a browser: the browsers showing the chat hear of each, or
+    /// its unread divider comes back when the chat is opened again. Not as an event for the UI,
+    /// which goes by `conversationRead` and would load every row of a large read.
+    pub(crate) fn web_messages_read(&mut self, conversation: &str, read: &[ReadMessage]) {
+        if !self
+            .web
+            .subscriptions
+            .values()
+            .any(|subscriptions| subscriptions.chats.contains_key(conversation))
+        {
+            return;
+        }
+        for bundle in read.chunks(PAGE as usize) {
+            let rows: Vec<Message> = bundle
+                .iter()
+                .filter_map(|message| self.store.message(message.id).ok().flatten())
+                .collect();
+            self.web_on_core_event(&CoreEvent::MessagesChanged(rows));
+        }
     }
 
     /// Something in the core changed: tell the subscribed browsers.

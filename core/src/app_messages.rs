@@ -1054,7 +1054,7 @@ impl App {
         Ok(self.store.message_json(&message))
     }
 
-    /// Mark a conversation read; sends read receipts if enabled (globally or per contact).
+    /// Mark a conversation read; queues read receipts if enabled (globally or per contact).
     pub(crate) fn mark_read(&mut self, identity: &str) -> Result<Value, ApiError> {
         let (id, conversation) = self.readable_chat(identity)?;
         let step = self.store.step()?;
@@ -1068,6 +1068,7 @@ impl App {
                 json!({ "event": "conversationRead", "identity": id }),
             ));
             self.tell_connection(ToConnection::SendPending);
+            self.web_messages_read(&id, &read);
         }
         Ok(json!({ "read": read.len() }))
     }

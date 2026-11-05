@@ -79,6 +79,43 @@ fn web_subscription_ends_when_chat_becomes_private() {
     );
 }
 
+/// A chat read anywhere: the browser showing it hears that each message is read, or its unread
+/// divider returns; in parts it can take, and a browser not showing the chat hears nothing.
+#[test]
+fn reading_a_chat_clears_the_unread_flags_in_the_browser() {
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    for id in 1..=60 {
+        app.store
+            .insert_incoming("BBBBBBBB", id, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+    }
+    app.store
+        .insert_incoming("CCCCCCCC", 1, "text", "hi", 1)
+        .unwrap()
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    wires(&mut rx);
+
+    app.mark_read("CCCCCCCC").unwrap();
+    assert!(wires(&mut rx).is_empty());
+
+    app.mark_read("BBBBBBBB").unwrap();
+    let updates = wires(&mut rx);
+    assert_eq!(updates.len(), 2, "60 messages in pages of 50");
+    let unread = updates
+        .iter()
+        .map(|update| update.matches("\"unread\": false").count())
+        .sum::<usize>();
+    assert_eq!(unread, 60, "{updates:?}");
+    assert!(updates.iter().all(|update| update.contains("modified")));
+
+    // Nothing left to tell.
+    app.mark_read("BBBBBBBB").unwrap();
+    assert!(wires(&mut rx).is_empty());
+}
+
 /// A private group's or list's name and members stay on the device: never in the receiver lists,
 /// taken out of a connected browser when marked and back in when unmarked. A private contact
 /// stays, as locked and not visible, since groups name their members by ID.
