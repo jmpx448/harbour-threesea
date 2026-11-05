@@ -331,6 +331,9 @@ pub enum OfflineReason {
     Mediator(u16),
     /// The chat server keeps closing the connection during login, without a word.
     LoginRefused,
+    /// Another device keeps taking over this ID, so logins are held off. Sent at each of them, as
+    /// each next login clears it from the UI; `first`: the one the user is alerted about.
+    AnotherConnection { first: bool },
 }
 
 impl OfflineReason {
@@ -342,6 +345,9 @@ impl OfflineReason {
             }
             Self::Mediator(code) => serde_json::json!({ "kind": "mediator", "code": code }),
             Self::LoginRefused => serde_json::json!({ "kind": "loginRefused" }),
+            Self::AnotherConnection { first } => {
+                serde_json::json!({ "kind": "anotherConnection", "first": first })
+            }
         }
     }
 }
@@ -1149,7 +1155,11 @@ fn close_reason(message: &str) -> Option<OfflineReason> {
 
 /// How often the server has said "Another connection" lately.
 #[derive(Default)]
-struct AnotherConnection(u32);
+struct AnotherConnection {
+    closes: u32,
+    /// This fight has been brought to the user's attention.
+    told: bool,
+}
 
 impl AnotherConnection {
     /// It said so again, after a session this long. Whether to stay away, if it asks us to: not
@@ -1158,10 +1168,21 @@ impl AnotherConnection {
     /// go on past those: then a login every [`HOLD_OFF`] at most, however long this runs.
     fn stay_away(&mut self, session: Duration) -> bool {
         if session > ANOTHER_CONNECTION_FORGOTTEN {
-            self.0 = 0;
+            self.closes = 0;
+            self.told = false;
         }
-        self.0 = self.0.saturating_add(1);
-        self.0 > ANOTHER_CONNECTION_IGNORED
+        self.closes = self.closes.saturating_add(1);
+        self.closes > ANOTHER_CONNECTION_IGNORED
+    }
+
+    /// What the user hears of the close [`Self::stay_away`] just counted: nothing, unless we really
+    /// do stay away because of it.
+    fn reason(&mut self, can_reconnect: bool) -> Option<OfflineReason> {
+        (!can_reconnect && self.closes > ANOTHER_CONNECTION_IGNORED).then(|| {
+            OfflineReason::AnotherConnection {
+                first: !std::mem::replace(&mut self.told, true),
+            }
+        })
     }
 }
 
@@ -1423,7 +1444,11 @@ pub async fn run(
                     let _ = tx.send(FromConnection::OfflineReason(reason));
                 }
                 let stay_away = if is_another_connection(&message) {
-                    another_connection.stay_away(started.elapsed())
+                    let stay_away = another_connection.stay_away(started.elapsed());
+                    if let Some(reason) = another_connection.reason(can_reconnect) {
+                        let _ = tx.send(FromConnection::OfflineReason(reason));
+                    }
+                    stay_away
                 } else {
                     true
                 };
@@ -6087,6 +6112,32 @@ mod sync_order_tests {
         assert!(!another.stay_away(ANOTHER_CONNECTION_FORGOTTEN + SHORT));
     }
 
+    /// Every hold-off says why, as a login in between clears it; only the first of a fight alerts.
+    #[test]
+    fn a_fight_over_the_id_is_told_once_and_shown_each_time() {
+        const SHORT: Duration = Duration::from_secs(30);
+        let mut another = AnotherConnection::default();
+        let mut close = |session, can_reconnect| {
+            another.stay_away(session);
+            another.reason(can_reconnect)
+        };
+        for _ in 0..ANOTHER_CONNECTION_IGNORED {
+            assert_eq!(close(SHORT, false), None);
+        }
+        // The server lets us come back: nothing is held off, so there is nothing to explain.
+        assert_eq!(close(SHORT, true), None);
+        let first = Some(OfflineReason::AnotherConnection { first: true });
+        let again = Some(OfflineReason::AnotherConnection { first: false });
+        assert_eq!(close(SHORT, false), first);
+        assert_eq!(close(SHORT, false), again);
+        // A long session ended that fight; the next is news.
+        assert_eq!(close(ANOTHER_CONNECTION_FORGOTTEN + SHORT, false), None);
+        for _ in 1..ANOTHER_CONNECTION_IGNORED {
+            assert_eq!(close(SHORT, false), None);
+        }
+        assert_eq!(close(SHORT, false), first);
+    }
+
     /// Our picture and whoever is to get it, with a contact's `setup`.
     fn picture_to_share(setup: &ConnectionSetup) {
         use crate::profile_pictures::{OWN_PICTURE, Share};
@@ -6216,6 +6267,10 @@ mod sync_order_tests {
         assert_eq!(
             OfflineReason::LoginRefused.to_json(),
             serde_json::json!({ "kind": "loginRefused" })
+        );
+        assert_eq!(
+            OfflineReason::AnotherConnection { first: true }.to_json(),
+            serde_json::json!({ "kind": "anotherConnection", "first": true })
         );
     }
 

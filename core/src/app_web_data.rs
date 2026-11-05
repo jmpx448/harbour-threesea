@@ -1312,7 +1312,9 @@ impl App {
         let (kind, text) = match reason {
             OfflineReason::ServerAlert(text) => ("warning", text),
             OfflineReason::Server(text) => ("error", text),
-            OfflineReason::Mediator(_) | OfflineReason::LoginRefused => return,
+            OfflineReason::Mediator(_)
+            | OfflineReason::LoginRefused
+            | OfflineReason::AnotherConnection { .. } => return,
         };
         if self.web_connection_stayed_up() {
             self.web_forget_what_server_said();

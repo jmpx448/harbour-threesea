@@ -220,6 +220,10 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   notification while the window is closed. Android keeps them in `ServerMessageModel` and shows them
   as HTML; ours are plain text with the markup taken out (`plain_server_text`). Whether a revoked
   ID's login ends that way isn't known from the code on either side.
+  "Another connection" alone isn't reported, as on Android, where it is mostly our own old connection
+  after a change of network. Past the closes we ignore, logins are 10 minutes apart: that is reported,
+  in our words (`anotherConnection`), which Android doesn't do, since we keep trying and the header
+  would otherwise only say "Offline".
 - A `close-error` containing "Another connection" isn't shown, and as on Android (`MonitoringLayer`)
   its `can-reconnect: false` is ignored the first 3 times, since it mostly is our own earlier
   connection after a change of network. After that the hold applies, so two devices fighting over

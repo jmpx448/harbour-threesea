@@ -174,6 +174,8 @@ ApplicationWindow {
         if (reason.kind === "server") return reason.text
         //% "Threema's server keeps closing the connection during login."
         if (reason.kind === "loginRefused") return qsTrId("threesea-la-reason-login-refused")
+        //% "Another device keeps taking over this Threema ID. An ID works on one phone at a time, so Threesea tries again every 10 minutes."
+        if (reason.kind === "anotherConnection") return qsTrId("threesea-la-reason-another-connection")
         switch (reason.code) {
         case 4110:
             //% "Threema's server for linked devices no longer accepts this version of Threesea."
@@ -194,6 +196,8 @@ ApplicationWindow {
     }
     function offlineReasonArrived(reason) {
         offlineReason = reason
+        // The chat list's header says it again after each login; the alert was for the first.
+        if (reason.first === false) return
         if (Qt.application.state === Qt.ApplicationActive) {
             Notices.show(offlineReasonText, Notice.Long, Notice.Center)
             return
@@ -2172,7 +2176,9 @@ ApplicationWindow {
             if (backend.connectionState !== "connected") return
             // What the server itself said remains something it said. Our words about it being
             // refused or closed aren't true any more.
-            if (window.offlineReason && window.offlineReason.kind !== "server") {
+            // A takeover isn't over by one login, and its alert comes only once: that stays too.
+            if (window.offlineReason && window.offlineReason.kind !== "server"
+                    && window.offlineReason.kind !== "anotherConnection") {
                 window.clearNotification("serverMessage")
             }
             window.offlineReason = null
