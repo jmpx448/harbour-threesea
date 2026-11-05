@@ -392,9 +392,7 @@ impl Shared {
             self.store.delete_setting(k)?;
         }
         self.end_backup_reminder()?;
-        // On from here, also if the first upload fails below: the window's warning goes by this.
-        self.note_ui_events(&["safeChanged"]);
-        self.safe_upload(true).await?;
+        self.safe_upload_and_tell().await?;
         self.safe_status()
     }
 
@@ -402,10 +400,17 @@ impl Shared {
         if self.safe_key()?.is_none() {
             return Err(ApiError::Internal("Threema Safe is disabled".into()));
         }
-        // Whichever way it goes, also with the page closed by then.
-        self.note_ui_events(&["safeChanged"]);
-        self.safe_upload(true).await?;
+        self.safe_upload_and_tell().await?;
         self.safe_status()
+    }
+
+    /// An upload on request: the window's warning hears how it went, whichever way, also with the
+    /// page closed by then. Only afterwards: another command ending meanwhile would send the event
+    /// early, the window would read the old status, and nothing would follow.
+    async fn safe_upload_and_tell(&self) -> Result<bool, ApiError> {
+        let result = self.safe_upload(true).await;
+        self.note_ui_events(&["safeChanged"]);
+        result
     }
 
     /// Turn Safe off: first the backup goes from the server, as the key to it goes with the
@@ -2058,6 +2063,20 @@ mod tests {
             .unwrap();
         assert_eq!(app.store.setting(keys::BACKUP_REMINDER_AT).unwrap(), None);
         assert_eq!(app.take_ui_events(), ["safeChanged"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_window_hears_of_an_upload_only_when_it_has_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        app.store
+            .set_setting(keys::SAFE_MASTER_KEY, &"00".repeat(64))
+            .unwrap();
+        crate::https::stall_requests();
+        let waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(50), app.safe_backup_now()).await;
+        assert!(waiting.is_err(), "the upload is on its way");
+        assert!(app.take_ui_events().is_empty());
     }
 
     #[test]
