@@ -78,6 +78,8 @@ function row(identity, name, more) {
 }
 
 var table = {
+    contacts: { contacts: [{ identity: "ABCD1234", displayName: "Ada", section: "A", pictureVersion: 0 },
+                           { identity: "BCDE2345", displayName: "Bob", section: "B", pictureVersion: 0 }] },
     conversations: function() {
         return { conversations: [
             row("ABCD1234", "Ada", { unread: 2 }),

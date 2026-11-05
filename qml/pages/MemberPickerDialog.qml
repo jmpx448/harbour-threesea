@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import harbour.threesea 1.0
 import "../components"
 
 // Pick group members from the contacts (multi-select, like Jolla's contact pickers): tap to
@@ -22,6 +23,10 @@ Dialog {
     property string acceptText
     property string title
 
+    // How many contacts there are at all, and whether we know yet.
+    property int contactCount
+    property bool loaded
+
     function isSelected(identity) {
         return selected.indexOf(identity) >= 0
     }
@@ -34,10 +39,36 @@ Dialog {
         selected = list
     }
 
+    // The contacts to offer: with the excluded ones gone from the model, the view has no section
+    // for a letter that has nobody left under it.
+    function load() {
+        backend.call("contacts", {}, function(ok, result) {
+            if (!ok) return
+            offered.update(result.contacts.filter(function(contact) {
+                return dialog.excluded.indexOf(contact.identity) < 0
+            }))
+            dialog.contactCount = result.contacts.length
+            dialog.loaded = true
+        })
+    }
+
+    JsonListModel {
+        id: offered
+        keyField: "identity"
+        roles: ["identity", "displayName", "section", "pictureVersion"]
+    }
+
+    Component.onCompleted: load()
+
+    Connections {
+        target: backend
+        onCoreEvent: if (name === "contactsChanged") dialog.load()
+    }
+
     SilicaListView {
         id: listView
         anchors.fill: parent
-        model: backend.contacts
+        model: offered
         // Or the first row becomes the current item and takes the focus from the name field.
         currentIndex: -1
 
@@ -84,9 +115,7 @@ Dialog {
         // contact's square picture at the right edge.
         delegate: TextSwitch {
             id: item
-            readonly property bool hiddenHere: dialog.excluded.indexOf(model.identity) >= 0
-            visible: !hiddenHere
-            height: hiddenHere ? 0 : Math.max(implicitHeight, Theme.itemSizeMedium)
+            height: Math.max(implicitHeight, Theme.itemSizeMedium)
             automaticCheck: false
             checked: dialog.isSelected(model.identity)
             text: model.displayName
@@ -104,9 +133,15 @@ Dialog {
         }
 
         ViewPlaceholder {
-            enabled: listView.count === 0
-            //% "No contacts yet"
-            text: qsTrId("threesea-la-no-contacts")
+            enabled: dialog.loaded && listView.count === 0
+            text: dialog.contactCount === 0
+                  //% "No contacts"
+                  ? qsTrId("threesea-la-no-contacts")
+                  : dialog.distributionList
+                    //% "All your contacts are on this list"
+                    ? qsTrId("threesea-la-all-contacts-on-list")
+                    //% "All your contacts are in this group"
+                    : qsTrId("threesea-la-all-contacts-in-group")
         }
 
         VerticalScrollDecorator { }
