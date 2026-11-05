@@ -1889,6 +1889,12 @@ Page {
         visible: page.shown && backend.wallpaper !== ""
         anchors.fill: parent
         source: visible ? Fmt.fileUrl(backend.wallpaper) : ""
+        // Decoded for the screen, not at the camera's size. The height is what the crop has to
+        // fill, in both orientations; the width is only capped, for a panorama's texture, which
+        // then decodes lower than the screen and is scaled up. A photo of ordinary proportions
+        // doesn't get near it. (A square of the long side would be too low for any landscape one.)
+        sourceSize.height: Math.max(Screen.width, Screen.height)
+        sourceSize.width: 4096
         fillMode: Image.PreserveAspectCrop
         asynchronous: true
         clip: true
