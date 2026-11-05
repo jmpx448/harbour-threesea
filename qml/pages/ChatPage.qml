@@ -417,11 +417,30 @@ Page {
     // A bubble's menu is open, and what came meanwhile for a reader at the newest end.
     property bool bubbleMenuOpen: false
     property var heldArrivals: []
+    // Where the menu found the reader: a menu that grows in this bottom-to-top list moves the view,
+    // and Silica's restoring of the position doesn't find the way back here. Someone at the newest
+    // end stays there, with the input in view; someone further back is left alone.
+    property bool menuAtNewest: false
     onBubbleMenuOpenChanged: {
-        if (bubbleMenuOpen) return
+        if (bubbleMenuOpen) {
+            menuAtNewest = atNewest()
+            return
+        }
+        // Silica's menu is closed and gone by now (ContextMenu._reset). First, so that what came
+        // meanwhile sees the reader where they were; again a moment later, as Silica restores its
+        // position on the same change.
+        if (menuAtNewest) {
+            listView.positionViewAtBeginning()
+            backAtNewest.restart()
+        }
         var held = heldArrivals
         heldArrivals = []
         for (var i = 0; i < held.length; ++i) addMessage(held[i])
+    }
+    Timer {
+        id: backAtNewest
+        interval: 50
+        onTriggered: if (!listView.moving) listView.positionViewAtBeginning()
     }
     onSelectingChanged: if (!selecting) reachedNewest()
     // The first message that came unseen and counts as unread, since the reader last was at the
