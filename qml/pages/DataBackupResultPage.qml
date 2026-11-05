@@ -12,6 +12,8 @@ Page {
     // The metadata import's counts, the history job's summary, and the error if one ended it.
     property var imported: null
     property var summary: null
+    // The ID came from this backup too: a first start, with no app lock yet.
+    property bool restored: false
     property string error
     property string errorKind
 
@@ -117,6 +119,18 @@ Page {
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.secondaryHighlightColor
                 text: qsTrId("threesea-la-data-backup-resume-hint")
+            }
+
+            // A backup has no mark for a private chat (ADR 0009).
+            Label {
+                visible: page.restored
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.highlightColor
+                //% "Chats that were marked private come back as ordinary, visible chats. To hide them again, set up an app lock in Settings and choose Make private in the chat list."
+                text: qsTrId("threesea-la-data-backup-restored-private")
             }
 
             SectionHeader {

@@ -33,7 +33,8 @@ Page {
                 window.pendingDataImport = {
                     filePath: page.filePath,
                     password: password.text,
-                    imported: result.imported
+                    imported: result.imported,
+                    restored: true
                 }
                 backend.refresh()
             } else {

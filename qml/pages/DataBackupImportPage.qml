@@ -15,6 +15,8 @@ Page {
 
     property string filePath
     property string password
+    // Over a restore of the ID from this backup (DataBackupRestorePage), for the results page.
+    property bool restored: false
 
     // "metadata", "history", then "done"
     property string phase: ""
@@ -87,6 +89,7 @@ Page {
             stop()
             pageStack.replace(Qt.resolvedUrl("DataBackupResultPage.qml"), {
                 "imported": page.imported,
+                "restored": page.restored,
                 "summary": summary,
                 "error": error,
                 "errorKind": errorKind
