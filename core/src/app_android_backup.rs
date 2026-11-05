@@ -879,20 +879,8 @@ mod history_tests {
 
     /// The Done event of one history import.
     async fn finish_import_of(app: &App, path: std::path::PathBuf) -> Value {
-        let identity = app.store.identity().unwrap().unwrap();
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let job = HistoryImport {
-            store: std::rc::Rc::clone(&app.store),
-            media: std::sync::Arc::clone(&app.media),
-            events: events_tx,
-            cancel: std::rc::Rc::new(std::cell::Cell::new(false)),
-            me: identity.threema_id.clone(),
-            own_public_key: libthreema::common::keys::ClientKey::from(*identity.client_key)
-                .public_key()
-                .to_string(),
-            path,
-            password: Zeroizing::new("test-password".into()),
-        };
+        let cancel = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (job, mut events_rx) = import_job(app, path, cancel);
         job.run().await;
         let mut done = Value::Null;
         while let Ok(event) = events_rx.try_recv() {
@@ -902,6 +890,31 @@ mod history_tests {
             }
         }
         done
+    }
+
+    fn import_job(
+        app: &App,
+        path: std::path::PathBuf,
+        cancel: std::rc::Rc<std::cell::Cell<bool>>,
+    ) -> (
+        HistoryImport,
+        tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>,
+    ) {
+        let identity = app.store.identity().unwrap().unwrap();
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let job = HistoryImport {
+            store: std::rc::Rc::clone(&app.store),
+            media: std::sync::Arc::clone(&app.media),
+            events: events_tx,
+            cancel,
+            me: identity.threema_id.clone(),
+            own_public_key: libthreema::common::keys::ClientKey::from(*identity.client_key)
+                .public_key()
+                .to_string(),
+            path,
+            password: Zeroizing::new("test-password".into()),
+        };
+        (job, events_rx)
     }
 
     /// A backup of the fixture's identity with the given tables, written here.
@@ -988,6 +1001,142 @@ mod history_tests {
         );
         let keys = app.store.file_keys(file.id).unwrap().unwrap();
         assert_eq!(keys.blob_id.unwrap().0, [1; 16]);
+        assert_eq!(summary["mediaMissing"], 1, "{summary}");
+    }
+
+    fn file_body(blob: u8) -> String {
+        format!(
+            r#"["{}","{}","image/jpeg",1000,"a.jpg",1,true,"","image/jpeg",{{}}]"#,
+            format!("{blob:02x}").repeat(16),
+            "02".repeat(32),
+        )
+    }
+
+    /// Stopped once the first batch stands, the keys of its files stand too: without them a tap on
+    /// such a file does nothing, and importing again wouldn't have brought them back.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stop_keeps_the_blob_keys_of_what_is_imported() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
+        let mut messages = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"]);
+        for index in 0_i64..900 {
+            let uid = format!("u-{index}");
+            let at = (1_700_000_000_000 + index).to_string();
+            messages.push_str(&write_row(&[
+                &uid,
+                "B0B0B0B0",
+                "0",
+                "FILE",
+                &file_body(1),
+                &at,
+            ]));
+        }
+        let path = backup_with(
+            dir.path(),
+            &[("contacts.csv", contacts), ("message_17.csv", messages)],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let count =
+            |sql: &str| -> i64 { app.store.conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+
+        let cancel = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (job, _events) = import_job(&app, path.clone(), std::rc::Rc::clone(&cancel));
+        let stopper = async {
+            while !cancel.get() {
+                if count("SELECT count(*) FROM messages") > 0 {
+                    cancel.set(true);
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::join!(job.run(), stopper);
+        let imported = count("SELECT count(*) FROM messages");
+        assert!(imported > 0 && imported < 900, "{imported}");
+        assert_eq!(count("SELECT count(*) FROM files"), imported);
+
+        // Rows from before this was so: importing again brings the keys back, and it leaves a key
+        // that is there as it is.
+        let damaged = count("SELECT min(message) FROM files");
+        let kept = count("SELECT max(message) FROM files");
+        app.store
+            .conn
+            .execute("DELETE FROM files WHERE message = ?1", [damaged])
+            .unwrap();
+        let mut other = app.store.file_keys(kept).unwrap().unwrap();
+        other.blob_id = Some(libthreema::common::BlobId([9; 16]));
+        app.store.set_file_keys(kept, &other).unwrap();
+
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["cancelled"], false, "{summary}");
+        assert_eq!(count("SELECT count(*) FROM messages"), 900);
+        assert_eq!(count("SELECT count(*) FROM files"), 900);
+        let repaired = app.store.file_keys(damaged).unwrap().unwrap();
+        assert_eq!(repaired.blob_id.unwrap().0, [1; 16]);
+        let untouched = app.store.file_keys(kept).unwrap().unwrap();
+        assert_eq!(untouched.blob_id.unwrap().0, [9; 16]);
+    }
+
+    /// A message deleted here stays deleted: no keys, no bytes from an older backup of it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deleted_message_gets_nothing_back_from_a_backup() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
+        let api_id = "0123456789abcdef";
+        let messages = write_row(&[
+            "apiid",
+            "uid",
+            "identity",
+            "isoutbox",
+            "type",
+            "body",
+            "posted_at",
+        ]) + &write_row(&[
+            api_id,
+            "u-1",
+            "B0B0B0B0",
+            "0",
+            "FILE",
+            &file_body(1),
+            "1700000000000",
+        ]);
+        let path = backup_with(
+            dir.path(),
+            &[
+                ("contacts.csv", contacts),
+                ("message_17.csv", messages),
+                ("message_media_u-1", "picture bytes".to_owned()),
+            ],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let id = crate::android_backup::records::parse_api_id(api_id).unwrap();
+        let deleted = app
+            .store
+            .insert_incoming("B0B0B0B0", id, "deleted", "", 1_700_000_000_000)
+            .unwrap()
+            .unwrap();
+
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["existing"], 1, "{summary}");
+        assert_eq!(summary["mediaFiles"], 0, "{summary}");
+        assert!(app.store.file_keys(deleted.id).unwrap().is_none());
     }
 
     /// A store that refuses a write ends the job with its error, undoes the batch and leaves no

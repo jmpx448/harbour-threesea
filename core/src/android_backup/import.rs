@@ -38,11 +38,10 @@ pub(crate) const MIGRATION_IMPORT_IDS: &str = "
 const BATCH: usize = 400;
 const MAX_TABLE_BYTES: usize = 64 << 20;
 
-/// A file message whose bytes (and keys) are applied after its row is committed.
+/// A file message whose bytes are applied after its row is committed.
 struct MediaJob {
     row: i64,
     uid: String,
-    keys: Option<convert::FileImport>,
     outgoing: bool,
 }
 
@@ -532,26 +531,11 @@ impl HistoryImport {
                     "mediaFiles": summary.media_files,
                 }));
             }
-            if let Some(keys) = &job.keys
-                && let Some(key_bytes) = &keys.key
-            {
-                let _ = self.store.set_file_keys(
-                    job.row,
-                    &crate::media::FileKeys {
-                        key: key_bytes.clone(),
-                        blob_id: keys.blob_id.map(libthreema::common::BlobId),
-                        thumbnail_blob_id: None,
-                    },
-                );
-            }
             for (part, entries) in [
                 (MediaPart::File, media_entries),
                 (MediaPart::Thumbnail, thumbnail_entries),
             ] {
                 let Some(entry) = entries.get(&(plan.family.name(), job.uid.clone())) else {
-                    if part == MediaPart::File {
-                        summary.media_missing += 1;
-                    }
                     continue;
                 };
                 let name = entry.clone();
@@ -735,22 +719,27 @@ impl HistoryImport {
                             summary.collisions += 1;
                         } else {
                             summary.existing += 1;
-                            // Repair pass: an interrupted earlier run may have the row
-                            // without its media. Bytes already stored stay untouched (and
-                            // uncounted), so importing again moves no media.
-                            if kind == "file" && (has_media || has_thumbnail) {
+                            // Repair pass: an earlier run may have left the row without what
+                            // came after it. Keys and bytes already stored stay untouched (and
+                            // uncounted), so importing again moves no media. A row that isn't a
+                            // file (any more) gets nothing: a deleted message stays deleted.
+                            if kind == "file" && existing.kind == "file" {
+                                if self.store.file_keys(existing.id)?.is_none() {
+                                    self.keep_file_keys(existing.id, file.as_ref())?;
+                                }
                                 let stored: Value =
                                     serde_json::from_str(&existing.body).unwrap_or_default();
                                 let local = |part: &str| {
                                     stored[part].as_i64() == Some(crate::app_media::STATE_LOCAL)
                                 };
+                                summary.media_missing +=
+                                    usize::from(!has_media && !local("fileState"));
                                 if (has_media && !local("fileState"))
                                     || (has_thumbnail && !local("thumbnailState"))
                                 {
                                     media_jobs.push(MediaJob {
                                         row: existing.id,
                                         uid: message.uid.clone(),
-                                        keys: file,
                                         outgoing: message.outgoing,
                                     });
                                 }
@@ -771,18 +760,45 @@ impl HistoryImport {
                 self.store.register_poll(key, creator, *poll_id, row)?;
             }
         }
-        if kind == "file" && (has_media || has_thumbnail || file.is_some()) {
-            media_jobs.push(MediaJob {
-                row,
-                uid: message.uid.clone(),
-                keys: file,
-                outgoing: message.outgoing,
-            });
+        if kind == "file" {
+            // With the row, in its transaction: a stop or a kill before the media come must not
+            // leave a file nothing can fetch any more.
+            self.keep_file_keys(row, file.as_ref())?;
+            summary.media_missing += usize::from(!has_media);
+            if has_media || has_thumbnail {
+                media_jobs.push(MediaJob {
+                    row,
+                    uid: message.uid.clone(),
+                    outgoing: message.outgoing,
+                });
+            }
         }
         if kind != "deleted" {
             self.apply_thumbs(key, row, message)?;
         }
         Ok(())
+    }
+
+    /// The blob key a backup row brings, if it brings one.
+    fn keep_file_keys(
+        &self,
+        row: i64,
+        file: Option<&convert::FileImport>,
+    ) -> Result<(), StoreError> {
+        let Some(file) = file else {
+            return Ok(());
+        };
+        let Some(key) = &file.key else {
+            return Ok(());
+        };
+        self.store.set_file_keys(
+            row,
+            &crate::media::FileKeys {
+                key: key.clone(),
+                blob_id: file.blob_id.map(libthreema::common::BlobId),
+                thumbnail_blob_id: None,
+            },
+        )
     }
 
     /// Android's thumbs: 1:1 USERACK/USERDEC and the per-member `g_msg_states`, as reactions
