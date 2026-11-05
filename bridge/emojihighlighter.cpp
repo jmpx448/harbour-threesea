@@ -39,6 +39,13 @@ void EmojiHighlighter::setRanges(const QVariantList &ranges)
         return;
     }
     m_ranges = ranges;
+    m_spans.clear();
+    m_spans.reserve(ranges.size());
+    for (const QVariant &value : ranges) {
+        const QVariantMap range = value.toMap();
+        const int start = range.value(QStringLiteral("start")).toInt();
+        m_spans.append({ start, start + range.value(QStringLiteral("length")).toInt() });
+    }
     rehighlight();
     emit rangesChanged();
 }
@@ -49,18 +56,28 @@ void EmojiHighlighter::setEmojiWidth(qreal width)
         return;
     }
     m_emojiWidth = width;
+    m_spacings.clear();
     rehighlight();
     emit emojiWidthChanged();
 }
 
-// Letter spacing (added after each glyph) that makes `emoji` take `width` pixels in `font`. Qt
+// Letter spacing (added after each glyph) that makes `emoji` take the emoji width in `font`. Qt
 // turns ligatures off in text with letter spacing, which splits emoji the font draws as one
 // ligature (a hand and its skin tone): measure the glyphs with some spacing on, too.
-static qreal spacingFor(const QString &emoji, QFont font, qreal width)
+qreal EmojiHighlighter::spacingFor(const QString &emoji, const QFont &font)
 {
+    if (font != m_spacingFont) {
+        m_spacings.clear();
+        m_spacingFont = font;
+    }
+    const auto known = m_spacings.constFind(emoji);
+    if (known != m_spacings.constEnd()) {
+        return known.value();
+    }
     const qreal probe = 1;
-    font.setLetterSpacing(QFont::AbsoluteSpacing, probe);
-    QTextLayout layout(emoji, font);
+    QFont measured = font;
+    measured.setLetterSpacing(QFont::AbsoluteSpacing, probe);
+    QTextLayout layout(emoji, measured);
     layout.beginLayout();
     QTextLine line = layout.createLine();
     layout.endLayout();
@@ -68,7 +85,9 @@ static qreal spacingFor(const QString &emoji, QFont font, qreal width)
     for (const QGlyphRun &run : layout.glyphRuns()) {
         glyphs += run.glyphIndexes().size();
     }
-    return glyphs > 0 ? (width - line.naturalTextWidth()) / glyphs + probe : 0;
+    const qreal spacing = glyphs > 0 ? (m_emojiWidth - line.naturalTextWidth()) / glyphs + probe : 0;
+    m_spacings.insert(emoji, spacing);
+    return spacing;
 }
 
 void EmojiHighlighter::highlightBlock(const QString &text)
@@ -76,20 +95,17 @@ void EmojiHighlighter::highlightBlock(const QString &text)
     const int blockStart = currentBlock().position();
     const int blockEnd = blockStart + text.length();
     const QFont font = document()->defaultFont();
-    for (const QVariant &value : m_ranges) {
-        const QVariantMap range = value.toMap();
-        const int start = range.value(QStringLiteral("start")).toInt();
-        const int end = start + range.value(QStringLiteral("length")).toInt();
-        if (end <= blockStart || start >= blockEnd) {
+    for (const Range &range : m_spans) {
+        if (range.end <= blockStart || range.start >= blockEnd) {
             continue;
         }
-        const int from = qMax(start, blockStart) - blockStart;
-        const int length = qMin(end, blockEnd) - blockStart - from;
+        const int from = qMax(range.start, blockStart) - blockStart;
+        const int length = qMin(range.end, blockEnd) - blockStart - from;
         QTextCharFormat hidden;
         hidden.setForeground(Qt::transparent);
         if (m_emojiWidth > 0) {
             hidden.setFontLetterSpacingType(QFont::AbsoluteSpacing);
-            hidden.setFontLetterSpacing(spacingFor(text.mid(from, length), font, m_emojiWidth));
+            hidden.setFontLetterSpacing(spacingFor(text.mid(from, length), font));
         }
         setFormat(from, length, hidden);
     }

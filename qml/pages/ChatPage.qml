@@ -2631,20 +2631,24 @@ Page {
                     // highlighter hides the system's emoji glyphs, the pictures are drawn over
                     // them; the text itself stays plain.
                     property var emojiRanges: []
-                    property var emojiPlaces: []
                     // The pictures' size: a bit more than the font's, most of a line.
                     readonly property real emojiSide: Math.round(font.pixelSize * 1.15)
+                    // Each moved where it is, so typing keeps the pictures instead of making them anew.
+                    ListModel { id: emojiPlaces }
                     function placeEmoji() {
-                        var places = []
                         for (var i = 0; i < emojiRanges.length; ++i) {
                             var range = emojiRanges[i]
                             var from = input._editor.positionToRectangle(range.start)
                             var to = input._editor.positionToRectangle(range.start + range.length)
                             var width = to.y === from.y ? to.x - from.x : from.height
-                            places.push({ x: from.x, y: from.y, width: width, height: from.height,
-                                          cell: range.cell })
+                            var place = { left: from.x, top: from.y, boxWidth: width, boxHeight: from.height,
+                                          cell: range.cell }
+                            if (i < emojiPlaces.count) emojiPlaces.set(i, place)
+                            else emojiPlaces.append(place)
                         }
-                        emojiPlaces = places
+                        if (emojiPlaces.count > emojiRanges.length) {
+                            emojiPlaces.remove(emojiRanges.length, emojiPlaces.count - emojiRanges.length)
+                        }
                     }
                     Timer {
                         id: emojiLayout
@@ -2664,17 +2668,17 @@ Page {
                         parent: input._editor
                         anchors.fill: parent
                         Repeater {
-                            model: input.emojiPlaces
+                            model: emojiPlaces
                             Image {
                                 // Square, centred on the glyph's box.
                                 readonly property real side: input.emojiSide
-                                x: modelData.x + (modelData.width - side) / 2
-                                y: modelData.y + (modelData.height - side) / 2
+                                x: model.left + (model.boxWidth - side) / 2
+                                y: model.top + (model.boxHeight - side) / 2
                                 width: side
                                 height: side
                                 sourceSize.width: side
                                 sourceSize.height: side
-                                source: "image://emoji/" + modelData.cell
+                                source: "image://emoji/" + model.cell
                             }
                         }
                     }
