@@ -1267,7 +1267,10 @@ ApplicationWindow {
 
     function notificationText(sender, message) {
         if (backend.notificationPreview) return (sender ? sender + ": " : "") + Fmt.preview(message)
-        // A status line is a call (notify()), which has no message to hide.
+        // A status line is a call (notify()), which has no message to hide, only who started it.
+        if (message.kind === "status" && String(message.body).split("|")[0] === "groupCallStarted") {
+            return Fmt.status("groupCallStarted")
+        }
         //% "New message"
         return message.kind === "status" ? Fmt.preview(message) : qsTrId("threesea-la-new-message")
     }

@@ -113,7 +113,10 @@ function status(code) {
         //% "%1 left the group."
         return qsTrId("threesea-la-status-group-member-left").arg(arg)
     case "groupCallStarted":
-        // A locked private chat's line has lost the name; only the generic notification shows it.
+        // A locked private chat's line has lost the name, and notifications without preview ask
+        // for it without.
+        //% "A group call started."
+        if (arg.length === 0) return qsTrId("threesea-la-status-group-call-started-unnamed")
         //% "%1 started a group call."
         return qsTrId("threesea-la-status-group-call-started").arg(arg)
     case "groupCallYouStarted":
