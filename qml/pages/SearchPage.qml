@@ -174,6 +174,19 @@ Page {
         delegate: ListItem {
             id: item
             contentHeight: column.height + 2 * Theme.paddingMedium
+            menu: page.starred ? starMenu : null
+            // The list follows at once; a star can be set again.
+            Component {
+                id: starMenu
+                ContextMenu {
+                    MenuItem {
+                        //% "Remove star"
+                        text: qsTrId("threesea-me-remove-star")
+                        onClicked: backend.call("setStarred", { message: modelData.id, starred: false },
+                                                function() { page.loadStarred() })
+                    }
+                }
+            }
             onClicked: {
                 var chat = pageStack.find(function(p) { return p.objectName === "chat" && p.identity === modelData.conversation })
                 if (chat) {

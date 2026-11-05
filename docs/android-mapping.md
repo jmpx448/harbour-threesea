@@ -40,3 +40,12 @@ Upstream paths are relative to `third_party/threema-android`. "lt" = provided by
 | 1:1 calls | `ch.threema.app.voip` (`VoipCallService`, `PeerConnectionClient`, `util/SdpPatcher`, `util/VoipVideoParams`, `signaling/CaptureState`) | lt call messages | `core::calls` (state; `VoipStateService`), `core::sdp`, `core::call_video` (profiles, data channel, VP8 size limit), `core::app_calls`; media `bridge/callengine` (GStreamer webrtcbin), `bridge/callmanager`, `bridge/aec`; `qml/pages/CallPage.qml` (ADR 0012) | audio ✅, video ✅ |
 | Android data backup (full ZIP) | `app/backuprestore/csv/{BackupService,RestoreService,Tags,RestoreSettings}`, `app/utils/{CSVReader,CSVWriter,CSVRow}`, `app/utils/FileHandlingZipOutputStream.kt` (Zip4j AES-256/AE, DEFLATE) | — | `core::android_backup` (container via the `zip` crate, own OpenCSV-exact CSV dialect, version gate 15–27, inventory); fixtures from pyzipper (`scripts/make-backup-fixtures.py`). Import into the running identity, and on a device with no ID first its ID (`androidBackupRestore`): `docs/android-backup-design.md` | 🔨 read/validate ✅, inspect/preview + merge ⏳ |
 | Searching lists and the chats by name | `ConversationsFragment.kt` (`filter`), `ContactsSectionFragment.java` (search in the list), `GlobalSearchActivity` | — | `core` `find_chats_json` for the search page (hidden private chats stay out), `bridge/listfilter` for the contact, share and member lists | ✅ |
+
+## Message actions
+
+| Android | Here |
+|---|---|
+| `MessageServiceImpl.resendMessage` (same ID, polls a new one), tap on a failed bubble (`ComposeMessageFragment`) | `resendMessage` (`app_messages.rs`), tap or "Send again" in `MessageDelegate.qml` |
+| `FileChatAdapterDecorator`, `MessageServiceImpl.cancelMessageUpload` and downloads | `cancelTransfer` (`app_media.rs`), "Stop sending" and "Stop download" in the bubble's menu |
+| `copySelectedMessagesToClipboard`, `menu_share` (text), gallery's select all | `selectionActions` (`Format.js`), `MessageOut.qml`, the panels in `ChatPage.qml` and `MediaPage.qml` |
+| `EmojiReactionsOverviewActivity` | "Reactions" on `MessageDetailsPage.qml`, opened by holding a chip |
