@@ -113,6 +113,9 @@ fn kept_parts(bytes: &[u8]) -> Result<Vec<(usize, usize)>, NotCleanable> {
     if frames == 0 {
         return Err(NotCleanable);
     }
+    // A control block is only taken once its frame is there, after what came between them: back
+    // in the file's order, which `clean` moves forward in place and so needs.
+    kept.sort_unstable();
     Ok(kept)
 }
 
@@ -213,6 +216,24 @@ mod tests {
         let out = cleaned(&file).unwrap();
         assert!(!out.windows(8).any(|part| part == b"GPS here"));
         assert!(!out.windows(11).any(|part| part == b"NETSCAPE2.0"));
+    }
+
+    /// A loop block between a control block and its frame: the order stays, and cleaning moves
+    /// every part forward without overwriting one still to come (found by fuzzing).
+    #[test]
+    fn a_block_between_control_and_frame_keeps_its_place() {
+        let head = &fixture::clean()[..19];
+        let file = [
+            head,
+            fixture::CONTROL,
+            fixture::LOOP_COUNT,
+            fixture::FRAME,
+            b"\x3b",
+        ]
+        .concat();
+        let once = cleaned(&file).unwrap();
+        assert_eq!(once, file);
+        assert_eq!(cleaned(&once).unwrap(), once);
     }
 
     #[test]
