@@ -65,8 +65,10 @@ Page {
 
     // The check takes a moment. If the app locked meanwhile, the lock page is on top and what
     // was to follow must not replace it; this page, empty again, asks once the lock is gone.
+    // The core has shown the private chats by then, and now nothing that wanted them follows.
     function accepted(pin) {
         if (database || pageStack.currentPage === page) unlocked(pin)
+        else if (privateChats) backend.lockWithFilesOnTheirWay()
     }
 
     PinEntry {
