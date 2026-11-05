@@ -858,6 +858,12 @@ pub enum Command {
     CheckForUpdate,
     /// Settings → Advanced: how much is logged (`warn`, `info`, `debug`; device-local, kept by
     /// the bridge and passed in the start configuration too).
+    /// Settings → Image size, for pictures the browser sends: the longest side in pixels, 0 for as
+    /// large as they are. The UI has the setting and tells us when we start and when it changes;
+    /// until then the default holds.
+    SetImageSize {
+        side: u32,
+    },
     SetLogLevel {
         level: String,
     },
@@ -1444,6 +1450,8 @@ pub struct App {
     pub(crate) group_call_leaves: u64,
     /// The groups whose call we are joining, with the SFU still to answer.
     pub(crate) group_calls_joining: Vec<String>,
+    /// Settings → Image size (`setImageSize`).
+    pub(crate) image_size: u32,
     /// The command handled went to a blocking thread: its reply comes later.
     pub(crate) reply_later: bool,
     /// How many of those are still to be finished.
@@ -1557,6 +1565,7 @@ impl App {
             detached: crate::detached::DetachedWork::default(),
             group_call_leaves: 0,
             group_calls_joining: Vec::new(),
+            image_size: crate::web::images::SENT_MAX,
             reply_later: false,
             file_work_running: 0,
             file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),
@@ -2479,6 +2488,10 @@ impl App {
             Command::CheckForUpdate => {
                 self.start_update_check(true);
                 self.update_settings_json()
+            }
+            Command::SetImageSize { side } => {
+                self.image_size = side;
+                Ok(json!({}))
             }
             Command::SetLogLevel { level } => {
                 crate::runtime::set_log_level(&level);

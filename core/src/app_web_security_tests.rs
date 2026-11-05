@@ -767,6 +767,26 @@ async fn web_sends_media_as_media() {
             assert!(!contains(&newest(&app), secret));
 
             // As a file it is the user's, as it is.
+            // The setting's size, 0 for as large as it is.
+            let large = {
+                let image = image::RgbImage::from_pixel(2000, 1000, image::Rgb([1, 2, 3]));
+                let mut out = std::io::Cursor::new(Vec::new());
+                image.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
+                out.into_inner()
+            };
+            for (side, width) in [(None, 1600), (Some(800), 800), (Some(0), 2000)] {
+                if let Some(side) = side {
+                    let reply = app
+                        .handle(&json!({"id": 1, "cmd": "setImageSize", "side": side}).to_string())
+                        .await;
+                    assert!(reply.contains(r#""ok":true"#), "{reply}");
+                }
+                let body = web_send(&mut app, wire(&large, "image/jpeg", false))
+                    .await
+                    .unwrap();
+                assert_eq!(body["width"], width);
+            }
+
             let body = web_send(&mut app, wire(&jpeg, "image/jpeg", true))
                 .await
                 .unwrap();

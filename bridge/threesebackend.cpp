@@ -574,7 +574,10 @@ void ThreeseBackend::startCore(QByteArray key)
     if (!m_core) {
         // If the core could still say why, its `fatal` follows.
         fail(QStringLiteral("coreStart"));
+        return;
     }
+    QJSValue none;
+    call(QStringLiteral("setImageSize"), QVariantMap{{QStringLiteral("side"), imageSize()}}, none);
 }
 
 void ThreeseBackend::fail(const QString &kind, const QString &detail)
@@ -1281,6 +1284,16 @@ QString storedLogLevel()
 QString ThreeseBackend::logLevel() const
 {
     return storedLogLevel();
+}
+
+void ThreeseBackend::setImageSize(int side)
+{
+    QSettings().setValue(QStringLiteral("imageSize"), side);
+    if (m_core) {
+        QJSValue none;
+        call(QStringLiteral("setImageSize"), QVariantMap{{QStringLiteral("side"), side}}, none);
+    }
+    emit notificationSettingsChanged();
 }
 
 void ThreeseBackend::setLogLevel(const QString &level)

@@ -159,11 +159,7 @@ public:
     }
     void setNotificationPreview(bool preview);
     int imageSize() const { return QSettings().value(QStringLiteral("imageSize"), 1600).toInt(); }
-    void setImageSize(int side)
-    {
-        QSettings().setValue(QStringLiteral("imageSize"), side);
-        emit notificationSettingsChanged();
-    }
+    void setImageSize(int side);
     // These four are read per bubble while a chat scrolls: from members, not the settings file.
     bool threemaEmoji() const { return m_threemaEmoji; }
     void setThreemaEmoji(bool threema);
