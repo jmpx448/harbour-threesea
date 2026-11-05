@@ -122,6 +122,52 @@ ApplicationWindow {
                           qsTrId("threesea-la-license-notification-body"))
     }
 
+    // What Threema's servers said last, or why they don't let this device in: on the chat list until
+    // the next login, as from outside that looks like a bad network.
+    property var offlineReason: null
+    readonly property string offlineReasonText: reasonText(offlineReason)
+    // What the background has been told since the window was last open: a server that goes on
+    // refusing gets one notification, not one per attempt.
+    property string offlineReasonNotified
+    function reasonText(reason) {
+        if (!reason) return ""
+        if (reason.kind === "server") return reason.text
+        //% "Threema's server keeps closing the connection during login."
+        if (reason.kind === "loginRefused") return qsTrId("threesea-la-reason-login-refused")
+        switch (reason.code) {
+        case 4110:
+            //% "Threema's server for linked devices no longer accepts this version of Threesea."
+            return qsTrId("threesea-la-reason-mediator-version")
+        case 4111:
+            //% "Threema's server for linked devices turned this device away: this Threema ID has reached its limit of linked devices."
+            return qsTrId("threesea-la-reason-mediator-device-limit")
+        case 4112:
+            //% "Another connection under this device's login took over on Threema's server for linked devices."
+            return qsTrId("threesea-la-reason-mediator-duplicate")
+        case 4114:
+            //% "Too many messages are waiting for this device on Threema's server for linked devices, so it closed the connection."
+            return qsTrId("threesea-la-reason-mediator-queue-full")
+        default:
+            //% "Threema's server for linked devices closed the connection (code %1)."
+            return qsTrId("threesea-la-reason-mediator-other").arg(reason.code)
+        }
+    }
+    function offlineReasonArrived(reason) {
+        offlineReason = reason
+        if (Qt.application.state === Qt.ApplicationActive) {
+            Notices.show(offlineReasonText, Notice.Long, Notice.Center)
+            return
+        }
+        var again = offlineReasonNotified === offlineReasonText
+        if (again && notifications["serverMessage"]) return
+        offlineReasonNotified = offlineReasonText
+        plainNotification("serverMessage", reason.kind === "server"
+                          //% "Message from Threema's server"
+                          ? qsTrId("threesea-la-server-message-notification")
+                          // The words are ours, about what the server did.
+                          : qsTrId("threesea-la-license-notification"), offlineReasonText, again)
+    }
+
     function lockChanged(status) {
         lockInfo = status
     }
@@ -276,6 +322,11 @@ ApplicationWindow {
             }
             window.lockedNotification()
             window.startFailedNotification()
+            // The chat list says it now.
+            if (Qt.application.state === Qt.ApplicationActive) {
+                window.clearNotification("serverMessage")
+                window.offlineReasonNotified = ""
+            }
             // The group may have become private during the call.
             if (Qt.application.state !== Qt.ApplicationActive && groupCalls.conversation.length > 0
                     && window.groupCallName.length > 0) {
@@ -795,8 +846,9 @@ ApplicationWindow {
         }
     }
 
-    // The plain notification under this key, new or updated, on the screen.
-    function plainNotification(key, summary, body) {
+    // The plain notification under this key, new or updated, on the screen; `quiet`: without a
+    // banner, as this isn't news.
+    function plainNotification(key, summary, body, quiet) {
         var n = notifications[key]
         if (!n) {
             n = plainNotificationComponent.createObject(window, { key: key })
@@ -804,8 +856,8 @@ ApplicationWindow {
         }
         n.summary = summary
         n.body = body
-        n.previewSummary = summary
-        n.previewBody = body
+        n.previewSummary = quiet ? "" : summary
+        n.previewBody = quiet ? "" : body
         n.publish()
         return n
     }
@@ -1047,7 +1099,11 @@ ApplicationWindow {
             // The private chats' notification opens the app only, and so do the ones for the lock
             // and for a failed start.
             identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked"
-                     : n.summary === qsTrId("threesea-la-startup-failed") ? "startFailed" : "private"
+                     : n.summary === qsTrId("threesea-la-startup-failed") ? "startFailed"
+                     : n.summary === qsTrId("threesea-la-license-notification")
+                       && n.body === qsTrId("threesea-la-license-notification-body") ? "license"
+                     : n.summary === qsTrId("threesea-la-license-notification")
+                       || n.summary === qsTrId("threesea-la-server-message-notification") ? "serverMessage" : "private"
         }
         if (identity && !notifications[identity]) {
             notifications[identity] = n
@@ -1236,7 +1292,7 @@ ApplicationWindow {
         var added = 0
         Object.keys(notifications).forEach(function(key) {
             // Who wrote what isn't in these.
-            if (["appLocked", "locked", "license", "replyNotSent"].indexOf(key) >= 0
+            if (["appLocked", "locked", "license", "serverMessage", "replyNotSent"].indexOf(key) >= 0
                     || key.indexOf("replyNotSent:") === 0) return
             added += Math.max(notifications[key].itemCount, 1)
             if (closeNotification(key)) dbus.releaseToken(key)
@@ -1324,6 +1380,8 @@ ApplicationWindow {
         pendingChat = ""
         pendingShare = null
         notificationsWaiting = []
+        offlineReason = null
+        offlineReasonNotified = ""
         appSettings = ({})
         lockInfo = null
         lockChecked = false
@@ -1628,6 +1686,17 @@ ApplicationWindow {
 
     Connections {
         target: backend
+        // Logged in: whatever a server said before that has passed. What it says from here on
+        // comes after this.
+        onConnectionStateChanged: {
+            if (backend.connectionState !== "connected") return
+            // What the server itself said remains something it said. Our words about it being
+            // refused or closed aren't true any more.
+            if (window.offlineReason && window.offlineReason.kind !== "server") {
+                window.clearNotification("serverMessage")
+            }
+            window.offlineReason = null
+        }
         onStateChanged: {
             // A last run's notifications, after a crash or a restart: their names and words stay
             // behind the passphrase too. They would otherwise last until it is entered.
@@ -1667,8 +1736,8 @@ ApplicationWindow {
                     delete window.readingPlaces[data.identity]
                     window.clearNotification("replyNotSent:" + data.identity)
                 }
-            } else if (name === "serverMessage") {
-                Notices.show(data.message, Notice.Long, Notice.Center)
+            } else if (name === "offlineReason") {
+                window.offlineReasonArrived(data.reason)
             } else if (name === "wakeSettled") {
                 window.endWake()
             } else if (name === "safeServerCopyLeft") {

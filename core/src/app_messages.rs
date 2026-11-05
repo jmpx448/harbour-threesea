@@ -1466,7 +1466,7 @@ mod live_tests {
                         }
                         other => eprintln!("event: {other:?}"),
                     },
-                    FromConnection::ServerMessage { message, .. } => eprintln!("server: {message}"),
+                    FromConnection::OfflineReason(reason) => eprintln!("server: {reason:?}"),
                     FromConnection::WakeSettled => {}
                 }
             }

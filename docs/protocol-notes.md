@@ -173,6 +173,19 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   after server-side failures.
 - Live-tested 2026-10-21 with the test ID: ECHOECHO echoes text; server ack → "sent",
   ECHOECHO also sends a "read" receipt.
+- What the servers say: a `server-alert` or `close-error`, a mediator's 41xx close (by its code) and
+  logins that the chat server keeps ending (no word from it: it closes the connection before the
+  login's answer, through the mediator close code 4000; at least 3 of them over at least 5 minutes
+  with no other failure in between, as a short hiccup at the server must not raise this) reach the
+  UI as `offlineReason`, shown under the chat list's header until the next login, with a
+  notification while the window is closed. Android keeps them in `ServerMessageModel` and shows them
+  as HTML; ours are plain text with the markup taken out (`plain_server_text`). Whether a revoked
+  ID's login ends that way isn't known from the code on either side.
+- A `close-error` containing "Another connection" isn't shown, and as on Android (`MonitoringLayer`)
+  its `can-reconnect: false` is ignored the first 3 times, since it mostly is our own earlier
+  connection after a change of network. After that the hold applies, so two devices fighting over
+  an ID come down to a login every 10 minutes; a session over 10 minutes starts the count over,
+  where Android's lasts until the connection is started anew.
 
 ## Threema Safe
 Not in libthreema (only the URL template); implemented in `core/src/safe/` after upstream

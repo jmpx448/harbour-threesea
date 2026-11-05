@@ -264,21 +264,40 @@ Page {
             }
         }
 
-        header: PageHeader {
-            title: page.privateList
-                   ? qsTrId("threesea-he-private-chats")
-                   : page.archived
-                   //% "Archived chats"
-                   ? qsTrId("threesea-he-archived-chats")
-                   //% "Chats"
-                   : qsTrId("threesea-he-chats")
-            description: window.storageProblem ? qsTrId("threesea-la-storage-problem-title")
-                         : backend.connectionState === "connected" ? ""
-                         : backend.connectionState === "connecting"
-                           //% "Connecting…"
-                           ? qsTrId("threesea-la-connecting")
-                           //% "Offline"
-                           : qsTrId("threesea-la-offline")
+        header: Column {
+            width: listView.width
+
+            PageHeader {
+                title: page.privateList
+                       ? qsTrId("threesea-he-private-chats")
+                       : page.archived
+                       //% "Archived chats"
+                       ? qsTrId("threesea-he-archived-chats")
+                       //% "Chats"
+                       : qsTrId("threesea-he-chats")
+                description: window.storageProblem ? qsTrId("threesea-la-storage-problem-title")
+                             : backend.connectionState === "connected" ? ""
+                             : backend.connectionState === "connecting"
+                               //% "Connecting…"
+                               ? qsTrId("threesea-la-connecting")
+                               //% "Offline"
+                               : qsTrId("threesea-la-offline")
+            }
+
+            // What the server said: too long for the header's own line, and this is the place the
+            // user looks at to find out what is going on. The server's words stay plain text.
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                visible: text.length > 0
+                height: visible ? implicitHeight + Theme.paddingMedium : 0
+                text: window.offlineReasonText
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignRight
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+            }
         }
 
         section {

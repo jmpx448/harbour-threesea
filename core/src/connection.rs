@@ -128,9 +128,20 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// The least wait while the store fails: a new connection brings the message it failed on again,
 /// and a wake-up or "Connect now" tries at once anyway.
 const STORAGE_BACKOFF: Duration = Duration::from_secs(30);
+/// The mediator's close code for the chat server having closed its connection (md-d2m.struct.yml).
+const MEDIATOR_CHAT_SERVER_CLOSED: u16 = 4000;
 /// How long we stay away when a server told us not to come back by ourselves. Only "Connect now"
 /// ends this early: what wakes the connection by itself would be coming back by ourselves.
 const HOLD_OFF: Duration = Duration::from_secs(600);
+/// A login may fail on a bad network, and a server can have a bad minute: it takes this many refused
+/// in a row, over at least this long, before the user is told that the server is refusing.
+const REFUSED_LOGINS_TO_TELL: u32 = 3;
+const REFUSED_LOGINS_SPAN: Duration = Duration::from_secs(5 * 60);
+/// How many times the chat server may say "Another connection" with us coming back regardless
+/// (Android's `MonitoringLayer`); after that two of them are fighting over the ID.
+const ANOTHER_CONNECTION_IGNORED: u32 = 3;
+/// A session this long wasn't part of a fight, and starts that count over.
+const ANOTHER_CONNECTION_FORGOTTEN: Duration = HOLD_OFF;
 /// How long an echo gets after a wake-up: the device stays up for this, the usual interval would
 /// outlast that.
 const WAKE_ECHO_LIMIT: Duration = Duration::from_secs(15);
@@ -301,15 +312,36 @@ pub struct LinkedDevice {
     pub last_disconnect_at: Option<u64>,
 }
 
+/// What Threema's servers said, or why they don't let us in: for the user to know until the next
+/// login, as from outside it all looks like a bad network otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfflineReason {
+    /// An alert or a close error, in the words of the chat server (Android's `ServerMessageModel`).
+    Server(String),
+    /// The mediator closed the connection with a code that rules out reconnecting by itself: the
+    /// UI words it, by the code.
+    Mediator(u16),
+    /// The chat server keeps closing the connection during login, without a word.
+    LoginRefused,
+}
+
+impl OfflineReason {
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Server(text) => serde_json::json!({ "kind": "server", "text": text }),
+            Self::Mediator(code) => serde_json::json!({ "kind": "mediator", "code": code }),
+            Self::LoginRefused => serde_json::json!({ "kind": "loginRefused" }),
+        }
+    }
+}
+
 /// From the connection to the app/UI.
 pub enum FromConnection {
     State(ConnectionState),
     Event(Box<CoreEvent>),
-    /// The server closed the connection with a message for the user.
-    ServerMessage {
-        message: String,
-        can_reconnect: bool,
-    },
+    /// Something the user should know, for as long as the next login is away.
+    OfflineReason(OfflineReason),
     /// What a wake-up was for has happened or won't soon: the device may sleep again.
     WakeSettled,
 }
@@ -549,6 +581,9 @@ enum ConnectionError {
     /// A directory lookup inside libthreema's message task met its rate limit.
     #[error("rate limited")]
     RateLimited,
+    /// The chat server closed the connection after our login, instead of answering it.
+    #[error("login refused")]
+    LoginRefused,
     #[error("closed by server: {message}")]
     Closed {
         message: String,
@@ -607,6 +642,7 @@ impl ConnectionError {
             self,
             Self::Io(_)
                 | Self::Timeout
+                | Self::LoginRefused
                 | Self::Closed { .. }
                 | Self::Stopped
                 | Self::Reconnect
@@ -933,6 +969,138 @@ fn fs_status_line(status: &FsStatus, supports_fs: bool, resending: bool) -> Opti
     }
 }
 
+/// Android shows the servers' words as HTML. They stay plain text here, which nothing gets to parse
+/// or load: what is markup goes, and what would show as markup becomes what it stands for.
+fn plain_server_text(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        plain.push_str(&rest[..start]);
+        let tag = &rest[start + 1..];
+        let opens_a_tag =
+            tag.starts_with(|c: char| c.is_ascii_alphabetic() || c == '/' || c == '!');
+        match tag.find('>').filter(|_| opens_a_tag) {
+            Some(end) => {
+                let name = tag[..end].trim_end_matches('/').trim().to_ascii_lowercase();
+                if name == "br" || name == "/p" {
+                    plain.push('\n');
+                }
+                rest = &tag[end + 1..];
+            }
+            // A lone "<", as in "a < b".
+            None => {
+                plain.push('<');
+                rest = tag;
+            }
+        }
+    }
+    plain.push_str(rest);
+    // `&amp;` last: "&amp;lt;" stands for the text "&lt;".
+    [
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+    ]
+    .iter()
+    .fold(plain, |text, (entity, character)| {
+        text.replace(entity, character)
+    })
+    .trim()
+    .to_owned()
+}
+
+/// What the chat server's words tell the user; nothing, if there aren't any.
+fn server_reason(message: &str) -> Option<OfflineReason> {
+    let text = plain_server_text(message);
+    (!text.is_empty()).then_some(OfflineReason::Server(text))
+}
+
+/// "Another connection" is often our own earlier connection after a change of network, and another
+/// device has a warning of its own, the device cookie's. Android checks for it just like this.
+fn is_another_connection(message: &str) -> bool {
+    message.contains("Another connection")
+}
+
+/// What a close error tells the user. Not "Another connection" (Android's
+/// `IncomingMessageProcessorImpl` leaves it out too).
+fn close_reason(message: &str) -> Option<OfflineReason> {
+    if is_another_connection(message) {
+        None
+    } else {
+        server_reason(message)
+    }
+}
+
+/// How often the server has said "Another connection" lately.
+#[derive(Default)]
+struct AnotherConnection(u32);
+
+impl AnotherConnection {
+    /// It said so again, after a session this long. Whether to stay away, if it asks us to: not
+    /// the first few times, as on Android, since it mostly is a change of network, and coming back
+    /// after a moment beats ten minutes offline without a word. A real fight over the ID doesn't
+    /// go on past those: then a login every [`HOLD_OFF`] at most, however long this runs.
+    fn stay_away(&mut self, session: Duration) -> bool {
+        if session > ANOTHER_CONNECTION_FORGOTTEN {
+            self.0 = 0;
+        }
+        self.0 = self.0.saturating_add(1);
+        self.0 > ANOTHER_CONNECTION_IGNORED
+    }
+}
+
+/// What it means when reading failed during the handshake. After our login the server has an
+/// answer to give, and closing the connection instead is how it says no. It doesn't send a word
+/// before the login is through, so there is no reason to go by. Through the mediator that end of
+/// the chat server's connection comes as a close code.
+fn handshake_read_failed(login_sent: bool, error: ConnectionError) -> ConnectionError {
+    match error {
+        ConnectionError::Io(ref io)
+            if login_sent
+                && matches!(
+                    io.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                ) =>
+        {
+            ConnectionError::LoginRefused
+        }
+        ConnectionError::MediatorClosed {
+            code: MEDIATOR_CHAT_SERVER_CLOSED,
+            ..
+        } if login_sent => ConnectionError::LoginRefused,
+        other => other,
+    }
+}
+
+/// Logins refused one after the other, with nothing else going wrong in between.
+#[derive(Default)]
+struct RefusedLogins {
+    /// The first of them, and how many so far.
+    streak: Option<(Stopwatch, u32)>,
+    told: bool,
+}
+
+impl RefusedLogins {
+    /// One more. Returns whether it is the first, and whether to tell the user now: once per streak.
+    fn refused(&mut self) -> (bool, bool) {
+        let first = self.streak.is_none();
+        let (began, count) = self.streak.get_or_insert_with(|| (Stopwatch::start(), 0));
+        *count = count.saturating_add(1);
+        let tell = !self.told
+            && *count >= REFUSED_LOGINS_TO_TELL
+            && began.elapsed() >= REFUSED_LOGINS_SPAN;
+        self.told |= tell;
+        (first, tell)
+    }
+
+    fn over(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// The wait before the next attempt, given the wait so far and how long the session lasted. A
 /// working connection starts over, unless the server told us to stay away: then how long the
 /// session lasted says nothing (another device took over after an hour, say), and coming back at
@@ -1071,6 +1239,8 @@ pub async fn run(
     tx: mpsc::UnboundedSender<FromConnection>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    let mut refused_logins = RefusedLogins::default();
+    let mut another_connection = AnotherConnection::default();
     loop {
         let _ = tx.send(FromConnection::State(ConnectionState::Connecting));
         let started = Stopwatch::start();
@@ -1081,6 +1251,10 @@ pub async fn run(
             Err(error) => Err(error),
         };
         let _ = tx.send(FromConnection::State(ConnectionState::Disconnected));
+        // Anything else means it wasn't one refusal after the other.
+        if !matches!(result, Err(ConnectionError::LoginRefused)) {
+            refused_logins.over();
+        }
         let rate_limited = matches!(result, Err(ConnectionError::RateLimited));
         match result {
             Err(ConnectionError::Stopped) => return,
@@ -1094,12 +1268,16 @@ pub async fn run(
                 can_reconnect,
             }) => {
                 tracing::warn!(can_reconnect, "chat server closed the connection");
-                let _ = tx.send(FromConnection::ServerMessage {
-                    message,
-                    can_reconnect,
-                });
-                if !can_reconnect {
-                    // E.g. another device took over this ID. Don't fight it.
+                if let Some(reason) = close_reason(&message) {
+                    let _ = tx.send(FromConnection::OfflineReason(reason));
+                }
+                let stay_away = if is_another_connection(&message) {
+                    another_connection.stay_away(started.elapsed())
+                } else {
+                    true
+                };
+                if !can_reconnect && stay_away {
+                    // E.g. another device keeps taking over this ID. Don't fight it.
                     backoff = HOLD_OFF;
                 }
             }
@@ -1126,7 +1304,26 @@ pub async fn run(
             {
                 // log-ok: Threema's mediator's own text
                 tracing::warn!(code, %reason, "mediator closed the connection");
+                let _ = tx.send(FromConnection::OfflineReason(OfflineReason::Mediator(code)));
                 backoff = HOLD_OFF;
+            }
+            // One word per streak in the log, which it would otherwise fill by the day.
+            Err(ConnectionError::LoginRefused) => {
+                let (first, tell) = refused_logins.refused();
+                if first {
+                    tracing::warn!("chat server closed the connection during login");
+                } else {
+                    tracing::info!("login refused again");
+                }
+                if tell {
+                    tracing::warn!("logins keep being refused");
+                    let reason = OfflineReason::LoginRefused;
+                    let _ = tx.send(FromConnection::OfflineReason(reason));
+                }
+            }
+            // A server's answer we can't make sense of, not a bad network.
+            Err(error @ ConnectionError::Protocol(_)) if !came_up => {
+                tracing::warn!(%error, "login failed");
             }
             // No use trying harder.
             Err(ConnectionError::Storage { code, step }) => {
@@ -1492,6 +1689,7 @@ impl<'a> Session<'a> {
     async fn handshake(&mut self, client_hello: Vec<u8>) -> Result<(), ConnectionError> {
         self.transport.write_csp(&client_hello).await?;
         let mut buffer = vec![0_u8; 8192];
+        let mut login_sent = false;
         loop {
             while let Some(instruction) = self.csp.poll().map_err(protocol_error)? {
                 if instruction.incoming_payload.is_some() {
@@ -1499,12 +1697,14 @@ impl<'a> Session<'a> {
                 }
                 if let Some(frame) = instruction.outgoing_frame {
                     self.transport.write_csp(&frame.0).await?;
+                    login_sent = true;
                 }
                 if let Some(CspStateUpdate::PostHandshake(_)) = instruction.state_update {
                     return Ok(());
                 }
             }
-            match self.read_inbound(&mut buffer).await? {
+            let inbound = self.read_inbound(&mut buffer).await;
+            match inbound.map_err(|error| handshake_read_failed(login_sent, error.into()))? {
                 Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
                 Inbound::D2m(payload) => self.d2m_queue.push_back(payload),
             }
@@ -3589,10 +3789,10 @@ impl<'a> Session<'a> {
                 });
             }
             IncomingPayload::ServerAlert(alert) => {
-                let _ = self.tx.send(FromConnection::ServerMessage {
-                    message: alert.0,
-                    can_reconnect: true,
-                });
+                tracing::info!("chat server sent an alert");
+                if let Some(reason) = server_reason(&alert.0) {
+                    let _ = self.tx.send(FromConnection::OfflineReason(reason));
+                }
             }
             IncomingPayload::QueueSendComplete => {
                 tracing::debug!("message queue drained");
@@ -5037,6 +5237,142 @@ mod sync_order_tests {
         session.transport = Transport::Direct(stream);
         session.liveness.echo_sent(Instant::now(), ECHO_INTERVAL);
         (session, server)
+    }
+
+    #[test]
+    fn another_connection_is_no_news_and_any_other_close_is() {
+        // Android's check: `contains`, whatever comes around it.
+        assert_eq!(close_reason("Another connection for this ID"), None);
+        assert_eq!(
+            close_reason("Your ID was revoked"),
+            Some(OfflineReason::Server("Your ID was revoked".into()))
+        );
+    }
+
+    /// Like Android: three times back at once, as it mostly is a change of network. Then a fight
+    /// over the ID, and ten minutes between logins for as long as it goes on.
+    #[test]
+    fn another_connection_is_ignored_a_few_times_and_not_in_a_fight() {
+        const SHORT: Duration = Duration::from_secs(30);
+        let mut another = AnotherConnection::default();
+        for _ in 0..ANOTHER_CONNECTION_IGNORED {
+            assert!(!another.stay_away(SHORT));
+        }
+        assert!(another.stay_away(SHORT));
+        assert!(another.stay_away(SHORT));
+        // Back after a hold, and kicked out at once: still the fight.
+        assert!(another.stay_away(Duration::from_secs(1)));
+        // A long session in between: this one is news again.
+        assert!(!another.stay_away(ANOTHER_CONNECTION_FORGOTTEN + SHORT));
+    }
+
+    /// The markup goes, and nothing that merely looks like it.
+    #[test]
+    fn the_servers_words_are_shown_without_their_markup() {
+        for (text, plain) in [
+            ("plain words", "plain words"),
+            ("<b>Update</b> now", "Update now"),
+            ("one<br>two<br/>three", "one\ntwo\nthree"),
+            ("<p>one</p><p>two</p>", "one\ntwo"),
+            ("<a href=\"https://threema.ch\">Threema</a>", "Threema"),
+            ("<img src=\"file:///etc/passwd\">words", "words"),
+            ("a < b and b > a", "a < b and b > a"),
+            ("3 <4", "3 <4"),
+            ("cut off <b", "cut off <b"),
+            ("Tom &amp; Jerry &lt;b&gt;", "Tom & Jerry <b>"),
+            ("&amp;lt;", "&lt;"),
+            ("Grüße <i>aus</i> Köln", "Grüße aus Köln"),
+        ] {
+            assert_eq!(plain_server_text(text), plain, "{text}");
+        }
+        assert_eq!(server_reason("<br>"), None);
+        assert_eq!(server_reason("  "), None);
+    }
+
+    #[test]
+    fn the_ui_gets_a_reason_in_words_or_by_its_code() {
+        assert_eq!(
+            OfflineReason::Server("maintenance".into()).to_json(),
+            serde_json::json!({ "kind": "server", "text": "maintenance" })
+        );
+        assert_eq!(
+            OfflineReason::Mediator(4111).to_json(),
+            serde_json::json!({ "kind": "mediator", "code": 4111 })
+        );
+        assert_eq!(
+            OfflineReason::LoginRefused.to_json(),
+            serde_json::json!({ "kind": "loginRefused" })
+        );
+    }
+
+    /// Only an end of the connection after our login counts as a no: before it the server hasn't
+    /// been asked, and a timeout says nothing.
+    #[test]
+    fn a_refused_login_is_the_connection_closing_after_the_login() {
+        let refused = |login_sent, error: TransportError| {
+            matches!(
+                handshake_read_failed(login_sent, error.into()),
+                ConnectionError::LoginRefused
+            )
+        };
+        assert!(refused(true, TransportError::Closed));
+        assert!(refused(
+            true,
+            TransportError::Io(std::io::ErrorKind::ConnectionReset.into())
+        ));
+        assert!(!refused(false, TransportError::Closed));
+        assert!(!refused(
+            true,
+            TransportError::Io(std::io::ErrorKind::TimedOut.into())
+        ));
+        assert!(!refused(true, TransportError::WriteTimeout));
+        // Through the mediator: its close code for the chat server's connection having ended.
+        let mediator_closed = |code| {
+            TransportError::WebSocket(WebSocketError::Closed {
+                code: Some(code),
+                reason: String::new(),
+            })
+        };
+        assert!(refused(true, mediator_closed(MEDIATOR_CHAT_SERVER_CLOSED)));
+        assert!(!refused(
+            false,
+            mediator_closed(MEDIATOR_CHAT_SERVER_CLOSED)
+        ));
+        // Could not be established, or the mediator's own affair.
+        assert!(!refused(true, mediator_closed(4001)));
+        assert!(!refused(true, mediator_closed(4111)));
+    }
+
+    /// A short hiccup at the server takes a few refusals in seconds: no alarm, however many.
+    /// Minutes of it, with nothing else going wrong, and it tells once.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_refused_login_is_told_only_after_minutes_of_them() {
+        let mut logins = RefusedLogins::default();
+        assert_eq!(logins.refused(), (true, false));
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert_eq!(logins.refused(), (false, false));
+        }
+        tokio::time::advance(REFUSED_LOGINS_SPAN).await;
+        assert_eq!(logins.refused(), (false, true));
+        assert_eq!(logins.refused(), (false, false));
+
+        // Long enough but too few: a device asleep in between, say.
+        let mut logins = RefusedLogins::default();
+        logins.refused();
+        tokio::time::advance(REFUSED_LOGINS_SPAN).await;
+        assert_eq!(logins.refused(), (false, false));
+        assert_eq!(logins.refused(), (false, true));
+
+        // Something else went wrong in between, or a login worked: it starts over.
+        let mut logins = RefusedLogins::default();
+        logins.refused();
+        tokio::time::advance(REFUSED_LOGINS_SPAN).await;
+        logins.refused();
+        logins.over();
+        assert_eq!(logins.refused(), (true, false));
+        assert_eq!(logins.refused(), (false, false));
+        assert_eq!(logins.refused(), (false, false));
     }
 
     /// The device stays up for as long as it takes, and no longer.

@@ -507,9 +507,8 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                             }
                         }
                     }
-                    Some(FromConnection::ServerMessage { message, can_reconnect }) => emit(
-                        json!({"event": "serverMessage", "message": message, "canReconnect": can_reconnect})
-                            .to_string(),
+                    Some(FromConnection::OfflineReason(reason)) => emit(
+                        json!({"event": "offlineReason", "reason": reason.to_json()}).to_string(),
                     ),
                     Some(FromConnection::WakeSettled) => wake_settled(&mut app, &emit),
                 }
