@@ -589,6 +589,10 @@ impl HttpsClient {
     pub async fn send_limited(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
         #[cfg(test)]
         stalled_if_asked().await;
+        #[cfg(test)]
+        if let Some(answer) = test_answer(&request) {
+            return answer.await;
+        }
         let builder = self
             .builder(request.method, &request.url, request.headers)?
             .timeout(request.timeout)
@@ -610,6 +614,10 @@ impl HttpsClient {
     pub async fn transfer(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
         #[cfg(test)]
         stalled_if_asked().await;
+        #[cfg(test)]
+        if let Some(answer) = test_answer(&request) {
+            return answer.await;
+        }
         let builder = self.builder(request.method, &request.url, request.headers)?;
         until_stalled(builder, request.body, limit, request.timeout, ANSWER_WAIT).await
     }
@@ -694,6 +702,50 @@ async fn stalled_if_asked() {
     if STALLED.get() {
         std::future::pending::<()>().await;
     }
+}
+
+/// What a test's stand-in for Threema's servers says to a request, whenever it is ready to.
+#[cfg(test)]
+pub(crate) type TestAnswer = std::pin::Pin<Box<dyn Future<Output = HttpsResult>>>;
+
+#[cfg(test)]
+type TestServers = std::rc::Rc<dyn Fn(&HttpsRequest) -> TestAnswer>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SERVERS: std::cell::RefCell<Option<TestServers>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Until this is dropped, `servers` answers this thread's requests instead of the network.
+#[cfg(test)]
+pub(crate) struct TestServersInPlace;
+
+#[cfg(test)]
+impl Drop for TestServersInPlace {
+    fn drop(&mut self) {
+        TEST_SERVERS.set(None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn answer_requests_with(
+    servers: impl Fn(&HttpsRequest) -> TestAnswer + 'static,
+) -> TestServersInPlace {
+    TEST_SERVERS.set(Some(std::rc::Rc::new(servers)));
+    TestServersInPlace
+}
+
+/// A request a real client would refuse isn't one for the stand-in either.
+#[cfg(test)]
+fn test_answer(request: &HttpsRequest) -> Option<TestAnswer> {
+    let servers = TEST_SERVERS.with_borrow(Clone::clone)?;
+    if !is_threema_url(&server_url(&request.url)) {
+        return Some(Box::pin(std::future::ready(Err(
+            HttpsError::InvalidRequest("not a Threema host".into()),
+        ))));
+    }
+    Some(servers(request))
 }
 
 #[cfg(test)]
@@ -899,6 +951,33 @@ mod tests {
         let result = until_stalled(post, vec![1; LENGTH], 100, SECOND, 2 * SECOND);
         let result = tokio::time::timeout(10 * SECOND, result).await.unwrap();
         assert!(matches!(result, Err(HttpsError::Timeout(_))));
+    }
+
+    /// A test's stand-in answers only what a real client would send, and only while it is there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stand_in_answers_for_threema_hosts_only_while_it_is_in_place() {
+        let client = HttpsClient::new().unwrap();
+        let get = |url: &str| HttpsRequest {
+            timeout: std::time::Duration::from_secs(1),
+            url: url.to_owned(),
+            method: HttpsMethod::Get,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        {
+            let _in_place = answer_requests_with(|request| {
+                let body = request.url.clone().into_bytes();
+                Box::pin(async move { Ok(HttpsResponse { status: 200, body }) })
+            });
+            let answer = client
+                .send(get("https://ds-apip.threema.ch/x"))
+                .await
+                .unwrap();
+            assert_eq!(answer.body, b"https://ds-apip.threema.ch/x");
+            let refused = client.transfer(get("https://example.org/x"), 10).await;
+            assert!(matches!(refused, Err(HttpsError::InvalidRequest(_))));
+        }
+        assert!(TEST_SERVERS.with_borrow(Option::is_none));
     }
 
     #[test]
