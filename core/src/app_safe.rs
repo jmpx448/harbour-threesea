@@ -488,6 +488,31 @@ impl Shared {
         }))
     }
 
+    /// `safeSearchId {phone, email}`: which IDs are linked to a number or address, for someone who
+    /// knows the Safe password but not the ID (Android's "forgot ID"). Before there is an ID: the
+    /// only moment it is for. Both are hashed here and never stored or logged.
+    pub(crate) async fn safe_search_id(&self, phone: &str, email: &str) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
+        // Libre: a valid license comes first, as for the restore itself.
+        let _ = self.license()?;
+        let (email_hashes, phone_hashes) =
+            crate::address_book::search_hashes(phone, email, self.address_book_region()?);
+        if email_hashes.is_empty() && phone_hashes.is_empty() {
+            return Err(ApiError::IdSearchInput);
+        }
+        let found =
+            crate::directory::search_identities(&self.https, &email_hashes, &phone_hashes).await?;
+        let mut identities: Vec<String> = found
+            .into_iter()
+            .filter_map(|found| normalize_identity(&found.identity))
+            .collect();
+        identities.sort();
+        identities.dedup();
+        // log-ok: a count
+        tracing::info!(found = identities.len(), "ID search answered");
+        Ok(json!({ "identities": identities }))
+    }
+
     fn store_safe_limits(&self, config: server::ServerConfig) -> Result<(), ApiError> {
         self.store
             .set_setting(keys::SAFE_MAX_BYTES, &config.max_backup_bytes.to_string())?;
@@ -1304,6 +1329,25 @@ mod tests {
     use super::*;
     use crate::{app::StartConfig, store::StoredIdentity};
 
+    fn app_without_identity(dir: &std::path::Path) -> App {
+        App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[7; 32],
+        )
+        .unwrap()
+    }
+
     /// An app with the ID `AAAAAAAA`.
     fn app_with_identity(dir: &std::path::Path) -> App {
         let app = App::new(
@@ -1884,6 +1928,57 @@ mod tests {
         app.connection_state.set("connecting");
         app.run_restore_setup().await;
         assert!(inits_to(&mut rx).is_empty(), "the connection too");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_id_search_is_for_a_device_without_an_id_and_needs_something_to_look_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        assert!(matches!(
+            app.safe_search_id("+41791234567", "").await,
+            Err(ApiError::IdentityExists)
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_without_identity(dir.path());
+        assert!(matches!(
+            app.safe_search_id("+41791234567", "").await,
+            Err(ApiError::NoLicense)
+        ));
+        app.store
+            .set_setting(keys::LICENSE_KEY, "XXXXX-XXXXX")
+            .unwrap();
+        for (phone, email) in [("", ""), ("12", "not an address")] {
+            assert!(matches!(
+                app.safe_search_id(phone, email).await,
+                Err(ApiError::IdSearchInput)
+            ));
+        }
+    }
+
+    #[test]
+    fn an_id_search_sends_hashes_only() {
+        let (emails, phones) =
+            crate::address_book::search_hashes("+41 79 123 45 67", " Someone@Example.org ", "");
+        assert_eq!(
+            emails,
+            crate::address_book::email_hashes("someone@example.org")
+        );
+        assert_eq!(phones, [crate::address_book::phone_hash("41791234567")]);
+        for hash in emails.iter().chain(&phones) {
+            assert!(
+                !hash.contains("example") && !hash.contains("4179"),
+                "{hash}"
+            );
+        }
+        // A number of its own country without one: by the region's rules.
+        let (_, phones) = crate::address_book::search_hashes("079 123 45 67", "", "CH");
+        assert_eq!(phones, [crate::address_book::phone_hash("41791234567")]);
+        assert!(
+            crate::address_book::search_hashes("079 123 45 67", "", "")
+                .1
+                .is_empty()
+        );
     }
 
     #[test]

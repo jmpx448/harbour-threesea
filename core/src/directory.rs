@@ -678,6 +678,20 @@ mod tests {
     }
 
     #[test]
+    fn a_search_for_an_id_has_no_token_and_also_finds_inactive_ids() {
+        let hashes = ["hash".to_owned()];
+        assert_eq!(
+            match_request(None, &hashes, &[], true),
+            json!({"emailHashes": ["hash"], "mobileNoHashes": [], "includeInactive": true})
+        );
+        // Address book matching as ever.
+        assert_eq!(
+            match_request(Some("token"), &[], &hashes, false),
+            json!({"matchToken": "token", "emailHashes": [], "mobileNoHashes": ["hash"]})
+        );
+    }
+
+    #[test]
     fn link_phase1_answers() {
         assert!(link_phase1(br#"{"linked":true}"#).unwrap());
         assert!(!link_phase1(br#"{"linked":false,"token":"x","tokenRespKeyPub":"y"}"#).unwrap());
@@ -925,13 +939,52 @@ pub async fn match_identities(
     email_hashes: &[String],
     mobile_hashes: &[String],
 ) -> Result<Vec<MatchedIdentity>, DirectoryError> {
-    let url = format!("{DIRECTORY_URL}identity/match");
-    let request = json!({
-        "matchToken": token,
+    post_match(
+        client,
+        &match_request(Some(token), email_hashes, mobile_hashes, false),
+    )
+    .await
+}
+
+/// The same without an ID of our own, to find the ID to restore: no token, as Android posts it
+/// with no identity yet, and also IDs that are inactive by now.
+pub async fn search_identities(
+    client: &HttpsClient,
+    email_hashes: &[String],
+    mobile_hashes: &[String],
+) -> Result<Vec<MatchedIdentity>, DirectoryError> {
+    post_match(
+        client,
+        &match_request(None, email_hashes, mobile_hashes, true),
+    )
+    .await
+}
+
+fn match_request(
+    token: Option<&str>,
+    email_hashes: &[String],
+    mobile_hashes: &[String],
+    include_inactive: bool,
+) -> serde_json::Value {
+    let mut request = json!({
         "emailHashes": email_hashes,
         "mobileNoHashes": mobile_hashes,
     });
-    let body = ensure_ok(client.post_json(&url, &request).await)?;
+    if let Some(token) = token {
+        request["matchToken"] = json!(token);
+    }
+    if include_inactive {
+        request["includeInactive"] = json!(true);
+    }
+    request
+}
+
+async fn post_match(
+    client: &HttpsClient,
+    request: &serde_json::Value,
+) -> Result<Vec<MatchedIdentity>, DirectoryError> {
+    let url = format!("{DIRECTORY_URL}identity/match");
+    let body = ensure_ok(client.post_json(&url, request).await)?;
     let value: serde_json::Value = serde_json::from_slice(&body)?;
     let identities = value["identities"].as_array().cloned().unwrap_or_default();
     Ok(identities

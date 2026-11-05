@@ -218,6 +218,9 @@ function text(kind, message) {
     case "reportRefused":
         //% "Threema didn't accept the report. Try again later."
         return qsTrId("threesea-la-error-report-refused")
+    case "idSearchInput":
+        //% "Enter a phone number with its country code, or an e-mail address."
+        return qsTrId("threesea-la-error-id-search-input")
     case "identityExists":
         //% "This device already has a Threema ID."
         return qsTrId("threesea-la-error-identity-exists")

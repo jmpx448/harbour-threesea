@@ -1224,7 +1224,7 @@ impl Shared {
 
     /// The country of numbers that don't say their own: the user's choice, else automatic. A
     /// choice is checked when made, and a later version may list fewer countries.
-    fn address_book_region(&self) -> Result<&'static str, ApiError> {
+    pub(crate) fn address_book_region(&self) -> Result<&'static str, ApiError> {
         let chosen = self
             .store
             .setting(keys::ADDRESS_BOOK_COUNTRY)?

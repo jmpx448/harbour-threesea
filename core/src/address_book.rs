@@ -358,6 +358,16 @@ pub fn phone_hash(normalized: &str) -> String {
     hmac(&MOBILE_HMAC_KEY, normalized)
 }
 
+/// The hashes to look for a single number or address with: what `identity/match` takes (e-mail,
+/// phone), nothing unhashed.
+pub fn search_hashes(phone: &str, email: &str, region: &str) -> (Vec<String>, Vec<String>) {
+    let phones = normalize_phone(phone, region)
+        .map(|normalized| phone_hash(&normalized))
+        .into_iter()
+        .collect();
+    (email_hashes(email), phones)
+}
+
 /// All hashes of the entries, each with the entries that have it.
 #[derive(Default)]
 pub struct Hashes {

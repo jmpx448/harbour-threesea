@@ -33,6 +33,18 @@ Page {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
 
+        PullDownMenu {
+            enabled: !page.working
+            MenuItem {
+                //% "Find my ID"
+                text: qsTrId("threesea-me-safe-find-id")
+                onClicked: {
+                    var finder = pageStack.push(Qt.resolvedUrl("SafeFindIdPage.qml"))
+                    finder.chosen.connect(function(identity) { identityField.text = identity })
+                }
+            }
+        }
+
         Column {
             id: column
             width: parent.width

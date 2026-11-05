@@ -148,6 +148,12 @@ pub enum Command {
     /// Try the rest of a restored backup's import (contacts, groups, lists) now.
     SafeRetryImport,
     SafeDeclineSetup,
+    SafeSearchId {
+        #[serde(default)]
+        phone: String,
+        #[serde(default)]
+        email: String,
+    },
     /// Look into an Android data backup (ZIP) on the device: format version, whether it
     /// belongs to the running identity, and what it holds. Local only; nothing is imported.
     AndroidBackupInspect {
@@ -1044,6 +1050,9 @@ pub enum ApiError {
     /// Threema ID has the wrong format.
     #[error("invalid Threema ID")]
     IdentityFormat,
+    /// Nothing to look for an ID with: neither a usable phone number nor an e-mail address.
+    #[error("no phone number or e-mail address to search with")]
+    IdSearchInput,
     /// The ID does not exist or was revoked.
     #[error("this Threema ID does not exist or was revoked")]
     ContactInvalid,
@@ -1216,6 +1225,7 @@ impl ApiError {
             Self::SafeTooLarge(_) => "safeTooLarge",
             Self::SafeDamaged(_) => "safeDamaged",
             Self::IdentityFormat => "identityFormat",
+            Self::IdSearchInput => "idSearchInput",
             Self::ContactInvalid => "contactInvalid",
             Self::ContactIsSelf => "contactIsSelf",
             Self::ContactNotFound => "contactNotFound",
@@ -1854,6 +1864,12 @@ impl App {
                 .await
             }
             Command::SafeDeclineSetup => self.safe_decline_setup(),
+            Command::SafeSearchId { phone, email } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.safe_search_id(&phone, &email).await
+                })
+                .await
+            }
             Command::SafeCheckPassword { password } => Ok(Self::safe_check_password(&password)),
             Command::SafeStatus => self.safe_status(),
             Command::SafeEnable { password, pin } => {

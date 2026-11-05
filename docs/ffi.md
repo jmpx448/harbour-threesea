@@ -99,6 +99,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `safeBackupNow` | – | status |
 | `safeDisable` | `pin` | status with `serverCopyDeleted`; deletes the backup from the server, then forgets the key. Off even if the deletion fails (`serverCopyDeleted: false` and the event `safeServerCopyLeft`, as the page may be gone by then; that copy expires with the server's retention) |
 | `safeRestore` | `identity`, `password` | `{identity, contacts, groups}` (needs a license first); error `identityExists` on a device with an ID |
+| `safeSearchId` | `phone`, `email` (either may be empty) | `{identities}`, the IDs linked to them, for a device with no ID yet (needs a license; hashed in the core, posted without a match token, inactive IDs included); errors `identityExists`, `idSearchInput` (nothing to look for) |
 | `safeDeclineSetup` | – | status; the answer to `askSetup`: go on without Threema Safe |
 | `safeRetryImport` | – | status; tries the rest of a restored backup's import now |
 | `androidBackupInspect` | `path`, `password` | `{version, identity (match\|otherIdentity\|keyMismatch\|unreadable\|missing), inventory: {contactChats, groupChats, listChats, mediaEntries, mediaBytes (declared, an estimate), thumbnails, contactAvatars, contactProfilePictures, groupAvatars, ownAvatar, has…, unknownEntries}}` — looks into an Android data backup ZIP, entirely locally; errors `backupDecrypt` (password), `backupVersion`, `backupInvalid` |
@@ -245,7 +246,7 @@ Error kinds (mapped to translated text in `qml/components/Errors.js`): `noLicens
 Threema server's unexpected status or unreadable answer; its text stays out of the UI), `network`,
 `backupDecrypt`, `backupVersion`, `passwordTooShort`, `passwordTooLong`, `safeNotFound`,
 `safeTooLarge`, `safeDamaged`,
-`identityFormat`, `contactInvalid`, `contactIsSelf`, `contactNotFound`, `messageTooLong`,
+`identityFormat`, `idSearchInput`, `contactInvalid`, `contactIsSelf`, `contactNotFound`, `messageTooLong`,
 `storeKey`, `storeDamaged`, `storeTooNew`, `diskFull`, `upgradeNoRoom`, `storeUnreadable` (the store failed, see
 `fatal`; the message is only a code for support), `internal`.
 

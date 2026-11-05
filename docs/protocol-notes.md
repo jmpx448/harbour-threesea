@@ -232,6 +232,10 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   chat only.
 
 ## Threema Safe
+
+- Finding the ID for a restore (Android: `ThreemaSafeServiceImpl.searchID`): `identity/match` with
+  the hashes of a number or address, no `matchToken` (Android has none without an identity either)
+  and `includeInactive: true`. Only hashes leave the device, like address book matching.
 Not in libthreema (only the URL template); implemented in `core/src/safe/` after upstream
 `app/src/main/java/ch/threema/app/threemasafe/ThreemaSafeServiceImpl.java`. Format spec:
 `domain/libthreema/threema-protocols/src/safe-backup.schema.yml` (version 1).
