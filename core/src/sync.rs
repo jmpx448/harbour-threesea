@@ -1581,4 +1581,273 @@ mod tests {
                 .any(|event| matches!(event, CoreEvent::GroupDeleted(deleted) if *deleted == key))
         );
     }
+
+    /// What one device sends of a contact, the other stores and would send the same way back.
+    fn round_trip_contact(from: &Store, to: &Store, create: bool) -> Vec<CoreEvent> {
+        let synced = crate::join::contact_sync(from, &from.contact(BOB).unwrap().unwrap()).unwrap();
+        let action = if create {
+            contact_sync::Action::Create(contact_sync::Create {
+                contact: Some(synced.clone()),
+            })
+        } else {
+            contact_sync::Action::Update(contact_sync::Update {
+                contact: Some(synced.clone()),
+            })
+        };
+        let mut events = Vec::new();
+        contact_sync(
+            to,
+            ContactSync {
+                action: Some(action),
+            },
+            &mut events,
+        )
+        .unwrap();
+        let back = crate::join::contact_sync(to, &to.contact(BOB).unwrap().unwrap()).unwrap();
+        assert_eq!(back, synced);
+        events
+    }
+
+    #[test]
+    fn a_contact_goes_to_the_other_device_and_comes_back_the_same() {
+        let (_one, here) = store();
+        let (_two, there) = store();
+        let mut bob = crate::contacts::test_contact(BOB);
+        bob.first_name = Some("Bob".into());
+        bob.last_name = Some("Builder".into());
+        bob.nickname = Some("bob".into());
+        bob.verification_level = contact::VerificationLevel::FullyVerified;
+        bob.acquaintance_level = contact::AcquaintanceLevel::Direct;
+        bob.sync_state = contact::SyncState::Custom;
+        bob.read_receipt_policy_override = Some(ReadReceiptPolicy::DontSendReadReceipt);
+        bob.typing_indicator_policy_override = Some(TypingIndicatorPolicy::DontSendTypingIndicator);
+        bob.conversation_category = ConversationCategory::Protected;
+        here.upsert_contact(&bob).unwrap();
+        here.set_private(BOB, true).unwrap();
+        let tomorrow = crate::messages::now_ms() + 86_400_000;
+        here.set_chat_notifications(BOB, Some((Policy::Never, Some(tomorrow))))
+            .unwrap();
+
+        let events = round_trip_contact(&here, &there, true);
+        assert!(there.is_private(BOB).unwrap(), "private there too");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CoreEvent::ContactsChanged))
+        );
+
+        // Everything back to its default, and the chat pinned (a private chat can't be).
+        let mut plain = crate::contacts::test_contact(BOB);
+        plain.acquaintance_level = contact::AcquaintanceLevel::Direct;
+        plain.created_at = bob.created_at;
+        here.upsert_contact(&plain).unwrap();
+        here.set_private(BOB, false).unwrap();
+        here.set_pinned(BOB, true).unwrap();
+        here.set_chat_notifications(BOB, None).unwrap();
+        round_trip_contact(&here, &there, false);
+        assert!(!there.is_private(BOB).unwrap());
+        assert_eq!(there.pinned_chats().unwrap(), [BOB]);
+
+        // Archived, which unpins.
+        here.set_archived(BOB, true).unwrap();
+        round_trip_contact(&here, &there, false);
+        assert!(there.pinned_chats().unwrap().is_empty());
+        assert_eq!(there.archived_chats().unwrap(), [BOB]);
+    }
+
+    /// Absent means unchanged: an update naming one field leaves the verification, the private mark,
+    /// the pin and the rest alone.
+    #[test]
+    fn a_contact_update_changes_only_what_it_names() {
+        let (_dir, store) = store();
+        let mut bob = crate::contacts::test_contact(BOB);
+        bob.first_name = Some("Bob".into());
+        bob.verification_level = contact::VerificationLevel::FullyVerified;
+        bob.conversation_category = ConversationCategory::Protected;
+        bob.read_receipt_policy_override = Some(ReadReceiptPolicy::DontSendReadReceipt);
+        store.upsert_contact(&bob).unwrap();
+        store.set_private(BOB, true).unwrap();
+        store.set_pinned(BOB, true).unwrap();
+        let before =
+            crate::join::contact_sync(&store, &store.contact(BOB).unwrap().unwrap()).unwrap();
+
+        let mut events = Vec::new();
+        contact_sync(
+            &store,
+            ContactSync {
+                action: Some(contact_sync::Action::Update(contact_sync::Update {
+                    contact: Some(d2d_sync::Contact {
+                        identity: BOB.to_owned(),
+                        nickname: Some("bobby".into()),
+                        ..Default::default()
+                    }),
+                })),
+            },
+            &mut events,
+        )
+        .unwrap();
+        let after =
+            crate::join::contact_sync(&store, &store.contact(BOB).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            after,
+            d2d_sync::Contact {
+                nickname: Some("bobby".into()),
+                ..before
+            }
+        );
+        assert!(store.is_private(BOB).unwrap());
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, CoreEvent::PrivateChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn a_new_contact_needs_its_key() {
+        let (_dir, store) = store();
+        let create = |public_key: Option<Vec<u8>>| ContactSync {
+            action: Some(contact_sync::Action::Create(contact_sync::Create {
+                contact: Some(d2d_sync::Contact {
+                    identity: BOB.to_owned(),
+                    public_key,
+                    first_name: Some("Bob".into()),
+                    ..Default::default()
+                }),
+            })),
+        };
+        for key in [None, Some(vec![3; 31])] {
+            let mut events = Vec::new();
+            contact_sync(&store, create(key), &mut events).unwrap();
+            assert!(store.contact(BOB).unwrap().is_none());
+            assert!(events.is_empty());
+        }
+        let mut events = Vec::new();
+        contact_sync(&store, create(Some(vec![3; 32])), &mut events).unwrap();
+        let bob = store.contact(BOB).unwrap().unwrap();
+        assert!(bob.public_key == PublicKey::from([3; 32]));
+        assert_eq!(bob.first_name.as_deref(), Some("Bob"));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CoreEvent::ContactsChanged))
+        );
+    }
+
+    fn apply_settings(store: &Store, settings: d2d_sync::Settings) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        settings_sync(
+            store,
+            SettingsSync {
+                action: Some(settings_sync::Action::Update(settings_sync::Update {
+                    settings: Some(settings),
+                })),
+            },
+            &mut events,
+        )
+        .unwrap();
+        events
+    }
+
+    #[test]
+    fn settings_go_to_the_other_device_and_come_back_the_same() {
+        let (_one, here) = store();
+        let (_two, there) = store();
+        let defaults = crate::join::settings_sync(&here).unwrap();
+        let changed = crate::safe::backup::Settings {
+            sync_contacts: true,
+            block_unknown: true,
+            read_receipts: false,
+            send_typing: false,
+            threema_calls: false,
+            relay_threema_calls: true,
+            disable_screenshots: true,
+            incognito_keyboard: true,
+            blocked_contacts: vec![EVE.to_owned()],
+            sync_excluded_ids: vec![BOB.to_owned()],
+            ..Default::default()
+        };
+        here.set_setting(
+            keys::APP_SETTINGS,
+            &serde_json::to_string(&changed).unwrap(),
+        )
+        .unwrap();
+        here.set_setting(keys::VIDEO_CALLS, "0").unwrap();
+        here.set_setting(keys::GROUP_CALLS, "0").unwrap();
+        let synced = crate::join::settings_sync(&here).unwrap();
+        assert_ne!(synced, defaults);
+
+        let events = apply_settings(&there, synced.clone());
+        assert_eq!(crate::join::settings_sync(&there).unwrap(), synced);
+        assert!(there.is_explicitly_blocked(EVE).unwrap());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, CoreEvent::SettingsChanged))
+        );
+
+        // And back to the defaults.
+        apply_settings(&there, defaults.clone());
+        assert_eq!(crate::join::settings_sync(&there).unwrap(), defaults);
+        assert!(!there.is_explicitly_blocked(EVE).unwrap());
+
+        // A setting the message leaves out stays as it is.
+        apply_settings(&there, synced.clone());
+        apply_settings(
+            &there,
+            d2d_sync::Settings {
+                read_receipt_policy: Some(ReadReceiptPolicy::SendReadReceipt as i32),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            crate::join::settings_sync(&there).unwrap(),
+            d2d_sync::Settings {
+                read_receipt_policy: Some(ReadReceiptPolicy::SendReadReceipt as i32),
+                ..synced
+            }
+        );
+    }
+
+    #[test]
+    fn the_profile_goes_to_the_other_device_and_comes_back_the_same() {
+        use crate::profile_pictures::Share;
+        let (_one, here) = store();
+        let (_two, there) = store();
+        let apply = |store: &Store, profile: d2d_sync::UserProfile| {
+            let mut events = Vec::new();
+            user_profile_sync(
+                store,
+                UserProfileSync {
+                    action: Some(user_profile_sync::Action::Update(
+                        user_profile_sync::Update {
+                            user_profile: Some(profile),
+                        },
+                    )),
+                },
+                &mut events,
+            )
+            .unwrap();
+        };
+        let without_picture = |store: &Store| d2d_sync::UserProfile {
+            profile_picture: None,
+            ..crate::join::profile_sync(store).unwrap()
+        };
+        here.set_setting(keys::NICKNAME, "Tester").unwrap();
+        here.set_picture_share(Share::Selected).unwrap();
+        here.set_picture_recipients(&[BOB.to_owned(), EVE.to_owned()])
+            .unwrap();
+        there.set_setting(keys::NICKNAME_UNANSWERED, "ask").unwrap();
+
+        apply(&there, without_picture(&here));
+        assert_eq!(without_picture(&there), without_picture(&here));
+        assert_eq!(there.setting(keys::NICKNAME_UNANSWERED).unwrap(), None);
+
+        // Cleared here, cleared there.
+        here.delete_setting(keys::NICKNAME).unwrap();
+        here.set_picture_share(Share::Nobody).unwrap();
+        apply(&there, without_picture(&here));
+        assert_eq!(there.setting(keys::NICKNAME).unwrap(), None);
+        assert_eq!(without_picture(&there), without_picture(&here));
+    }
 }
