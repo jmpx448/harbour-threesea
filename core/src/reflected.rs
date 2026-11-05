@@ -33,6 +33,9 @@ use crate::{
     store::{Store, StoreError},
 };
 
+/// The length of a chat server message box's nonce.
+const NONCE_LEN: usize = 24;
+
 /// A reflected envelope could not be used. It is still acknowledged, as the mediator would
 /// otherwise send it again forever, unless the store failed ([`Self::storage_code`]).
 #[derive(Debug, thiserror::Error)]
@@ -125,21 +128,73 @@ pub fn open(
     }
 }
 
-/// An envelope is given up on: from now on it counts as seen.
+/// An envelope is given up on: from now on it counts as seen, and so does what it says came from
+/// the chat server.
 pub fn note_dropped(
     store: &Store,
+    user: ThreemaId,
     device_group_key: &libthreema::common::keys::DeviceGroupKey,
     data: &[u8],
 ) -> Result<(), ReflectedError> {
-    let (nonce, _) = device_group_key
+    let (nonce, plain) = device_group_key
         .decrypt_envelope(data)
         .map_err(|e| ReflectedError::Decrypt(e.to_string()))?;
-    Ok(store.add_d2d_nonce(&nonce)?)
+    let csp = d2d::Envelope::decode(plain.as_slice())
+        .map(|envelope| csp_nonces(user, envelope.content.as_ref()))
+        .unwrap_or_default();
+    note_seen(store, &nonce, &csp)?;
+    Ok(())
 }
 
-/// Apply an opened envelope and note its nonce, in one store step. An envelope this can't use
-/// leaves nothing behind but the nonce, and one the store failed on not even that. Events only for
-/// what holds.
+/// The nonces of the chat server's message boxes an envelope tells of, for this device's replay
+/// protection (md-d2d.proto): should it become leader, the server can't hand those out again, and
+/// a device joining later gets them along. Not those of messages without replay protection (typing,
+/// like the incoming message task). A body that doesn't decode counts as protected.
+fn csp_nonces(user: ThreemaId, content: Option<&envelope::Content>) -> Vec<Vec<u8>> {
+    let protected = |sender: ThreemaId, message_type: i32, body: &[u8]| {
+        IncomingMessageBody::decode_reflected(sender, message_type, body)
+            .map_or(true, |body| body.has_replay_protection())
+    };
+    let nonces: Vec<&Vec<u8>> = match content {
+        Some(envelope::Content::IncomingMessage(message)) => {
+            let sender = message.sender_identity.parse().unwrap_or(user);
+            if !protected(sender, message.r#type, &message.body) || message.nonce.is_empty() {
+                return Vec::new();
+            }
+            vec![&message.nonce]
+        }
+        Some(envelope::Content::OutgoingMessage(message))
+            if protected(user, message.r#type, &message.body) =>
+        {
+            message.nonces.iter().collect()
+        }
+        _ => return Vec::new(),
+    };
+    let wanted = nonces.len();
+    let nonces: Vec<Vec<u8>> = nonces
+        .into_iter()
+        .filter(|nonce| nonce.len() == NONCE_LEN)
+        .cloned()
+        .collect();
+    if nonces.len() != wanted {
+        tracing::warn!(
+            count = wanted - nonces.len(),
+            "reflected nonces of a wrong length left out"
+        );
+    }
+    nonces
+}
+
+/// An envelope's nonce and those of the message boxes it tells of count as used.
+fn note_seen(store: &Store, envelope_nonce: &[u8], csp: &[Vec<u8>]) -> Result<(), StoreError> {
+    store.add_d2d_nonce(envelope_nonce)?;
+    let csp: Vec<&[u8]> = csp.iter().map(Vec::as_slice).collect();
+    store.add_nonces(&csp)
+}
+
+/// Apply an opened envelope and note its nonces, in one store step. An envelope this can't use
+/// leaves nothing behind but the nonces, and one the store failed on not even those. Events only
+/// for what holds.
 pub fn apply_once(
     store: &Rc<Store>,
     user: ThreemaId,
@@ -148,15 +203,16 @@ pub fn apply_once(
 ) -> Result<(), ReflectedError> {
     let announced = events.borrow().len();
     let Opened { envelope, nonce } = opened;
+    let csp = csp_nonces(user, envelope.content.as_ref());
     let step = store.step()?;
     let applied = apply(store, user, envelope, events).and_then(|()| {
-        store.add_d2d_nonce(&nonce)?;
+        note_seen(store, &nonce, &csp)?;
         Ok(step.commit()?)
     });
     if let Err(error) = &applied {
         events.borrow_mut().truncate(announced);
         if error.storage_code().is_none() {
-            store.add_d2d_nonce(&nonce)?;
+            note_seen(store, &nonce, &csp)?;
         }
     }
     applied
@@ -758,5 +814,119 @@ mod tests {
         let events: EventSink = Rc::new(RefCell::new(Vec::new()));
         apply(&store, user, read_update("B0B0B0B0", 7), &events).unwrap();
         assert!(!clears(&events, "B0B0B0B0"));
+    }
+
+    /// A reflected incoming message, as it would come from the leader.
+    fn reflected_incoming(
+        sender: &str,
+        message_id: u64,
+        nonce: Vec<u8>,
+        body: ContactMessageBody,
+    ) -> d2d::Envelope {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody},
+        };
+        let (message_type, data) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: "ABCD1234".parse().unwrap(),
+                body,
+            }));
+        d2d::Envelope {
+            content: Some(envelope::Content::IncomingMessage(d2d::IncomingMessage {
+                sender_identity: sender.into(),
+                message_id,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body: data,
+                nonce,
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn text_body() -> ContactMessageBody {
+        ContactMessageBody::Text(libthreema::model::message::TextMessage { text: "hi".into() })
+    }
+
+    /// Run an envelope through what a follower does with one.
+    fn apply_sealed(store: &Rc<Store>, envelope: &d2d::Envelope, events: &EventSink) {
+        let key = libthreema::common::keys::DeviceGroupKey::from([7; 32]);
+        let (_, sealed) = key.encrypt_envelope(&envelope.encode_to_vec()).unwrap();
+        let opened = open(store, &key, &sealed).unwrap();
+        let _ = apply_once(store, "ABCD1234".parse().unwrap(), opened, events);
+    }
+
+    /// What another device received or sent while it led can't be replayed here once this device
+    /// leads, whatever became of the envelope.
+    #[test]
+    fn the_nonces_a_reflection_tells_of_count_as_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
+            .unwrap();
+        let events: EventSink = Rc::default();
+
+        // Received elsewhere.
+        let incoming = reflected_incoming("B0B0B0B0", 1, vec![1; 24], text_body());
+        apply_sealed(&store, &incoming, &events);
+        assert!(store.has_nonce(&[1; 24]).unwrap());
+
+        // Sent elsewhere, to a group's members; something of a wrong length stays out.
+        let mut outgoing = reflected_outgoing("B0B0B0B0", 2, text_body());
+        if let Some(envelope::Content::OutgoingMessage(message)) = &mut outgoing.content {
+            message.nonces = vec![vec![2; 24], vec![3; 24], vec![4; 5]];
+        }
+        apply_sealed(&store, &outgoing, &events);
+        assert!(store.has_nonce(&[2; 24]).unwrap());
+        assert!(store.has_nonce(&[3; 24]).unwrap());
+        assert!(!store.has_nonce(&[4; 5]).unwrap());
+
+        // From someone this device doesn't know.
+        let stranger = reflected_incoming("C0C0C0C0", 3, vec![5; 24], text_body());
+        apply_sealed(&store, &stranger, &events);
+        assert!(store.has_nonce(&[5; 24]).unwrap());
+
+        // What can't be used: the other device has received it all the same.
+        let mut broken = reflected_incoming("B0B0B0B0", 4, vec![6; 24], text_body());
+        if let Some(envelope::Content::IncomingMessage(message)) = &mut broken.content {
+            message.r#type = 0xfe;
+        }
+        apply_sealed(&store, &broken, &events);
+        assert!(store.has_nonce(&[6; 24]).unwrap());
+
+        // Without replay protection there is nothing to keep.
+        let typing = reflected_incoming(
+            "B0B0B0B0",
+            5,
+            vec![7; 24],
+            ContactMessageBody::TypingIndicator(
+                libthreema::model::message::TypingIndicatorMessage { is_typing: true },
+            ),
+        );
+        apply_sealed(&store, &typing, &events);
+        assert!(!store.has_nonce(&[7; 24]).unwrap());
+    }
+
+    /// One the store failed on comes again and leaves nothing, so that next copy isn't a replay.
+    #[test]
+    fn nothing_counts_as_used_when_the_store_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON d2d_nonces
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let events: EventSink = Rc::default();
+        let mut outgoing = reflected_outgoing("B0B0B0B0", 2, text_body());
+        if let Some(envelope::Content::OutgoingMessage(message)) = &mut outgoing.content {
+            message.nonces = vec![vec![2; 24]];
+        }
+        apply_sealed(&store, &outgoing, &events);
+        assert!(!store.has_nonce(&[2; 24]).unwrap());
     }
 }

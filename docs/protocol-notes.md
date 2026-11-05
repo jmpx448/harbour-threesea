@@ -178,6 +178,12 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   store failed on stays unacknowledged, so the mediator hands it out at the next login, by the same
   rule as above (without an end of that queue there is no promotion to leader either). Android
   acknowledges those too (with a TODO), but nothing else brings them to a follower.
+- The CSP nonces an envelope tells of (`IncomingMessage.nonce`, `OutgoingMessage.nonces`) go into
+  the nonce store in that same step, unless the message has no replay protection: without them, a
+  chat server could replay to a new leader what the last one received. Our own envelope's D2D nonce
+  is noted when it is sealed, and an outgoing message's nonces are picked before its reflection,
+  which carries them (a member a group message only reaches later on that connection isn't in it:
+  the field is optional for now).
 - A leader stores a 1:1 message before reflecting it. Until the task is through it is in
   `awaiting_reflection`, which keeps `message_is_marked_used` from discarding the server's next copy
   as a reused id: that copy runs the reflection again, or the other devices would never get the

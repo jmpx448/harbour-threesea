@@ -1591,6 +1591,9 @@ struct Session<'a> {
     next_reflect_id: u32,
     /// Outgoing messages reflected on this connection: (conversation, message id).
     reflected: std::collections::HashSet<(String, u64)>,
+    /// The nonces told to the other devices for messages still to be encoded: (receiver, message
+    /// id).
+    planned_nonces: RefCell<std::collections::HashMap<(String, u64), Nonce>>,
     csp: CspProtocol,
     e2e: CspE2eProtocol,
     events: EventSink,
@@ -1818,6 +1821,7 @@ impl<'a> Session<'a> {
             backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            planned_nonces: RefCell::default(),
             csp,
             e2e,
             events,
@@ -2037,6 +2041,7 @@ impl<'a> Session<'a> {
                 message.message_id,
                 message.created_at,
                 &body,
+                core::slice::from_ref(&message.conversation),
             )
             .await?;
             match self
@@ -2196,11 +2201,22 @@ impl<'a> Session<'a> {
         .map_err(storage_error)?;
         // Before the members: our own other devices want it even when there are none — a notes
         // group (Threema's group of one) would otherwise never reach Threema Desktop.
+        let going_out: Vec<String> = receivers
+            .iter()
+            .filter(|receiver| {
+                !self
+                    .awaiting_ack
+                    .iter()
+                    .any(|(to, id)| to == *receiver && *id == message_id)
+            })
+            .cloned()
+            .collect();
         self.reflect_outgoing(
             key,
             message_id,
             created_at,
             &Outgoing::Group(group, body.clone()),
+            &going_out,
         )
         .await?;
         if receivers.is_empty() {
@@ -2318,6 +2334,7 @@ impl<'a> Session<'a> {
                         entry.message_id,
                         entry.created_at,
                         &Outgoing::Contact(body.clone()),
+                        core::slice::from_ref(&entry.conversation),
                     )
                     .await?;
                 }
@@ -2366,6 +2383,26 @@ impl<'a> Session<'a> {
             .add_nonces(&[&nonce.0])
             .map_err(storage_error)?;
         Ok(nonce)
+    }
+
+    /// A fresh nonce per receiver of a message, for the reflection (md-d2d.proto: reflect, then
+    /// send under those nonces) and for [`Self::encode`] to use.
+    fn plan_nonces(
+        &self,
+        message_id: u64,
+        receivers: &[String],
+    ) -> Result<Vec<Vec<u8>>, ConnectionError> {
+        receivers
+            .iter()
+            .map(|receiver| {
+                let nonce = self.fresh_nonce()?;
+                let bytes = nonce.0.to_vec();
+                self.planned_nonces
+                    .borrow_mut()
+                    .insert((receiver.clone(), message_id), nonce);
+                Ok(bytes)
+            })
+            .collect()
     }
 
     fn fs_store(&self) -> StoreFs {
@@ -2563,7 +2600,14 @@ impl<'a> Session<'a> {
             }
         }
 
-        let nonce = self.fresh_nonce()?;
+        let planned = self
+            .planned_nonces
+            .borrow_mut()
+            .remove(&(receiver.to_owned(), message_id));
+        let nonce = match planned {
+            Some(nonce) => nonce,
+            None => self.fresh_nonce()?,
+        };
         let message = OutgoingMessage {
             id: MessageId(message_id),
             overrides: MessageOverrides::default(),
@@ -3254,13 +3298,14 @@ impl<'a> Session<'a> {
     }
 
     /// Our outgoing message for the other devices (Android: `reflectMessage` before sending).
-    /// Once per message and connection.
+    /// Once per message and connection. `receivers`: who it goes to now, whose nonces go along.
     async fn reflect_outgoing(
         &mut self,
         conversation: &str,
         message_id: u64,
         created_at: i64,
         body: &Outgoing,
+        receivers: &[String],
     ) -> Result<(), ConnectionError> {
         use libthreema::protobuf::d2d::{OutgoingMessage, envelope::Content};
         if self.multi_device.is_none()
@@ -3288,6 +3333,7 @@ impl<'a> Session<'a> {
             }
         };
         let (message_type, data) = encode_message_body(&outgoing_body);
+        let nonces = self.plan_nonces(message_id, receivers)?;
         self.reflect(Content::OutgoingMessage(OutgoingMessage {
             conversation: Some(conversation_id),
             message_id,
@@ -3295,7 +3341,7 @@ impl<'a> Session<'a> {
             created_at: u64::try_from(created_at).unwrap_or_default(),
             r#type: i32::from(message_type),
             body: data,
-            nonces: Vec::new(),
+            nonces,
         }))
         .await
     }
@@ -3403,9 +3449,12 @@ impl<'a> Session<'a> {
                     failures,
                     "a reflected envelope keeps failing and is dropped"
                 );
-                if let Err(error) =
-                    crate::reflected::note_dropped(&store, &device_group_key, &reflected.envelope)
-                {
+                if let Err(error) = crate::reflected::note_dropped(
+                    &store,
+                    self.setup.identity,
+                    &device_group_key,
+                    &reflected.envelope,
+                ) {
                     tracing::warn!(%error, "noting a dropped envelope failed");
                 }
             }
@@ -5867,6 +5916,7 @@ mod sync_order_tests {
             backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            planned_nonces: RefCell::default(),
             csp,
             e2e,
             events,
@@ -6490,6 +6540,45 @@ mod sync_order_tests {
             crate::reflected::open(&setup.store, &key, &sealed),
             Err(crate::reflected::ReflectedError::Replay)
         ));
+    }
+
+    /// What the other devices are told is what the message goes out under, also used up.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_goes_out_under_the_nonce_told_to_the_other_devices() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let text = || {
+            Outgoing::Contact(ContactMessageBody::Text(
+                libthreema::model::message::TextMessage { text: "hi".into() },
+            ))
+        };
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), false);
+        let carries = |sent: &[MessageWithMetadataBox], nonce: &[u8]| {
+            sent.last()
+                .unwrap()
+                .bytes
+                .windows(24)
+                .any(|part| part == nonce)
+        };
+        let told = session.plan_nonces(7, &[CREATOR.to_owned()]).unwrap();
+        assert_eq!(told.len(), 1);
+        assert!(setup.store.has_nonce(&told[0]).unwrap());
+
+        let encoded = session
+            .encode(CREATOR, 7, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(carries(&encoded, &told[0]));
+
+        let again = session
+            .encode(CREATOR, 7, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!carries(&again, &told[0]));
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
