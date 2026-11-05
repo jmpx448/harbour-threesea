@@ -501,11 +501,9 @@ impl Shared {
         self.check_readable(key)?;
         self.group_info(key)
     }
-}
 
-impl App {
     /// `removeGroupPicture` (creator).
-    pub(crate) fn remove_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
+    pub(crate) fn remove_group_picture(&self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
         self.store.cancel_synced_picture(key)?;
         self.store.forget_group_picture_sends(key)?;
@@ -522,9 +520,7 @@ impl App {
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
-}
 
-impl Shared {
     /// [`resolve_members`] off the connection's path, for what the connection didn't ask itself:
     /// the retry on reconnect and in maintenance, and what a group sync named.
     pub(crate) fn fetch_members(&self, identities: Vec<String>) {

@@ -2260,7 +2260,14 @@ impl App {
             } => self.create_poll(&identity, &description, &choices, multiple, announce),
             Command::Vote { message, choices } => self.vote(message, &choices),
             Command::ClosePoll { message } => self.close_poll(message),
-            Command::RemoveGroupPicture { key } => self.remove_group_picture(&key),
+            Command::RemoveGroupPicture { key } => {
+                // In turn: behind a new picture still on its way up, or that one would win.
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.remove_group_picture(&key) },
+                )
+                .await
+            }
             Command::SendFile {
                 identity,
                 path,

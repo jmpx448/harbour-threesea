@@ -891,7 +891,7 @@ mod tests {
     /// (the requests' network waits don't end by themselves in these tests). What was said.
     async fn loop_said(
         app: &mut App,
-        requests: Vec<serde_json::Value>,
+        requests: Vec<CoreRequest>,
         until: impl Fn(&[String]) -> bool,
     ) -> Vec<String> {
         let said = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -901,11 +901,7 @@ mod tests {
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         for request in requests {
-            tx.send(CoreRequest {
-                json: Zeroizing::new(request.to_string()),
-                attachments: Vec::new(),
-            })
-            .unwrap();
+            tx.send(request).unwrap();
         }
         let mut media_events = app.take_media_events();
         let mut file_work = app.take_file_work();
@@ -930,6 +926,44 @@ mod tests {
         })
     }
 
+    /// Set, then removed while the upload runs: the removal comes last here too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_a_group_picture_waits_for_the_one_on_its_way() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                app.store
+                    .set_identity(&crate::store::StoredIdentity {
+                        threema_id: "ABCD1234".into(),
+                        client_key: Zeroizing::new([9; 32]),
+                        server_group: "01".into(),
+                    })
+                    .unwrap();
+                let group = app.create_group("Crew", &[]).unwrap();
+                let key = group["key"].as_str().unwrap().to_owned();
+                crate::https::stall_requests();
+                let said = loop_said(
+                    &mut app,
+                    vec![
+                        request(json!({"id": 9, "cmd": "status"})),
+                        CoreRequest {
+                            json: Zeroizing::new(
+                                json!({"id": 1, "cmd": "setGroupPicture", "key": key}).to_string(),
+                            ),
+                            attachments: vec![Zeroizing::new(b"jpeg".to_vec())],
+                        },
+                        request(json!({"id": 2, "cmd": "removeGroupPicture", "key": key})),
+                        request(json!({"id": 3, "cmd": "connectionState"})),
+                    ],
+                    |said| replied(said, 3),
+                )
+                .await;
+                assert!(!replied(&said, 1) && !replied(&said, 2), "{said:?}");
+            })
+            .await;
+    }
+
     /// What a stalled mobile link used to do: every reply waited for the request's time-out.
     #[tokio::test(flavor = "current_thread")]
     async fn the_core_answers_while_a_request_of_another_command_stalls() {
@@ -942,10 +976,12 @@ mod tests {
                 let said = loop_said(
                     &mut app,
                     vec![
-                        json!({"id": 1, "cmd": "checkLicense", "licenseKey": "ABCDE-12345"}),
-                        json!({"id": 2, "cmd": "status"}),
-                        json!({"id": 3, "cmd": "connectionState"}),
-                        json!({"id": 4, "cmd": "revocationStatus", "cached": true}),
+                        request(
+                            json!({"id": 1, "cmd": "checkLicense", "licenseKey": "ABCDE-12345"}),
+                        ),
+                        request(json!({"id": 2, "cmd": "status"})),
+                        request(json!({"id": 3, "cmd": "connectionState"})),
+                        request(json!({"id": 4, "cmd": "revocationStatus", "cached": true})),
                     ],
                     |said| replied(said, 2) && replied(said, 3) && replied(said, 4),
                 )
@@ -975,11 +1011,12 @@ mod tests {
                 assert!(said.lock().unwrap().is_empty());
 
                 let asked = Instant::now();
-                let settled =
-                    loop_said(&mut app, vec![json!({"id": 1, "cmd": "status"})], |said| {
-                        said.iter().any(|message| message.contains("wakeSettled"))
-                    })
-                    .await;
+                let settled = loop_said(
+                    &mut app,
+                    vec![request(json!({"id": 1, "cmd": "status"}))],
+                    |said| said.iter().any(|message| message.contains("wakeSettled")),
+                )
+                .await;
                 assert!(
                     asked.elapsed() >= ROUND - Duration::from_millis(5),
                     "{settled:?}"
