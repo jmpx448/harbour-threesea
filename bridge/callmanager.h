@@ -40,7 +40,8 @@ class CallManager : public QObject
     // The peer muted its microphone / has its camera on (from the call's data channel).
     Q_PROPERTY(bool remoteMuted READ remoteMuted NOTIFY remoteChanged)
     Q_PROPERTY(bool remoteCamera READ remoteCamera NOTIFY remoteChanged)
-    // A video call (both sides take video); our camera on/off, front or back.
+    // Both sides can do video, which Android says on its voice calls too: no camera has to be on.
+    // Our camera on/off, front or back.
     Q_PROPERTY(bool video READ video NOTIFY stateChanged)
     Q_PROPERTY(bool camera READ camera WRITE setCamera NOTIFY cameraChanged)
     Q_PROPERTY(bool frontCamera READ frontCamera WRITE setFrontCamera NOTIFY cameraChanged)

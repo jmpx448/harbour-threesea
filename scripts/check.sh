@@ -89,6 +89,8 @@ if $full; then
     if docker image inspect "harbour-threesea-sdk:${SFOS_VERSION:-5.1.0.11}" >/dev/null 2>&1; then
         step "list models (SDK)"
         scripts/test-models.sh >/dev/null 2>&1 || fail "list models (scripts/test-models.sh)"
+        step "loudspeaker switch (SDK)"
+        scripts/test-callroute.sh >/dev/null 2>&1 || fail "loudspeaker switch (scripts/test-callroute.sh)"
         step "GIF decoder (SDK)"
         scripts/test-gifdecoder.sh >/dev/null 2>&1 || fail "GIF decoder (scripts/test-gifdecoder.sh)"
         step "reading media off the GUI thread (SDK)"

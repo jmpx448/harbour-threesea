@@ -1153,7 +1153,7 @@ ApplicationWindow {
         var identity = calls.identity
         backend.call("contact", { identity: identity }, function(ok, contact) {
             if (!callNotificationWanted || calls.identity !== identity) return
-            var kind = calls.video ? qsTrId("threesea-la-call-incoming-video") : qsTrId("threesea-la-call-incoming")
+            var kind = qsTrId("threesea-la-call-incoming")
             // As in the other notifications: neither who nor which chat behind a lock or for a
             // private chat.
             var named = ok && !calls.privateChat && !lockActive()
@@ -1903,10 +1903,16 @@ ApplicationWindow {
                && pageStack.currentPage.atEar === true
     }
 
+    Connections {
+        target: callRoute
+        //% "The sound could not be switched"
+        onFailed: Notices.show(qsTrId("threesea-la-call-route-failed"), Notice.Short, Notice.Center)
+    }
+
     // The camera page is filming.
     property bool cameraRecording: false
     readonly property bool videoCallShowing: {
-        if (calls.video && (calls.state === "connecting" || calls.state === "active")) return true
+        if ((calls.camera || calls.remoteCamera) && (calls.state === "connecting" || calls.state === "active")) return true
         if (groupCalls.state !== "connected") return false
         if (groupCalls.camera) return true
         var others = groupCalls.participants

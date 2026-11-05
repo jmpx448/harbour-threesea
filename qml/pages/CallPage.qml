@@ -55,11 +55,9 @@ Page {
             //% "Ringing…"
             return qsTrId("threesea-la-call-ringing")
         case "incoming":
-            return calls.video
-                    //% "Incoming video call"
-                    ? qsTrId("threesea-la-call-incoming-video")
-                    //% "Incoming call"
-                    : qsTrId("threesea-la-call-incoming")
+            // Android's voice calls say "video" as well, so an incoming call can't tell.
+            //% "Incoming call"
+            return qsTrId("threesea-la-call-incoming")
         case "connecting":
             //% "Connecting…"
             return qsTrId("threesea-la-call-connecting")
@@ -117,7 +115,7 @@ Page {
     // bubbles (radius, square outer bottom corner), on the ambience; the controls under them.
     readonly property bool remoteVideo: calls.video && calls.remoteCamera && remote.hasFrame
     readonly property bool inCall: state !== "incoming" && state !== "ended" && state !== "idle"
-    readonly property bool atEar: inCall && !calls.video && !callRoute.speaker
+    readonly property bool atEar: inCall && !calls.camera && !calls.remoteCamera && !callRoute.speaker
 
     SilicaFlickable {
         anchors.fill: parent

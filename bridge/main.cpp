@@ -216,11 +216,16 @@ int main(int argc, char *argv[])
             || group == QLatin1String("connected");
         const bool inCall = one != QLatin1String("idle") && one != QLatin1String("incoming")
             && one != QLatin1String("ended");
-        // Video and group calls are held away from the ear.
-        callRoute->setCall(inCall || inGroup, inGroup || calls->video());
+        // Only a camera that is on takes a call away from the ear, as on Android: `video` only says
+        // both sides can do video, which Android's voice calls say too.
+        callRoute->setCall(inCall || inGroup, (inCall && (calls->camera() || calls->remoteCamera()))
+                                                  || (inGroup && groupCalls->camera()));
     };
     QObject::connect(calls, &CallManager::stateChanged, callRoute, followCalls);
+    QObject::connect(calls, &CallManager::cameraChanged, callRoute, followCalls);
+    QObject::connect(calls, &CallManager::remoteChanged, callRoute, followCalls);
     QObject::connect(groupCalls, &GroupCallManager::stateChanged, callRoute, followCalls);
+    QObject::connect(groupCalls, &GroupCallManager::cameraChanged, callRoute, followCalls);
     // One call has the microphone (like Android): both pipelines would capture it, and a group
     // would hear the private call. Here, not in the pages' buttons: the cover and a notification
     // get past those.
