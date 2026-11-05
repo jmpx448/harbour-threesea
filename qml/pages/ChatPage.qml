@@ -99,6 +99,8 @@ Page {
     // Quoted messages not in the loaded list, fetched on demand (messageId -> message or false).
     property var quoteCache: ({})
     property int quoteCacheRevision: 0
+    // What each quote showed last, for while a new lookup is under way (quotedFor).
+    property var quoteShown: ({})
     // Picked files waiting to be sent with the next send ([{path, photo, name, video}]), in order;
     // the typed text becomes the first one's caption.
     property var attachments: []
@@ -148,6 +150,7 @@ Page {
         keyField: "id"
         roles: ["id", "messageId", "outgoing", "kind", "text", "body", "createdAt", "state",
                 "editedAt", "sender", "reactions", "quoteId", "mentions", "starred", "writtenOut"]
+        onCountChanged: page.retryMissingQuotes()
     }
 
     // The contact, or for groups the group info shaped like one (title as name, member names).
@@ -303,6 +306,10 @@ Page {
             // Other rows, however alike their count: the band reads its day again below.
             page.stickyIndex = -1
             messages.update(result.messages.reverse())
+            // Rows may be gone or changed without a word about each (Threema Web, Keep messages),
+            // and a live quote has its copy: all of them look again.
+            for (var quoted in page.quoteCache) delete page.quoteCache[quoted]
+            page.quoteCacheRevision++
             if (focusMessage >= 0) {
                 if (!page.showLoadedMessage(focusMessage, page.focusMode)) listView.positionViewAtBeginning()
                 else if (page.focusMode === ListView.Center) page.flashMessage(focusMessage)
@@ -361,8 +368,10 @@ Page {
             updateCachedQuote(message)
             return
         }
-        // Out of the window, but a quote may be showing it.
+        // Out of the window, but a quote may be showing it: from the cache, or a copy from
+        // when it was still in the window, which only a new lookup replaces.
         updateCachedQuote(message)
+        if (message.kind === "deleted" || message.editedAt) quoteCacheRevision++
         if (messages.count > 0 && !isNewer(message, messages.get(0))) return
         if (!newerExhausted) {
             // Not next to what is loaded: it comes with the pages when the reader gets there.
@@ -425,8 +434,24 @@ Page {
         }
     }
 
+    // A quote waiting for a message that wasn't to be had may find it among the rows now (a
+    // quote can arrive before what it quotes). Bubbles don't follow the number of rows themselves:
+    // in chats full of quotes that would look all of them up for every new message. Only for a
+    // message that is really here now: one that never comes (older than this device's history)
+    // would bring that back. The entry goes, so one no bubble asks for doesn't count again.
+    function retryMissingQuotes() {
+        var found = false
+        for (var key in quoteCache) {
+            if (quoteCache[key] === false && messages.indexOfField("messageId", key) >= 0) {
+                delete quoteCache[key]
+                found = true
+            }
+        }
+        if (found) quoteCacheRevision++
+    }
+
     // Whether a quote of this message would read differently now (an edit, a deletion for
-    // everyone). Not for receipts and reactions: every visible quote looks its message up again.
+    // everyone). Not for receipts and reactions: a quote shows neither.
     function shownInQuote(before, now) {
         return before.kind !== now.kind || before.text !== now.text || before.editedAt !== now.editedAt
     }
@@ -791,31 +816,29 @@ Page {
         return contact.displayName || identity
     }
 
-    function indexOfMessageId(messageId) {
-        for (var i = 0; i < messages.count; ++i) {
-            if (messages.get(i).messageId === messageId) return i
-        }
-        return -1
-    }
-
-    // The quoted message with its sender's name, or null (not here; then fetched once).
+    // The quoted message with its sender's name, or null (not here; then fetched once). While the
+    // core is asked a quote keeps what it showed: blank for a moment it could change the bubble's
+    // height and move the list. The answer decides, so what is gone doesn't stay.
     function quotedFor(quoteId, revision) {
         if (!quoteId) return null
-        var index = indexOfMessageId(quoteId)
+        var index = messages.indexOfField("messageId", quoteId)
+        // Found after all: it no longer counts as missing, and if it leaves the window it is
+        // fetched like any other.
+        if (index >= 0 && quoteCache[quoteId] === false) delete quoteCache[quoteId]
         var message = index >= 0 ? messages.get(index) : quoteCache[quoteId]
         if (message === undefined) {
             quoteCache[quoteId] = false
             backend.call("quotedMessage", { identity: identity, messageId: quoteId }, function(ok, result) {
-                if (ok && result) {
-                    page.quoteCache[quoteId] = result
-                    page.quoteCacheRevision++
-                }
+                if (ok && result) page.quoteCache[quoteId] = result
+                else if (!page.quoteShown[quoteId]) return
+                delete page.quoteShown[quoteId]
+                page.quoteCacheRevision++
             })
-            return null
         }
-        if (!message) return null
+        if (!message) return quoteShown[quoteId] || null
         var copy = JSON.parse(JSON.stringify(message))
         copy.senderName = senderNameOf(message)
+        quoteShown[quoteId] = copy
         return copy
     }
 
@@ -829,7 +852,7 @@ Page {
     }
 
     function showQuoted(quoteId) {
-        var index = indexOfMessageId(quoteId)
+        var index = messages.indexOfField("messageId", quoteId)
         if (index >= 0) {
             listView.positionViewAtIndex(index, ListView.Center)
             flashMessage(messages.get(index).id)
@@ -1312,19 +1335,13 @@ Page {
             return
         }
         window.voiceFrom = page.isPrivate ? "" : (page.contact.displayName || page.identity)
-        var index = indexOfLocalId(id)
+        var index = messages.indexOfKey(id)
         if (index < 0) return
         var m = messages.get(index)
         if (!m.outgoing && m.body && m.body.listened !== true) {
             // The change comes back as a messagesChanged event, as for one played on the media page.
             backend.call("setVoiceListened", { message: id })
         }
-    }
-    function indexOfLocalId(id) {
-        for (var i = 0; i < messages.count; ++i) {
-            if (messages.get(i).id === id) return i
-        }
-        return -1
     }
     // The chat ends in voice messages: the oldest of that run not listened to yet, or -1.
     // Any other message breaks the run (the queue never jumps past text).
@@ -1390,7 +1407,7 @@ Page {
         onFinished: {
             // The next one waits behind the lock.
             if (window.locked) return
-            var index = page.indexOfLocalId(message)
+            var index = messages.indexOfKey(message)
             if (index <= 0) return
             var next = messages.get(index - 1)
             if (!page.isPlayableVoice(next)) return
@@ -2277,7 +2294,7 @@ Page {
                     return
                 }
                 // Like the quick reactions: an emoji we reacted with already is withdrawn.
-                var index = page.indexOfLocalId(target.id)
+                var index = messages.indexOfKey(target.id)
                 var reactions = index >= 0 ? messages.get(index).reactions : target.reactions
                 page.react(target.messageId, emoji, !Fmt.reactedWith(reactions, emoji))
                 page.emojiPanelOpen = false

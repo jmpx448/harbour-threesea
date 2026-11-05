@@ -138,6 +138,27 @@ int main(int argc, char **argv)
     page.insertAll(QVariantList(), page.rowCount());
     check(page.rowCount() == 6, "json: an empty page changes nothing");
 
+    // What a bubble asks of the rows: one field, or a row by one field, without a row copy.
+    {
+        JsonListModel lookup;
+        lookup.setKeyField(QStringLiteral("id"));
+        lookup.setRoleList({QStringLiteral("id"), QStringLiteral("messageId")});
+        QVariantList lookupRows;
+        lookupRows << QVariantMap{{QStringLiteral("id"), 1}, {QStringLiteral("messageId"), QStringLiteral("aa")}};
+        lookupRows << QVariantMap{{QStringLiteral("id"), 2}};
+        lookupRows << QVariantMap{{QStringLiteral("id"), 3}, {QStringLiteral("messageId"), QStringLiteral("cc")}};
+        lookup.update(lookupRows);
+        check(lookup.indexOfField(QStringLiteral("messageId"), QStringLiteral("cc")) == 2, "indexOfField: found");
+        check(lookup.indexOfField(QStringLiteral("messageId"), QStringLiteral("bb")) == -1, "indexOfField: not here");
+        check(lookup.indexOfField(QStringLiteral("messageId"), QString()) == -1,
+              "indexOfField: a row without the field isn't a row with an empty one");
+        check(lookup.indexOfField(QStringLiteral("id"), 2.0) == 1, "indexOfField: a number as QML sends it");
+        check(lookup.fieldAt(2, QStringLiteral("messageId")).toString() == QStringLiteral("cc"), "fieldAt: the field");
+        check(!lookup.fieldAt(1, QStringLiteral("messageId")).isValid(), "fieldAt: no such field");
+        check(!lookup.fieldAt(3, QStringLiteral("id")).isValid() && !lookup.fieldAt(-1, QStringLiteral("id")).isValid(),
+              "fieldAt: no such row");
+    }
+
     // What the chat page's scrolling back costs in the model: a page of a hundred messages
     // row by row against the same page as one insert (user report 2026-10-29: the UI stopped
     // while a page came in).
