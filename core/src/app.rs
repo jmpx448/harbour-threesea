@@ -1865,7 +1865,12 @@ impl App {
                 if matches!(error, ApiError::RateLimited) {
                     self.store.rest_directory_calls();
                 }
-                tracing::info!(kind = error.kind(), "command failed");
+                // Nothing else tells these apart for a support package: the user sees one sentence.
+                if matches!(error, ApiError::Internal(_)) {
+                    tracing::warn!(kind = error.kind(), "command failed");
+                } else {
+                    tracing::info!(kind = error.kind(), "command failed");
+                }
                 json!({"reply": request, "ok": false,
                     "error": {"kind": error.kind(), "message": error.to_string()}})
             }
@@ -3160,6 +3165,24 @@ mod tests {
 
     fn kind(text: &str) -> serde_json::Value {
         super::qr_kind(text, NOW)
+    }
+
+    /// Without a case the user gets "Something went wrong.": fine for these two only. `internal` is
+    /// that case, and `parseLink`'s caller doesn't show its error.
+    #[test]
+    fn every_error_kind_has_a_text() {
+        let source = include_str!("app.rs");
+        let start = source.find("fn kind(&self) -> &'static str").unwrap();
+        let end = start + source[start..].find("fn store_failed").unwrap();
+        let texts = include_str!("../../qml/components/Errors.js");
+        let kinds = source[start..end]
+            .lines()
+            .filter_map(|line| line.split("=> \"").nth(1)?.split('"').next());
+        let missing: Vec<_> = kinds
+            .filter(|kind| !["internal", "linkInvalid"].contains(kind))
+            .filter(|kind| !texts.contains(&format!("case \"{kind}\":")))
+            .collect();
+        assert_eq!(missing, Vec::<&str>::new());
     }
 
     #[test]

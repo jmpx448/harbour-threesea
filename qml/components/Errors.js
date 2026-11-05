@@ -24,7 +24,7 @@ function text(kind, message) {
         //% "A license key looks like ABCDE-12345."
         return qsTrId("threesea-la-error-license-format")
     case "backupDecrypt":
-        //% "Wrong password, or the ID backup is damaged."
+        //% "Wrong password, or the backup is damaged."
         return qsTrId("threesea-la-error-backup-decrypt")
     case "backupVersion":
         //% "This backup's format is not supported."
@@ -99,7 +99,7 @@ function text(kind, message) {
         //% "This is not a Threema contact QR code."
         return qsTrId("threesea-la-error-qr-invalid")
     case "qrMismatch":
-        //% "The code does not match this contact's key. Ask them to show their code again."
+        //% "This code has the right Threema ID but a different key from the one known for it, so it may be forged. It was not accepted. Compare the codes with this person directly."
         return qsTrId("threesea-la-error-qr-mismatch")
     case "qrExpired":
         //% "This code has expired. Scan it directly from the other person's app."
@@ -179,11 +179,17 @@ function text(kind, message) {
     case "contactNotFound":
         //% "Add this ID to your contacts to write to it."
         return qsTrId("threesea-la-error-contact-not-found")
+    case "groupNotFound":
+        //% "This group is no longer on this device."
+        return qsTrId("threesea-la-error-group-not-found")
+    case "noIdentity":
+        //% "Create or restore your Threema ID first."
+        return qsTrId("threesea-la-error-no-identity")
     case "notSupportedByContact":
-        //% "This contact's app doesn't support this."
+        //% "The app on the other side doesn't support this."
         return qsTrId("threesea-la-error-not-supported-by-contact")
     case "messageTooOld":
-        //% "Messages can only be changed for 6 hours."
+        //% "Messages can be edited or deleted for everyone for 6 hours after sending."
         return qsTrId("threesea-la-error-message-too-old")
     case "reactionNotSupported":
         //% "This contact's app only understands thumbs up and thumbs down."
@@ -264,10 +270,8 @@ function text(kind, message) {
         // the kind, so there may be none.
         return message || qsTrId("threesea-la-error-server-trouble")
     default:
-        // Stored errors keep only the kind: no message to show after the colon.
+        // Internal errors carry English for developers, or a system's wording: never shown.
         //% "Something went wrong."
-        if (!message) return qsTrId("threesea-la-error-internal-plain")
-        //% "Something went wrong: %1"
-        return qsTrId("threesea-la-error-internal").arg(message)
+        return qsTrId("threesea-la-error-internal-plain")
     }
 }
