@@ -35,12 +35,25 @@ Page {
         })
     }
 
+    // Others can't find the ID by it any more, and linking it again takes a new confirmation.
+    function removeLink(command, args, kind) {
+        //% "Removing link"
+        Remorse.popupAction(page, qsTrId("threesea-la-removing-link"), function() {
+            page.link(command, args, kind)
+        })
+    }
+
     // The SMS code of a pending phone link.
     function askCode() {
         var dialog = pageStack.push(Qt.resolvedUrl("../MobileCodeDialog.qml"),
                                     { number: page.profile.linkedMobilePending })
         dialog.accepted.connect(function() { page.link("verifyMobile", { code: dialog.code }, "mobile") })
-        dialog.cancelRequested.connect(function() { page.link("linkMobile", { number: "" }, "mobile") })
+        dialog.cancelRequested.connect(function() {
+            //% "Cancelling link"
+            Remorse.popupAction(page, qsTrId("threesea-la-cancelling-link"), function() {
+                page.link("linkMobile", { number: "" }, "mobile")
+            })
+        })
     }
 
     Connections {
@@ -168,8 +181,11 @@ Page {
                     visible: page.profile.pictureVersion > 0
                     //% "Remove profile picture"
                     text: qsTrId("threesea-me-remove-profile-picture")
-                    onClicked: backend.call("removeProfilePicture", {}, function(ok, result) {
-                        if (ok) page.profile = result
+                    //% "Removing picture"
+                    onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-picture"), function() {
+                        backend.call("removeProfilePicture", {}, function(ok, result) {
+                            if (ok) page.profile = result
+                        })
                     })
                 }
             }
@@ -242,7 +258,7 @@ Page {
                             if (!result.linkedEmailPending) Notices.show(qsTrId("threesea-la-email-already-linked"), Notice.Long, Notice.Center)
                         })
                     })
-                    dialog.unlinkRequested.connect(function() { page.link("linkEmail", { email: "" }, "email") })
+                    dialog.unlinkRequested.connect(function() { page.removeLink("linkEmail", { email: "" }, "email") })
                 }
             }
             ValueButton {
@@ -275,7 +291,7 @@ Page {
                             else Notices.show(qsTrId("threesea-la-phone-already-linked"), Notice.Long, Notice.Center)
                         })
                     })
-                    dialog.unlinkRequested.connect(function() { page.link("linkMobile", { number: "" }, "mobile") })
+                    dialog.unlinkRequested.connect(function() { page.removeLink("linkMobile", { number: "" }, "mobile") })
                 }
             }
 

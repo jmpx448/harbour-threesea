@@ -124,7 +124,9 @@ Page {
                 visible: page.group.isCreator === true && !page.group.left && page.group.pictureVersion > 0
                 //% "Remove picture"
                 text: qsTrId("threesea-me-remove-picture")
-                onClicked: page.run("removeGroupPicture", {})
+                onClicked: remorse.execute(qsTrId("threesea-la-removing-picture"), function() {
+                    page.run("removeGroupPicture", {})
+                })
             }
             MenuItem {
                 visible: page.group.isCreator === true && !page.group.left

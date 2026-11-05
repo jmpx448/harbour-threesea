@@ -2814,7 +2814,13 @@ Page {
                         page.run("vote", { message: messageId, choices: ids })
                     })
                 }
-                onClosePollRequested: page.run("closePoll", { message: model.id })
+                // For everyone and for good, like on the poll's own page.
+                onClosePollRequested: {
+                    var pollMessage = model.id
+                    remorseAction(qsTrId("threesea-la-closing-poll"), function() {
+                        page.run("closePoll", { message: pollMessage })
+                    })
+                }
                 onFileRequested: {
                     var file = model.body
                     if (model.outgoing && file.uploadState === 3 && !page.readOnly) {
