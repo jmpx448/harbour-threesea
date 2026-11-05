@@ -13,6 +13,9 @@ use crate::{
     store::{Store, StoreError},
 };
 
+/// How the status line of a group call someone else started begins (`…|their name`).
+pub(crate) const GROUP_CALL_STARTED: &str = "groupCallStarted|";
+
 /// Schema (store migration 12).
 pub(crate) const MIGRATION: &str = "
     CREATE TABLE chat_notifications (
@@ -178,9 +181,12 @@ impl Store {
 
     /// Whether an incoming message should notify (the global switch is the UI's).
     pub fn should_notify(&self, message: &Message) -> bool {
-        // Of the status lines only missed calls (app_calls.rs) are worth a notification.
+        // Of the status lines only missed calls (app_calls.rs) and group calls others start
+        // (app_group_calls.rs) are worth a notification.
         if message.outgoing
-            || (message.kind == "status" && !message.body.starts_with("call|missed|"))
+            || (message.kind == "status"
+                && !message.body.starts_with("call|missed|")
+                && !message.body.starts_with(GROUP_CALL_STARTED))
         {
             return false;
         }

@@ -103,8 +103,13 @@ pub enum CoreEvent {
     },
     GroupCallStart {
         conversation: String,
+        /// Who announced it.
+        caller: String,
         start: libthreema::model::message::GroupCallStartMessage,
     },
+    /// Internal: a peek showed that the call announced by this status line runs (`call_id`, the
+    /// group's running call): the notification goes out unless we are in that call.
+    GroupCallRunning { message: Message, call_id: [u8; 32] },
     /// Internal: a call signalling message from `peer` (ADR 0012).
     CallSignal {
         peer: String,
@@ -122,6 +127,19 @@ pub enum CoreEvent {
     WebSessionResume(String),
 }
 
+/// What the UI may see of a message of a hidden private chat. Statuses carry app-made codes, so
+/// that it can tell a missed call from a message; what group status lines say after the code
+/// (a new name, a member's or caller's name) is user content and stays behind.
+fn hidden_body(message: &Message) -> Value {
+    if message.kind != "status" {
+        Value::Null
+    } else if message.body.starts_with("group") {
+        Value::from(message.body.split('|').next().unwrap_or_default())
+    } else {
+        Value::from(message.body.as_str())
+    }
+}
+
 impl CoreEvent {
     /// JSON event for the bridge. While the app is locked, events about private chats carry no
     /// content, so it never reaches the UI layer (ADR 0009: hidden by the core, not only the
@@ -134,20 +152,12 @@ impl CoreEvent {
             Self::MessageAdded { message, .. } => {
                 let private = store.is_private(&message.conversation).unwrap_or(false);
                 let message_json = if private && !unlocked {
-                    // Statuses carry app-made codes; the body stays so the UI can tell a missed
-                    // call from a message. A rename's new name is user content: without it.
                     json!({
                         "conversation": message.conversation,
                         "outgoing": message.outgoing,
                         "kind": message.kind,
                         "createdAt": message.created_at,
-                        "body": if message.kind != "status" {
-                            Value::Null
-                        } else if message.body.starts_with("groupRenamed|") {
-                            Value::from("groupRenamed")
-                        } else {
-                            Value::from(message.body.as_str())
-                        },
+                        "body": hidden_body(message),
                     })
                 } else {
                     store.message_json(message)
@@ -156,8 +166,10 @@ impl CoreEvent {
                     "event": "messageAdded",
                     "message": message_json,
                     // Per-chat notification setting (muted, mentions only) applied; a
-                    // forwarded message's notification may wait (`Notify` follows).
+                    // forwarded message's notification may wait (`Notify` follows), and so does
+                    // a group call's until a peek shows it runs.
                     "notify": store.should_notify(message)
+                        && !message.body.starts_with(crate::chat_notifications::GROUP_CALL_STARTED)
                         && !store.held_notifications.borrow().contains(&message.id),
                     // Private chat: notifications show neither sender nor text (ADR 0009).
                     "private": private,
@@ -197,7 +209,7 @@ impl CoreEvent {
                         json!({ "conversation": message.conversation,
                                 "kind": message.kind, "outgoing": false,
                                 "createdAt": message.created_at,
-                                "body": Value::Null })
+                                "body": hidden_body(message) })
                     } else {
                         store.message_json(message)
                     },
@@ -207,6 +219,13 @@ impl CoreEvent {
             }
             Self::DeviceCookieChanged => json!({"event": "deviceCookieChanged"}),
             Self::StorageProblem { active } => json!({"event": "storageProblem", "active": active}),
+            // Who is in a call of a private group is its content like any other.
+            Self::Call(event)
+                if event["event"] == "groupCall"
+                    && event["conversation"].as_str().is_some_and(hidden) =>
+            {
+                json!({"event": "internal"})
+            }
             Self::Call(event) => event.clone(),
             // Handled inside the core.
             Self::FsControl { .. }
@@ -224,6 +243,7 @@ impl CoreEvent {
             | Self::CallSignal { .. }
             | Self::AnnounceGroupCall { .. }
             | Self::GroupCallStart { .. }
+            | Self::GroupCallRunning { .. }
             | Self::WebSessionResume(_) => json!({"event": "internal"}),
         }
     }
@@ -719,9 +739,10 @@ impl StoreConversations {
                 if let Some(key) = outcome.remove_picture {
                     events.push(CoreEvent::RemoveGroupPicture(key));
                 }
-                if let Some(start) = outcome.call_start {
+                if let Some((caller, start)) = outcome.call_start {
                     events.push(CoreEvent::GroupCallStart {
                         conversation: crate::groups::key(&group_identity),
+                        caller,
                         start,
                     });
                 }

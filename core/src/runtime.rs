@@ -579,6 +579,8 @@ async fn run_loop(
     app.resume_media();
     // Downloads of contact and group pictures that never finished (kept descriptors).
     app.resume_picture_downloads();
+    // Group calls kept from the last run may have ended meanwhile.
+    app.refresh_stored_group_calls();
     // Locked at start: the private chats' media stay hidden from the UI's readers.
     app.update_media_gate();
     loop {

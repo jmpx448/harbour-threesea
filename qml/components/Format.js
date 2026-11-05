@@ -112,6 +112,16 @@ function status(code) {
     case "groupMemberLeft":
         //% "%1 left the group."
         return qsTrId("threesea-la-status-group-member-left").arg(arg)
+    case "groupCallStarted":
+        // A locked private chat's line has lost the name; only the generic notification shows it.
+        //% "%1 started a group call."
+        return qsTrId("threesea-la-status-group-call-started").arg(arg)
+    case "groupCallYouStarted":
+        //% "You started a group call."
+        return qsTrId("threesea-la-status-group-call-you-started")
+    case "groupCallEnded":
+        //% "The group call ended."
+        return qsTrId("threesea-la-status-group-call-ended")
     case "fsEstablished":
         //% "Forward secrecy is active for this chat."
         return qsTrId("threesea-la-status-fs-established")

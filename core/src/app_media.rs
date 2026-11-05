@@ -1794,8 +1794,12 @@ impl App {
             } => self.announce_running_group_call(conversation, receivers.clone()),
             CoreEvent::GroupCallStart {
                 conversation,
+                caller,
                 start,
-            } => self.on_group_call_start(conversation, start),
+            } => self.on_group_call_start(conversation, caller, start),
+            CoreEvent::GroupCallRunning { message, call_id } => {
+                self.on_group_call_running(message, call_id);
+            }
             CoreEvent::CallSignal { peer, kind, json } => self.on_call_signal(peer, *kind, json),
             CoreEvent::SyncPicture { target } => self.apply_synced_picture(target.clone()),
             CoreEvent::GroupDeleted(key) => {

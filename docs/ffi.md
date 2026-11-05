@@ -65,6 +65,11 @@ running call name it with `callId`, and do nothing if another call is current by
 of the earlier call can still be on its way. Before `callStart`'s reply the bridge has no id, so it
 keeps its candidates and a hangup until then.
 
+A group call also shows in its chat (Full, ADR 0012) as status lines: `groupCallStarted|<name>`,
+`groupCallYouStarted`, `groupCallEnded`. The first comes without `notify`; a `messageNotify` follows
+once a peek found the call running. In a private chat while locked the line has no name, and no
+`groupCall` event comes for that group.
+
 Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCallOffer {sdp}`,
 `groupCallParticipants {participants}`, `groupCallChannelSend {data}`, `groupCallAlone`, and
 `groupCallMicrophoneOff`: the call we joined has 4 or more others, so we start muted like Android

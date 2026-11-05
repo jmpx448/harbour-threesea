@@ -13,7 +13,7 @@ use libthreema::common::keys::ClientKey;
 use libthreema::model::message::GroupCallStartMessage;
 use serde_json::{Value, json};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use data_encoding::{BASE64, HEXLOWER};
 use libthreema::protobuf::group_call::{
@@ -25,13 +25,20 @@ use prost::Message as _;
 
 use crate::{
     app::{ApiError, App},
+    chat_notifications::GROUP_CALL_STARTED,
     group_call_handshake::{Event, Known, Local, MediaKey, Peer, rekey},
     group_call_sdp::{Description, Extensions, Session},
     group_calls::{self, CallKeys, Join, Peek, RunningCall, SfuCredentials, StateParticipant},
     https::HttpsClient,
+    messages::Message,
     providers::CoreEvent,
     store::{Store, keys},
 };
+
+/// Status line: we started the group's call.
+const GROUP_CALL_YOU_STARTED: &str = "groupCallYouStarted";
+/// Status line: the group has no running call any more.
+const GROUP_CALL_ENDED: &str = "groupCallEnded";
 
 /// Whether this build announces group call support (feature mask; Full only, like 1:1 calls).
 /// On since joining, starting, audio, video and rekeying worked with Threema for Android
@@ -47,6 +54,12 @@ const ANNOUNCE_AFTER_MS: i64 = 2000;
 /// Alone in a call this long: leave (the SFU ends it after 5 minutes).
 const ALONE_MS: i64 = 3 * 60 * 1000;
 
+/// A group's calls are peeked again this often while one runs (Android's refresh steps, which
+/// notice a call's end without anyone looking at the chat)...
+const REFRESH_MS: u64 = 10_000;
+/// ... and this often while none answers, as without a network.
+const REFRESH_UNREACHABLE_MS: u64 = 60_000;
+
 /// Calls received more than this long ago are dropped after 3 failed peeks in a row (spec).
 const STALE_AFTER_MS: i64 = 10 * 3600 * 1000;
 
@@ -61,6 +74,8 @@ struct Context {
     https: HttpsClient,
     sfu: Rc<RefCell<SfuCache>>,
     events: tokio::sync::mpsc::UnboundedSender<CoreEvent>,
+    /// The groups with a task peeking their calls until they are over.
+    watched: Rc<RefCell<HashSet<String>>>,
 }
 
 impl Context {
@@ -90,8 +105,9 @@ impl Context {
         Ok(credentials)
     }
 
-    /// Check and store an announced call, then refresh the group.
-    async fn on_start(&self, conversation: String, start: GroupCallStartMessage) {
+    /// Check and store an announced call with its line in the chat, then refresh the group; the
+    /// notification waits for that, an announcement read late is of a call long over.
+    async fn on_start(&self, conversation: String, caller: String, start: GroupCallStartMessage) {
         let credentials = match self.credentials(false).await {
             Ok(credentials) => credentials,
             Err(error) => {
@@ -124,17 +140,90 @@ impl Context {
             received_at: crate::messages::now_ms(),
             failed: 0,
         };
-        match self.store.add_group_call(&call) {
-            Ok(true) => tracing::info!("group call announced"),
-            Ok(false) => tracing::warn!("group call announced twice (same key)"),
-            Err(error) => tracing::warn!(%error, "group call not stored"),
+        let line = match self.store.add_group_call(&call) {
+            Ok(true) => {
+                tracing::info!("group call announced");
+                self.started_line(&conversation, &caller)
+            }
+            Ok(false) => {
+                tracing::warn!("group call announced twice (same key)");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, "group call not stored");
+                None
+            }
+        };
+        let chosen = self.refresh(&conversation).await;
+        if let (Some(message), Some((running, _, _))) = (line, chosen) {
+            let _ = self.events.send(CoreEvent::GroupCallRunning {
+                message,
+                call_id: running.call_id,
+            });
         }
-        self.refresh(&conversation).await;
+    }
+
+    /// "Someone started a group call" in the chat. Returns the line if it is one to notify of:
+    /// someone else's.
+    fn started_line(&self, conversation: &str, caller: &str) -> Option<Message> {
+        let own = self.store.identity().ok().flatten()?.threema_id;
+        let mine = own == caller;
+        let code = if mine {
+            GROUP_CALL_YOU_STARTED.to_owned()
+        } else {
+            format!("{GROUP_CALL_STARTED}{}", self.participant_name(caller, ""))
+        };
+        let message = add_line(&self.store, &self.events, conversation, &code)?;
+        (!mine).then_some(message)
+    }
+
+    /// Peek the group again while it has calls, so that their end shows without the chat open.
+    /// One task per group.
+    fn keep_watching(&self, conversation: &str) {
+        if !self.watched.borrow_mut().insert(conversation.to_owned()) {
+            return;
+        }
+        let context = self.clone();
+        let conversation = conversation.to_owned();
+        let mut pause = REFRESH_MS;
+        tokio::task::spawn_local(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+                let off = context.store.setting(keys::GROUP_CALLS).ok().flatten();
+                if off.as_deref() == Some("0")
+                    || context
+                        .store
+                        .group_calls(&conversation)
+                        .map_or(true, |calls| calls.is_empty())
+                {
+                    break;
+                }
+                pause = match context.refresh_only(&conversation).await {
+                    Some(_) => REFRESH_MS,
+                    None => REFRESH_UNREACHABLE_MS,
+                };
+            }
+            context.watched.borrow_mut().remove(&conversation);
+        });
     }
 
     /// The _Group Call Refresh Steps_: peek every running call of the group, drop the ended ones,
     /// and tell the UI which one runs (the most recently started).
     async fn refresh(&self, conversation: &str) -> Option<(RunningCall, u64, u32)> {
+        let chosen = self.refresh_only(conversation).await;
+        if !self
+            .store
+            .group_calls(conversation)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            self.keep_watching(conversation);
+        }
+        chosen
+    }
+
+    /// [`Self::refresh`] without starting the task that repeats it, which is what this is for.
+    async fn refresh_only(&self, conversation: &str) -> Option<(RunningCall, u64, u32)> {
         let (chosen, state) = self.chosen(conversation).await;
         let _ = self.events.send(CoreEvent::Call(json!({
             "event": "groupCall",
@@ -181,6 +270,7 @@ impl Context {
         let calls = self.store.group_calls(conversation).unwrap_or_default();
         let mut chosen: Option<(RunningCall, u64, u32)> = None;
         let mut state: Option<Vec<(String, String)>> = None;
+        let mut ended = false;
         for call in calls {
             let result = self.peek(&call).await;
             match result {
@@ -206,6 +296,7 @@ impl Context {
                 }
                 Ok(Peek::NotRunning) => {
                     let _ = self.store.remove_group_call(&call.call_id);
+                    ended = true;
                 }
                 Ok(Peek::Unauthorized) | Err(_) => {
                     if let Err(error) = &result {
@@ -215,9 +306,13 @@ impl Context {
                     let stale = crate::messages::now_ms() - call.received_at > STALE_AFTER_MS;
                     if call.failed + 1 >= 3 && stale {
                         let _ = self.store.remove_group_call(&call.call_id);
+                        ended = true;
                     }
                 }
             }
+        }
+        if ended {
+            ended_line(&self.store, &self.events, conversation);
         }
         tracing::info!(
             running = chosen.is_some(),
@@ -294,6 +389,48 @@ fn queue_call_start(
     Ok(!receivers.is_empty())
 }
 
+/// A status line in a group's chat, for the UI too; none in a group that is gone or left.
+fn add_line(
+    store: &Store,
+    events: &tokio::sync::mpsc::UnboundedSender<CoreEvent>,
+    conversation: &str,
+    code: &str,
+) -> Option<Message> {
+    if store
+        .group(conversation)
+        .ok()
+        .flatten()
+        .is_none_or(|group| group.left)
+    {
+        return None;
+    }
+    let message = match store.insert_status(conversation, code) {
+        Ok(message) => message?,
+        Err(error) => {
+            tracing::warn!(%error, "group call line not stored");
+            return None;
+        }
+    };
+    let _ = events.send(CoreEvent::MessageAdded {
+        message: message.clone(),
+    });
+    Some(message)
+}
+
+/// The group's last known call is over: one line for that, however many ended together.
+fn ended_line(
+    store: &Store,
+    events: &tokio::sync::mpsc::UnboundedSender<CoreEvent>,
+    conversation: &str,
+) {
+    if store
+        .group_calls(conversation)
+        .is_ok_and(|calls| calls.is_empty())
+    {
+        add_line(store, events, conversation, GROUP_CALL_ENDED);
+    }
+}
+
 fn participant_name(store: &Store, identity: &str, nickname: &str) -> String {
     match store.contact(identity).ok().flatten() {
         Some(contact) => crate::contacts::display_name(&contact),
@@ -305,6 +442,7 @@ fn participant_name(store: &Store, identity: &str, nickname: &str) -> String {
 /// The group call we are in.
 pub(crate) struct ActiveGroupCall {
     pub conversation: String,
+    pub call_id: [u8; 32],
     pub keys: CallKeys,
     pub local: u32,
     pub description: Description,
@@ -532,6 +670,7 @@ impl App {
             https: self.https.clone(),
             sfu: Rc::clone(&self.sfu),
             events: self.media_events.clone(),
+            watched: Rc::clone(&self.group_calls_watched),
         }
     }
 
@@ -543,13 +682,44 @@ impl App {
     }
 
     /// A `GroupCallStart` arrived in a group.
-    pub(crate) fn on_group_call_start(&self, conversation: &str, start: &GroupCallStartMessage) {
+    pub(crate) fn on_group_call_start(
+        &self,
+        conversation: &str,
+        caller: &str,
+        start: &GroupCallStartMessage,
+    ) {
         if !self.group_calls_wanted() {
             return;
         }
         let context = self.group_call_context();
-        let (conversation, start) = (conversation.to_owned(), start.clone());
-        tokio::task::spawn_local(async move { context.on_start(conversation, start).await });
+        let (conversation, caller, start) =
+            (conversation.to_owned(), caller.to_owned(), start.clone());
+        tokio::task::spawn_local(
+            async move { context.on_start(conversation, caller, start).await },
+        );
+    }
+
+    /// The call this line announces was found running: a notification, unless we are in it.
+    pub(crate) fn on_group_call_running(&self, message: &Message, call_id: &[u8; 32]) {
+        if self
+            .group_call
+            .as_ref()
+            .is_some_and(|joined| joined.call_id == *call_id)
+        {
+            return;
+        }
+        let _ = self.media_events.send(CoreEvent::Notify(message.clone()));
+    }
+
+    /// Calls kept from the last run: peeked at the start, like Android, which also notices the
+    /// ones that ended meanwhile.
+    pub(crate) fn refresh_stored_group_calls(&self) {
+        if !self.group_calls_wanted() {
+            return;
+        }
+        for conversation in self.store.groups_with_calls().unwrap_or_default() {
+            self.group_call_refresh(&conversation);
+        }
     }
 
     /// Those people just got the group's state from us; see [`Context::announce_to`]. Nothing
@@ -663,6 +833,7 @@ impl App {
         crate::group_call_frames::set_local(&media_key);
         self.group_call = Some(ActiveGroupCall {
             conversation: conversation.to_owned(),
+            call_id: call.call_id,
             keys,
             local: response.participant_id,
             description,
@@ -734,7 +905,14 @@ impl App {
             .identity()?
             .ok_or(ApiError::NoIdentity)?
             .threema_id;
-        self.store.add_group_call(call)?;
+        if self.store.add_group_call(call)? {
+            add_line(
+                &self.store,
+                &self.media_events,
+                &call.conversation,
+                GROUP_CALL_YOU_STARTED,
+            );
+        }
         let members = self
             .store
             .group(&call.conversation)?
@@ -1157,6 +1335,7 @@ mod app_tests {
         assert!(!app.group_calls_wanted());
         app.on_group_call_start(
             "group",
+            "BBBBBBBB",
             &GroupCallStartMessage {
                 protocol_version: 1,
                 gck: [1; 32],
@@ -1164,6 +1343,157 @@ mod app_tests {
             },
         );
         assert_eq!(app.group_call_refresh("group"), json!({}));
+        app.store.add_group_call(&stored_call("group", 1)).unwrap();
+        app.refresh_stored_group_calls();
+    }
+
+    fn stored_call(conversation: &str, seed: u8) -> RunningCall {
+        RunningCall {
+            call_id: [seed; 32],
+            conversation: conversation.to_owned(),
+            gck: [seed; 32],
+            sfu_base_url: "https://sfu.example.org".into(),
+            protocol_version: group_calls::PROTOCOL_VERSION,
+            received_at: 1,
+            failed: 0,
+        }
+    }
+
+    /// An app with an ID and a group that "BBBBBBBB" is in, and the group's key.
+    fn app_with_group(left: bool) -> (tempfile::TempDir, App, String) {
+        let (dir, app) = app(true);
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([3; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: "BBBBBBBB".parse().unwrap(),
+            group_id: 7,
+        };
+        let key = crate::groups::key(&identity);
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: key.clone(),
+                identity,
+                name: "Crew".into(),
+                members: vec!["ABCD1234".into(), "BBBBBBBB".into()],
+                left,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        (dir, app, key)
+    }
+
+    #[test]
+    fn someone_elses_call_gets_a_line_with_their_name_and_ours_no_notification() {
+        let (_dir, mut app, key) = app_with_group(false);
+        let mut events = app.take_media_events().unwrap();
+        let context = app.group_call_context();
+
+        let message = context.started_line(&key, "BBBBBBBB").unwrap();
+        assert_eq!(message.body, "groupCallStarted|BBBBBBBB");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CoreEvent::MessageAdded { message: added }) if added.id == message.id
+        ));
+
+        assert!(context.started_line(&key, "ABCD1234").is_none());
+        assert!(
+            app.store
+                .newest_is_status(&key, GROUP_CALL_YOU_STARTED)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_group_we_are_out_of_gets_no_line() {
+        let (_dir, app, key) = app_with_group(true);
+        let context = app.group_call_context();
+        assert!(context.started_line(&key, "BBBBBBBB").is_none());
+        ended_line(&app.store, &context.events, &key);
+        assert!(!app.store.newest_is_status(&key, GROUP_CALL_ENDED).unwrap());
+    }
+
+    /// Announced is not running: the notification only follows from `GroupCallRunning`.
+    #[test]
+    fn the_notification_waits_for_the_peek_and_skips_the_call_we_are_in() {
+        let (_dir, mut app, key) = app_with_group(false);
+        let mut events = app.take_media_events().unwrap();
+        let message = app
+            .group_call_context()
+            .started_line(&key, "BBBBBBBB")
+            .unwrap();
+        let added = events.try_recv().unwrap();
+        assert_eq!(added.to_json(&app.store, true)["notify"], false);
+
+        app.group_call = Some(super::tests::call());
+        app.on_group_call_running(&message, &[1; 32]);
+        assert!(events.try_recv().is_err(), "we are in this call");
+
+        app.on_group_call_running(&message, &[2; 32]);
+        let notify = events.try_recv().unwrap();
+        let json = notify.to_json(&app.store, true);
+        assert_eq!(json["event"], "messageNotify");
+        assert_eq!(json["notify"], true);
+
+        // A muted group stays silent, the same as for its messages.
+        app.store
+            .set_chat_notifications(&key, Some((crate::chat_notifications::Policy::Never, None)))
+            .unwrap();
+        assert_eq!(notify.to_json(&app.store, true)["notify"], false);
+    }
+
+    /// §7.8: a locked private group's call shows neither who started it nor who is in it, and it
+    /// can still give the generic notification.
+    #[test]
+    fn a_locked_private_group_gives_away_no_names() {
+        let (_dir, mut app, key) = app_with_group(false);
+        let mut events = app.take_media_events().unwrap();
+        app.store.set_private(&key, true).unwrap();
+        let message = app
+            .group_call_context()
+            .started_line(&key, "CCCCCCCC")
+            .unwrap();
+        for event in [events.try_recv().unwrap(), CoreEvent::Notify(message)] {
+            let locked = event.to_json(&app.store, false);
+            assert_eq!(locked["message"]["body"], "groupCallStarted", "{locked}");
+            assert_eq!(locked["private"], true);
+            assert!(!locked.to_string().contains("CCCCCCCC"), "{locked}");
+        }
+
+        let running = CoreEvent::Call(json!({
+            "event": "groupCall",
+            "conversation": key,
+            "call": { "participants": [{ "identity": "CCCCCCCC", "name": "CCCCCCCC" }] },
+        }));
+        assert_eq!(running.to_json(&app.store, false)["event"], "internal");
+        assert_eq!(running.to_json(&app.store, true)["event"], "groupCall");
+    }
+
+    #[test]
+    fn the_end_line_waits_for_the_last_call_of_the_group() {
+        let (_dir, mut app, key) = app_with_group(false);
+        let mut events = app.take_media_events().unwrap();
+        let context = app.group_call_context();
+        let (first, second) = (stored_call(&key, 1), stored_call(&key, 2));
+        app.store.add_group_call(&first).unwrap();
+        app.store.add_group_call(&second).unwrap();
+
+        app.store.remove_group_call(&first.call_id).unwrap();
+        ended_line(&app.store, &context.events, &key);
+        assert!(events.try_recv().is_err(), "one still runs");
+
+        app.store.remove_group_call(&second.call_id).unwrap();
+        ended_line(&app.store, &context.events, &key);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CoreEvent::MessageAdded { message }) if message.body == GROUP_CALL_ENDED
+        ));
     }
 
     /// The old ID's token would go out with the next ID's requests while it lasts, and its call
@@ -1387,6 +1717,7 @@ mod tests {
         };
         ActiveGroupCall {
             conversation: String::new(),
+            call_id: [1; 32],
             keys: CallKeys::derive(&[1; 32]),
             local: 1,
             description: Description::new(session),

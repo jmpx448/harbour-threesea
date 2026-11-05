@@ -1413,6 +1413,8 @@ pub struct App {
     /// Group calls: the SFU credentials while they last.
     pub(crate) sfu: std::rc::Rc<std::cell::RefCell<crate::app_group_calls::SfuCache>>,
     pub(crate) group_call: Option<crate::app_group_calls::ActiveGroupCall>,
+    pub(crate) group_calls_watched:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     /// Threema Web sessions running (ADR 0013).
     pub(crate) web: crate::app_web::WebSessions,
     pub(crate) turn_servers: Option<(crate::directory::TurnServers, i64)>,
@@ -1520,6 +1522,7 @@ impl App {
             call_media: crate::app_calls::CallMedia::default(),
             sfu: std::rc::Rc::default(),
             group_call: None,
+            group_calls_watched: std::rc::Rc::default(),
             web: crate::app_web::WebSessions::default(),
             turn_servers: None,
             pending_ui_events: Vec::new(),

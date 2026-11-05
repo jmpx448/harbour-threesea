@@ -324,6 +324,9 @@ fn status_text(code: &str) -> String {
         "groupMemberAdded" => format!("{argument} was added."),
         "groupMemberRemoved" => format!("{argument} was removed."),
         "groupMemberLeft" => format!("{argument} left the group."),
+        "groupCallStarted" => format!("{argument} started a group call."),
+        "groupCallYouStarted" => "You started a group call.".into(),
+        "groupCallEnded" => "The group call ended.".into(),
         "fsEstablished" => "Forward secrecy is active for this chat.".into(),
         "fsReset" => {
             "Forward secrecy was reset. This can happen when the contact changes devices or \

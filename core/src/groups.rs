@@ -1033,8 +1033,8 @@ pub struct GroupOutcome {
     pub remove_picture: Option<String>,
     /// Who just got the group's state from us: a running call is for them to hear of too.
     pub state_sent_to: Vec<String>,
-    /// A group call was announced (checked and stored by the app).
-    pub call_start: Option<libthreema::model::message::GroupCallStartMessage>,
+    /// A group call was announced, and by whom (checked and stored by the app).
+    pub call_start: Option<(String, libthreema::model::message::GroupCallStartMessage)>,
     /// What the other devices of the group have to be told.
     pub change: GroupChange,
     /// That went into the sync queue, in the same store step as the change.
@@ -1258,7 +1258,9 @@ fn receive_steps(
             }
         }
         // Group calls (ADR 0012): the app checks the SFU URL and peeks the call.
-        GroupMessageBody::CallStart(start) => outcome.call_start = Some(start),
+        GroupMessageBody::CallStart(start) => {
+            outcome.call_start = Some((sender.to_owned(), start));
+        }
         GroupMessageBody::Text(text) => outcome.added.extend(content("text", text.text)?),
         GroupMessageBody::Location(location) => outcome.added.extend(content(
             "location",

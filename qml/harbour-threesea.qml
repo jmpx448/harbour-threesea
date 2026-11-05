@@ -1208,7 +1208,7 @@ ApplicationWindow {
 
     function notificationText(sender, message) {
         if (backend.notificationPreview) return (sender ? sender + ": " : "") + Fmt.preview(message)
-        // A status line is a missed call (notify()), which has no message to hide.
+        // A status line is a call (notify()), which has no message to hide.
         //% "New message"
         return message.kind === "status" ? Fmt.preview(message) : qsTrId("threesea-la-new-message")
     }
@@ -1422,9 +1422,13 @@ ApplicationWindow {
             notificationsWaiting.push({ message: message, isPrivate: isPrivate, held: held })
             return
         }
-        // Of the status lines only missed calls ("call|missed|…", core/src/app_calls.rs).
+        // Of the status lines only missed calls ("call|missed|…", core/src/app_calls.rs) and group
+        // calls others start ("groupCallStarted|…", core/src/app_group_calls.rs; without the name
+        // in a locked private chat).
+        var statusLine = String(message.body)
         if (!backend.notificationsEnabled
-                || (message.kind === "status" && String(message.body).indexOf("call|missed|") !== 0)) return
+                || (message.kind === "status" && statusLine.indexOf("call|missed|") !== 0
+                    && statusLine.split("|")[0] !== "groupCallStarted")) return
         if (!lockActive() && Qt.application.state === Qt.ApplicationActive && openChat === message.conversation) {
             // The message is right there, so no notification — only Android's quiet in-app
             // feedback, and none for one that has been standing there or a whole backlog.
