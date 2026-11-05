@@ -1146,7 +1146,9 @@ ApplicationWindow {
             showCallNotification()
         } else {
             callNotification.close()
-            dbus.forgetToken("call")
+            // Only its grace starts: on a locked phone lipstick runs the action after the unlock,
+            // when the window may be up already. The handlers look at the state.
+            dbus.releaseToken("call")
         }
     }
     function showCallNotification() {
