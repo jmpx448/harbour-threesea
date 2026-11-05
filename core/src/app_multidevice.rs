@@ -151,7 +151,10 @@ impl Shared {
 impl Shared {
     /// `multiDevice`: `{active}`.
     pub(crate) fn multi_device_json(&self) -> Result<Value, ApiError> {
-        Ok(json!({ "active": self.store.multi_device()?.is_some() }))
+        Ok(json!({
+            "active": self.store.multi_device()?.is_some(),
+            "reflectedLeftOut": self.store.reflected_left_out()?,
+        }))
     }
 
     /// `linkedDevices`: `{devices: [LinkedDevice]}` (this device first). Each device also
@@ -2724,5 +2727,14 @@ mod tests {
         app.store.upsert_group(&group).unwrap();
         app.delete_conversation(&group.key).unwrap();
         assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    /// What found no room among the waiting is there for the linked devices page to say.
+    #[test]
+    fn the_state_says_how_many_reflected_messages_were_left_out() {
+        let (_dir, app) = app();
+        assert_eq!(app.multi_device_json().unwrap()["reflectedLeftOut"], 0);
+        app.store.note_reflected_left_out().unwrap();
+        assert_eq!(app.multi_device_json().unwrap()["reflectedLeftOut"], 1);
     }
 }

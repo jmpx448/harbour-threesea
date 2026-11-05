@@ -248,6 +248,8 @@ pub mod keys {
     pub const DIRECTORY_RETRY_AFTER: &str = "directory_retry_after";
     /// Group members still to be looked up (JSON list of IDs), see `owe_member_lookups`.
     pub const MEMBER_LOOKUPS_OWED: &str = "member_lookups_owed";
+    /// How many reflected messages found no room to wait for their sender's contact.
+    pub const REFLECTED_LEFT_OUT: &str = "reflected_left_out";
     /// Random persistent device id sent with license checks (like Android's `DeviceIdProvider`).
     pub const DEVICE_ID: &str = "device_id";
     /// App settings as the Threema Safe `settings` object (JSON). One source of truth that

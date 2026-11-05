@@ -40,6 +40,11 @@ use crate::{
 /// The length of a chat server message box's nonce.
 const NONCE_LEN: usize = 24;
 
+/// How many reflected messages may wait for their sender's contact (at most a frame each, so some
+/// 8 MB). The oldest stay. A message beyond this is on the other device only, which is counted, and
+/// shown with the linked devices (`multiDevice`).
+pub(crate) const REFLECTED_WAITING_MAX: i64 = 1000;
+
 /// A reflected envelope could not be used. It is still acknowledged, as the mediator would
 /// otherwise send it again forever, unless the store failed ([`Self::storage_code`]).
 #[derive(Debug, thiserror::Error)]
@@ -344,14 +349,17 @@ pub fn apply(
             // Nothing else brings it here and the mediator's queue must go on: it stays here, for
             // as long as the directory takes (`apply_waiting`).
             let Some(mut contact) = store.contact(sender.as_str())? else {
-                if waits_for_sender(store, sender, &body)? {
+                if !waits_for_sender(store, sender, &body)? {
+                    tracing::warn!("reflected incoming message from an unknown contact skipped");
+                } else if store.reflected_waiting_count()? >= REFLECTED_WAITING_MAX {
+                    let count = store.note_reflected_left_out()?;
+                    tracing::warn!(count, "too many reflected messages wait, this one left out");
+                } else {
                     store.keep_reflected(sender.as_str(), &message.encode_to_vec())?;
                     store.owe_member_lookups(&[sender.to_string()])?;
                     events
                         .borrow_mut()
                         .push(CoreEvent::UnknownMembers(vec![sender.to_string()]));
-                } else {
-                    tracing::warn!("reflected incoming message from an unknown contact skipped");
                 }
                 return Ok(());
             };
@@ -1538,5 +1546,61 @@ mod tests {
         assert!(!has_it("C0C0C0C0"));
         reflect("C0C0C0C0", [1; 16]);
         assert!(has_it("C0C0C0C0"));
+    }
+
+    /// At the bound the oldest stay, the new one is counted for the user to see, and the mediator's
+    /// queue goes on: its nonces are noted, and no lookup is owed for it.
+    #[test]
+    fn what_doesnt_fit_among_the_waiting_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let step = store.step().unwrap();
+        for _ in 0..REFLECTED_WAITING_MAX {
+            store.keep_reflected("D0D0D0D0", b"kept").unwrap();
+        }
+        step.commit().unwrap();
+        assert_eq!(store.reflected_left_out().unwrap(), 0);
+
+        let events: EventSink = Rc::default();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &events);
+        assert_eq!(
+            store.reflected_waiting_count().unwrap(),
+            REFLECTED_WAITING_MAX
+        );
+        assert_eq!(store.reflected_left_out().unwrap(), 1);
+        assert!(store.has_nonce(&[1; 24]).unwrap());
+        assert!(store.owed_member_lookups().unwrap().is_empty());
+        assert!(events.borrow().is_empty());
+
+        // The count holds on; room again, and the next one waits.
+        let (first, _, _) = store.reflected_waiting().unwrap().remove(0);
+        store.reflected_done(first).unwrap();
+        apply_sealed(&store, &stranger_text(2, vec![2; 24]), &events);
+        assert_eq!(
+            store.reflected_waiting_count().unwrap(),
+            REFLECTED_WAITING_MAX
+        );
+        assert_eq!(store.reflected_left_out().unwrap(), 1);
+    }
+
+    /// A store failure doesn't count one: the envelope comes again.
+    #[test]
+    fn a_count_of_the_left_out_goes_back_with_its_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let step = store.step().unwrap();
+        for _ in 0..REFLECTED_WAITING_MAX {
+            store.keep_reflected("D0D0D0D0", b"kept").unwrap();
+        }
+        step.commit().unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON d2d_nonces
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+        assert_eq!(store.reflected_left_out().unwrap(), 0);
     }
 }

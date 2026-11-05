@@ -188,6 +188,9 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   lookup owed like a group member's: a directory that rests or fails holds up neither the mediator's
   queue nor the message. It is applied once they have a contact, and dropped if the directory says
   the ID doesn't exist. Android discards these. Read updates that came meanwhile aren't kept for it.
+  At most 1000 wait, the oldest stay. One beyond that is acknowledged and only on the other devices;
+  it is logged with a count and the count shows on the linked devices page, for good (no content,
+  no sender).
 - Typing reflected from a leading device shows, except while the mediator is still handing out its
   backlog at login: those can be old.
 - The CSP nonces an envelope tells of (`IncomingMessage.nonce`, `OutgoingMessage.nonces`) go into

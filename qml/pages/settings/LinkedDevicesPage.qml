@@ -20,7 +20,8 @@ Page {
     property bool offline: false
     // This device's label, as the other devices show it.
     property string label: ""
-
+    // Messages received on another device from someone unknown here, with no room to wait here.
+    property int leftOut: 0
 
     // Keyed, so a reload keeps the rows, and a running remorse with them.
     JsonListModel {
@@ -37,6 +38,7 @@ Page {
                 return
             }
             page.active = result.active
+            page.leftOut = result.reflectedLeftOut || 0
             if (!result.active) {
                 page.offline = false
                 page.devices = []
@@ -149,8 +151,22 @@ Page {
             }
         }
 
-        header: PageHeader {
-            title: qsTrId("threesea-se-linked-devices")
+        header: Column {
+            width: list.width
+
+            PageHeader {
+                title: qsTrId("threesea-se-linked-devices")
+            }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                visible: page.leftOut > 0
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.highlightColor
+                //% "%n message(s) from people unknown on this phone are only on your other devices."
+                text: qsTrId("threesea-la-reflected-left-out", page.leftOut)
+            }
         }
 
         delegate: ListItem {

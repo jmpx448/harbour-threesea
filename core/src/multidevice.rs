@@ -199,6 +199,29 @@ impl Store {
         Ok(())
     }
 
+    pub fn reflected_waiting_count(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM reflected_waiting", [], |row| {
+                row.get(0)
+            })?)
+    }
+
+    /// How many reflected messages never got to wait for their sender, as too many were waiting.
+    pub fn reflected_left_out(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .setting(crate::store::keys::REFLECTED_LEFT_OUT)?
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// One more of those: the count now.
+    pub fn note_reflected_left_out(&self) -> Result<i64, StoreError> {
+        let count = self.reflected_left_out()?.saturating_add(1);
+        self.set_setting(crate::store::keys::REFLECTED_LEFT_OUT, &count.to_string())?;
+        Ok(count)
+    }
+
     /// What is kept, oldest first: (id, sender, message).
     pub fn reflected_waiting(&self) -> Result<Vec<(i64, String, Vec<u8>)>, StoreError> {
         let mut statement = self
