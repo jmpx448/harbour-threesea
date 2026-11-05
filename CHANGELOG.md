@@ -5,11 +5,95 @@ All notable changes. Versions follow `MAJOR.MINOR.PATCH`; each release is built 
 
 ## [Unreleased]
 
+A large round of fixes after a review of the whole app, and the features from Threema for Android
+that were still missing for everyday use.
+
+Privacy, please read:
+
+- **Pictures sent from Threema Web kept their metadata.** Before this release, JPEG, PNG and WebP
+  pictures sent from Threema Web went out with their EXIF data: where and when a picture was taken,
+  and with which device. They are now made anew the way the phone's own pictures are, without any
+  of it. Pictures already sent can't be called back.
+- **Pictures sent from the phone could carry text from their file.** A JPEG's comment or a PNG's
+  text could pass through when a photo was scaled, cut or turned before sending. Nothing of the kind
+  goes along now; GIFs keep only their frames and timing, and forwarded pictures are cleaned too.
+- **Older logs may hold place names.** Up to this release a place name you typed in Send location
+  could end up in the log. New logs don't have it. To remove old ones before you share a support
+  package: Settings → Advanced → View log → Clear log.
+
 Changed:
 
 - Linking a phone number now needs its country code, and the dialog shows the number the code will
   go to. It used to take the country from the phone's language, which could send a linking request
   for the wrong number.
+- Videos sent as media leave without their metadata (place, time, device); only what a player
+  needs stays. A video that can't be cleaned is asked about: send it as a file, as it is, or don't.
+- Forward secrecy follows what the other side's app says it supports, as Threema's own apps do: a
+  contact who links Threema for Desktop gets one line in the chat and messages without it, and
+  when they unlink it comes back. Blocked contacts get no forward secrecy session and no answers.
+- Calls with contacts you haven't verified go only through Threema's relay, so your IP address
+  doesn't reach them. Joining a group call with four or more others starts with the microphone off.
+- While the app is locked, notifications only say that something arrived: no name, no text and no
+  Reply.
+- Profile pictures: the setting is now called "Show profile pictures". As on Android, pictures that
+  arrive are stored and the setting decides whether they are shown; with it off, nobody is asked
+  for theirs. Contacts are asked for their picture once after a restore, not each time a chat opens.
+- Deleting a contact deletes the chat with them too, as on Android. Their messages in groups stay.
+- Removing the ID from this device stops calls and backups, removes linked devices first when
+  online, and replaces the database file and its key, so no copy of the old file can be opened.
+- Uploads and downloads that fail try again by themselves, after a minute and then up to eight
+  hours apart, five times. A transfer gives up when nothing has moved for 100 seconds, not after a
+  fixed time, so large files on slow networks go through.
+- Keep messages and Clean up go by when a message arrived, not by the sender's clock, and leave
+  notes groups and hidden private chats alone. A shorter Keep messages period counts down first.
+  The chat list orders chats by when their messages arrived, too.
+- Scanning a code asks before it pairs a browser, links a device or adds a contact, and a contact's
+  code is refused once it has expired or names another key.
+- Pull-down menus have at most four items: Export chat moved to the contact and group pages, and
+  sharing the profile picture is a choice on the contact's page.
+- Errors are plain sentences everywhere; the app no longer shows internal English.
+- With IPv6 off, every connection uses IPv4, calls included.
+- Contacts are sorted by their letter whatever its accents.
+
+Added:
+
+- Draw on a photo before sending it (pen, text, colours, undo), also on a picture you received, and
+  send it back.
+- Send a place: a place nearby or one found by name, from Threema's own map server. The place row
+  says what goes to the server before anything does. There is no map yet.
+- A chat's polls on a page of their own, and a reminder of open polls under the chat's header.
+- Profile and group pictures: cut them to a square, or take one with the camera.
+- Voice messages: pause the recording, listen to it before sending, and discard it with a countdown.
+- Threema's text formatting (*bold*, _italic_, ~strikethrough~) shows as formatting.
+- Search the emoji panel by a word.
+- The picture viewer swipes through a chat's pictures and videos, with Save and Show in chat.
+- Forward and share to several chats at once, after a look at what goes, with a caption you can
+  change.
+- Share a message's text with other apps; copy, save or share several selected messages; select in
+  the media gallery.
+- Send a failed message again, and stop an upload or a download, from its bubble.
+- Hold a reaction to see who reacted.
+- Calls (Full): a notification with Answer and Decline for an incoming call, a loudspeaker switch,
+  the screen going dark at the ear, a ringtone and vibration of their own, and a line and a
+  notification when someone starts a group call.
+- First start: restore the ID and the chats from a data backup.
+- ID backups as a QR code to show or share, and restored by scanning it.
+- Threema Safe: find a forgotten ID by its linked number or address; a warning when backups keep
+  failing; a new ID is asked about Threema Safe and reminded while it has no backup of any kind.
+- Threema Web: names for sessions, Remove all, a switch to turn it off, a notification while a
+  browser is connected, the self-hosted servers you allowed (and taking them back), and accepting
+  a self-hosted server's new certificate. The browser now follows what changes on the phone:
+  contacts, groups, pictures, deleted messages, mute and unread marks.
+- Chat list: Lock now, mute from a chat's menu, and the search finds chats and contacts by name.
+  Contacts, the share page and the member picker can be searched too.
+- The cover opens the waiting chat directly.
+- Settings → Privacy: which country numbers without a country code belong to, for the address book.
+- Links shared from the Browser; memory cards in the file picker and for data backups.
+- "Write message" on a contact page opened on its own; copy and share Threema IDs.
+- The link in Threema's verification SMS confirms the number.
+- Why Threesea is offline (what Threema's servers said) shows under the chat list's header, and as
+  a notification when the window is closed.
+- The licence texts and a link to the source under Settings → About.
 
 Fixed:
 
@@ -19,6 +103,53 @@ Fixed:
   showing nothing.
 - A manual address book sync (turning it on, or pulling to refresh the contacts) always tells how it
   went: new contacts, how many entries it checked, no phone numbers or addresses found, or the error.
+  It takes only one-to-one matches, as Android does, and a name from the address book follows later
+  changes there.
+- Photos and videos of private chats no longer land in the Gallery folder, private groups and lists
+  stay out of Threema Web while hidden, and the settings file no longer names your chat partners.
+- A received message is stored completely before the server is told, so a full disk or a failing
+  store no longer loses one; it stays on the server and comes again. Read and delivery receipts,
+  and forward secrecy answers, wait until they have really gone out.
+- What you type stays in the input until the message is accepted; a draft keeps its mentions and
+  its quote; a refused file comes back with its caption; a swipe no longer throws away picked files
+  or a recording.
+- A chat stays where you are reading when messages arrive or change, reopens where you left it,
+  and a tap on a quote goes to the quoted message.
+- Groups: being added by someone who isn't a contact, messages written while offline, leaving
+  right after writing, being removed rather than leaving, new members getting the group's name,
+  picture and running call, and changes made on Threema Desktop.
+- Revoked IDs: the chat says so and nothing more goes to them.
+- Notifications: a reply that couldn't be sent says so and keeps its words in the chat; an edited
+  or deleted message updates its notification quietly; a backlog after being offline alerts once.
+- Data backups: a damaged or too large chat is left out and named instead of stopping the import;
+  the result page says what didn't come along; scheduled backups no longer fill the disk or run
+  hourly after a failure; a running backup can be stopped.
+- Threema Safe: turning it off deletes the backup on the server; a restore keeps the key of a
+  contact you verified in person, and runs the same steps afterwards as Android.
+- The connection comes back when the network changes and when you return to the app, tries IPv4
+  after a few seconds where IPv6 doesn't work, and stops waiting for a write after 30 seconds.
+  Another device taking over the ID no longer makes Threesea log in again and again.
+- Linking and removing devices say what really happened.
+- A start that fails says why (storage full, damaged, from a newer version) and offers a way on;
+  upgrading a large store shows a hint.
+- After an update the running app notices it and ends; a notification opens the new version.
+- Send location sends only a recent position, or offers the last known one with its time.
+- Videos play again after their end and the slider follows; a picture turned by its EXIF data
+  shows in its own proportions; a damaged picture says so.
+- Pictures from linked devices, read receipts and typing reach the other devices and come from them.
+- Many texts now say what a setting really does.
+
+Faster:
+
+- Long work no longer holds up the app: Threema Safe, linking, exports and maintenance run beside
+  everything else, and large files are read, encrypted and decrypted away from it, within a
+  memory budget.
+- Searching a long history, the media gallery and the chat list's counts use indexes and pages.
+- The emoji panel opens faster, and starting the app reads the emoji tables only when needed.
+
+Not tested yet: the headset and Bluetooth buttons on the lock screen's media controls, which the
+0.2.0 notes below say work, have not been tried on a phone. Calls, the loudspeaker switch and
+everything else in `docs/voice-video-device-checklist.md` still wait for a phone too.
 
 ## [0.2.0] - 2026-11-03
 
