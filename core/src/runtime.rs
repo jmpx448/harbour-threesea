@@ -416,6 +416,15 @@ fn forget_stopped_connection(
     }
 }
 
+/// The connection is through with a wake-up: if transfers are running too, the device stays up for
+/// those (the window's limit holds either way).
+fn wake_settled(app: &mut App, emit: &Emit) {
+    app.wake_settled_held = !app.transfers.none_running();
+    if !app.wake_settled_held {
+        emit(json!({"event": "wakeSettled"}).to_string());
+    }
+}
+
 /// The core loop: commands (in order), connection events, hourly maintenance.
 async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, emit: Emit) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -434,6 +443,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
     loop {
         forget_stopped_connection(&app, &mut connection, &emit);
         let transfer_retry_at = app.transfer_retry_at;
+        let wake_settled_held = app.wake_settled_held;
         tokio::select! {
             request = rx.recv() => {
                 let Some(request) = request else { break };
@@ -486,9 +496,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                         json!({"event": "serverMessage", "message": message, "canReconnect": can_reconnect})
                             .to_string(),
                     ),
-                    Some(FromConnection::WakeSettled) => {
-                        emit(json!({"event": "wakeSettled"}).to_string());
-                    }
+                    Some(FromConnection::WakeSettled) => wake_settled(&mut app, &emit),
                 }
             }
             event = async {
@@ -518,6 +526,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     None => std::future::pending().await,
                 }
             } => app.retry_failed_transfers(),
+            () = app.transfers.ended(), if wake_settled_held => wake_settled(&mut app, &emit),
             _ = tick.tick() => {
                 for event in app.maintenance().await {
                     emit(json!({ "event": event }).to_string());
@@ -531,6 +540,44 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_up_stays_for_a_transfer_that_is_running() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let emit: Emit = {
+                    let said = std::sync::Arc::clone(&said);
+                    Box::new(move |message| said.lock().unwrap().push(message))
+                };
+
+                let (finish, transfer) = tokio::sync::oneshot::channel::<()>();
+                tokio::task::spawn_local(app.transfers.track(async move {
+                    let _ = transfer.await;
+                }));
+                wake_settled(&mut app, &emit);
+                assert!(app.wake_settled_held);
+                assert!(said.lock().unwrap().is_empty());
+
+                finish.send(()).unwrap();
+                app.transfers.ended().await;
+                wake_settled(&mut app, &emit);
+                assert!(!app.wake_settled_held);
+                assert_eq!(said.lock().unwrap().len(), 1);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_new_wake_up_does_not_end_with_the_word_held_back_for_the_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+        app.wake_settled_held = true;
+        app.wake_connection();
+        assert!(!app.wake_settled_held);
+    }
 
     #[test]
     fn what_a_stopped_connection_said_is_dropped() {

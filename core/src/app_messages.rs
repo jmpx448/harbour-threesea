@@ -576,6 +576,8 @@ impl App {
     /// Wake the connection, without the user asking (timer, network changed, back in the app).
     /// `waiting`: `wakeSettled` will follow.
     pub(crate) fn wake_connection(&mut self) -> Value {
+        // The word that is held back is for a wake-up gone by.
+        self.wake_settled_held = false;
         let waiting = self
             .connection
             .as_ref()

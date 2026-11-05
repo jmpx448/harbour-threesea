@@ -995,6 +995,47 @@ pub(crate) struct WritePass {
     pub(crate) expires: std::time::Instant,
 }
 
+/// How many uploads and downloads are running. A wake-up holds the device up for them: a picture
+/// on a slow link would otherwise get the seconds the connection needs, wake-up after wake-up, and
+/// could run out of tries overnight.
+pub(crate) struct RunningTransfers(Rc<tokio::sync::watch::Sender<usize>>);
+
+impl Default for RunningTransfers {
+    fn default() -> Self {
+        Self(Rc::new(tokio::sync::watch::channel(0).0))
+    }
+}
+
+/// One transfer of those, until it ends, one way or another.
+struct RunningTransfer(Rc<tokio::sync::watch::Sender<usize>>);
+
+impl Drop for RunningTransfer {
+    fn drop(&mut self) {
+        self.0.send_modify(|running| *running -= 1);
+    }
+}
+
+impl RunningTransfers {
+    /// It counts from here on, before its task first runs.
+    pub(crate) fn track<T: Future>(&self, transfer: T) -> impl Future<Output = T::Output> + use<T> {
+        self.0.send_modify(|running| *running += 1);
+        let counted = RunningTransfer(Rc::clone(&self.0));
+        async move {
+            let _counted = counted;
+            transfer.await
+        }
+    }
+
+    pub(crate) fn none_running(&self) -> bool {
+        *self.0.borrow() == 0
+    }
+
+    pub(crate) async fn ended(&self) {
+        // The sender is ours, it can't be gone.
+        let _ = self.0.subscribe().wait_for(|running| *running == 0).await;
+    }
+}
+
 impl App {
     /// A `lock` naming files on their way: those of hidden private chats get a pass, which replaces
     /// any earlier one. A list has none: its members' copies are made by reading its own back.
@@ -1261,13 +1302,13 @@ impl App {
                 return;
             }
         }
-        tokio::task::spawn_local(upload(
+        tokio::task::spawn_local(self.transfers.track(upload(
             Rc::clone(&self.store),
             self.https.clone(),
             Arc::clone(&self.media),
             self.media_events.clone(),
             message,
-        ));
+        )));
     }
 
     /// A media task reported progress: an upload may have finished, so send what's pending; one
@@ -1409,13 +1450,13 @@ impl App {
                 return;
             }
         }
-        tokio::task::spawn_local(download(
+        tokio::task::spawn_local(self.transfers.track(download(
             Rc::clone(&self.store),
             self.https.clone(),
             Arc::clone(&self.media),
             self.media_events.clone(),
             job,
-        ));
+        )));
     }
 
     fn download_job(&self, message: i64, part: MediaPart) -> Option<Download> {

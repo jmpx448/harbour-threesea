@@ -1314,6 +1314,10 @@ pub struct App {
         Option<tokio::sync::mpsc::UnboundedSender<crate::connection::ToConnection>>,
     /// Its task, to stop it wherever it is.
     pub(crate) connection_task: Option<tokio::task::JoinHandle<()>>,
+    /// Uploads and downloads running.
+    pub(crate) transfers: crate::app_media::RunningTransfers,
+    /// A wake-up is over but for those: `wakeSettled` follows when they have ended.
+    pub(crate) wake_settled_held: bool,
     /// Last known connection state, for `connectionState`.
     pub connection_state: &'static str,
     /// Encrypted files of messages (shared with the bridge's image provider).
@@ -1415,6 +1419,8 @@ impl App {
             config: Arc::new(Config::from(ConfigEnvironment::Production)),
             connection: None,
             connection_task: None,
+            transfers: crate::app_media::RunningTransfers::default(),
+            wake_settled_held: false,
             connection_state: "disconnected",
             media,
             media_events,
