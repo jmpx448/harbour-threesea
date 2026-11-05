@@ -180,7 +180,8 @@ Page {
         if (body.fileState !== 2) {
             if (body.fileState !== 1) backend.call("downloadFile", { message: id })
         } else if ((kind === "image" || kind === "gif") && Fmt.isPicture(body.mediaType)) {
-            pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), { messageId: id, animated: kind === "gif" })
+            pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), { identity: identity, messageId: id, newestFirst: true,
+                                                                   animated: kind === "gif" })
         } else if (kind === "voice") {
             if (voicePlayer.messageId === id && voicePlayer.playing) {
                 voicePlayer.pause()

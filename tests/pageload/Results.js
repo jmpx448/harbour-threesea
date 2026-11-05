@@ -104,8 +104,11 @@ var table = {
     settings: { readReceipts: true, sendTyping: true, blockUnknown: false, threemaCalls: true, groupCalls: true,
                 videoCalls: true, relayThreemaCalls: false, videoQuality: "auto", blockedContacts: [] },
     chatMedia: function() {
-        return { messages: [message(5, "file", { mediaKind: "image", body: file("image/jpeg", "image") })],
-                 kinds: ["image"], counts: { image: 1, gif: 0, video: 0, voice: 0, audio: 0, file: 0 } }
+        return { messages: [message(8, "file", { mediaKind: "image", body: file("image/jpeg", "image", { fileState: 0 }) }),
+                            message(7, "file", { mediaKind: "video", body: file("video/mp4", "media") }),
+                            message(6, "file", { mediaKind: "gif", body: file("image/gif", "image") }),
+                            message(5, "file", { mediaKind: "image", body: file("image/jpeg", "image") })],
+                 kinds: ["image", "gif", "video"], counts: { image: 2, gif: 1, video: 1, voice: 0, audio: 0, file: 0 } }
     },
     blockedContacts: { blocked: [{ identity: "ABCD1234", displayName: "Ada" }] },
     forwardSecurity: { on: true, multiDevice: false },
