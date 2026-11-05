@@ -16,6 +16,8 @@ var table = {
                                                   choosePlace: function() {} } },
     "pages/SendLocationDialog.qml": { secondsWaited: 31,
                                       center: { latitude: 47.2, longitude: 8.8, recent: false, taken: 1700000000000 } },
+    "pages/ConfirmSendDialog.qml": { names: "Sam, Ada", forwarding: true, askContent: true, content: "Words",
+                                     contentIsCaption: true, askCaptions: true },
     "pages/PollsPage.qml": { identity: "ABCD1234", chatName: "Sam" },
     "pages/PollPage.qml": { messageId: 12, conversation: "ABCD1234",
                             poll: { id: 1, creator: "AAAAAAAA", description: "When?", multiple: false, announce: true,

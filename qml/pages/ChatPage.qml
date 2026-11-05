@@ -75,6 +75,11 @@ Page {
         for (var i = 0; i < list.length; ++i) ids.push(list[i].id)
         return ids
     }
+    // What the share page has to know of a message to forward it.
+    function forwardItem(m) {
+        return { id: m.id, kind: m.kind, mentions: m.mentions,
+                 caption: (m.kind === "file" && m.body && m.body.caption) || "" }
+    }
     function forwardable(m) {
         return m.kind === "text" || m.kind === "location"
                || (m.kind === "file" && m.body && m.body.fileState === 2)
@@ -3112,7 +3117,8 @@ Page {
                 onCancelTransferRequested: page.tell("cancelTransfer", { message: model.id })
                 onShareRequested: window.messageOut.shareText(Fmt.copyText(model.kind, model.text, model.body, model.mentions))
                 onForwardRequested: pageStack.push(Qt.resolvedUrl("SharePage.qml"),
-                                                   { forwardMessage: model.id, text: Fmt.preview(messages.get(index)) })
+                                                   { forwardItems: [page.forwardItem(messages.get(index))],
+                                                     text: Fmt.preview(messages.get(index)) })
                 onPollRequested: page.openPoll(model.id, model.body)
                 // For everyone and for good, like on the poll's own page.
                 onClosePollRequested: {
@@ -3250,13 +3256,11 @@ Page {
                     return list.length > 0
                 }
                 onClicked: {
-                    var ids = []
-                    var list = page.selectedMessages()
-                    for (var i = 0; i < list.length; ++i) ids.push(list[i].id)
+                    var items = page.selectedMessages().map(page.forwardItem)
                     page.endSelection()
                     pageStack.push(Qt.resolvedUrl("SharePage.qml"),
                                    //% "%n message(s)"
-                                   { forwardMessages: ids, text: qsTrId("threesea-la-n-messages", ids.length) })
+                                   { forwardItems: items, text: qsTrId("threesea-la-n-messages", items.length) })
                 }
             }
         }
@@ -3275,77 +3279,11 @@ Page {
         }
     }
 
-    // A video's thumbnail (first frame, from the system thumbnailer) and length, then it is
-    // sent as media, without a thumbnail if there is no frame.
-    Item {
+    // A video's thumbnail and length, then it is sent as media, without a thumbnail if there is no
+    // frame.
+    VideoFrameReader {
         id: videoPreparer
-        // Off screen, not invisible: grabToImage only renders visible items.
-        x: -2 * width
-        width: 512
-        height: 512
-        property string path
-        // The sendQueue entry.
-        property var file
-        property real seconds: 0
-
-        function start(entry) {
-            videoPreparer.path = entry.path
-            videoPreparer.file = entry
-            seconds = 0
-            frame.path = entry.path
-            durationProbe.source = Fmt.fileUrl(entry.path)
-            giveUp.restart()
-        }
-        function finish(image) {
-            giveUp.stop()
-            if (videoPreparer.path.length === 0) return
-            videoPreparer.path = ""
-            var entry = file
-            entry.frame = image
-            entry.seconds = seconds
-            page.sendNow(entry)
-            frame.path = ""
-            durationProbe.source = ""
-        }
-
-        // The thumbnailer's image provider, as lipstick uses it. It always gives a centred
-        // square, so video thumbnails are square (the video keeps its proportions).
-        Image {
-            id: frame
-            property string path
-            width: implicitWidth
-            height: implicitHeight
-            sourceSize.width: 512
-            sourceSize.height: 512
-            asynchronous: true
-            cache: false
-            source: path.length > 0 ? "image://nemoThumbnail/" + path.replace(/^file:\/\//, "") : ""
-            onStatusChanged: {
-                if (videoPreparer.path.length === 0) return
-                // A moment more for the length (the media service may not exist).
-                if (status === Image.Ready) grabLater.restart()
-                else if (status === Image.Error) videoPreparer.finish(null)
-            }
-        }
-        MediaPlayer {
-            id: durationProbe
-            autoLoad: true
-            onDurationChanged: if (duration > 0) videoPreparer.seconds = duration / 1000
-        }
-        Timer {
-            id: grabLater
-            interval: 800
-            onTriggered: {
-                if (!frame.grabToImage(function(result) { videoPreparer.finish(result.image) })) {
-                    videoPreparer.finish(null)
-                }
-            }
-        }
-        Timer {
-            id: giveUp
-            interval: 10000
-            onTriggered: videoPreparer.finish(null)
-        }
+        onFinished: page.sendNow(entry)
     }
 
     Component {
