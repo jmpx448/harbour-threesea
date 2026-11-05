@@ -1536,16 +1536,10 @@ use std::sync::Arc;
 
 /// How many recently used emoji the picker keeps (Android keeps a row or two).
 const RECENT_EMOJI: usize = 32;
+/// Longer isn't an emoji.
+const EMOJI_BYTES_MAX: usize = 64;
 
 impl App {
-    fn recent_emoji(&self) -> Result<Vec<String>, ApiError> {
-        Ok(self
-            .store
-            .setting(keys::RECENT_EMOJI)?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default())
-    }
-
     /// `recentEmoji`: `{emoji: [text]}`, newest first.
     pub(crate) fn recent_emoji_json(&self) -> Result<Value, ApiError> {
         Ok(json!({ "emoji": self.recent_emoji()? }))
@@ -1553,7 +1547,7 @@ impl App {
 
     /// `useEmoji {emoji}`: put it first in the recently used.
     pub(crate) fn use_emoji(&mut self, emoji: &str) -> Result<Value, ApiError> {
-        if emoji.is_empty() || emoji.len() > 64 {
+        if !is_emoji_entry(emoji) {
             return Err(ApiError::Internal("not an emoji".into()));
         }
         let mut recent = self.recent_emoji()?;
@@ -1566,6 +1560,39 @@ impl App {
         )?;
         Ok(json!({ "emoji": recent }))
     }
+}
+
+impl Shared {
+    pub(crate) fn recent_emoji(&self) -> Result<Vec<String>, ApiError> {
+        Ok(self
+            .store
+            .setting(keys::RECENT_EMOJI)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default())
+    }
+
+    /// The recently used of a restored Threema Safe backup, under the same limits as `useEmoji`
+    /// (a backup is someone else's data until it is checked). None in it: nothing changes.
+    pub(crate) fn seed_recent_emoji(&self, restored: &[String]) -> Result<(), ApiError> {
+        let mut recent: Vec<&String> = Vec::new();
+        for emoji in restored.iter().filter(|emoji| is_emoji_entry(emoji)) {
+            if recent.len() < RECENT_EMOJI && !recent.contains(&emoji) {
+                recent.push(emoji);
+            }
+        }
+        if recent.is_empty() {
+            return Ok(());
+        }
+        self.store.set_setting(
+            keys::RECENT_EMOJI,
+            &serde_json::to_string(&recent).map_err(|e| ApiError::Internal(e.to_string()))?,
+        )?;
+        Ok(())
+    }
+}
+
+fn is_emoji_entry(emoji: &str) -> bool {
+    !emoji.is_empty() && emoji.len() <= EMOJI_BYTES_MAX
 }
 
 /// Live end-to-end test against the real chat server: restores a test ID from an ID backup

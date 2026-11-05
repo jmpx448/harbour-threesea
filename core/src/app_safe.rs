@@ -626,6 +626,7 @@ impl Shared {
             self.store.set_picture_recipients(&recipients)?;
         }
         self.save_app_settings(&backup.settings)?;
+        self.seed_recent_emoji(&backup.settings.recent_emojis)?;
         // Contacts, then groups and lists, are imported afterwards (lookups needed); until then
         // they wait here and are carried into our own backups.
         let pending = json!({
@@ -1136,8 +1137,19 @@ impl Shared {
             contacts: Some(self.backup_contacts(&updates)?),
             groups: Some(self.backup_groups(&identity.threema_id, &pending, &updates)?),
             distributionlists: Some(self.backup_lists(&pending, &updates)?),
-            settings: self.app_settings()?,
+            settings: self.backup_settings()?,
         })
+    }
+
+    /// The settings with the emoji the picker has now; the restored list only until there are
+    /// any here (the restore seeds the picker, an older restore didn't).
+    fn backup_settings(&self) -> Result<backup::Settings, ApiError> {
+        let mut settings = self.app_settings()?;
+        let recent = self.recent_emoji()?;
+        if !recent.is_empty() {
+            settings.recent_emojis = recent;
+        }
+        Ok(settings)
     }
 }
 
@@ -1461,6 +1473,44 @@ mod tests {
         assert_eq!(parsed.contacts.unwrap().len(), 1);
     }
 
+    /// The picker and the backup's list are one: what a restore brings shows in the picker, and
+    /// what is used here goes into the next backup.
+    #[test]
+    fn recent_emoji_go_from_a_backup_to_the_picker_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+
+        // A restored list, before the picker has one: kept for the next backup.
+        let mut settings = app.app_settings().unwrap();
+        settings.recent_emojis = vec!["\u{1F600}".into()];
+        app.save_app_settings(&settings).unwrap();
+        assert_eq!(
+            app.build_backup().unwrap().settings.recent_emojis,
+            ["\u{1F600}"]
+        );
+
+        // Seeded under the picker's limits, the order kept.
+        let mut restored = vec![String::new(), "x".repeat(65), "\u{1F44D}".into()];
+        restored.extend((0..40).map(|n| format!("e{n}")));
+        restored.push("\u{1F44D}".into());
+        app.seed_recent_emoji(&restored).unwrap();
+        let seeded = app.recent_emoji().unwrap();
+        assert_eq!(seeded.len(), 32);
+        assert_eq!(seeded[0], "\u{1F44D}");
+        assert_eq!(seeded[1], "e0");
+        assert_eq!(seeded.iter().filter(|e| *e == "\u{1F44D}").count(), 1);
+
+        // Nothing usable in a backup leaves the list as it is.
+        app.seed_recent_emoji(&[String::new()]).unwrap();
+        assert_eq!(app.recent_emoji().unwrap(), seeded);
+
+        // Used here: the next backup says so.
+        app.use_emoji("\u{1F389}").unwrap();
+        let backup = app.build_backup().unwrap();
+        assert_eq!(backup.settings.recent_emojis[0], "\u{1F389}");
+        assert_eq!(backup.settings.recent_emojis.len(), 32);
+    }
+
     #[test]
     fn server_and_backup_failures_have_kinds_of_their_own() {
         let kind = |error: ServerError| ApiError::from(error).kind();
@@ -1576,11 +1626,13 @@ mod tests {
     #[test]
     fn a_restore_is_stored_all_at_once() {
         let dir = tempfile::tempdir().unwrap();
-        let (app, backup, key) = restore_material(dir.path());
+        let (app, mut backup, key) = restore_material(dir.path());
+        backup.settings.recent_emojis = vec!["\u{1F44D}".into()];
         let client_key = ClientKey::from([5; 32]);
         app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
             .unwrap();
         assert!(app.store.identity().unwrap().is_some());
+        assert_eq!(app.recent_emoji().unwrap(), ["\u{1F44D}"]);
         let status = app.safe_status().unwrap();
         assert_eq!(status["enabled"], true);
         assert_eq!(status["restore"]["pendingContacts"], 1);
