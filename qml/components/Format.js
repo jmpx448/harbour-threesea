@@ -136,23 +136,23 @@ function status(code) {
         //% "The group call ended."
         return qsTrId("threesea-la-status-group-call-ended")
     case "fsEstablished":
-        //% "Forward secrecy is active for this chat."
+        //% "Perfect Forward Secrecy is active for this chat."
         return qsTrId("threesea-la-status-fs-established")
     case "fsReset":
-        //% "Forward secrecy was reset. This can happen when the contact changes devices or reinstalls the app."
+        //% "Perfect Forward Secrecy was reset. This can happen when the contact changes devices or reinstalls the app."
         return qsTrId("threesea-la-status-fs-session-reset")
     case "fsMessageRejected":
-        //% "Forward secrecy was reset. Affected messages are sent again."
+        //% "Perfect Forward Secrecy was reset. Affected messages are sent again."
         return qsTrId("threesea-la-status-fs-message-rejected")
     case "fsMessageWithoutFs":
-        //% "A message without forward secrecy was received. Check with the contact that they turned it off on purpose."
+        //% "A message without Perfect Forward Secrecy was received. Check with the contact that they turned it off on purpose."
         return qsTrId("threesea-la-status-fs-message-without")
     case "fsUnavailable":
-        //% "Forward secrecy is off in this chat because this contact's app is not using it at the moment."
+        //% "Perfect Forward Secrecy is off in this chat because this contact's app is not using it at the moment."
         return qsTrId("threesea-la-status-fs-unavailable")
     case "fsTerminated":
         // Only in older chats: new ones say why (fsReset, fsUnavailable).
-        //% "The forward secrecy session with this contact ended."
+        //% "The Perfect Forward Secrecy session with this contact ended."
         return qsTrId("threesea-la-status-fs-session-ended")
     default:
         return code
@@ -447,6 +447,7 @@ function preview(message) {
         if (file.caption) return withMentions(stripMarkup(file.caption), message.mentions).replace(/\s+/g, " ")
         //% "Voice message"
         if (String(file.mediaType).indexOf("audio/") === 0 && file.rendering !== "file") return qsTrId("threesea-la-voice-message")
+        if (String(file.mediaType).toLowerCase() === "image/gif" && file.rendering !== "file") return qsTrId("threesea-la-gif")
         //% "Photo"
         if (isPicture(file.mediaType) && file.rendering !== "file") return qsTrId("threesea-la-photo")
         //% "Video"

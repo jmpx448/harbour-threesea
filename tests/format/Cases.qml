@@ -152,6 +152,10 @@ QtObject {
 
         check("a day of an earlier year has its year", Fmt.day(new Date(2001, 0, 15, 12).getTime()).indexOf("2001") >= 0, true)
 
+        check("preview, a GIF", Fmt.preview({ kind: "file", body: { mediaType: "image/gif", rendering: "media" } }), "threesea-la-gif")
+        check("preview, a GIF as a file", Fmt.preview({ kind: "file", body: { mediaType: "image/gif", rendering: "file", name: "a.gif" } }) === "threesea-la-gif", false)
+        check("preview, a photo", Fmt.preview({ kind: "file", body: { mediaType: "image/jpeg", rendering: "media" } }), "threesea-la-photo")
+
         var senders = Fmt.reactionSenders([{ emoji: "a", sender: "ABCD1234" }, { emoji: "b", sender: "" },
                                            { emoji: "a", sender: "" }, { emoji: "a", sender: "EFGH5678" }])
         check("who reacted, by emoji", senders.length, 2)

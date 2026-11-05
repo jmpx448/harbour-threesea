@@ -52,7 +52,7 @@ Made-up demo data, taken in the emulator. [Which version each picture is from](d
 |---|---|
 | Builds and installs on SFOS 5.1+ (aarch64, armv7hl, i486) | ✅ |
 | Libre license check, ID creation, ID backup export/import, Threema Safe backup/restore | ✅ |
-| 1:1 chats with forward secrecy (off while a device is linked, as Threema's multi-device requires, and if you switch it off; no warning yet on a message sent without it), delivery/read receipts, typing indicators | ✅ |
+| 1:1 chats with Perfect Forward Secrecy (off while a device is linked, as Threema's multi-device requires, and if you switch it off; no warning yet on a message sent without it), delivery/read receipts, typing indicators | ✅ |
 | Report spam, 1:1 and groups (the complete report is not tested end to end yet) | ✅ |
 | Groups (create, rename, members, leave, pictures), mentions, distribution lists | ✅ |
 | Photos (cut, turn, draw on them), videos, files, voice messages (pause, listen before sending), GIFs, polls with a chat's overview, locations (your position, or a place found nearby or by name), quotes, reactions, edit, delete | ✅ |
