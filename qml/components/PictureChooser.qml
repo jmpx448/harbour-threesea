@@ -12,6 +12,9 @@ Item {
     property Item host
     // Picked or taken, waiting for the picker or the camera to have gone.
     property string waiting
+    // In the editor. A shot stays no longer than this does, also when the editor is taken away
+    // without an answer (the stack settled, the chooser's page went).
+    property string editing
 
     signal chosen(string path)
 
@@ -23,17 +26,24 @@ Item {
         camera.captured.connect(function(path) { chooser.edit(path) })
     }
     function edit(path) {
+        forget(waiting)
         waiting = path
         editorLater.start()
     }
+    // A photo just taken isn't kept (a picked one isn't ours: this leaves it alone).
+    function forget(path) {
+        if (path) backend.removeCapture(path)
+        if (path === editing) editing = ""
+    }
     function openEditor() {
+        forget(editing)
         var source = waiting
         waiting = ""
+        editing = source
         var editor = pageStack.push(Qt.resolvedUrl("../pages/EditPhotoPage.qml"), { path: source, square: true })
         editor.accepted.connect(function() {
             editor.save(function(path) {
-                // A photo just taken isn't kept (a picked one isn't ours: this leaves it alone).
-                backend.removeCapture(source)
+                chooser.forget(source)
                 if (path) {
                     chooser.chosen(path)
                 } else {
@@ -42,10 +52,13 @@ Item {
                 return ""
             })
         })
-        editor.rejected.connect(function() { backend.removeCapture(source) })
+        editor.rejected.connect(function() { chooser.forget(source) })
     }
 
-    Component.onDestruction: backend.removeCapture(waiting)
+    Component.onDestruction: {
+        backend.removeCapture(waiting)
+        backend.removeCapture(editing)
+    }
 
     Timer {
         id: editorLater

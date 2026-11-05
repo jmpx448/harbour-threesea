@@ -177,6 +177,9 @@ Dialog {
                               : dialog.path ? Fmt.fileUrl(dialog.path) : ""
                         fillMode: Image.PreserveAspectFit
                         asynchronous: true
+                        // Like every reader of message media: nothing decoded stays behind in Qt's
+                        // cache once the editor has gone, a private chat's least of all.
+                        cache: false
                         // As the camera stored it: QML's Image leaves the EXIF rotation alone
                         // unless asked. The cut is made on the turned picture (editPhoto), and
                         // what is sent is turned too (FilePreparer), so the view must be.

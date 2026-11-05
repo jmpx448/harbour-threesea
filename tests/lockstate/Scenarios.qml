@@ -566,6 +566,19 @@ QtObject {
                 check("passed on", root.handedOver, "/cache/capture/edited.jpg")
                 check("told to remove the shot", backend.removedCaptures.indexOf("/tmp/threesea-wide.png") >= 0, true)
                 checkStack("conversations chooserPage")
+                // A shot in the editor, and the page goes without any answer from it.
+                page("chooserPage").chooser.edit("/tmp/threesea-wide.png")
+            }, 800],
+            [function() {
+                backend.removedCaptures = []
+                check("in the editor again", stack.currentPage.square, true)
+                stack.pop(stack.find(function(p) {
+                    return p.objectName === "conversations"
+                }), PageStackAction.Immediate)
+            }, 300],
+            [function() {
+                checkStack("conversations")
+                check("the shot went with it", backend.removedCaptures.indexOf("/tmp/threesea-wide.png") >= 0, true)
             }, 0],
         ],
         // It is only seen while the app is in front and it is on top.
