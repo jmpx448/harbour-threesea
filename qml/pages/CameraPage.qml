@@ -2,7 +2,6 @@
 import QtQuick 2.6
 import QtMultimedia 5.6
 import Sailfish.Silica 1.0
-import Nemo.KeepAlive 1.2
 import "../components"
 
 // Take a photo or record a video for a chat, like Jolla Camera: viewfinder, shutter at the
@@ -61,15 +60,12 @@ Page {
         }
     }
     Component.onDestruction: {
+        window.cameraRecording = false
         if (recording) camera.videoRecorder.stop()
         removeCapture()
     }
 
-    // Filming doesn't touch the screen: it stays on, or the page would stop being seen.
-    DisplayBlanking {
-        preventBlanking: page.recording
-    }
-
+    onRecordingChanged: window.cameraRecording = recording
     Rectangle {
         anchors.fill: parent
         color: "black"

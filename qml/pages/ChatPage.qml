@@ -6,7 +6,6 @@ import Sailfish.Pickers 1.0
 // Registers the image://nemoThumbnail provider (video frames for sending). Its Thumbnail item is
 // not used: on SFOS 5.1 it repeats statusChanged without end (main thread at 100 %).
 import Nemo.Thumbnailer 1.0 as Nemo
-import Nemo.KeepAlive 1.2
 import harbour.threesea 1.0
 import "../components"
 import "../components/Errors.js" as Errors
@@ -1309,14 +1308,6 @@ Page {
     // A recording went, or stopped and waits, while nobody was looking: said when the app is back.
     property bool recordingDiscarded
     property bool recordingHeldAway
-
-    // Talking for a long time without touching the phone must not blank it: that would leave the
-    // app, which stops the recording. Nor while it waits for an answer at the limit: a lock would
-    // throw it away. Once the app has been left, the phone blanks and locks as usual.
-    DisplayBlanking {
-        preventBlanking: page.recordingHere && (voiceRecorder.recording || voiceRecorder.held)
-                         && Qt.application.state === Qt.ApplicationActive
-    }
 
     // ---- Voice messages at the ear, their queue and their "new" state (user requests
     // 2026-10-28, like Threema for Android) ----

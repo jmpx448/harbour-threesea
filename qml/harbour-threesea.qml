@@ -1838,6 +1838,32 @@ ApplicationWindow {
         }
     }
 
+    // The camera page is filming.
+    property bool cameraRecording: false
+    readonly property bool videoCallShowing: {
+        if (calls.video && (calls.state === "connecting" || calls.state === "active")) return true
+        if (groupCalls.state !== "connected") return false
+        if (groupCalls.camera) return true
+        var others = groupCalls.participants
+        for (var i = 0; i < others.length; ++i) {
+            if (others[i].camera === true) return true
+        }
+        return false
+    }
+    // What is watched or goes on without a touch keeps the screen on while the app is in view: a
+    // video, a call's pictures, filming, and talking into a voice message, also while it waits
+    // for an answer at the limit (blanking leaves the app, which stops or throws these away).
+    // Once the app has been left, the phone blanks and locks as usual.
+    DisplayBlanking {
+        preventBlanking: Qt.application.state === Qt.ApplicationActive
+                         && (videoPlayer.playing || window.cameraRecording || window.videoCallShowing
+                             || voiceRecorder.recording || voiceRecorder.held)
+    }
+    // A call goes on with the screen off, and a ringing one has to be answered in time.
+    KeepAlive {
+        enabled: window.anyCallRunning
+    }
+
     // A call takes the sound and the microphone, also a group call whose page isn't on top. What
     // is playing pauses and stays paused, the call may be long. A recording has nobody to ask
     // during the call, and would pick up its sound.
