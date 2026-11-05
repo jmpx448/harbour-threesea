@@ -3,9 +3,11 @@
 // written here) and the browser's pictures have their tests in the core. Exit 0: passed.
 #include <QBuffer>
 #include <QDirIterator>
+#include <QFile>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QImage>
+#include <QImageReader>
 #include <QRunnable>
 #include <QTemporaryDir>
 #include <QThreadPool>
@@ -104,6 +106,56 @@ QImage halves(bool transparent)
         }
     }
     return image;
+}
+
+// A camera's JPEG: turned sideways in its EXIF data (orientation 6, shown turned clockwise) and
+// with a GPS block naming the place.
+QByteArray cameraJpeg(const QImage &image)
+{
+    QByteArray tiff("II*\0", 4);
+    auto u16 = [&tiff](int v) { tiff.append(char(v & 0xff)).append(char((v >> 8) & 0xff)); };
+    auto u32 = [&u16](int v) { u16(v & 0xffff); u16((v >> 16) & 0xffff); };
+    u32(8);
+    // IFD0 at 8: orientation, and where the GPS block is.
+    u16(2);
+    u16(0x0112), u16(3), u32(1), u16(6), u16(0);
+    u16(0x8825), u16(4), u32(1), u32(38);
+    u32(0);
+    // The GPS block at 38: north, and the place as text at 68.
+    const QByteArray place = QByteArray(Secret) + '\0';
+    u16(2);
+    u16(0x0001), u16(2), u32(2), tiff.append("N\0\0\0", 4);
+    u16(0x0012), u16(2), u32(place.size()), u32(68);
+    u32(0);
+    tiff.append(place);
+    const QByteArray exif = QByteArray("Exif\0\0", 6) + tiff;
+    QByteArray segment("\xff\xe1", 2);
+    segment.append(char(((exif.size() + 2) >> 8) & 0xff)).append(char((exif.size() + 2) & 0xff)).append(exif);
+    QByteArray jpeg = encoded(image, "JPEG");
+    return jpeg.left(2) + segment + jpeg.mid(2);
+}
+
+void exifStaysBehind(const QString &dir)
+{
+    // Left half red, right half blue, as stored; shown turned clockwise: red on top.
+    const QByteArray camera = cameraJpeg(halves(false));
+    check(camera.contains(Secret), "the test JPEG names the place");
+    QBuffer buffer;
+    buffer.setData(camera);
+    QImageReader reader(&buffer);
+    check(reader.transformation() == QImageIOHandler::TransformationRotate90, "the test JPEG is turned in EXIF");
+
+    const QString path = dir + QStringLiteral("/camera.jpg");
+    QFile file(path);
+    check(file.open(QIODevice::WriteOnly) && file.write(camera) == camera.size(), "test JPEG written");
+    file.close();
+    const QByteArray sent = prepared(path);
+    check(!sent.isEmpty(), "FilePreparer: a camera's JPEG goes");
+    check(!sent.contains("Exif"), "FilePreparer: no EXIF block");
+    check(!sent.contains(Secret), "FilePreparer: nothing of the place");
+    const QImage out = QImage::fromData(sent);
+    check(out.size() == QSize(20, 40), "FilePreparer: upright, as it was shown");
+    check(qRed(out.pixel(10, 5)) > 200 && qBlue(out.pixel(10, 5)) < 60, "FilePreparer: turned the right way");
 }
 
 void turnsAndCuts()
@@ -258,6 +310,7 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
     QTemporaryDir dir;
     metadataStaysBehind(dir.path());
+    exifStaysBehind(dir.path());
     turnsAndCuts();
     wipesOnlyWhatIsItsOwn();
     transparencyStays(dir.path());
