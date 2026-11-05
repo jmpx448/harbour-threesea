@@ -425,9 +425,17 @@ fn wake_settled(app: &mut App, emit: &Emit) {
     }
 }
 
+async fn run_maintenance(app: &mut App, emit: &Emit) {
+    app.maintenance_ran_at = std::time::SystemTime::now();
+    for event in app.maintenance().await {
+        emit(json!({ "event": event }).to_string());
+    }
+    app.start_update_check(false);
+}
+
 /// The core loop: commands (in order), connection events, hourly maintenance.
 async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, emit: Emit) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    let mut tick = tokio::time::interval(crate::app::MAINTENANCE_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     if let Err(error) = crate::sync::reflect_group_contacts_once(&app.store) {
         tracing::warn!(%error, "group contacts not queued for the other devices");
@@ -458,6 +466,10 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     if let Err(error) = app.publish_feature_mask().await {
                         tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
                     }
+                }
+                if core::mem::take(&mut app.maintenance_overdue) {
+                    run_maintenance(&mut app, &emit).await;
+                    tick.reset();
                 }
             }
             event = async {
@@ -527,12 +539,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 }
             } => app.retry_failed_transfers(),
             () = app.transfers.ended(), if wake_settled_held => wake_settled(&mut app, &emit),
-            _ = tick.tick() => {
-                for event in app.maintenance().await {
-                    emit(json!({ "event": event }).to_string());
-                }
-                app.start_update_check(false);
-            }
+            _ = tick.tick() => run_maintenance(&mut app, &emit).await,
         }
     }
 }
@@ -568,6 +575,24 @@ mod tests {
                 assert_eq!(said.lock().unwrap().len(), 1);
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_up_runs_maintenance_when_an_hour_has_passed_by_the_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+        app.wake_connection();
+        assert!(!app.maintenance_overdue, "it has just run");
+
+        let now = std::time::SystemTime::now();
+        app.maintenance_ran_at = now - crate::app::MAINTENANCE_INTERVAL;
+        app.wake_connection();
+        assert!(app.maintenance_overdue);
+
+        // The clock set back says nothing: the tick is still there.
+        app.maintenance_ran_at = now + crate::app::MAINTENANCE_INTERVAL;
+        app.wake_connection();
+        assert!(!app.maintenance_overdue);
     }
 
     #[tokio::test(flavor = "current_thread")]

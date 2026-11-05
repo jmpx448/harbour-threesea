@@ -39,6 +39,9 @@ pub const MIN_BACKUP_PASSWORD_LENGTH: usize = 8;
 /// How often a running app asks the directory about its license.
 const LICENSE_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// How often maintenance runs while the app does.
+pub(crate) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// A check is due without an earlier one, after the interval, and when the clock went backwards.
 fn license_check_due(checked_at: Option<i64>, now: i64) -> bool {
     checked_at.is_none_or(|at| now < at || now - at >= LICENSE_CHECK_INTERVAL_MS)
@@ -1314,6 +1317,10 @@ pub struct App {
         Option<tokio::sync::mpsc::UnboundedSender<crate::connection::ToConnection>>,
     /// Its task, to stop it wherever it is.
     pub(crate) connection_task: Option<tokio::task::JoinHandle<()>>,
+    /// When maintenance last ran, by the clock.
+    pub(crate) maintenance_ran_at: std::time::SystemTime,
+    /// A wake-up found it overdue.
+    pub(crate) maintenance_overdue: bool,
     /// Uploads and downloads running.
     pub(crate) transfers: crate::app_media::RunningTransfers,
     /// A wake-up is over but for those: `wakeSettled` follows when they have ended.
@@ -1419,6 +1426,8 @@ impl App {
             config: Arc::new(Config::from(ConfigEnvironment::Production)),
             connection: None,
             connection_task: None,
+            maintenance_ran_at: std::time::SystemTime::now(),
+            maintenance_overdue: false,
             transfers: crate::app_media::RunningTransfers::default(),
             wake_settled_held: false,
             connection_state: "disconnected",

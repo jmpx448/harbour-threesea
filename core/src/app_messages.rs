@@ -578,6 +578,12 @@ impl App {
     pub(crate) fn wake_connection(&mut self) -> Value {
         // The word that is held back is for a wake-up gone by.
         self.wake_settled_held = false;
+        // The hourly tick goes by tokio's clock, which stands still while the device sleeps: with
+        // short wake-ups an hour of it can take days.
+        self.maintenance_overdue = self
+            .maintenance_ran_at
+            .elapsed()
+            .is_ok_and(|since| since >= crate::app::MAINTENANCE_INTERVAL);
         let waiting = self
             .connection
             .as_ref()
