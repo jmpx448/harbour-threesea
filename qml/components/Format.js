@@ -8,14 +8,15 @@ function clock(ms, Format, Formatter) {
 }
 
 // Time shown in a message bubble, like Jolla Messages: clock time today, "Tuesday 20:42"
-// within the last week, otherwise "1 Sep 10:12".
+// within the last week, otherwise "1 Sep 10:12", with the year if it is not the current one.
 function time(ms, Format, Formatter) {
     var date = new Date(ms)
     var clockText = Format.formatDate(date, Formatter.TimeValue)
     var days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86400000)
     if (days === 0) return clockText
     if (days > 0 && days < 7) return Qt.formatDate(date, "dddd") + " " + clockText
-    return Format.formatDate(date, Formatter.DateMediumWithoutYear) + " " + clockText
+    var sameYear = date.getFullYear() === new Date().getFullYear()
+    return Format.formatDate(date, sameYear ? Formatter.DateMediumWithoutYear : Formatter.DateMedium) + " " + clockText
 }
 
 function startOfDay(date) {
@@ -23,7 +24,8 @@ function startOfDay(date) {
 }
 
 // Day of a message for section headers: "Today", "Yesterday", a weekday within the last week,
-// otherwise "Wednesday, 14 October" (with the year if it is not the current one).
+// otherwise the language's long date, "Wednesday, 14 October" (with the year if it is not the
+// current one).
 function day(ms) {
     var date = new Date(ms)
     var days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86400000)
@@ -32,8 +34,16 @@ function day(ms) {
     //% "Yesterday"
     if (days === 1) return qsTrId("threesea-la-yesterday")
     if (days > 1 && days < 7) return Qt.formatDate(date, "dddd")
-    if (date.getFullYear() === new Date().getFullYear()) return Qt.formatDate(date, "dddd, d MMMM")
-    return Qt.formatDate(date, "dddd, d MMMM yyyy")
+    var pattern = Qt.locale().dateFormat()
+    if (date.getFullYear() === new Date().getFullYear()) pattern = withoutYear(pattern)
+    return Qt.formatDate(date, pattern)
+}
+
+// A language's long date pattern without its year: "dddd, d. MMMM yyyy" gives "dddd, d. MMMM". Silica's
+// Formatter.DateFullWithoutYear doesn't follow the language ("Montag, 14 Oktober").
+function withoutYear(pattern) {
+    return pattern.replace(/^y+(?:[^dM']|'[^']*')*/, "")
+                  .replace(/(?:[\s,.\/-]|'[^']*')*y+(?:[\s.]|'[^']*')*/, "")
 }
 
 // A call in the chat: "call|result|outgoing|seconds" (core/src/app_calls.rs).

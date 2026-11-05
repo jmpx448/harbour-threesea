@@ -140,6 +140,18 @@ QtObject {
         check("download, here without being seen", Fmt.downloadStep(false, 2), "ended")
         check("download, stopped", Fmt.downloadStep(true, 0), "ended")
 
+        check("long date without year, German", Fmt.withoutYear("dddd, d. MMMM yyyy"), "dddd, d. MMMM")
+        check("long date without year, English", Fmt.withoutYear("dddd, d MMMM yyyy"), "dddd, d MMMM")
+        check("long date without year, American", Fmt.withoutYear("dddd, MMMM d, yyyy"), "dddd, MMMM d")
+        check("long date without year, French", Fmt.withoutYear("dddd d MMMM yyyy"), "dddd d MMMM")
+        check("long date without year, Spanish", Fmt.withoutYear("dddd, d 'de' MMMM 'de' yyyy"), "dddd, d 'de' MMMM")
+        check("long date without year, Hungarian", Fmt.withoutYear("yyyy. MMMM d., dddd"), "MMMM d., dddd")
+        check("long date without year, Japanese", Fmt.withoutYear("yyyy\u5e74M\u6708d\u65e5dddd"), "M\u6708d\u65e5dddd")
+        check("long date without year, a word after it", Fmt.withoutYear("dddd, d MMMM yyyy '\u0433'."), "dddd, d MMMM")
+        check("long date without year, year in the middle", Fmt.withoutYear("d MMMM yyyy, dddd"), "d MMMM, dddd")
+
+        check("a day of an earlier year has its year", Fmt.day(new Date(2001, 0, 15, 12).getTime()).indexOf("2001") >= 0, true)
+
         var senders = Fmt.reactionSenders([{ emoji: "a", sender: "ABCD1234" }, { emoji: "b", sender: "" },
                                            { emoji: "a", sender: "" }, { emoji: "a", sender: "EFGH5678" }])
         check("who reacted, by emoji", senders.length, 2)
