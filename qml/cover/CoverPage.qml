@@ -151,8 +151,11 @@ CoverBackground {
         }
     }
 
+    // From here: inside a CoverActionList `window` is its own property, not the app's window.
+    readonly property bool appLocked: window.locked
+
     CoverActionList {
-        enabled: backend.state === "ready" && !cover.inCall && !window.locked
+        enabled: backend.state === "ready" && !cover.inCall && !cover.appLocked
         CoverAction {
             iconSource: "image://theme/icon-cover-new"
             // New message: the contacts, attached to the chat list (swipe left there).
