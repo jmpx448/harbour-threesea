@@ -397,6 +397,8 @@ function emojiRanges(text) {
 // Walks `text`, calling `plain(unit)` for each other UTF-16 unit or pair, `emoji(units, cell)`
 // for each emoji.
 function scanEmoji(text, plain, emoji) {
+    // Most texts: nothing to look up, and no need for the table at all.
+    var candidates = mayHaveEmoji(text)
     var codepoints = []
     var units = []
     for (var i = 0; i < text.length; ++i) {
@@ -415,12 +417,15 @@ function scanEmoji(text, plain, emoji) {
         var first = codepoints[n]
         var found = null
         var length = 0
-        // Emoji start at these: pictographs, symbols, and the digits/#/* of keycaps.
-        if (first >= 0xA9 || first === 0x23 || first === 0x2A || (first >= 0x30 && first <= 0x39)) {
+        if (candidates && EmojiTable.mayStart(first)) {
+            var table = EmojiTable.table()
             var key = ""
-            for (var k = 0; k < EmojiTable.longest && n + k < codepoints.length; ++k) {
+            // The longest sequence that is an emoji. No longer one can start with what isn't in
+            // the table at all.
+            for (var k = 0; n + k < codepoints.length; ++k) {
                 key += (k > 0 ? "-" : "") + codepoints[n + k].toString(16)
-                var cell = EmojiTable.table[key]
+                var cell = table[key]
+                if (cell === undefined) break
                 if (cell) { found = cell; length = k + 1 }
             }
         }

@@ -385,13 +385,20 @@ mod tests {
     /// Every emoji the app has a picture for (Threema's own list) can be reacted with.
     #[test]
     fn every_emoji_of_the_table_counts() {
-        let table = include_str!("../../qml/components/EmojiTable.js");
-        let table = table.split_once("var table = {").unwrap().1;
+        let script = include_str!("../../qml/components/EmojiTable.js");
+        let literal = script
+            .lines()
+            .find_map(|line| line.strip_prefix("var data = "))
+            .unwrap();
+        let json: String = serde_json::from_str(literal).unwrap();
+        let table: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&json).unwrap();
         let mut seen = 0;
-        for entry in table.split(",\"").map(|e| e.trim_start_matches('"')) {
-            let Some((key, _)) = entry.split_once("\":\"") else {
+        for (key, cell) in table {
+            // The start of a longer sequence: no picture of its own.
+            if cell == "" {
                 continue;
-            };
+            }
             let emoji: String = key
                 .split('-')
                 .map(|c| char::from_u32(u32::from_str_radix(c, 16).unwrap()).unwrap())

@@ -42,9 +42,13 @@ Item {
     property var recent: []
     property var gifs: []
 
-    readonly property int gifTab: EmojiData.categories.length
+    readonly property int gifTab: EmojiData.names.length
+
+    // Each chat has a panel, most are never opened: the emoji list is read at the first opening.
+    property bool opened: false
 
     function load() {
+        opened = true
         // Opens on the recently used, if any (set once: picking must not switch tabs).
         backend.call("recentEmoji", {}, function(ok, result) {
             if (!ok) return
@@ -92,6 +96,7 @@ Item {
 
     // The grid's items: [text, cell, tones?].
     readonly property var items: {
+        if (!opened) return []
         if (tab === -1) {
             var list = []
             for (var i = 0; i < recent.length; ++i) {
@@ -100,7 +105,7 @@ Item {
             }
             return list
         }
-        if (tab >= 0 && tab < gifTab) return EmojiData.categories[tab][1]
+        if (tab >= 0 && tab < gifTab) return EmojiData.items(tab)
         return []
     }
 
@@ -142,12 +147,12 @@ Item {
         anchors.top: topLine.bottom
         width: parent.width
         height: Theme.itemSizeSmall
-        readonly property real cellWidth: Math.floor(width / (EmojiData.categories.length
+        readonly property real cellWidth: Math.floor(width / (EmojiData.names.length
                                                              + (panel.reactionMode ? 1 : 3)))
         readonly property real iconSize: Math.min(Theme.iconSizeSmallPlus, Math.round(cellWidth * 0.7))
 
         Repeater {
-            model: EmojiData.categories.length + (panel.reactionMode ? 1 : 2)
+            model: EmojiData.names.length + (panel.reactionMode ? 1 : 2)
             MouseArea {
                 id: tabKey
                 readonly property int tabIndex: index - 1
@@ -182,7 +187,7 @@ Item {
                     highlighted: tabKey.current
                     source: panel.iconSource(tabKey.tabIndex === -1 ? "recent"
                                              : tabKey.tabIndex === panel.gifTab ? "gif"
-                                             : EmojiData.categories[tabKey.tabIndex][0])
+                                             : EmojiData.names[tabKey.tabIndex])
                 }
             }
         }
@@ -190,7 +195,7 @@ Item {
         MouseArea {
             id: backspaceKey
             visible: !panel.reactionMode
-            width: parent.width - (EmojiData.categories.length + 2) * tabs.cellWidth
+            width: parent.width - (EmojiData.names.length + 2) * tabs.cellWidth
             height: tabs.height
             onPressed: {
                 panel.backspace()
