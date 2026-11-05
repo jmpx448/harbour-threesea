@@ -29,6 +29,21 @@ function text(kind, message) {
     case "backupInvalid":
         //% "The file could not be read as a Threema backup."
         return qsTrId("threesea-la-error-backup-invalid")
+    case "backupWrite":
+        //% "The backup could not be written. Check the backup folder."
+        return qsTrId("threesea-la-error-backup-write")
+    case "backupNoRoom":
+        //% "The backup folder's storage has too little free space for a backup. Free some space or choose another folder."
+        return qsTrId("threesea-la-error-backup-no-room")
+    case "backupRunning":
+        //% "A backup is being written right now."
+        return qsTrId("threesea-la-error-backup-running")
+    case "backupNoFolder":
+        //% "Choose a backup folder first."
+        return qsTrId("threesea-la-error-backup-no-folder")
+    case "backupNoPassword":
+        //% "Enter a backup password first."
+        return qsTrId("threesea-la-error-backup-no-password")
     case "backupIdentity":
         //% "This backup belongs to a different Threema ID or key."
         return qsTrId("threesea-la-error-backup-identity")

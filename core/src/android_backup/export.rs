@@ -116,6 +116,26 @@ type Writer = zip::ZipWriter<std::fs::File>;
 /// How much of an entry is compressed before looking at the cancel flag again.
 const ADD_CHUNK_BYTES: usize = 1 << 20;
 
+/// What a failed write means for the user. Never `BackupInvalid`: that is about reading a file.
+fn write_error(error: &std::io::Error) -> ApiError {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded
+    ) {
+        ApiError::BackupNoRoom
+    } else {
+        ApiError::BackupWrite(error.to_string())
+    }
+}
+
+fn zip_error(error: zip::result::ZipError) -> ApiError {
+    match error {
+        zip::result::ZipError::Io(error) => write_error(&error),
+        other => ApiError::BackupWrite(other.to_string()),
+    }
+}
+
 fn export_cancelled() -> ApiError {
     ApiError::Internal("backup cancelled".into())
 }
@@ -181,8 +201,7 @@ impl Export {
         let temporary = self.directory.join(format!("{name}.part"));
         let create = temporary.clone();
         let writer = tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
-            let file = std::fs::File::create(&create)
-                .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+            let file = std::fs::File::create(&create).map_err(|e| write_error(&e))?;
             Ok(zip::ZipWriter::new(file))
         })
         .await
@@ -191,11 +210,8 @@ impl Export {
         let result = self.write_entries(writer, &mut summary).await;
         let finished = match result {
             Ok(writer) => tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-                let mut file = writer
-                    .finish()
-                    .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
-                file.flush()
-                    .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+                let mut file = writer.finish().map_err(zip_error)?;
+                file.flush().map_err(|e| write_error(&e))?;
                 Ok(())
             })
             .await
@@ -214,7 +230,7 @@ impl Export {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
         }
-        std::fs::rename(&temporary, &path).map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+        std::fs::rename(&temporary, &path).map_err(|e| write_error(&e))?;
         summary.removed_old_backups = self.rotate(&name);
         Ok((summary, path))
     }
@@ -262,17 +278,13 @@ impl Export {
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
                 .with_aes_encryption(zip::AesMode::Aes256, &password);
-            writer
-                .start_file(name, options)
-                .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+            writer.start_file(name, options).map_err(zip_error)?;
             // In pieces: one big video must not hold up whoever waits for the cancel.
             for piece in data.chunks(ADD_CHUNK_BYTES) {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(export_cancelled());
                 }
-                writer
-                    .write_all(piece)
-                    .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+                writer.write_all(piece).map_err(|e| write_error(&e))?;
             }
             Ok(writer)
         })
@@ -551,7 +563,7 @@ impl Export {
                                 .and_then(|()| {
                                     writer.write_all(&data).map_err(zip::result::ZipError::Io)
                                 })
-                                .map_err(|e| ApiError::BackupInvalid(e.to_string()))?;
+                                .map_err(zip_error)?;
                             Ok(true)
                         })();
                         (writer, result)

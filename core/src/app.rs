@@ -984,6 +984,21 @@ pub enum ApiError {
     /// An Android data backup that cannot be read (damaged, truncated, not a backup).
     #[error("{0}")]
     BackupInvalid(String),
+    /// A data backup that could not be written into its folder.
+    #[error("{0}")]
+    BackupWrite(String),
+    /// The folder's storage has no room for a data backup.
+    #[error("no room for the backup")]
+    BackupNoRoom,
+    /// A data backup is being written already (one at a time).
+    #[error("a backup is already running")]
+    BackupRunning,
+    /// A data backup needs a folder, and none was given or stored.
+    #[error("no backup folder chosen")]
+    BackupNoFolder,
+    /// A data backup needs a password, and none was given or stored.
+    #[error("no backup password")]
+    BackupNoPassword,
     /// Password too short.
     #[error("password too short")]
     PasswordTooShort,
@@ -1160,6 +1175,11 @@ impl ApiError {
             Self::BackupVersion(_) => "backupVersion",
             Self::BackupOtherIdentity => "backupIdentity",
             Self::BackupInvalid(_) => "backupInvalid",
+            Self::BackupWrite(_) => "backupWrite",
+            Self::BackupNoRoom => "backupNoRoom",
+            Self::BackupRunning => "backupRunning",
+            Self::BackupNoFolder => "backupNoFolder",
+            Self::BackupNoPassword => "backupNoPassword",
             Self::PasswordTooShort => "passwordTooShort",
             Self::PasswordTooLong => "passwordTooLong",
             Self::SafeNotFound => "safeNotFound",

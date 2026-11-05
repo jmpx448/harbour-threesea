@@ -2064,18 +2064,18 @@ impl App {
     ) -> Result<Value, ApiError> {
         use crate::store::keys;
         if self.android_export.as_ref().is_some_and(|done| !done.get()) {
-            return Err(ApiError::Internal("an export is already running".into()));
+            return Err(ApiError::BackupRunning);
         }
         let directory = directory
             .filter(|d| !d.is_empty())
             .or(self.store.setting(keys::ANDROID_EXPORT_DIR)?)
-            .ok_or_else(|| ApiError::Internal("no folder chosen".into()))?;
+            .ok_or(ApiError::BackupNoFolder)?;
         let password = match password.filter(|p| !p.is_empty()) {
             Some(password) => password,
             None => Zeroizing::new(
                 self.store
                     .setting(keys::ANDROID_EXPORT_PASSWORD)?
-                    .ok_or(ApiError::PasswordTooShort)?,
+                    .ok_or(ApiError::BackupNoPassword)?,
             ),
         };
         if password.chars().count() < 8 {
@@ -2176,9 +2176,17 @@ mod export_tests {
         media::MediaPart,
     };
 
-    async fn run_export(app: &App, directory: &std::path::Path, keep: usize) -> Value {
+    /// The job for `directory`, and where its events go.
+    fn export_job(
+        app: &App,
+        directory: &std::path::Path,
+        keep: usize,
+    ) -> (
+        Export,
+        tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>,
+    ) {
         let identity = app.store.identity().unwrap().unwrap();
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let job = Export {
             store: std::rc::Rc::clone(&app.store),
             media: std::sync::Arc::clone(&app.media),
@@ -2191,6 +2199,11 @@ mod export_tests {
             done: std::rc::Rc::new(std::cell::Cell::new(false)),
             cancel: std::sync::Arc::default(),
         };
+        (job, events_rx)
+    }
+
+    async fn run_export(app: &App, directory: &std::path::Path, keep: usize) -> Value {
+        let (job, mut events_rx) = export_job(app, directory, keep);
         job.run().await;
         let mut done = Value::Null;
         while let Ok(event) = events_rx.try_recv() {
@@ -2329,6 +2342,56 @@ mod export_tests {
         });
         assert_eq!(app.store.setting(keys::ANDROID_EXPORT_ERROR).unwrap(), None);
         assert!(restored.iter().any(|m| m.body == "private words"));
+    }
+
+    /// The folder is gone: that is a failure to write, not a file that can't be read, also for
+    /// whoever looks at the last attempt later.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_folder_that_cant_be_written_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path(), [7; 32]);
+        let gone = dir.path().join("gone");
+        let (job, mut events) = export_job(&app, &gone, 3);
+        job.run().await;
+        let mut kind = Value::Null;
+        while let Ok(event) = events.try_recv() {
+            let json = event.to_json(&app.store, true);
+            if json["event"] == "androidExportDone" {
+                assert_eq!(json["ok"], false);
+                kind = json["kind"].clone();
+            }
+        }
+        assert_eq!(kind, "backupWrite");
+        assert_eq!(
+            app.store
+                .setting(crate::store::keys::ANDROID_EXPORT_ERROR)
+                .unwrap()
+                .as_deref(),
+            Some("backupWrite")
+        );
+    }
+
+    /// Nothing to write with, and a second backup beside a running one, each with its own kind:
+    /// the page has a text for those, and none for an English sentence from here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn starting_a_backup_says_what_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let error = app
+            .android_backup_export(None, Some(Zeroizing::new("long enough".into())))
+            .unwrap_err();
+        assert_eq!(error.kind(), "backupNoFolder");
+        let folder = folder.path().to_str().unwrap().to_owned();
+        let error = app
+            .android_backup_export(Some(folder.clone()), None)
+            .unwrap_err();
+        assert_eq!(error.kind(), "backupNoPassword");
+        app.android_export = Some(std::rc::Rc::new(std::cell::Cell::new(false)));
+        let error = app
+            .android_backup_export(Some(folder), Some(Zeroizing::new("long enough".into())))
+            .unwrap_err();
+        assert_eq!(error.kind(), "backupRunning");
     }
 
     #[test]
