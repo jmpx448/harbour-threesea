@@ -2747,6 +2747,7 @@ Page {
 
             delegate: MessageDelegate {
                 width: listView.width
+                listMoving: listView.moving || listView.quickScrollAnimating
                 hasOlder: index + 1 < messages.count
                 olderCreatedAt: index + 1 < messages.count ? messages.fieldAt(index + 1, "createdAt") || 0 : 0
                 olderOutgoing: index + 1 < messages.count && messages.fieldAt(index + 1, "outgoing") === true

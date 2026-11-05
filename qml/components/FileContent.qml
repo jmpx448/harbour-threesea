@@ -16,6 +16,13 @@ Item {
     property bool highlighted
     // Whether the bubble is in view: a GIF outside it needn't be decoded frame by frame.
     property bool onScreen: true
+    // The list is moving: the full picture waits until it stops, since reading one means reading
+    // and decrypting the whole file, for a bubble that may be gone again in a moment. Once the
+    // list has rested the picture stays wanted, so scrolling on doesn't take it away.
+    property bool listMoving: false
+    property bool fullWanted: false
+    onListMovingChanged: if (!listMoving) fullWanted = true
+    Component.onCompleted: if (!listMoving) fullWanted = true
     property color textColor: Theme.primaryColor
     // Corners like the surrounding bubble (concentric radius, same corners rounded).
     property real radius: 0
@@ -46,7 +53,13 @@ Item {
     readonly property real pictureWidth: Math.min(maxWidth, Screen.width * 2 / 3)
     readonly property real aspect: {
         var w = body && body.width, h = body && body.height
-        if (!(w > 0 && h > 0) && thumbnail.status === Image.Ready) {
+        // The full picture only carries on from a thumbnail it replaced. Without one the bubble
+        // stays as it was built and crops: going by the picture would change its height, and
+        // move the list, at each rest after a rebuild.
+        if (!(w > 0 && h > 0) && body && body.thumbnailState === 2 && fullPicture.status === Image.Ready) {
+            w = fullPicture.implicitWidth
+            h = fullPicture.implicitHeight
+        } else if (!(w > 0 && h > 0) && thumbnail.status === Image.Ready) {
             w = thumbnail.implicitWidth
             h = thumbnail.implicitHeight
         }
@@ -169,7 +182,7 @@ Item {
                 }"
         }
 
-        // Thumbnail first, the full image on top once it is here.
+        // Thumbnail first, the full image on top once it is here, and then the thumbnail goes.
         Image {
             id: thumbnail
             // Not under a playing GIF (dimmed, both would show).
@@ -179,11 +192,12 @@ Item {
             asynchronous: true
             cache: false
             sourceSize.width: root.pictureWidth
-            source: root.hasPicture && root.body.thumbnailState === 2
+            source: root.hasPicture && root.body.thumbnailState === 2 && fullPicture.status !== Image.Ready
                     ? "image://threesea/" + root.messageId + "/thumb" : ""
         }
 
         Image {
+            id: fullPicture
             visible: root.isImage && status === Image.Ready && !animation.ready
             anchors.fill: parent
             fillMode: Image.PreserveAspectCrop
@@ -191,7 +205,8 @@ Item {
             cache: false
             sourceSize.width: root.pictureWidth
             // GIFs: AnimatedMedia draws them (the first frame too).
-            source: root.isImage && !root.isGif && root.fileHere ? "image://threesea/" + root.messageId + "/file" : ""
+            source: root.isImage && !root.isGif && root.fileHere && root.fullWanted
+                    ? "image://threesea/" + root.messageId + "/file" : ""
         }
         AnimatedMedia {
             id: animation
@@ -203,7 +218,8 @@ Item {
         }
         // Placeholder until something is loaded.
         Rectangle {
-            visible: root.hasPicture && thumbnail.status !== Image.Ready && !root.fileHere
+            visible: root.hasPicture && thumbnail.status !== Image.Ready && fullPicture.status !== Image.Ready
+                     && !animation.ready
             anchors.fill: parent
             color: Theme.rgba(Theme.primaryColor, Fmt.alpha(0.05, backend.emulator))
         }

@@ -488,6 +488,7 @@ ListItem {
                     onScreen: !isGif || (!!message.chatView
                                          && message.y + message.height > message.chatView.contentY
                                          && message.y < message.chatView.contentY + message.chatView.height)
+                    listMoving: message.listMoving
                     maxWidth: message.maxTextWidth
                     highlighted: message.highlighted
                     textColor: message.textColor
