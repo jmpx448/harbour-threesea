@@ -602,8 +602,9 @@ pub enum Command {
         #[serde(default)]
         identity: Option<String>,
     },
-    /// Several, in the given order: `{forwarded, failed, errors}`, `errors` being the kinds of
-    /// error that came up, each once.
+    /// Several, in the given order: `{forwarded, failed, errors, failedMembers}`, `errors` being the
+    /// kinds of error that came up, each once, `failedMembers` how many of a list's members a file
+    /// didn't reach.
     ForwardMessages {
         messages: Vec<i64>,
         identity: String,
@@ -2312,12 +2313,15 @@ impl App {
                 identity,
                 caption,
             } => {
-                let (mut forwarded, mut failed) = (0, 0);
+                let (mut forwarded, mut failed, mut failed_members) = (0, 0, 0);
                 let mut errors: Vec<&str> = Vec::new();
                 for message in messages {
                     match Box::pin(self.forward_message(message, &identity, caption.clone())).await
                     {
-                        Ok(_) => forwarded += 1,
+                        Ok(sent) => {
+                            forwarded += 1;
+                            failed_members += sent["failedMembers"].as_u64().unwrap_or(0);
+                        }
                         Err(error) => {
                             tracing::warn!(%error, "forwarding failed");
                             failed += 1;
@@ -2327,7 +2331,10 @@ impl App {
                         }
                     }
                 }
-                Ok(json!({ "forwarded": forwarded, "failed": failed, "errors": errors }))
+                Ok(
+                    json!({ "forwarded": forwarded, "failed": failed, "errors": errors,
+                           "failedMembers": failed_members }),
+                )
             }
             Command::SetChatNotifications {
                 identity,

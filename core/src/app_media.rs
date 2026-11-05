@@ -1723,14 +1723,21 @@ impl App {
         // Its state may have changed (a list's copy counts as sent).
         let message = self.store.message(message.id)?.unwrap_or(message);
         if let Conversation::List(list) = &conversation {
+            let mut failed_members = 0;
             for member in self.list_receivers(list)? {
                 // What the list got has been made fit to leave; each member gets the same.
                 let forwarded = Box::pin(self.copy_message(message.id, &member, false, None)).await;
                 if let Err(error) = forwarded {
                     tracing::warn!(%error, "sending a list's file to a member failed");
+                    failed_members += 1;
                 }
             }
-            return Ok(self.store.message_json(&message));
+            let mut sent = self.store.message_json(&message);
+            // Only how many: why might tell that one of them is a hidden private chat.
+            if failed_members > 0 {
+                sent["failedMembers"] = failed_members.into();
+            }
+            return Ok(sent);
         }
         self.spawn_upload(message.id);
         Ok(self.store.message_json(&message))
@@ -4139,6 +4146,61 @@ mod tests {
             forward(json!({"messages": [text], "caption": "my words"})).await,
             Value::from("only words")
         );
+    }
+
+    /// A member a list's file couldn't reach is counted, and which or why stays out of the answer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_forward_to_a_list_counts_the_members_it_missed() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let body = json!({"rendering": "file", "mediaType": "application/pdf", "name": "a.pdf",
+                          "size": 4, "fileState": STATE_LOCAL});
+        let file = app
+            .store
+            .insert_incoming("BBBBBBBB", 1, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media.write(file, MediaPart::File, b"%PDF").unwrap();
+        let list = app
+            .store
+            .create_distribution_list("Crew", vec!["CCCCCCCC".into(), "DDDDDDDD".into()])
+            .unwrap();
+        let mut forward = async || -> Value {
+            let request = json!({"id": 1, "cmd": "forwardMessages", "identity": list.key,
+                                 "messages": [file]})
+            .to_string();
+            let reply = in_own_set(app.handle(&request)).await;
+            serde_json::from_str(&reply).unwrap()
+        };
+        let reply = forward().await;
+        assert_eq!(reply["result"]["forwarded"], 1, "{reply}");
+        assert_eq!(reply["result"]["failedMembers"], 0, "{reply}");
+
+        app.store.set_private("DDDDDDDD", true).unwrap();
+        app.unlocked.set(false);
+        let mut forward = async || -> Value {
+            let request = json!({"id": 1, "cmd": "forwardMessages", "identity": list.key,
+                                 "messages": [file]})
+            .to_string();
+            let reply = in_own_set(app.handle(&request)).await;
+            serde_json::from_str(&reply).unwrap()
+        };
+        let reply = forward().await;
+        assert_eq!(reply["result"]["forwarded"], 1, "{reply}");
+        assert_eq!(reply["result"]["failedMembers"], 1, "{reply}");
+        assert_eq!(reply["result"]["errors"], json!([]), "{reply}");
     }
 
     /// What couldn't be forwarded is said, not only counted: the UI has only this to go by.
