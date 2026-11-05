@@ -2374,3 +2374,84 @@ fn a_group_setup_reaches_the_browser_as_receiver_then_chat() {
     };
     assert!(position("receiver", &key) < position("conversation", &key));
 }
+
+/// A message coming in doesn't build all receivers again. Everything that changes what the browser
+/// may see of them does, however it is written; above all a chat going private and back (§7.8).
+#[test]
+fn receivers_are_built_again_only_when_something_of_them_changed() {
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    let builds = |app: &App| app.web.refresh.receiver_builds;
+    let visible = |sent: &[Value]| {
+        let wire = sent
+            .iter()
+            .find(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from("receiver")))
+            .unwrap_or_else(|| panic!("no receiver: {sent:?}"));
+        saltyrtc::field(saltyrtc::field(wire, "data").unwrap(), "visible")
+            .and_then(Value::as_bool)
+            .unwrap()
+    };
+
+    let before = builds(&app);
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+        .unwrap()
+        .unwrap();
+    app.store.remove_message(message.id).unwrap();
+    app.store
+        .insert_incoming("BBBBBBBB", 2, "text", "hi", 2)
+        .unwrap();
+    app.store.set_setting("something_else", "1").unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before, "not for a message or another setting");
+    sent_values(&mut rx);
+
+    // Going private is what must never be missed, then coming back, then the lock.
+    app.store.set_private("BBBBBBBB", true).unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 1);
+    assert!(!visible(&sent_values(&mut rx)));
+    app.store.set_private("BBBBBBBB", false).unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 2);
+    assert!(visible(&sent_values(&mut rx)));
+    let unlocked = app.unlocked;
+    app.unlocked = !unlocked;
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 3, "unlocked");
+    app.unlocked = unlocked;
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 4, "locked");
+
+    // The rest of what the receivers are made of, each on its own.
+    let contact = crate::contacts::test_contact("DDDDDDDD");
+    app.store.upsert_contact(&contact).unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 5, "contact");
+    let group = app.create_group("Group", &["BBBBBBBB".into()]).unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 6, "group");
+    app.store
+        .create_distribution_list("List", vec!["BBBBBBBB".into()])
+        .unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 7, "list");
+    let mut settings = app.app_settings().unwrap();
+    settings.blocked_contacts = vec!["BBBBBBBB".into()];
+    app.save_app_settings(&settings).unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 8, "blocked");
+    app.store
+        .set_setting(crate::profile_pictures::SETTING_SHOW, "0")
+        .unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 9, "pictures shown");
+    app.media
+        .write_picture(group["key"].as_str().unwrap(), &picture())
+        .unwrap();
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 10, "a picture");
+    app.web_refresh();
+    assert_eq!(builds(&app), before + 10, "nothing");
+}

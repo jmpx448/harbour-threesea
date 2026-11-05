@@ -47,12 +47,70 @@ pub(crate) const RECEIVER_UPDATES_MAX: usize = 20;
 
 const RECEIVER_KINDS: [&str; 3] = ["contact", "group", "distributionList"];
 
+/// Counts every change to what the browsers' receivers are made of: contacts, groups, lists, the
+/// private chats, the blocked contacts and whether contacts' pictures are shown. The triggers say
+/// so for every way of writing them, so a refresh can tell it needn't build them all again for each
+/// incoming message. Nothing that could be there already stops it (`IF NOT EXISTS`).
+pub(crate) const MIGRATION_RECEIVER_GENERATION: &str = "
+    CREATE TABLE IF NOT EXISTS receiver_generation (
+        id    INTEGER PRIMARY KEY CHECK (id = 1),
+        value INTEGER NOT NULL
+    );
+    INSERT OR IGNORE INTO receiver_generation (id, value) VALUES (1, 0);
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_contacts_insert AFTER INSERT ON contacts
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_contacts_update AFTER UPDATE ON contacts
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_contacts_delete AFTER DELETE ON contacts
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_groups_insert AFTER INSERT ON groups
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_groups_update AFTER UPDATE ON groups
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_groups_delete AFTER DELETE ON groups
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_lists_insert
+        AFTER INSERT ON distribution_lists
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_lists_update
+        AFTER UPDATE ON distribution_lists
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_lists_delete
+        AFTER DELETE ON distribution_lists
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_private_insert AFTER INSERT ON private_chats
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_private_update AFTER UPDATE ON private_chats
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_private_delete AFTER DELETE ON private_chats
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_settings_insert AFTER INSERT ON settings
+        WHEN NEW.key IN ('app_settings', 'profilePictureReceive')
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_settings_update AFTER UPDATE ON settings
+        WHEN NEW.key IN ('app_settings', 'profilePictureReceive')
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+    CREATE TRIGGER IF NOT EXISTS receiver_generation_settings_delete AFTER DELETE ON settings
+        WHEN OLD.key IN ('app_settings', 'profilePictureReceive')
+        BEGIN UPDATE receiver_generation SET value = value + 1; END;
+";
+
+/// What the browsers' receivers were last built from. The subscriptions' shape counts, for one
+/// that couldn't read them on subscribing, and whether the private chats are unlocked so that
+/// nothing that might bear on them can go by unseen.
+type ReceiverSource = (i64, u64, bool, usize);
+
 /// When the browsers were last brought up to date.
 #[derive(Default)]
 pub(crate) struct RefreshState {
-    /// The store's change count, the subscriptions' shape and the picture writes at the last
-    /// refresh.
-    last: Option<(u64, usize, u64)>,
+    /// The store's change count, the subscriptions' shape, the picture writes and whether the
+    /// private chats are unlocked at the last refresh.
+    last: Option<(u64, usize, u64, bool)>,
+    /// What the receivers were last built from.
+    receivers: Option<ReceiverSource>,
+    /// How many times they were.
+    #[cfg(test)]
+    pub(crate) receiver_builds: u32,
 }
 
 /// What a connected browser subscribed to, and what it has been sent.
@@ -1175,7 +1233,12 @@ impl App {
             })
             .sum::<usize>()
             + self.web.subscriptions.len();
-        let now = (self.store.changes(), shape, self.media.picture_writes());
+        let now = (
+            self.store.changes(),
+            shape,
+            self.media.picture_writes(),
+            self.unlocked,
+        );
         if self.web.refresh.last == Some(now) {
             return;
         }
@@ -1187,13 +1250,21 @@ impl App {
         else {
             return;
         };
-        let receivers = if self.web.subscriptions.values().any(|s| s.receivers) {
+        // An error reading the count: as if it had changed.
+        let source = self
+            .store
+            .receiver_generation()
+            .ok()
+            .map(|generation| (generation, now.2, self.unlocked, shape));
+        let receivers = if self.web.subscriptions.values().any(|s| s.receivers)
+            && (source.is_none() || source != self.web.refresh.receivers)
+        {
             let Ok(receivers) = self.web_current_receivers(&private) else {
                 return;
             };
-            receivers
+            Some(receivers)
         } else {
-            Vec::new()
+            None
         };
         let profile = if self
             .web
@@ -1209,6 +1280,13 @@ impl App {
             None
         };
         self.web.refresh.last = Some(now);
+        if receivers.is_some() {
+            self.web.refresh.receivers = source;
+            #[cfg(test)]
+            {
+                self.web.refresh.receiver_builds += 1;
+            }
+        }
         let user = identity.threema_id;
         let mut out: Vec<(i64, Value)> = Vec::new();
         let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
@@ -1242,9 +1320,9 @@ impl App {
                     ));
                 }
             }
-            if subscriptions.receivers {
+            if let (true, Some(receivers)) = (subscriptions.receivers, &receivers) {
                 let updates =
-                    self.web_receiver_updates(&mut subscriptions.sent_receivers, &receivers);
+                    self.web_receiver_updates(&mut subscriptions.sent_receivers, receivers);
                 out.extend(updates.into_iter().map(|update| (session, update)));
             }
             for (key, newest) in &mut subscriptions.chats {

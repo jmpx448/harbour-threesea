@@ -796,4 +796,11 @@ before new conversations, as the browser ignores a conversation of a receiver it
 `update/receivers` makes the browser forget the pictures it has loaded, `update/receiver` doesn't.
 The removals say `type: text` and `isStatus: false` whatever the message was: the browser goes by
 the ID. `update/alert` (`source: server`) carries the chat server's words; an alert is a `warning`,
-what it closes the connection with an `error`.
+what it closes the connection with an `error`. The browser shows each as a dialog, so the same words
+go to a browser once until a connection has stayed up for 60 s. `update/receiver` only adds to what
+the browser has, so a name taken away goes as an empty one.
+
+Building all receivers takes a look at every contact, so a refresh does it only when
+`receiver_generation` moved: triggers count every change to contacts, groups, lists, the private
+chats, the blocked contacts and whether pictures are shown. Picture writes, the lock state and a new
+subscription count as well.

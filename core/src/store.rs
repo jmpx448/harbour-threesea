@@ -211,6 +211,8 @@ const MIGRATIONS: &[&str] = &[
     crate::profile_pictures::MIGRATION_SYNCED_PICTURES,
     // 40: who is to get a group's picture once it has been uploaded anew; a newer one on its way
     crate::groups::MIGRATION_PICTURE_SENDS,
+    // 41: a count of the changes to what Threema Web's receivers are made of, kept by triggers
+    crate::app_web_data::MIGRATION_RECEIVER_GENERATION,
 ];
 
 /// Setting keys.
@@ -556,6 +558,16 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Goes up with every change to what Threema Web's receivers are made of
+    /// ([`crate::app_web_data::MIGRATION_RECEIVER_GENERATION`]).
+    pub(crate) fn receiver_generation(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM receiver_generation", [], |row| {
+                row.get(0)
+            })?)
     }
 
     /// Read a setting.
