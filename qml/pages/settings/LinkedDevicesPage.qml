@@ -3,6 +3,7 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import harbour.threesea 1.0
 import "../../components/Errors.js" as Errors
+import "../../components/Format.js" as Fmt
 
 // Settings → Linked devices (multi-device, ADR 0011): this device and the linked ones (Threema
 // for Desktop). Pull-down: link a device, remove all; long press a device: remove it.
@@ -197,7 +198,7 @@ Page {
                             : model.lastDisconnectAt
                               //% "Last active %1"
                               ? qsTrId("threesea-la-device-last-active").arg(
-                                    Format.formatDate(new Date(model.lastDisconnectAt), Formatter.TimepointRelative))
+                                    Fmt.time(model.lastDisconnectAt, Format, Formatter))
                               : ""
                 }
             }
