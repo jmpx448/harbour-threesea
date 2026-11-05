@@ -66,7 +66,7 @@ Page {
         id: conversations
         keyField: "identity"
         roles: ["identity", "displayName", "unread", "markedUnread", "lastMessage", "verification", "section",
-                "group", "senderName", "pictureVersion", "muted", "pinned", "distributionList", "draft",
+                "group", "left", "senderName", "pictureVersion", "muted", "pinned", "distributionList", "draft",
                 "draftMentions"]
     }
 
@@ -554,10 +554,21 @@ Page {
                                                       page.chatAction("emptyConversation", model.identity))
                     }
                     MenuItem {
-                        //% "Delete chat"
-                        text: qsTrId("threesea-me-delete-chat")
-                        //% "Deleting chat"
-                        onClicked: item.remorseAction(qsTrId("threesea-la-deleting-chat"),
+                        // A group goes only once left (its page does that); until then deleting
+                        // would just empty it. A list's chat goes with the list.
+                        visible: model.group !== true || model.left === true
+                        text: model.group === true
+                              ? qsTrId("threesea-me-delete-group")
+                              : model.distributionList === true
+                                ? qsTrId("threesea-me-delete-list")
+                                //% "Delete chat"
+                                : qsTrId("threesea-me-delete-chat")
+                        onClicked: item.remorseAction(model.group === true
+                                                      ? qsTrId("threesea-la-deleting-group")
+                                                      : model.distributionList === true
+                                                        ? qsTrId("threesea-la-deleting-list")
+                                                        //% "Deleting chat"
+                                                        : qsTrId("threesea-la-deleting-chat"),
                                                       page.chatAction("deleteConversation", model.identity))
                     }
                 }
@@ -752,7 +763,7 @@ Page {
             enabled: listView.count === 0 && page.loadError.length === 0 && page.mainList
             //% "No chats yet"
             text: qsTrId("threesea-la-no-chats")
-            //% "Pull down to write a message"
+            //% "Swipe left to choose a contact"
             hintText: qsTrId("threesea-la-no-chats-hint")
         }
 

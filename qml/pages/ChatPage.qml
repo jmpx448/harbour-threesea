@@ -1830,8 +1830,11 @@ Page {
         })
         dialog.accepted.connect(function() {
             if (dialog.block) {
-                //% "Reporting and deleting"
-                spamRemorse.execute(qsTrId("threesea-la-spam-reporting-deleting"), function() {
+                spamRemorse.execute(page.isGroup
+                                    //% "Reporting, blocking, leaving and deleting"
+                                    ? qsTrId("threesea-la-spam-reporting-group")
+                                    //% "Reporting, blocking and deleting"
+                                    : qsTrId("threesea-la-spam-reporting-contact"), function() {
                     page.reportSpam(true)
                 })
             } else {
