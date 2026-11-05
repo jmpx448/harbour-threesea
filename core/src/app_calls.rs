@@ -129,7 +129,12 @@ impl App {
                     }
                 }
                 Effect::RemoteCandidates(candidates) => {
-                    self.emit_call(json!({ "event": "callCandidates", "candidates": candidates }));
+                    let candidates = for_ip_version(candidates, ipv4_only());
+                    if !candidates.is_empty() {
+                        self.emit_call(
+                            json!({ "event": "callCandidates", "candidates": candidates }),
+                        );
+                    }
                 }
                 Effect::Ended { record } => {
                     tracing::info!(result = %record.result, outgoing = record.outgoing, "call ended");
@@ -382,7 +387,8 @@ impl App {
 
     /// `callCandidates`: our ICE candidates.
     pub(crate) fn call_candidates(&mut self, call_id: u32, candidates: Vec<Candidate>) -> Value {
-        if self.is_current_call(call_id) {
+        let candidates = for_ip_version(candidates, ipv4_only());
+        if self.is_current_call(call_id) && !candidates.is_empty() {
             let effects = self.calls.local_candidates(candidates);
             self.apply_call_effects(effects);
         }
@@ -496,11 +502,24 @@ fn split_turn_url(url: &str) -> Option<(&str, &str, u16, &str)> {
     Some((scheme, host, port.parse().ok()?, query))
 }
 
+fn ipv4_only() -> bool {
+    crate::https::IPV4_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A direct connection follows the IPv6 setting (Settings → Advanced) as well: with IPv6 off, both
+/// sides' IPv6 addresses stay out of the call.
+fn for_ip_version(mut candidates: Vec<Candidate>, ipv4_only: bool) -> Vec<Candidate> {
+    if ipv4_only {
+        candidates.retain(|candidate| !candidate.is_ipv6());
+    }
+    candidates
+}
+
 /// The TURN servers with their addresses instead of host names: inside Sailjail libnice can't
 /// resolve names (GLib's resolver fails there, our own lookups work), so the engine gets IPs.
 /// IPv6 addresses only if IPv6 is on (Settings → Advanced). A name that doesn't resolve stays.
 async fn resolve_turn_urls(urls: &[String]) -> Vec<String> {
-    let ipv4_only = crate::https::IPV4_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+    let ipv4_only = ipv4_only();
     let mut resolved = Vec::new();
     for url in urls {
         let Some((scheme, host, port, query)) = split_turn_url(url) else {
@@ -533,6 +552,24 @@ async fn resolve_turn_urls(urls: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_off_keeps_ipv6_candidates_out() {
+        let candidate = |text: &str| Candidate {
+            candidate: text.into(),
+            sdp_mid: None,
+            sdp_m_line_index: None,
+            ufrag: None,
+        };
+        let v4 = candidate("candidate:1 1 udp 1 192.0.2.1 5 typ host");
+        let v6 = candidate("candidate:2 1 udp 1 2001:db8::1 5 typ host");
+        let related =
+            candidate("candidate:3 1 udp 1 192.0.2.1 5 typ srflx raddr 2001:db8::1 rport 5");
+        let mdns = candidate("candidate:4 1 udp 1 name.local 5 typ host");
+        let all = vec![v4.clone(), v6, related.clone(), mdns.clone()];
+        assert_eq!(for_ip_version(all.clone(), false), all);
+        assert_eq!(for_ip_version(all, true), vec![v4, related, mdns]);
+    }
     use crate::app::StartConfig;
 
     const OFFER: &str = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n\

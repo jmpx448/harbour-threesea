@@ -59,6 +59,18 @@ pub struct Candidate {
     pub ufrag: Option<String>,
 }
 
+impl Candidate {
+    /// Whether its address is IPv6: `candidate:<foundation> <component> <transport> <priority>
+    /// <address> <port> typ …`. An mDNS name or a damaged line counts as not.
+    #[must_use]
+    pub fn is_ipv6(&self) -> bool {
+        self.candidate
+            .split_ascii_whitespace()
+            .nth(4)
+            .is_some_and(|address| address.contains(':'))
+    }
+}
+
 /// A decoded call signal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Signal {

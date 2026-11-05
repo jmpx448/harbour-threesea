@@ -195,7 +195,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `logClear` | — | `{}`; removes the in-app log files |
 | `forwardSecurity` | — | `{on, multiDevice}`; `on` is false while multi-device is active (SE-199) or the user switched it off |
 | `setForwardSecurity` | `on` | `{on}`; off terminates every session (DisabledByLocal) and the feature mask drops the FS bit, like multi-device activation; messages stay end-to-end encrypted either way (user decision 2026-10-28) |
-| `networkSettings` / `setNetworkSettings` | – / `ipv6` | `{ipv6}`; off: Threema's IPv4-only hosts (`apip`, `blobp-…`, `g-…` instead of the dual-stack `ds-…`); the chat server connection starts again |
+| `networkSettings` / `setNetworkSettings` | – / `ipv6` | `{ipv6}`; off: Threema's IPv4-only hosts (`apip`, `blobp-…`, `g-…` instead of the dual-stack `ds-…`); the chat server connection starts again. 1:1 calls also leave out both sides' IPv6 candidates |
 | `setArchived` | `identity`, `archived` | `{}`; archiving unpins; an incoming message or one we write unarchives; `conversations` has `archivedCount` |
 | `chatMedia` | `identity`, optional `kinds` (default: the saved filter), `limit` (default 60; 0: only the counts), `before` (the `next` of the page before) | `{messages (each with mediaKind: image\|gif\|video\|voice\|audio\|file), kinds, next (where the next page starts, null at the end), counts: {kind: n} (without `before`)}`, newest first (media gallery) |
 | `setMediaKinds` | `kinds` | `{kinds}`; the gallery filter, saved for all chats (absent: all, like Android) |

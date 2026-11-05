@@ -937,7 +937,8 @@ pub enum Command {
     },
     /// Remove the in-app log files.
     LogClear,
-    /// Settings → Advanced: `{ipv6}` (Android's "IPv6 for messages", on by default here).
+    /// Settings → Advanced: `{ipv6}` (Android's "IPv6 for messages", also for calls here, on by
+    /// default).
     NetworkSettings,
     /// Change it; the chat server connection starts again with the other hosts.
     SetNetworkSettings {
