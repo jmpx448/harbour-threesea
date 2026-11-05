@@ -49,6 +49,22 @@ pub fn parse(text: &str) -> Option<ContactCode> {
     })
 }
 
+/// Whether this is an ID backup, Threema for Android's ID export: Base32 in groups of four, in
+/// either of the sizes Android accepts from a scan (`WizardIDRestoreActivity`). Whether it can be
+/// read takes its password.
+#[must_use]
+pub fn is_identity_backup(text: &str) -> bool {
+    const GROUPS: [usize; 2] = [20, 26];
+    let groups = text.trim().split('-');
+    GROUPS.contains(&groups.clone().count())
+        && groups.into_iter().all(|group| {
+            group.len() == 4
+                && group
+                    .bytes()
+                    .all(|c| matches!(c, b'A'..=b'Z' | b'2'..=b'7'))
+        })
+}
+
 /// The QR code modules: `(size, rows of '0'/'1')`, for the UI to draw.
 pub fn modules(text: &str) -> Option<(usize, String)> {
     let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M).ok()?;
@@ -78,11 +94,9 @@ pub fn decode(grey: &[u8], width: usize, height: usize) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn roundtrip_through_pixels() {
-        let text = contact_text("ECHOECHO", &"ab".repeat(32));
-        let (size, bits) = modules(&text).unwrap();
-        // Render with a quiet zone, 4 px per module, then decode.
+    /// Rendered with a quiet zone, 4 px per module, then decoded.
+    fn through_pixels(text: &str) -> String {
+        let (size, bits) = modules(text).unwrap();
         let scale = 4;
         let side = (size + 8) * scale;
         let mut grey = vec![255_u8; side * side];
@@ -96,7 +110,13 @@ mod tests {
                 }
             }
         }
-        let decoded = decode(&grey, side, side).unwrap();
+        decode(&grey, side, side).unwrap()
+    }
+
+    #[test]
+    fn roundtrip_through_pixels() {
+        let text = contact_text("ECHOECHO", &"ab".repeat(32));
+        let decoded = through_pixels(&text);
         assert_eq!(decoded, text);
         let code = parse(&decoded).unwrap();
         assert_eq!(code.identity, "ECHOECHO");
@@ -104,6 +124,35 @@ mod tests {
         assert_eq!(code.expires_at, None);
         assert!(parse("3mid:SHORT,ab").is_none());
         assert!(parse("https://threema.id/ECHOECHO").is_none());
+    }
+
+    fn backup_of(groups: usize) -> String {
+        vec!["AB2C"; groups].join("-")
+    }
+
+    #[test]
+    fn an_id_backup_of_either_size_is_one_and_survives_a_code() {
+        for (groups, length) in [(20, 99), (26, 129)] {
+            let backup = backup_of(groups);
+            assert_eq!(backup.len(), length);
+            assert!(is_identity_backup(&backup));
+            assert!(is_identity_backup(&format!(" {backup}\n")));
+            assert_eq!(through_pixels(&backup), backup);
+        }
+    }
+
+    #[test]
+    fn what_merely_resembles_an_id_backup_is_not_one() {
+        assert!(!is_identity_backup(""));
+        assert!(!is_identity_backup(&backup_of(19)));
+        assert!(!is_identity_backup(&backup_of(21)));
+        assert!(!is_identity_backup(&backup_of(20).to_lowercase()));
+        assert!(!is_identity_backup(&backup_of(20).replace("AB2C", "AB1C")));
+        assert!(!is_identity_backup(&backup_of(20).replace('-', "")));
+        assert!(!is_identity_backup(&contact_text(
+            "ECHOECHO",
+            &"ab".repeat(32)
+        )));
     }
 
     #[test]

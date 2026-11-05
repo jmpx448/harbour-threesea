@@ -2970,7 +2970,9 @@ impl Shared {
             .map_err(|e| ApiError::Internal(e.to_string()))?
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         self.end_backup_reminder()?;
-        Ok(json!({ "backup": backup }))
+        let (size, bits) =
+            crate::qr::modules(&backup).ok_or_else(|| ApiError::Internal("QR code".into()))?;
+        Ok(json!({ "backup": backup, "qr": { "size": size, "bits": bits } }))
     }
 }
 
@@ -3041,12 +3043,15 @@ fn chat_is_marked(store: &crate::store::Store, conversation: &str) -> bool {
 }
 
 /// What a scanned QR code is, for the one place that decides what to do with it, however it
-/// reached the scanner: `kind` (`contact`, `web`, `device`, `link`, `unknown`), and `error`, the
+/// reached the scanner: `kind` (`contact`, `web`, `device`, `link`, `idBackup`, `unknown`), and `error`, the
 /// error kind to show instead when the code can't be used. No network, nothing stored.
 pub(crate) fn qr_kind(text: &str, now_seconds: i64) -> Value {
     use crate::{links::Link, rendezvous::LinkError, web::qr::QrError};
 
     let text = text.trim();
+    if crate::qr::is_identity_backup(text) {
+        return json!({ "kind": "idBackup" });
+    }
     if text.starts_with("3mid:") {
         return match crate::qr::parse(text) {
             None => json!({ "kind": "contact", "error": ApiError::QrInvalid.kind() }),
@@ -3104,6 +3109,14 @@ mod tests {
 
     fn kind(text: &str) -> serde_json::Value {
         super::qr_kind(text, NOW)
+    }
+
+    #[test]
+    fn an_id_backup_is_told_apart_from_other_codes() {
+        let backup = vec!["AB2C"; 20].join("-");
+        assert_eq!(kind(&backup)["kind"], "idBackup");
+        assert_eq!(kind(&vec!["AB2C"; 26].join("-"))["kind"], "idBackup");
+        assert_eq!(kind(&vec!["AB2C"; 21].join("-"))["kind"], "unknown");
     }
 
     #[test]

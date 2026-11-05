@@ -2110,9 +2110,16 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        app.export_identity_backup(Zeroizing::new("long enough here".into()))
+        let exported = app
+            .export_identity_backup(Zeroizing::new("long enough here".into()))
             .await
             .unwrap();
+        // What we make, the scanner on restore takes for what it is, and its code holds it.
+        let backup = exported["backup"].as_str().unwrap();
+        assert_eq!(crate::app::qr_kind(backup, 0)["kind"], "idBackup");
+        let (size, bits) = crate::qr::modules(backup).unwrap();
+        assert_eq!(exported["qr"]["size"], size);
+        assert_eq!(exported["qr"]["bits"], bits);
         assert_eq!(app.store.setting(keys::BACKUP_REMINDER_AT).unwrap(), None);
         assert_eq!(app.take_ui_events(), ["safeChanged"]);
     }
