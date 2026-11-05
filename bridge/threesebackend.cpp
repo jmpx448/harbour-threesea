@@ -128,10 +128,29 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     }
 }
 
+bool ThreeseBackend::shutdown()
+{
+    m_dbKey.fill('\0');
+    bool clean = true;
+    {
+        QWriteLocker locker(&m_coreLock);
+        if (m_core) {
+            clean = threesea_core_quit(m_core);
+            m_core = nullptr;
+        }
+    }
+    // Without the core lock: a task reading media would wait for it. Scrypt takes seconds, and a
+    // task left running would report to this object, which goes with the engine. The application
+    // would wait for these in its destructor as well, however long a video being scaled takes.
+    return QThreadPool::globalInstance()->waitForDone(3000) && clean;
+}
+
 ThreeseBackend::~ThreeseBackend()
 {
     // They read through this object and the core.
     m_mediaReads.waitForDone();
+    // Worker tasks report to this object; shutdown() has seen them off on the usual way out.
+    QThreadPool::globalInstance()->waitForDone();
     m_dbKey.fill('\0');
     QWriteLocker locker(&m_coreLock);
     if (m_core) {

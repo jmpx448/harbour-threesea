@@ -283,5 +283,18 @@ int main(int argc, char *argv[])
     // Own the D-Bus name only now: when the launcher started us via D-Bus activation, its
     // activate()/openChat() call is queued by the bus until then and must reach the loaded UI.
     dbus->registerOnBus();
-    return app->exec();
+    const int result = app->exec();
+
+    // The event loop has ended, so the window doesn't draw any more. The name stays until the
+    // process is gone: nothing starts beside a core that is still stopping, and a start the bus
+    // began while this one holds the launcher's lock would stay pending for minutes. A call in this
+    // time gets no answer.
+    view->hide();
+    if (!backend->shutdown()) {
+        // The core or a worker task is stuck and still reports to what the destructors would
+        // free. The store takes this like any crash.
+        qWarning("threesea: ending without waiting for the core");
+        ::_exit(result);
+    }
+    return result;
 }

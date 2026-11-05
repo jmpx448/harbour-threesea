@@ -118,6 +118,10 @@ public:
     // `engine` is used to hand results to QML callbacks; it also becomes the parent.
     explicit ThreeseBackend(QJSEngine *engine);
     ~ThreeseBackend() override;
+    // The process ends: stops the core and waits for the worker tasks, a few seconds at most. If
+    // that says false something still runs against this object: leave with _exit, not through
+    // the destructors.
+    bool shutdown();
 
     QString coreVersion() const;
     QString state() const { return m_state; }
