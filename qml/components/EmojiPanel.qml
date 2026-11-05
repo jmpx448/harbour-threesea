@@ -62,10 +62,12 @@ Item {
     }
     function endSearch() {
         if (!searching) return
+        // Tapped into the chat's input instead, the keyboard is that input's now.
+        var typing = searchField.activeFocus
         searching = false
         searchField.text = ""
         searchField.focus = false
-        Qt.inputMethod.hide()
+        if (typing) Qt.inputMethod.hide()
         grid.positionViewAtBeginning()
     }
 
