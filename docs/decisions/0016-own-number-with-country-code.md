@@ -23,5 +23,12 @@ can't be accepted without one, and sends exactly the number it showed.
   the locale, so people can be missed without an error. Which country to use there isn't decided yet:
   the calling code of the user's linked number, a setting, the SIM's country (may need a permission
   the Jolla Store doesn't allow) or a libphonenumber crate (a new dependency).
-- Known gaps in the national rules, also still open: Italian landlines keep their `0` internationally
-  and US/Canadian numbers written with their leading `1` get a second one.
+- The national rules live in one table (`COUNTRIES` in `address_book.rs`): calling code and national
+  prefix per country. Italy has none, so its landlines keep their `0`; North America's is `1`, so
+  `1 415 …` and `415 …` come out the same; Hungary's is `06`; Liechtenstein has its own code, `423`.
+  A country not listed isn't guessed at.
+- Numbers that say their country are cleaned up too: `(+49) 171 …` counts as `+49 171 …`, a national
+  prefix after the calling code goes (`+49 0171 …`, `+49 (0171) …`, `+36 06 …`), and marks that only
+  set the text's direction (U+202A, U+202C and their kind) are ignored. The prefix goes only if it
+  is a `0` (or `06`) and the country is known to have it. This also holds for the own number: the
+  dialog shows the result before anything is sent.
