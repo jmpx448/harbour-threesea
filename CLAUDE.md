@@ -213,9 +213,11 @@ Rules:
   which are always the **last** step (they fill the texts and write the files in the
   repository's layout; running lupdate afterwards reformats every line). New and reworded
   texts get their German and French at the very end, after all features and UI polish (user
-  decision 2026-10-22); until then they stay unfinished. A reworded text keeps its id, so that
-  step compares every `//%` text with the last release and translates each id whose English
-  changed. Plurals: `qsTrId(id, n)` with `%n`, forms in both files.
+  decision 2026-10-22); until then they stay unfinished. Each entry keeps the English it was
+  translated from: a text whose English changed (a reworded text keeps its id) stays unfinished
+  until it is translated again, and `scripts/check.sh --release` fails on any unfinished text.
+  Plurals: `qsTrId(id, n)` with `%n`, forms in both files. The few texts the core writes itself
+  (Threema Web's status lines) have their own small table in `core/src/app_web_data.rs`.
 
 ---
 
