@@ -672,8 +672,19 @@ impl App {
             }
         }
         self.send_group_pictures();
-        // What the other devices are still owed: a picture not on the mirror yet, a member whose
-        // lookup failed or never got to run.
+        self.reflect_owed_pictures();
+        // A member whose lookup failed or never got to run: the other devices are owed them too.
+        if let Err(error) = self.store.note_unresolved_member_lookups() {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
+        let due = self.member_lookups_due();
+        if !due.is_empty() {
+            self.fetch_members(due);
+        }
+    }
+
+    /// What the other devices are still owed: a picture not on the mirror yet.
+    pub(crate) fn reflect_owed_pictures(&self) {
         if self.store.own_picture_sync_owed().unwrap_or(false) {
             let store = Rc::clone(&self.store);
             let https = self.https.clone();
@@ -706,13 +717,6 @@ impl App {
                     .await;
                 });
             }
-        }
-        if let Err(error) = self.store.note_unresolved_member_lookups() {
-            tracing::warn!(%error, "noting group members to look up failed");
-        }
-        let due = self.member_lookups_due();
-        if !due.is_empty() {
-            self.fetch_members(due);
         }
     }
 

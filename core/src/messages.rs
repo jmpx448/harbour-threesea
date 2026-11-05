@@ -1535,17 +1535,17 @@ impl Store {
     /// were new.
     pub fn add_hashed_nonces(&self, d2d: bool, hashed: &[[u8; 32]]) -> Result<usize, StoreError> {
         let table = if d2d { "d2d_nonces" } else { "nonces" };
-        let tx = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         let mut added = 0;
         {
-            let mut statement = tx.prepare(&format!(
+            let mut statement = self.conn.prepare(&format!(
                 "INSERT OR IGNORE INTO {table} (nonce) VALUES (?1)"
             ))?;
             for nonce in hashed {
                 added += statement.execute([&nonce[..]])?;
             }
         }
-        tx.commit()?;
+        step.commit()?;
         Ok(added)
     }
 

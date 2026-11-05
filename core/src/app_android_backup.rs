@@ -278,7 +278,9 @@ impl App {
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))??;
-        self.apply_android_metadata(&own_id, data)
+        let summary = self.apply_android_metadata(&own_id, data)?;
+        self.reflect_owed_pictures();
+        Ok(summary)
     }
 
     /// Right after an import that added contacts: the regular contact refresh, under the regular
@@ -325,13 +327,28 @@ impl App {
         Ok(json!({ "started": true }))
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// In one store step, with what the other devices are told: a failed import leaves nothing
+    /// behind, so that importing again adds and tells everything. (Picture files stay; the next
+    /// try writes them again.)
     fn apply_android_metadata(&mut self, me: &str, data: Metadata) -> Result<Value, ApiError> {
+        let store = std::rc::Rc::clone(&self.store);
+        let step = store.step()?;
+        let summary = self.apply_android_metadata_rows(me, data)?;
+        step.commit()?;
+        self.tell_connection(crate::connection::ToConnection::ReflectSync);
+        Ok(summary)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn apply_android_metadata_rows(&mut self, me: &str, data: Metadata) -> Result<Value, ApiError> {
         use libthreema::{
             common::FeatureMask,
             model::contact::Contact,
             protobuf::d2d_sync::{ConversationCategory, ConversationVisibility, contact as pc},
         };
+        // What the other devices of the group are to hear of.
+        let (mut new_contacts, mut raised_contacts) = (Vec::new(), Vec::new());
+        let mut new_groups = Vec::new();
         let mut alias_to_identity: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let (mut added, mut existing, mut updated, mut key_conflicts) = (0, 0, 0, 0);
@@ -363,6 +380,7 @@ impl App {
                     {
                         stored.acquaintance_level = pc::AcquaintanceLevel::Direct;
                         self.store.upsert_contact(&stored)?;
+                        raised_contacts.push(c.identity.clone());
                         updated += 1;
                     } else {
                         existing += 1;
@@ -413,6 +431,7 @@ impl App {
                     if c.archived {
                         self.store.set_archived(&c.identity, true)?;
                     }
+                    new_contacts.push(c.identity.clone());
                     added += 1;
                 }
             }
@@ -488,6 +507,7 @@ impl App {
             if g.archived {
                 self.store.set_archived(&key, true)?;
             }
+            new_groups.push(key);
             added += 1;
         }
         let groups_summary = json!({
@@ -518,8 +538,8 @@ impl App {
         let lists_summary = json!({ "added": added, "existing": existing });
 
         // Pictures fill empty slots only; a picture already on the device stays (it may be
-        // newer). Nothing is uploaded or distributed by the import; our own picture follows
-        // the normal distribution policy with the next messages.
+        // newer). Nobody but the other devices of the group gets one from the import; our own
+        // picture follows the normal distribution policy with the next messages.
         let mut events: Vec<&'static str> = Vec::new();
         let mut own_imported = false;
         let mut pictures_skipped = data.pictures_skipped;
@@ -535,6 +555,7 @@ impl App {
                 .is_ok()
             {
                 self.store.bump_profile_picture_version()?;
+                self.store.owe_own_picture_sync()?;
                 own_imported = true;
                 events.push("profileChanged");
             } else {
@@ -588,10 +609,10 @@ impl App {
                 continue;
             }
             if self.media.write_picture(key, picture).is_ok() {
-                // Local bytes only: no blob descriptor is invented and nothing is sent.
+                // Local bytes only: no blob descriptor is invented and no member gets it.
                 group.picture_version =
                     crate::profile_pictures::next_version(group.picture_version);
-                self.store.upsert_group(&group)?;
+                self.store.store_new_group_picture(&group)?;
                 group_pictures += 1;
             } else {
                 pictures_skipped += 1;
@@ -600,6 +621,8 @@ impl App {
         // Nonces: hashes beside our raw nonces, checked on every receive (idempotent).
         let csp_nonces = self.store.add_hashed_nonces(false, &data.csp_nonces)?;
         let d2d_nonces = self.store.add_hashed_nonces(true, &data.d2d_nonces)?;
+
+        self.reflect_imported(&new_contacts, &raised_contacts, &new_groups)?;
 
         events.push("contactsChanged");
         events.push("groupsChanged");
@@ -762,6 +785,115 @@ mod tests {
         assert_eq!(summary["pictures"]["groups"], 0);
         assert_eq!(summary["pictures"]["skipped"], 3, "{summary}");
         assert_eq!(app.store.contact_picture_version("B0B0B0B0").unwrap(), 0);
+    }
+
+    /// Without this, later messages reach Desktop as messages of a group it doesn't know.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_an_import_adds_reaches_the_linked_devices() {
+        use libthreema::protobuf::d2d::{ContactSync, GroupSync, contact_sync, envelope::Content};
+        use prost::Message as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let password = || Zeroizing::new("test-password".to_owned());
+
+        // Nobody linked: nothing to tell.
+        let other = tempfile::tempdir().unwrap();
+        let mut alone = app_with_identity(other.path(), [7; 32]);
+        alone
+            .android_backup_import(fixture(), password(), "metadata")
+            .await
+            .unwrap();
+        assert!(alone.store.next_sync().unwrap().is_none());
+        assert!(!alone.store.own_picture_sync_owed().unwrap());
+        assert!(alone.store.group_picture_syncs().unwrap().is_empty());
+
+        app.store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        // The pictures' uploads are never run here: the test has no network.
+        let tasks = tokio::task::LocalSet::new();
+        let _entered = tasks.enter();
+        let summary = app
+            .android_backup_import(fixture(), password(), "metadata")
+            .await
+            .unwrap();
+        let (mut contacts, mut groups) = (0, 0);
+        while let Some((id, _, content)) = app.store.next_sync().unwrap() {
+            app.store.sync_done(id).unwrap();
+            let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+            match envelope.content {
+                Some(Content::ContactSync(ContactSync {
+                    action: Some(contact_sync::Action::Create(_)),
+                })) => {
+                    assert_eq!(groups, 0, "a group named someone not yet there");
+                    contacts += 1;
+                }
+                Some(Content::GroupSync(GroupSync {
+                    action: Some(libthreema::protobuf::d2d::group_sync::Action::Create(create)),
+                })) => {
+                    // Comes by itself, from the mirror.
+                    assert!(create.group.unwrap().profile_picture.is_none());
+                    groups += 1;
+                }
+                _ => panic!("not something new"),
+            }
+        }
+        assert_eq!(contacts, summary["contacts"]["added"].as_i64().unwrap());
+        assert_eq!(groups, summary["groups"]["added"].as_i64().unwrap());
+        assert_eq!(
+            app.store.own_picture_sync_owed().unwrap(),
+            summary["pictures"]["own"] == true
+        );
+
+        // Importing again adds nothing, and says nothing.
+        app.android_backup_import(fixture(), password(), "metadata")
+            .await
+            .unwrap();
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    /// Otherwise a repeat finds everything there, and the linked device never hears of it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_import_that_cannot_tell_the_linked_devices_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let password = || Zeroizing::new("test-password".to_owned());
+        app.store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        app.store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON d2d_sync_queue
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let tasks = tokio::task::LocalSet::new();
+        let _entered = tasks.enter();
+        assert!(
+            app.android_backup_import(fixture(), password(), "metadata")
+                .await
+                .is_err()
+        );
+        assert!(app.store.conn.is_autocommit());
+        assert!(app.store.contacts().unwrap().is_empty());
+        assert!(app.store.groups().unwrap().is_empty());
+
+        app.store
+            .conn
+            .execute_batch("DROP TRIGGER refuse;")
+            .unwrap();
+        let summary = app
+            .android_backup_import(fixture(), password(), "metadata")
+            .await
+            .unwrap();
+        assert_eq!(summary["contacts"]["added"], 3);
+        let mut queued = 0;
+        while let Some((id, ..)) = app.store.next_sync().unwrap() {
+            app.store.sync_done(id).unwrap();
+            queued += 1;
+        }
+        assert_eq!(queued, 3 + summary["groups"]["added"].as_i64().unwrap());
     }
 
     #[tokio::test(flavor = "current_thread")]

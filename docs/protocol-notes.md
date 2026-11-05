@@ -459,8 +459,7 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   (`providers::group_receivers`). Exceptions: a leave, an empty setup, and a sync request to the
   creator.
 - Creator: create (setup + name + delete-picture to all), rename, change members (setup to those
-  in the group, an empty setup to those removed, name/picture to added; the blob is persisted, so
-  the same descriptor serves), dissolve (empty setup). A running call's start is repeated, with
+  in the group, an empty setup to those removed, name/picture to added), dissolve (empty setup). A running call's start is repeated, with
   its `started_at` as `created-at`, to new members and to whoever gets the state on a sync request
   or a Reject, after a fresh peek rather than the spec's "most recent refresh" (no event for the
   UI: it can come while locked). Members: leave (`group-leave` to
@@ -471,7 +470,11 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   altogether (`join::group_syncable`), and a contact a group still names, a left group too, stays
   as a group acquaintance when deleted.
 - Group pictures: JPEG, uploaded with `persist=1` (members fetch it without `done`), sent with
-  sync answers and to new members.
+  sync answers and to new members. A picture on the device is uploaded anew for them, as the resync
+  steps say: `group_picture_sends` notes who is waiting, in the same step as their setup, until the
+  upload has worked. So no old blob goes out, and one set on another device goes out at all, whose
+  mirror blob no member could use. A member's download that finds the blob gone (404, or it doesn't
+  decrypt) drops the descriptor; the creator's next set-picture is a new try.
 - Group sync (`GroupSync`, multi-device): `member_identities` holds neither the creator nor the
   user, ours (above) has the creator. `groups::normalized_members` turns a synced list into ours
   and `join::group_sync_members` ours into a synced one, which also leaves out anyone without a
@@ -507,6 +510,19 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   discards those it has). A picture is reflected from the mirror once it is on this device;
   `group_picture_syncs` notes it until then, in the same step as the picture, and it is retried
   the same way; deleting the picture clears the note and the file, and a version 0 sends nothing.
+  A picture set here takes the same way, and our own too (`OWN_PICTURE_SYNC_OWED`), by itself rather
+  than in the rest of the profile's sync. A picture from another device: what the sync says is kept
+  in `synced_pictures` with the sync, as it won't come again, until the picture is stored, fetched
+  on reconnect and hourly with the contact pictures' backoff; a 404 or a failed decryption ends it,
+  and so does a newer word on it, a sync or the contact's or creator's message or a change here. The
+  mirror's `done` comes only after it is stored. Applying it clears the group's descriptor, also
+  for a new picture: it would be some older picture's.
+- Contacts in `ContactSync`: someone new goes as `Create`, since `Update` of someone unknown is
+  dropped (Android: `ReflectedContactSyncTask`). Each user action on a contact is reflected, a
+  deletion as acquaintance level `GROUP_OR_DELETED`. The daily directory refresh isn't, as a sync
+  carries the whole contact and could overwrite a newer name. Identity links go with the user profile after a link, an unlink or a
+  verification, and come back in the same field; one awaiting its code here stays when another
+  device lists none. A Data backup's metadata import reflects the contacts and groups it added.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We
   sync only on the spec's triggers (unknown group, sync requests) and once after a Safe restore,

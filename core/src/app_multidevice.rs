@@ -540,6 +540,69 @@ impl App {
         Ok(())
     }
 
+    /// What a backup's import added: the other devices get it, the contacts first, as they drop a
+    /// group naming someone they don't know. (Its messages stay here, as old history does.) A
+    /// picture comes by itself (`reflect_owed_pictures`). Within the import's store step.
+    pub(crate) fn reflect_imported(
+        &self,
+        new_contacts: &[String],
+        raised_contacts: &[String],
+        new_groups: &[String],
+    ) -> Result<(), StoreError> {
+        if self.store.multi_device()?.is_none() {
+            return Ok(());
+        }
+        let contact_sync_of = |identity: &str| {
+            Ok::<_, StoreError>(match self.store.contact(identity)? {
+                Some(contact) => Some(crate::join::contact_sync(&self.store, &contact)?),
+                None => None,
+            })
+        };
+        for identity in new_contacts {
+            if let Some(contact) = contact_sync_of(identity)? {
+                self.store.queue_sync_content(
+                    Scope::ContactSync,
+                    Content::ContactSync(ContactSync {
+                        action: Some(contact_sync::Action::Create(contact_sync::Create {
+                            contact: Some(contact),
+                        })),
+                    }),
+                )?;
+            }
+        }
+        for identity in raised_contacts {
+            if let Some(contact) = contact_sync_of(identity)? {
+                self.store.queue_sync_content(
+                    Scope::ContactSync,
+                    Content::ContactSync(ContactSync {
+                        action: Some(contact_sync::Action::Update(contact_sync::Update {
+                            contact: Some(contact),
+                        })),
+                    }),
+                )?;
+            }
+        }
+        for key in new_groups {
+            let Some(group) = self.store.group(key)? else {
+                continue;
+            };
+            if !crate::join::group_syncable(&self.store, &group)? {
+                continue;
+            }
+            let mut synced = crate::join::group_sync(&self.store, &group)?;
+            synced.profile_picture = None;
+            self.store.queue_sync_content(
+                Scope::GroupSync,
+                Content::GroupSync(GroupSync {
+                    action: Some(group_sync::Action::Create(group_sync::Create {
+                        group: Some(synced),
+                    })),
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
     /// After a command that changed something other devices keep too: reflect it.
     pub(crate) async fn reflect_change(&self, change: SyncChange, result: &Value) {
         use libthreema::protobuf::d2d::{

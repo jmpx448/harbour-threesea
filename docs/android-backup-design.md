@@ -89,7 +89,7 @@ Keep the import source immutable for a job or revalidate its fingerprint before 
 
 ### Historical records must have no sending side effects
 
-Use dedicated historical inserts. Do not call `sendText`, `sendFile`, `createGroup`, receive-message providers or `setGroupPicture` to recreate old data. Those paths can queue sends, receipts, uploads, notifications, photo requests, resyncs or D2D reflections.
+Use dedicated historical inserts. Do not call `sendText`, `sendFile`, `createGroup`, receive-message providers or `setGroupPicture` to recreate old data. Those paths can queue sends, receipts, uploads, notifications, photo requests, resyncs or D2D reflections. The one exception is deliberate: with other devices linked, the metadata import reflects the contacts and groups it added and the own and group pictures it filled in (`App::reflect_imported`), or later messages would name a group those devices don't know; old messages stay here.
 
 Imported outgoing `PENDING`/`SENDING` rows must not enter `Store::pending_outgoing` (currently selects outgoing state 0). Preserve them as failed/unsent historical items, with a separate explicit user action if resend is offered. Preserve incoming read/unread state without issuing delivery/read receipts or notification banners. Recompute unread counts after import and refresh models through aggregate completion events, not thousands of `messageAdded` notifications.
 
