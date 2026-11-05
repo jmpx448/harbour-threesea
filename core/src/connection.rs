@@ -582,6 +582,10 @@ impl StorageFailing {
 /// a way that says trying again won't help ([`ConnectionError::fails_every_time`]). It would hold
 /// up all that comes after it, for good: one bug of ours must not stop someone's whole inbox.
 const TRIES_BEFORE_DROPPING: u32 = 3;
+/// A reflected message whose sender can't be looked up is given up on after this many logins: it
+/// is only held up by the directory, but it holds up the mediator's queue, and with it the promotion
+/// to leader.
+const REFLECTED_LOOKUP_TRIES: u32 = 10;
 /// More than this many failing at once isn't one bad message; start counting over.
 const FAILING_ITEMS_MAX: usize = 64;
 
@@ -3409,15 +3413,19 @@ impl<'a> Session<'a> {
     ) -> Result<(), ConnectionError> {
         let device_group_key = self.device_group_key()?;
         let store = Rc::clone(&self.setup.store);
-        let applied = crate::reflected::open(&store, &device_group_key, &reflected.envelope)
-            .and_then(|opened| {
-                // log-ok: the kind of content, not the content
-                tracing::info!(
-                    content = crate::reflected::content_name(opened.envelope.content.as_ref()),
-                    "reflected"
-                );
-                crate::reflected::apply_once(&store, self.setup.identity, opened, &self.events)
-            });
+        let opened = crate::reflected::open(&store, &device_group_key, &reflected.envelope);
+        if let Ok(opened) = &opened {
+            self.look_up_reflected_sender(&opened.envelope, &reflected.envelope)
+                .await?;
+        }
+        let applied = opened.and_then(|opened| {
+            // log-ok: the kind of content, not the content
+            tracing::info!(
+                content = crate::reflected::content_name(opened.envelope.content.as_ref()),
+                "reflected"
+            );
+            crate::reflected::apply_once(&store, self.setup.identity, opened, &self.events)
+        });
         match applied {
             Ok(()) => self.storage_works(StorageStep::Reflected),
             // Unacknowledged, it comes again at the next login: this is its only way here.
@@ -3501,6 +3509,64 @@ impl<'a> Session<'a> {
             ))
             .await?;
         self.after_incoming().await
+    }
+
+    /// A reflected message from someone this device has no contact for (the other device has):
+    /// find them before it is applied. As long as the lookup fails the envelope stays
+    /// unacknowledged, as nothing else brings it here, but only for so long: it holds up the
+    /// mediator's queue. Someone the directory doesn't know leaves it to [`crate::reflected::apply`].
+    async fn look_up_reflected_sender(
+        &mut self,
+        envelope: &libthreema::protobuf::d2d::Envelope,
+        sealed: &[u8],
+    ) -> Result<(), ConnectionError> {
+        let store = Rc::clone(&self.setup.store);
+        let Some(sender) =
+            crate::reflected::sender_to_look_up(&store, envelope).map_err(storage_error)?
+        else {
+            return Ok(());
+        };
+        let resolved = if store.directory_resting() {
+            None
+        } else {
+            crate::app_groups::resolve_members(
+                &self.setup.https,
+                &self.setup.config,
+                &store,
+                core::slice::from_ref(&sender),
+            )
+            .await
+        };
+        let Some(resolved) = resolved else {
+            let failures = self
+                .setup
+                .failing_items
+                .failed(&FailingItem::Envelope(envelope_nonce(sealed)));
+            if failures < REFLECTED_LOOKUP_TRIES {
+                tracing::warn!(failures, "looking up a reflected message's sender failed");
+                return Err(ConnectionError::Timeout);
+            }
+            tracing::error!(
+                failures,
+                "a reflected message's sender can't be looked up, the message is dropped"
+            );
+            return Ok(());
+        };
+        let mut events = self.events.borrow_mut();
+        if resolved.synced {
+            events.push(CoreEvent::SyncQueued);
+        }
+        if resolved.groups_changed {
+            events.push(CoreEvent::GroupsChanged);
+        }
+        events.push(CoreEvent::ContactsChanged);
+        events.extend(
+            resolved
+                .lines
+                .into_iter()
+                .map(|message| CoreEvent::MessageAdded { message }),
+        );
+        Ok(())
     }
 
     /// Notify the held messages that are due (all of them when `all`) and still unread.
@@ -6645,6 +6711,61 @@ mod sync_order_tests {
         };
         assert!(!typing_shows(&mut session, true).await);
         assert!(typing_shows(&mut session, false).await);
+    }
+
+    /// A message from someone this device doesn't know waits for the directory, not for ever. No
+    /// network here: the directory is resting.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reflected_message_waits_for_its_senders_lookup_for_a_while() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody, TextMessage},
+            protobuf::d2d::{Envelope, IncomingMessage, envelope::Content},
+        };
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        setup.store.rest_directory_calls();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let (message_type, body) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: setup.identity,
+                body: ContactMessageBody::Text(TextMessage { text: "hi".into() }),
+            }));
+        let envelope = Envelope {
+            content: Some(Content::IncomingMessage(IncomingMessage {
+                sender_identity: "C0C0C0C0".into(),
+                message_id: 1,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body,
+                nonce: vec![8; 24],
+            })),
+            ..Default::default()
+        };
+        let (nonce, data) = key
+            .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
+            .unwrap();
+        let reflected = || libthreema::d2m::payload::Reflected {
+            reflect_id: 1,
+            flags: D2mReflectFlags(0),
+            timestamp: 1,
+            envelope: data.clone(),
+        };
+        for _ in 1..REFLECTED_LOOKUP_TRIES {
+            let error = session.handle_reflected(reflected()).await.unwrap_err();
+            assert!(matches!(error, ConnectionError::Timeout), "{error}");
+            assert!(!setup.store.has_d2d_nonce(&nonce).unwrap());
+            assert!(!setup.store.has_nonce(&[8; 24]).unwrap());
+        }
+        // Given up on: what it told counts as seen; the acknowledgement fails on this socket.
+        let error = session.handle_reflected(reflected()).await.unwrap_err();
+        assert!(!matches!(error, ConnectionError::Timeout), "{error}");
+        assert!(setup.store.has_d2d_nonce(&nonce).unwrap());
+        assert!(setup.store.has_nonce(&[8; 24]).unwrap());
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to

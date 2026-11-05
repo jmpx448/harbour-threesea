@@ -20,9 +20,12 @@ use libthreema::{
         },
         provider::ConversationProvider as _,
     },
-    protobuf::d2d::{
-        self, ConversationId, conversation_id, envelope, incoming_message_update,
-        outgoing_message_update,
+    protobuf::{
+        d2d::{
+            self, ConversationId, conversation_id, envelope, incoming_message_update,
+            outgoing_message_update,
+        },
+        d2d_sync::contact::AcquaintanceLevel,
     },
 };
 use prost::Message as _;
@@ -193,6 +196,32 @@ fn note_seen(store: &Store, envelope_nonce: &[u8], csp: &[Vec<u8>]) -> Result<()
     store.add_nonces(&csp)
 }
 
+/// The sender of a reflected message that needs one to be stored at all, if this device has no
+/// contact for them: the other device has one, and no contact sync will come for it here. The
+/// same messages as on a device that leads: those that make a direct contact, and group messages,
+/// which may be from a member whose lookup is still open. What is left is of no use without a chat
+/// to show it in.
+pub fn sender_to_look_up(
+    store: &Store,
+    envelope: &d2d::Envelope,
+) -> Result<Option<String>, StoreError> {
+    let Some(envelope::Content::IncomingMessage(message)) = &envelope.content else {
+        return Ok(None);
+    };
+    let Ok(sender) = message.sender_identity.parse::<ThreemaId>() else {
+        return Ok(None);
+    };
+    let Ok(body) = IncomingMessageBody::decode_reflected(sender, message.r#type, &message.body)
+    else {
+        return Ok(None);
+    };
+    let wanted = body.requires_direct_contact() || matches!(body, IncomingMessageBody::Group(_));
+    if !wanted || store.contact(sender.as_str())?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(sender.to_string()))
+}
+
 /// Apply an opened envelope and note its nonces, in one store step. An envelope this can't use
 /// leaves nothing behind but the nonces, and one the store failed on not even those. Events only
 /// for what holds.
@@ -256,11 +285,11 @@ pub fn apply(
                 .map_err(|_| ReflectedError::Decode("sender identity".into()))?;
             let body = IncomingMessageBody::decode_reflected(sender, message.r#type, &message.body)
                 .map_err(ReflectedError::Decode)?;
-            if store.contact(sender.as_str())?.is_none() {
-                // The contact comes with a contact sync, which isn't applied yet.
+            // `sender_to_look_up` has been there: the directory doesn't know them.
+            let Some(mut contact) = store.contact(sender.as_str())? else {
                 tracing::warn!("reflected incoming message from an unknown contact skipped");
                 return Ok(());
-            }
+            };
             // Not stored. Whether it is still news is for the connection to say
             // (`Session::handle_reflected`).
             if let IncomingMessageBody::Contact(ContactMessageBody::TypingIndicator(typing)) = &body
@@ -270,6 +299,15 @@ pub fn apply(
                     typing: typing.is_typing,
                 });
                 return Ok(());
+            }
+            // Someone deleted here, or known from a group, writes while another device leads: what
+            // the incoming message task does there. That device tells the others itself.
+            if body.requires_direct_contact()
+                && contact.acquaintance_level != AcquaintanceLevel::Direct
+            {
+                contact.acquaintance_level = AcquaintanceLevel::Direct;
+                store.upsert_contact(&contact)?;
+                events.borrow_mut().push(CoreEvent::ContactsChanged);
             }
             let mut conversations = StoreConversations {
                 store: Rc::clone(store),
@@ -967,5 +1005,101 @@ mod tests {
         let typing = reflected_incoming("C0C0C0C0", 2, Vec::new(), typing_body());
         apply(&store, user, typing, &events).unwrap();
         assert!(events.borrow().is_empty());
+    }
+
+    /// Someone deleted here writes while another device leads: back as a contact, as on the
+    /// leader, and the message is there. What makes nobody a contact leaves them as they are.
+    #[test]
+    fn a_contact_deleted_here_who_writes_elsewhere_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let mut contact = crate::contacts::test_contact("B0B0B0B0");
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&contact).unwrap();
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let events: EventSink = Rc::default();
+        let level = || {
+            store
+                .contact("B0B0B0B0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level
+        };
+
+        let typing = reflected_incoming("B0B0B0B0", 1, Vec::new(), typing_body());
+        apply(&store, user, typing, &events).unwrap();
+        assert_eq!(level(), AcquaintanceLevel::GroupOrDeleted);
+
+        let text = reflected_incoming("B0B0B0B0", 2, vec![1; 24], text_body());
+        apply(&store, user, text, &events).unwrap();
+        assert_eq!(level(), AcquaintanceLevel::Direct);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, CoreEvent::ContactsChanged))
+        );
+        assert_eq!(store.conversation_messages("B0B0B0B0", 5).unwrap().len(), 1);
+    }
+
+    /// A store failure takes the raised level back with the message.
+    #[test]
+    fn the_level_is_raised_only_with_the_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let mut contact = crate::contacts::test_contact("B0B0B0B0");
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&contact).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON d2d_nonces
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let events: EventSink = Rc::default();
+        let text = reflected_incoming("B0B0B0B0", 2, vec![1; 24], text_body());
+        apply_sealed(&store, &text, &events);
+        assert_eq!(
+            store
+                .contact("B0B0B0B0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level,
+            AcquaintanceLevel::GroupOrDeleted
+        );
+        assert!(events.borrow().is_empty());
+    }
+
+    /// Who is looked up before a reflected message is applied.
+    #[test]
+    fn only_the_unknown_sender_of_a_message_to_keep_is_looked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
+            .unwrap();
+        let wanted = |envelope: &d2d::Envelope| sender_to_look_up(&store, envelope).unwrap();
+        assert_eq!(
+            wanted(&reflected_incoming("C0C0C0C0", 1, Vec::new(), text_body())).as_deref(),
+            Some("C0C0C0C0")
+        );
+        assert_eq!(
+            wanted(&reflected_incoming("B0B0B0B0", 2, Vec::new(), text_body())),
+            None
+        );
+        assert_eq!(
+            wanted(&reflected_incoming(
+                "C0C0C0C0",
+                3,
+                Vec::new(),
+                typing_body()
+            )),
+            None
+        );
+        assert_eq!(
+            wanted(&reflected_outgoing("C0C0C0C0", 4, text_body())),
+            None
+        );
     }
 }

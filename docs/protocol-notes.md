@@ -178,6 +178,10 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   store failed on stays unacknowledged, so the mediator hands it out at the next login, by the same
   rule as above (without an end of that queue there is no promotion to leader either). Android
   acknowledges those too (with a TODO), but nothing else brings them to a follower.
+- A reflected message from a contact deleted here raises them to direct as the leader does; for one
+  from someone with no contact at all (only messages that would create one, or group messages) the
+  directory is asked first. While it doesn't answer, the envelope stays unacknowledged, ten logins
+  at most, as it holds up the queue; then it is dropped.
 - Typing reflected from a leading device shows, except while the mediator is still handing out its
   backlog at login: those can be old.
 - The CSP nonces an envelope tells of (`IncomingMessage.nonce`, `OutgoingMessage.nonces`) go into
