@@ -2109,9 +2109,13 @@ Page {
                     text: page.typing
                           //% "typing…"
                           ? qsTrId("threesea-la-typing")
-                          : (backend.connectionState !== "connected"
-                             //% "Offline – messages will be sent later"
-                             ? qsTrId("threesea-la-offline-queue")
+                          // Nothing goes out from a read-only chat, so nothing waits for the
+                          // connection either: it says what it always says.
+                          : (backend.connectionState !== "connected" && !page.readOnly
+                             ? (backend.connectionState === "connecting"
+                                ? qsTrId("threesea-la-connecting")
+                                //% "Offline – messages will be sent later"
+                                : qsTrId("threesea-la-offline-queue"))
                              // Groups: the members; people not saved as contacts: their Threema ID
                              // (saved ones show the verification dots instead, like Android).
                              : page.isGroup || page.isList ? (page.contact.memberNames || "")
@@ -2125,7 +2129,7 @@ Page {
                     width: parent.width
                     height: dots.height + Theme.paddingSmall
                     visible: !page.isGroup && page.contact.saved === true && !page.typing
-                             && backend.connectionState === "connected"
+                             && (backend.connectionState === "connected" || page.readOnly)
                     VerificationIndicator {
                         id: dots
                         anchors.right: parent.right
