@@ -1756,6 +1756,14 @@ impl App {
                     }
                 }
             }
+            // A download's progress is no reason to look for anything to send: only a message that
+            // is still to go out is, say one whose upload has just finished.
+            if !messages
+                .iter()
+                .any(|m| m.outgoing && m.state == crate::messages::OutgoingState::Pending as i64)
+            {
+                return;
+            }
         }
         self.send_pending_messages();
     }
@@ -3056,6 +3064,50 @@ mod tests {
                 assert!(app.transfer_retry_at.is_none());
             })
             .await;
+    }
+
+    /// A photo coming in changes its message several times; none of that sends anything. An upload
+    /// that has finished does. So does what isn't about a message's state.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_a_change_to_what_is_still_to_go_out_sends_pending_messages() {
+        let (_dir, mut app) = app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.connection = Some(tx);
+        let mut asked = |app: &mut App, event: CoreEvent| {
+            app.on_media_event(&event);
+            let mut count = 0;
+            while let Ok(message) = rx.try_recv() {
+                assert!(matches!(
+                    message,
+                    crate::connection::ToConnection::SendPending
+                ));
+                count += 1;
+            }
+            count
+        };
+
+        let incoming = app
+            .store
+            .insert_incoming("00000BOB", 1, "file", "{}", 1)
+            .unwrap()
+            .unwrap();
+        let event = CoreEvent::MessagesChanged(vec![incoming]);
+        assert_eq!(asked(&mut app, event), 0);
+
+        let id = outgoing_file(&app.store, 2, 1);
+        let pending = app.store.message(id).unwrap().unwrap();
+        let event = CoreEvent::MessagesChanged(vec![pending]);
+        assert_eq!(asked(&mut app, event), 1);
+
+        // Our own file, reflected or sent long ago, downloaded again.
+        app.store
+            .raise_outgoing_state("ABCD1234", &[2], crate::messages::OutgoingState::Sent)
+            .unwrap();
+        let sent = app.store.message(id).unwrap().unwrap();
+        let event = CoreEvent::MessagesChanged(vec![sent]);
+        assert_eq!(asked(&mut app, event), 0);
+
+        assert_eq!(asked(&mut app, CoreEvent::GroupsChanged), 1);
     }
 
     /// A pause in progress has the loop's timer set for its end, from the event of the failure and
