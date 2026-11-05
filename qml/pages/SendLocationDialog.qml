@@ -20,6 +20,10 @@ Dialog {
     property var place: null
     // Where to search around: the last position known, of any age, as it only orders the results.
     property var center: null
+    // A phone lying still on network positioning may report nothing new, and no recent fix ever
+    // comes. Then the last position known can be sent, chosen knowingly, with its time in view.
+    readonly property bool offerLastKnown: !fix && !place && secondsWaited >= patience
+                                           && center !== null && isFinite(center.taken)
     // Keeps the position coming while the place list is on top.
     property bool picking: false
 
@@ -33,6 +37,10 @@ Dialog {
         }
         place = chosen ? { name: chosen.name, latitude: chosen.latitude, longitude: chosen.longitude,
                            accuracy: null } : null
+    }
+    function useLastKnown() {
+        place = { name: "", latitude: center.latitude, longitude: center.longitude, accuracy: null,
+                  taken: center.taken }
     }
     property alias placeName: nameField.text
 
@@ -65,7 +73,8 @@ Dialog {
             var coordinate = position.coordinate
             if (!position.latitudeValid || !position.longitudeValid) return
             var recent = Fmt.isRecentFix(position.timestamp, Date.now())
-            dialog.center = { latitude: coordinate.latitude, longitude: coordinate.longitude, recent: recent }
+            dialog.center = { latitude: coordinate.latitude, longitude: coordinate.longitude, recent: recent,
+                              taken: new Date(position.timestamp).getTime() }
             if (!recent) return
             var accuracy = position.horizontalAccuracyValid ? position.horizontalAccuracy : null
             // Keep the most accurate fix while the dialog is open, as long as it is recent.
@@ -133,17 +142,30 @@ Dialog {
             }
 
             ValueButton {
+                //% "Your position"
+                readonly property string own: qsTrId("threesea-la-location-own")
                 //% "Place"
                 label: qsTrId("threesea-la-location-place")
-                value: dialog.place ? dialog.place.name
-                                    //% "Your position"
-                                    : qsTrId("threesea-la-location-own")
+                value: !dialog.place ? own
+                       //% "Your last known position, from %1"
+                       : dialog.place.taken ? qsTrId("threesea-la-location-last-known")
+                                              .arg(Fmt.time(dialog.place.taken, Format, Formatter))
+                       : dialog.place.name
                 //% "To find places, Threema's map server gets your position and what you search for."
                 description: qsTrId("threesea-la-place-server")
                 onClicked: {
                     dialog.picking = true
                     pageStack.push(Qt.resolvedUrl("PlacePickerPage.qml"), { positioning: dialog })
                 }
+            }
+
+            ValueButton {
+                visible: dialog.offerLastKnown
+                //% "Use your last known position, from"
+                label: qsTrId("threesea-la-location-use-last-known")
+                value: dialog.center && isFinite(dialog.center.taken)
+                       ? Fmt.time(dialog.center.taken, Format, Formatter) : ""
+                onClicked: dialog.useLastKnown()
             }
 
             TextField {

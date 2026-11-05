@@ -780,3 +780,21 @@ network to 3G if it can, or find a weak signal, and use a video that takes more 
      clock is more than a minute ahead of them.
 4. Stay in the dialog with a fix showing, then cover the antenna or go indoors for over a minute.
    - Expect: the coordinates go away again and Send becomes unavailable.
+5. Lie the phone still indoors with GPS off and only network positioning, and open the dialog.
+   - Note whether a fix comes at all: only here can it be seen whether network positioning reports
+     new fixes to a phone that doesn't move. If none comes, after 30 seconds the dialog offers the
+     last known position with its time, if there is one. Choosing it enables Send, and the place row
+     says "Your last known position".
+6. With no fix showing, tap Place.
+   - Expect: the row already says what the map server gets. The list opens and shows places nearby.
+     If nothing can be found and the page says the server did not answer although the phone is
+     online, see step 9.
+7. Search for something by name, also before any position has come.
+   - Expect: results with distances; text typed before a position is searched for once it comes.
+8. Choose a place and send it, then change it back with "Use your position".
+   - Expect: it arrives at the recipient with its name and coordinates, and opens in a maps app.
+9. TLS: `poi.threema.ch`'s own certificate hasn't been seen. Our client wants the pin on the leaf,
+   where Android accepts one anywhere in the chain, so a leaf outside the set fails only here, as
+   "did not answer". If that happens online, report it: the log has the network error's kind.
+10. Lock the app with the place list open, wait, and unlock (app lock on).
+    - Expect: the location indicator goes off while locked, and old coordinates don't flash on return.
