@@ -708,7 +708,7 @@ pub async fn mark_done(https: &HttpsClient, blob_id: &BlobId, scope: BlobScope) 
 /// local, only the device group fetches them). `persist` as in [`upload`].
 pub async fn upload_scoped(
     https: &HttpsClient,
-    data: &[u8],
+    data: Vec<u8>,
     persist: bool,
     scope: BlobScope,
 ) -> Result<BlobId, MediaError> {
@@ -719,25 +719,33 @@ pub async fn upload_scoped(
 /// `persist`: keep the blob after downloads (group pictures, which every member downloads and
 /// which are re-sent on group syncs); a 1:1 message's blob is removed once fetched.
 pub async fn upload(https: &HttpsClient, data: &[u8], persist: bool) -> Result<BlobId, MediaError> {
-    upload_to(https, data, persist, BlobScope::Public).await
+    upload_to(https, data.to_vec(), persist, BlobScope::Public).await
+}
+
+/// `data` as the form the upload sends, on the one buffer: a large blob isn't there twice.
+fn multipart_body(mut data: Vec<u8>) -> Vec<u8> {
+    let prefix = format!(
+        "--{MULTIPART_BOUNDARY}\r\nContent-Disposition: form-data; name=\"blob\"; \
+         filename=\"blob.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    )
+    .into_bytes();
+    let suffix = format!("\r\n--{MULTIPART_BOUNDARY}--\r\n").into_bytes();
+    data.reserve_exact(prefix.len() + suffix.len());
+    data.splice(0..0, prefix);
+    data.extend_from_slice(&suffix);
+    data
 }
 
 async fn upload_to(
     https: &HttpsClient,
-    data: &[u8],
+    data: Vec<u8>,
     persist: bool,
     scope: BlobScope,
 ) -> Result<BlobId, MediaError> {
     if data.len() > MAX_BLOB_SIZE + 16 {
         return Err(MediaError::TooLarge);
     }
-    let mut body = format!(
-        "--{MULTIPART_BOUNDARY}\r\nContent-Disposition: form-data; name=\"blob\"; \
-         filename=\"blob.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-    )
-    .into_bytes();
-    body.extend_from_slice(data);
-    body.extend_from_slice(format!("\r\n--{MULTIPART_BOUNDARY}--\r\n").as_bytes());
+    let body = off_thread(move || multipart_body(data)).await?;
     let response = https
         .transfer(
             HttpsRequest {
@@ -858,6 +866,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = MediaStore::open(dir.path(), &[3; 32]).unwrap();
         (dir, media)
+    }
+
+    #[test]
+    fn the_upload_form_holds_the_blob_as_it_is() {
+        let body = multipart_body(vec![0, 1, 2]);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.starts_with(&format!("--{MULTIPART_BOUNDARY}\r\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains("name=\"blob\"; filename=\"blob.bin\""),
+            "{text}"
+        );
+        let end = format!("\r\n--{MULTIPART_BOUNDARY}--\r\n");
+        assert!(body.ends_with(end.as_bytes()), "{text}");
+        let blob = &body[body.len() - end.len() - 3..body.len() - end.len()];
+        assert_eq!(blob, [0, 1, 2]);
+        assert!(text.contains("application/octet-stream\r\n\r\n"), "{text}");
     }
 
     fn stored_names(dir: &tempfile::TempDir) -> Vec<String> {

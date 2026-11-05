@@ -960,7 +960,7 @@ async fn upload(
         persist,
     };
     let result = upload_parts(&store, &media, message, &mut keys, target, async |blob| {
-        media::upload_scoped(&https, &blob, persist, scope).await
+        media::upload_scoped(&https, blob, persist, scope).await
     })
     .await;
     finish_upload(&store, &events, message, &keys, result);
@@ -970,7 +970,7 @@ async fn upload(
 /// back.
 async fn upload_parts(
     store: &Store,
-    media: &MediaStore,
+    media: &Arc<MediaStore>,
     message: i64,
     keys: &mut FileKeys,
     target: UploadTarget,
@@ -988,10 +988,17 @@ async fn upload_parts(
     }
     keys.thumbnail_blob_id = None;
     if keys.blob_id.is_none() {
-        let file = media
-            .read(message, MediaPart::File)?
+        // Until it is up, the blob is in memory.
+        let size = usize::try_from(body["size"].as_u64().unwrap_or(0)).unwrap_or(usize::MAX);
+        let _memory = media::reserve_transfer_memory(size.saturating_add(16)).await;
+        // Deleted while it waited: this id may be another file's by now.
+        if !same_file(store, message, &keys.key) {
+            return Ok(());
+        }
+        let blob = upload_blob(media, message, MediaPart::File, &keys.key)
+            .await?
             .ok_or(media::MediaError::FileGone)?;
-        keys.blob_id = Some(send(media::encrypt_blob(&keys.key, MediaPart::File, &file)).await?);
+        keys.blob_id = Some(send(blob).await?);
         // Deleted meanwhile: this id may be another file's by now.
         if same_file(store, message, &keys.key)
             && let Err(error) = store.keep_uploaded_file(message, keys, now_ms(), target)
@@ -1001,12 +1008,28 @@ async fn upload_parts(
     }
     // Deleted meanwhile: the thumbnail under this id may be another file's by now.
     if same_file(store, message, &keys.key)
-        && let Some(thumbnail) = media.read(message, MediaPart::Thumbnail)?
+        && let Some(blob) = upload_blob(media, message, MediaPart::Thumbnail, &keys.key).await?
     {
-        let blob = media::encrypt_blob(&keys.key, MediaPart::Thumbnail, &thumbnail);
         keys.thumbnail_blob_id = Some(send(blob).await?);
     }
     Ok(())
+}
+
+/// A stored part encrypted for the blob server, on a blocking thread and on the one buffer it was
+/// read into; `None` if it isn't on the device.
+async fn upload_blob(
+    media: &Arc<MediaStore>,
+    message: i64,
+    part: MediaPart,
+    key: &Zeroizing<[u8; 32]>,
+) -> Result<Option<Vec<u8>>, media::MediaError> {
+    let (media, key) = (Arc::clone(media), key.clone());
+    media::off_thread(move || {
+        Ok(media
+            .read(message, part)?
+            .map(|data| media::encrypt_blob_in_place(&key, part, data)))
+    })
+    .await?
 }
 
 /// Record how an upload went. No await in here: nothing can come between the check and the writes.
@@ -2218,6 +2241,41 @@ mod tests {
             app.media.read(id, MediaPart::File).unwrap().unwrap().len(),
             1024 * 1024
         );
+    }
+
+    /// The same for what goes the other way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reading_and_encrypting_an_upload_leaves_the_core_thread_free() {
+        let (_dir, app) = app();
+        let id = outgoing_file(&app.store, 1, 1);
+        app.media
+            .write(id, MediaPart::File, &[7; 1024 * 1024])
+            .unwrap();
+        let turns = Rc::new(std::cell::Cell::new(0));
+        let counted = Rc::clone(&turns);
+        let turns_at_send = std::cell::Cell::new(None);
+        let send = async |blob: Vec<u8>| {
+            turns_at_send.set(Some((turns.get(), blob.len())));
+            Ok(libthreema::common::BlobId([1; 16]))
+        };
+        let mut keys = app.store.file_keys(id).unwrap().unwrap();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let others = tokio::task::spawn_local(async move {
+                    loop {
+                        counted.set(counted.get() + 1);
+                        tokio::task::yield_now().await;
+                    }
+                });
+                upload_parts(&app.store, &app.media, id, &mut keys, TO_CONTACT, &send)
+                    .await
+                    .unwrap();
+                others.abort();
+            })
+            .await;
+        let (turns, size) = turns_at_send.get().unwrap();
+        assert!(turns > 0, "others got no turn");
+        assert_eq!(size, 1024 * 1024 + 16);
     }
 
     /// Deleted while a blocking thread was busy with it, and the next message got its row id.
