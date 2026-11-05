@@ -2119,15 +2119,15 @@ impl<'a> Session<'a> {
         }
         let store = Rc::clone(&self.setup.store);
         let own = self.setup.media.read_picture(OWN_PICTURE).ok().flatten();
-        let body = match store
+        let (body, blob_id) = match store
             .picture_distribution(receiver, own.is_some())
             .map_err(storage_error)?
         {
             Distribution::None => return Ok(()),
-            Distribution::Delete => {
-                store.picture_sent(receiver, None).map_err(storage_error)?;
-                ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage)
-            }
+            Distribution::Delete => (
+                ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage),
+                None,
+            ),
             Distribution::Set(upload) => {
                 let upload = match (upload, own) {
                     (Some(upload), _) => upload,
@@ -2146,14 +2146,14 @@ impl<'a> Session<'a> {
                     }
                     (None, None) => return Ok(()),
                 };
-                store
-                    .picture_sent(receiver, Some(&upload.blob_id))
-                    .map_err(storage_error)?;
-                ContactMessageBody::SetProfilePicture(SetProfilePictureMessage {
-                    blob_id: upload.blob_id,
-                    size: upload.size,
-                    key: upload.key,
-                })
+                (
+                    ContactMessageBody::SetProfilePicture(SetProfilePictureMessage {
+                        blob_id: upload.blob_id,
+                        size: upload.size,
+                        key: upload.key,
+                    }),
+                    Some(upload.blob_id),
+                )
             }
         };
         let created_at = crate::messages::now_ms();
@@ -2162,13 +2162,20 @@ impl<'a> Session<'a> {
         let receivers = [receiver.to_owned()];
         self.reflect_outgoing(receiver, message_id, created_at, &body, &receivers)
             .await?;
-        for payload in self
+        let payloads = self
             .encode(receiver, message_id, created_at, body)
             .await?
-            .unwrap_or_default()
-        {
+            .unwrap_or_default();
+        let any = !payloads.is_empty();
+        for payload in payloads {
             self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
                 .await?;
+        }
+        // Only now: a connection lost on the way must not leave it noted as sent.
+        if any {
+            store
+                .picture_sent(receiver, blob_id.as_ref())
+                .map_err(storage_error)?;
         }
         Ok(())
     }
@@ -6045,12 +6052,13 @@ mod sync_order_tests {
                     Ok(an_upload()),
                     Instant::now(),
                 );
-                // No handshake behind this session: the message gets as far as the transport.
+                // No handshake behind this session: the message gets as far as the transport, and
+                // without the server's ack it isn't noted as sent. The next try has the upload.
                 let _ = session.send_waiting_pictures().await;
                 assert!(uploads.waiting.borrow().is_empty());
                 assert!(matches!(
                     setup.store.picture_distribution(CREATOR, true).unwrap(),
-                    Distribution::None
+                    Distribution::Set(Some(_))
                 ));
             })
             .await;
@@ -6752,6 +6760,11 @@ mod sync_order_tests {
             assert!(error.is_err(), "{kind}");
         }
         assert!(session.distribute_picture(CREATOR).await.is_err());
+        // It didn't get out, so it isn't noted as sent.
+        assert!(matches!(
+            setup.store.picture_distribution(CREATOR, false).unwrap(),
+            crate::profile_pictures::Distribution::Delete
+        ));
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
