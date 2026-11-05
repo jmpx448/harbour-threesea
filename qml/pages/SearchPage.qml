@@ -227,7 +227,7 @@ Page {
                     readonly property string one: (modelData.snippet ? Fmt.withMentions(modelData.snippet, modelData.mentions)
                                                                      : Fmt.preview(modelData))
                                                   .replace(/\s+/g, " ")
-                    readonly property string plain: Fmt.previewLine(Fmt.matchWindow(one, page.query, limit), limit)
+                    readonly property string plain: Fmt.previewLine(Fmt.matchWindow(one, page.query, limit), limit, page.query)
                     // Threema's emoji pictures (Settings → Appearance), as in the chat they open.
                     readonly property bool pictures: backend.threemaEmoji && Fmt.mayHaveEmoji(plain)
                     readonly property string marked: Fmt.highlightMatch(plain, page.query, Theme.highlightColor)

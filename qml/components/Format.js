@@ -203,12 +203,21 @@ function matchWindow(text, query, limit) {
     if (!query) return text
     var first = text.toLowerCase().indexOf(query.toLowerCase())
     if (first <= 60 && first + query.length + 8 <= limit) return text
-    var start = first - Math.min(40, Math.floor(limit / 3))
+    // With a long query less of what is before it, so that all of the query fits.
+    var before = Math.min(40, Math.floor(limit / 3), Math.max(0, limit - query.length - 9))
+    var start = first - before
     if (first < 0 || start <= 0) return text
-    // Not in the middle of an emoji's two units.
-    var unit = text.charCodeAt(start)
-    if (unit >= 0xdc00 && unit <= 0xdfff) ++start
-    return "\u2026" + text.substring(start)
+    // Not inside an emoji: a joined one, a skin tone, a flag's pair, or a pair of units. Enough to
+    // see the longest sequence that could reach over the cut.
+    var offset = 0
+    var boundary = 0
+    var step = function(units) {
+        if (offset <= start) boundary = offset
+        offset += units.length
+    }
+    scanEmoji(text.substr(0, start + 32), step, step)
+    if (offset <= start) boundary = offset
+    return "\u2026" + text.substring(boundary)
 }
 
 // Plain `text` as StyledText with each (case-insensitive) occurrence of `query` in `color`,
@@ -378,8 +387,9 @@ function markEmoji(html, size) {
 // become single spaces, as Jolla's lists show them), cut with an ellipsis when it is longer
 // than `limit` characters. We cut it ourselves because Qt cannot elide text that has pictures
 // in it — with `elide` the emoji end up a line away from where they belong (user 2026-10-30).
-// `limit` comes from the label's width and font, so it follows the device.
-function previewLine(text, limit) {
+// `limit` comes from the label's width and font, so it follows the device. With `keep` (a search's
+// query) the cut doesn't go back to a space before the end of its first match.
+function previewLine(text, limit, keep) {
     var one = (text || "").replace(/\s+/g, " ").trim()
     if (one.length <= limit) return one
     // Measured in character widths, not in code units: an emoji is about two characters wide
@@ -400,7 +410,9 @@ function previewLine(text, limit) {
     })
     if (full && out.length >= one.length) return one
     // Back to the last word, unless that would throw most of the line away.
-    if (lastSpace > limit / 3) out = out.substr(0, lastSpace)
+    var kept = keep ? one.toLowerCase().indexOf(keep.toLowerCase()) : -1
+    var keepUntil = kept >= 0 ? kept + keep.length : 0
+    if (lastSpace > limit / 3 && lastSpace >= keepUntil) out = out.substr(0, lastSpace)
     return out + "…"
 }
 
