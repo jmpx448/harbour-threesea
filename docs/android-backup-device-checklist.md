@@ -42,11 +42,15 @@ those folders, plus Pictures, Videos and Music).
    - Tap "Stop" halfway once, or close the app from the cover; then check the backup again
      and import again: it should continue and end with the same totals, nothing twice.
 3. The results on the backup page:
-   - "Imported": counts for added and "Already on this device"; "Conflicting keys" should be
-     0. "Replay protection entries": the number of used nonces taken over. Should be above 0
-     for any phone that received messages.
-   - "Message history": imported messages, media files, reactions, polls; "Not supported"
+   - "Imported": counts for added and "Already on this device"; "Contacts with a different
+     key" should not show. The log's "Android backup metadata imported" line has the number
+     of used nonces taken over (`nonces`): above 0 for any phone that received messages.
+   - "Message history": imported messages, media files, reactions, polls; "Messages left out"
      only for status lines (e.g. group status lines), and the modified-poll lines.
+   - Rows like "Chats left out", "Groups left out" or "Entries left out" show only above 0, and
+     the headline then says the backup is imported except for what is listed. Note any you see.
+   - A contact added by the import offers editing and deleting messages shortly after the
+     import, when online, without pulling the Contacts page.
 4. Look at the result:
    - The chat list: old chats appear, with their latest message. Your live messages from
      before the import are still there, in time order around the old ones.
