@@ -654,7 +654,8 @@ pub fn download_kind(body: &str) -> &'static str {
 pub const AUTO_DOWNLOAD_WIFI: [&str; 4] = ["image", "audio", "video", "file"];
 pub const AUTO_DOWNLOAD_MOBILE: [&str; 1] = ["image"];
 
-/// Media downloads running at once (each holds its blob and the decrypted data in memory).
+/// Media downloads running at once (each holds its blob, then the decrypted data, in memory; a large
+/// one takes its share of the transfer memory as well).
 static DOWNLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
 
 /// Whether `message` is still the outgoing file with this key, which is random per file. See
@@ -681,6 +682,7 @@ fn done_scope(outgoing: bool, group: bool, multi_device: bool) -> Option<media::
 }
 
 /// How a deprecated image's blob is encrypted: between sender and receiver, with its own nonce.
+#[derive(Clone)]
 struct LegacySeal {
     key: Zeroizing<[u8; 32]>,
     nonce: [u8; 24],
@@ -723,9 +725,28 @@ struct Download {
     scope: media::BlobScope,
     done_scope: Option<media::BlobScope>,
     save_to: Option<std::path::PathBuf>,
+    /// The file's size as its sender tells it (0 if it doesn't).
+    announced_size: usize,
 }
 
 impl Download {
+    /// The most this part may be, whatever its sender says.
+    fn largest(&self) -> usize {
+        match self.part {
+            MediaPart::File => media::MAX_FILE_DOWNLOAD,
+            MediaPart::Thumbnail => media::MAX_PICTURE_DOWNLOAD,
+        }
+    }
+
+    /// The bytes to set memory aside for and fetch at most, at first. What a sender says of its
+    /// file isn't to be trusted, so a blob may never take more than was set aside. Only the small
+    /// ones get by on a fixed amount.
+    fn first_limit(&self) -> usize {
+        self.announced_size
+            .saturating_add(16)
+            .clamp(media::MAX_PICTURE_DOWNLOAD, self.largest())
+    }
+
     /// Whether the message is still this file. Row ids come back: once the newest message is
     /// deleted, the next one gets its id, and a transfer that outlives its message may touch
     /// nothing then. A deleted file has no keys any more, and another file has others; the sender
@@ -742,6 +763,54 @@ impl Download {
         })
     }
 
+    /// Decrypt what was fetched and put it on the disk, off the core thread. The blob's memory
+    /// becomes the file's: at no point is it there twice. A file to go to the Gallery as well goes
+    /// there before it is encrypted again.
+    async fn seal(
+        &self,
+        store: &Store,
+        media: &Arc<MediaStore>,
+        blob: Vec<u8>,
+    ) -> Result<media::SealedFile, media::MediaError> {
+        let (key, nonce) = match &self.seal {
+            Some(seal) => (seal.key.clone(), seal.nonce),
+            None => (self.key.clone(), *self.part.nonce()),
+        };
+        let data =
+            media::off_thread(move || media::decrypt_blob_in_place(&key, &nonce, blob)).await??;
+        // Now, not any earlier: a chat marked private during the download counts too.
+        let gallery = self
+            .save_to
+            .as_deref()
+            .filter(|_| self.wanted(store))
+            .and_then(|pictures| GallerySave::of(store, self.message, pictures));
+        let media = Arc::clone(media);
+        media::off_thread(move || {
+            if let Some(gallery) = gallery {
+                gallery.write(&data);
+            }
+            media.seal(data)
+        })
+        .await?
+    }
+
+    /// Whatever came of fetching this part: it ends up on the device or as failed.
+    async fn keep(
+        &self,
+        store: &Store,
+        media: &Arc<MediaStore>,
+        events: &mpsc::UnboundedSender<CoreEvent>,
+        fetched: Result<Vec<u8>, media::MediaError>,
+    ) -> bool {
+        let sealed = match fetched {
+            // Deleted meanwhile: no use in the work, and finish() has nothing to do.
+            Ok(blob) if self.wanted(store) => self.seal(store, media, blob).await,
+            Ok(_) => Err(media::MediaError::Decrypt),
+            Err(error) => Err(error),
+        };
+        self.finish(store, media, events, sealed)
+    }
+
     /// Keep what was fetched, and say so in the message's state; `true` if it is on the device now.
     /// No await in here: nothing can come between the check and the writes.
     fn finish(
@@ -749,7 +818,7 @@ impl Download {
         store: &Store,
         media: &MediaStore,
         events: &mpsc::UnboundedSender<CoreEvent>,
-        fetched: Result<Vec<u8>, media::MediaError>,
+        sealed: Result<media::SealedFile, media::MediaError>,
     ) -> bool {
         // Deleted meanwhile (for everyone as well): nothing may stay behind, and the id may be
         // another message's by now.
@@ -757,17 +826,7 @@ impl Download {
             tracing::info!(part = ?self.part, "media download dropped, its message is gone");
             return false;
         }
-        let stored = fetched.and_then(|blob| {
-            let data = match &self.seal {
-                Some(seal) => media::decrypt_blob_with_nonce(&seal.key, &seal.nonce, &blob)?,
-                None => media::decrypt_blob(&self.key, self.part, &blob)?,
-            };
-            media.write(self.message, self.part, &data)?;
-            if let Some(directory) = &self.save_to {
-                auto_save(store, self.message, &data, directory);
-            }
-            Ok(())
-        });
+        let stored = sealed.and_then(|sealed| sealed.keep(media, self.message, self.part));
         let changed = match &stored {
             Ok(()) => store.set_media_state(self.message, self.part, STATE_LOCAL),
             Err(error) => {
@@ -795,60 +854,72 @@ async fn download(
     events: mpsc::UnboundedSender<CoreEvent>,
     job: Download,
 ) {
-    let stored = {
-        // A few at a time: each can hold a blob of up to 100 MiB, twice (S06).
+    let mut limit = job.first_limit();
+    let stored = loop {
+        // A few at a time, and a large one as the memory allows: it holds a blob of up to 100 MiB.
+        let _memory = media::reserve_transfer_memory(limit).await;
         let _slot = DOWNLOAD_SLOTS.acquire().await;
         if !job.wanted(&store) {
             return;
         }
-        let limit = match job.part {
-            MediaPart::File => media::MAX_FILE_DOWNLOAD,
-            MediaPart::Thumbnail => media::MAX_PICTURE_DOWNLOAD,
-        };
         let fetched = media::download(&https, &job.blob_id, job.scope, limit).await;
-        job.finish(&store, &media, &events, fetched)
+        // Larger than its sender said: it may be, but it waits for that much memory first.
+        if matches!(fetched, Err(media::MediaError::TooLarge)) && limit < job.largest() {
+            limit = job.largest();
+            continue;
+        }
+        break job.keep(&store, &media, &events, fetched).await;
     };
     if stored && let Some(scope) = job.done_scope {
         media::mark_done(&https, &job.blob_id, scope).await;
     }
 }
 
-/// A received photo or video in `<Pictures>/Threesea` (Android's "Auto-save to gallery"),
+/// A received photo or video on its way to `<Pictures>/Threesea` (Android's "Auto-save to gallery"),
 /// unencrypted, as the user asked. Voice messages and other files stay in the app, and so does
-/// everything of a private chat (ADR 0009): checked here, after the download, so a chat marked
-/// private meanwhile counts too; if the mark can't be read, nothing is written.
-fn auto_save(store: &Store, message: i64, data: &[u8], pictures: &std::path::Path) {
-    let Ok(Some(message)) = store.message(message) else {
-        return;
-    };
-    if !matches!(store.is_private(&message.conversation), Ok(false)) {
-        return;
+/// everything of a private chat (ADR 0009): [`Self::of`] checks that on the core thread, after the
+/// download, and if the mark can't be read, nothing is written. [`Self::write`] is for a blocking
+/// thread.
+struct GallerySave {
+    name: String,
+    directory: std::path::PathBuf,
+}
+
+impl GallerySave {
+    fn of(store: &Store, message: i64, pictures: &std::path::Path) -> Option<Self> {
+        let message = store.message(message).ok()??;
+        if !matches!(store.is_private(&message.conversation), Ok(false))
+            || message.outgoing
+            || !matches!(
+                crate::messages::media_kind(&message.body),
+                "image" | "gif" | "video"
+            )
+        {
+            return None;
+        }
+        let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
+        let name = crate::file_types::gallery_file_name(
+            body["name"].as_str(),
+            body["mediaType"].as_str().unwrap_or(""),
+        )?;
+        Some(Self {
+            name,
+            directory: pictures.join("Threesea"),
+        })
     }
-    if message.outgoing
-        || !matches!(
-            crate::messages::media_kind(&message.body),
-            "image" | "gif" | "video"
-        )
-    {
-        return;
-    }
-    let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
-    let Some(name) = crate::file_types::gallery_file_name(
-        body["name"].as_str(),
-        body["mediaType"].as_str().unwrap_or(""),
-    )
-    .filter(|_| crate::file_types::looks_like_gallery_media(data)) else {
-        return;
-    };
-    let directory = pictures.join("Threesea");
-    if std::fs::create_dir_all(&directory).is_err() {
-        return;
-    }
-    let target = save_target(&directory, &name, data);
-    if !target.exists()
-        && let Err(error) = std::fs::write(&target, data)
-    {
-        tracing::warn!(%error, "auto-saving media failed");
+
+    fn write(&self, data: &[u8]) {
+        if !crate::file_types::looks_like_gallery_media(data)
+            || std::fs::create_dir_all(&self.directory).is_err()
+        {
+            return;
+        }
+        let target = save_target(&self.directory, &self.name, data);
+        if !target.exists()
+            && let Err(error) = std::fs::write(&target, data)
+        {
+            tracing::warn!(%error, "auto-saving media failed");
+        }
     }
 }
 
@@ -1536,9 +1607,14 @@ impl App {
         };
         // Android's scopes: our own (reflected) messages' blobs are only on the mirror; others'
         // are public.
-        let (outgoing, group) = row.map_or((false, false), |m| {
+        let (outgoing, group) = row.as_ref().map_or((false, false), |m| {
             (m.outgoing, m.conversation.starts_with("g:"))
         });
+        let announced_size = row
+            .filter(|_| part == MediaPart::File)
+            .and_then(|m| serde_json::from_str::<Value>(&m.body).ok())
+            .and_then(|body| body["size"].as_u64())
+            .map_or(0, |size| usize::try_from(size).unwrap_or(usize::MAX));
         // Settings → Media: received photos and videos also go to the Gallery's folder.
         let save_to = (part == MediaPart::File
             && self
@@ -1563,6 +1639,7 @@ impl App {
             },
             done_scope: done_scope(outgoing, group, media::mirror_active()),
             save_to,
+            announced_size,
         })
     }
 
@@ -2085,7 +2162,114 @@ mod tests {
             scope: media::BlobScope::Public,
             done_scope: None,
             save_to: None,
+            announced_size: 0,
         }
+    }
+
+    /// [`Download::keep`], from a test without a runtime.
+    fn kept(
+        job: &Download,
+        app: &App,
+        events: &mpsc::UnboundedSender<CoreEvent>,
+        fetched: Result<Vec<u8>, media::MediaError>,
+    ) -> bool {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(job.keep(&app.store, &app.media, events, fetched))
+    }
+
+    fn auto_save(store: &Store, message: i64, data: &[u8], pictures: &std::path::Path) {
+        if let Some(gallery) = GallerySave::of(store, message, pictures) {
+            gallery.write(data);
+        }
+    }
+
+    /// The core thread keeps running while a blob is decrypted and stored: with the connection on
+    /// the same thread, a large file would otherwise leave its echoes unanswered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn storing_a_download_leaves_the_core_thread_free() {
+        let (_dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = received_file(&app.store, 1, 1);
+        let download = job(&app.store, id, MediaPart::File);
+        let blob = media::encrypt_blob(&[1; 32], MediaPart::File, &[7; 1024 * 1024]);
+        let turns = Rc::new(std::cell::Cell::new(0));
+        let counted = Rc::clone(&turns);
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let others = tokio::task::spawn_local(async move {
+                    loop {
+                        counted.set(counted.get() + 1);
+                        tokio::task::yield_now().await;
+                    }
+                });
+                assert!(
+                    download
+                        .keep(&app.store, &app.media, &events, Ok(blob))
+                        .await
+                );
+                others.abort();
+            })
+            .await;
+        assert!(turns.get() > 0, "others got no turn");
+        assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOCAL));
+        assert_eq!(
+            app.media.read(id, MediaPart::File).unwrap().unwrap().len(),
+            1024 * 1024
+        );
+    }
+
+    /// Deleted while a blocking thread was busy with it, and the next message got its row id.
+    #[test]
+    fn a_file_sealed_for_a_message_that_went_stays_out_of_the_next_one() {
+        let (dir, app) = app();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let id = received_file(&app.store, 1, 1);
+        let download = job(&app.store, id, MediaPart::File);
+        let sealed = app.media.seal(Zeroizing::new(b"old".to_vec())).unwrap();
+        app.store.remove_message(id).unwrap();
+        let next = received_file(&app.store, 2, 3);
+        assert_eq!(next, id);
+
+        assert!(!download.finish(&app.store, &app.media, &events, Ok(sealed)));
+        assert!(!app.media.has(next, MediaPart::File));
+        let left = std::fs::read_dir(dir.path().join("media")).unwrap().count();
+        assert_eq!(left, 0, "nothing stayed behind");
+    }
+
+    #[test]
+    fn a_download_sets_memory_aside_by_what_its_sender_says_within_the_limits() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        let mut file = job(&app.store, id, MediaPart::File);
+        assert_eq!(
+            file.first_limit(),
+            media::MAX_PICTURE_DOWNLOAD,
+            "says nothing"
+        );
+        file.announced_size = 50 * 1024 * 1024;
+        assert_eq!(file.first_limit(), 50 * 1024 * 1024 + 16);
+        file.announced_size = usize::MAX;
+        assert_eq!(file.first_limit(), media::MAX_FILE_DOWNLOAD);
+        let mut thumbnail = job(&app.store, id, MediaPart::Thumbnail);
+        thumbnail.announced_size = 50 * 1024 * 1024;
+        assert_eq!(thumbnail.first_limit(), media::MAX_PICTURE_DOWNLOAD);
+    }
+
+    #[test]
+    fn a_download_knows_what_its_sender_said_of_the_file() {
+        let (_dir, app) = app();
+        let id = received_file(&app.store, 1, 1);
+        let file_size = serde_json::from_str::<Value>(
+            &app.store.message(id).unwrap().unwrap().body,
+        )
+        .unwrap()["size"]
+            .as_u64()
+            .unwrap();
+        let of = |part| app.download_job(id, part).unwrap().announced_size;
+        assert_eq!(of(MediaPart::File) as u64, file_size);
+        assert_eq!(of(MediaPart::Thumbnail), 0);
     }
 
     /// A deprecated image comes down like any file, but its blob opens with what sender and
@@ -2148,7 +2332,7 @@ mod tests {
         };
 
         let download = app.download_job(stored.id, MediaPart::File).unwrap();
-        assert!(download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert!(kept(&download, &app, &events, Ok(blob)));
         assert_eq!(
             app.media
                 .read(stored.id, MediaPart::File)
@@ -2185,7 +2369,7 @@ mod tests {
         let download = job(&app.store, id, MediaPart::File);
         let blob = media::encrypt_blob(&[1; 32], MediaPart::File, b"picture");
 
-        assert!(download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert!(kept(&download, &app, &events, Ok(blob)));
         assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOCAL));
         assert_eq!(
             app.media
@@ -2198,13 +2382,13 @@ mod tests {
 
         // A second fetch of the same blob, which the server has dropped since.
         let gone = Err(media::MediaError::Status(404));
-        assert!(!download.finish(&app.store, &app.media, &events, gone));
+        assert!(!kept(&download, &app, &events, gone));
         assert_eq!(state(&app.store, id, "fileState"), Some(STATE_LOCAL));
 
         // Nothing here and nothing fetched: failed.
         let other = job(&app.store, id, MediaPart::Thumbnail);
         let gone = Err(media::MediaError::Status(404));
-        assert!(!other.finish(&app.store, &app.media, &events, gone));
+        assert!(!kept(&other, &app, &events, gone));
         assert_eq!(state(&app.store, id, "thumbnailState"), Some(STATE_FAILED));
     }
 
@@ -2219,7 +2403,7 @@ mod tests {
         let blob = media::encrypt_blob(&[1; 32], MediaPart::File, b"picture");
         app.store.mark_deleted(id, 5).unwrap();
 
-        assert!(!download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert!(!kept(&download, &app, &events, Ok(blob)));
         assert!(!app.media.has(id, MediaPart::File));
     }
 
@@ -2236,10 +2420,10 @@ mod tests {
         let next = received_file(&app.store, 2, 3);
         assert_eq!(next, id, "SQLite gives the newest row's id out again");
 
-        assert!(!download.finish(&app.store, &app.media, &events, Ok(blob)));
+        assert!(!kept(&download, &app, &events, Ok(blob)));
         assert!(!app.media.has(next, MediaPart::File));
         let failed = Err(media::MediaError::Status(404));
-        assert!(!download.finish(&app.store, &app.media, &events, failed));
+        assert!(!kept(&download, &app, &events, failed));
         assert_eq!(state(&app.store, next, "fileState"), Some(STATE_REMOTE));
     }
 
@@ -2699,7 +2883,7 @@ mod tests {
         error: media::MediaError,
     ) -> mpsc::UnboundedReceiver<CoreEvent> {
         let (events, rx) = mpsc::unbounded_channel();
-        assert!(!job.finish(&app.store, &app.media, &events, Err(error)));
+        assert!(!kept(job, app, &events, Err(error)));
         rx
     }
 
