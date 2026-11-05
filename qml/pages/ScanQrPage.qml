@@ -313,6 +313,9 @@ Page {
 
         Label {
             id: hint
+            // Still holds its place for the viewfinder's anchor; without a camera there is
+            // nothing to point.
+            visible: viewfinder.visible
             anchors {
                 bottom: parent.bottom
                 bottomMargin: Theme.paddingLarge
