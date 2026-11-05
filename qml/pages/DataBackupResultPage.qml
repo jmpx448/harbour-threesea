@@ -134,7 +134,7 @@ Page {
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.secondaryHighlightColor
-                //% "This backup has no list of the messages already received. Messages sent again are recognised from what this device receives from now on."
+                //% "The list of messages already received isn't part of this import. Messages sent again are recognised from what this device receives from now on."
                 text: qsTrId("threesea-la-data-backup-received-list-missing")
             }
 

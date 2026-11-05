@@ -82,7 +82,7 @@ impl App {
 }
 
 /// Reading bounds for the metadata import (an archive beyond them reports instead of OOMing).
-const MAX_TABLE_BYTES: usize = 64 << 20;
+const MAX_TABLE_BYTES: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 const MAX_PICTURE_BYTES: usize = 8 << 20;
 const MAX_PICTURES_TOTAL: usize = 256 << 20;
 
@@ -106,7 +106,8 @@ struct Metadata {
     d2d_nonces: Vec<[u8; 32]>,
     nonces_skipped: usize,
     /// The archive has no `nonces.csv`: old, or someone removed it (entry sets are not
-    /// authenticated). Told to the user, the import goes on.
+    /// authenticated). Or one of the files is over the bound: about a million messages, every
+    /// run would stop here, before any contact or chat. Told to the user, the import goes on.
     nonces_missing: bool,
 }
 
@@ -159,15 +160,23 @@ fn load_metadata(
 
     // Used nonces: replay protection for what Android already received.
     let mut nonces_skipped = 0;
+    let mut nonces_missing = !archive.has_entry("nonces.csv");
     let mut nonces = |archive: &mut Archive, name: &str| -> Result<Vec<[u8; 32]>, ApiError> {
-        let Some(table) = table(archive, name)? else {
+        if !archive.has_entry(name) {
             return Ok(Vec::new());
+        }
+        let table = match archive.read_table(name, MAX_TABLE_BYTES) {
+            Ok(table) => table,
+            Err(ArchiveError::TooLarge) => {
+                nonces_missing = true;
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error.into()),
         };
         let (hashed, skipped) = crate::android_backup::nonces::read(&table, own_id);
         nonces_skipped += skipped;
         Ok(hashed)
     };
-    let nonces_missing = !archive.has_entry("nonces.csv");
     let csp_nonces = nonces(&mut archive, "nonces.csv")?;
     let d2d_nonces = nonces(&mut archive, "nonces_d2d.csv")?;
 
@@ -1252,6 +1261,36 @@ mod history_tests {
         assert_eq!(summary["existing"], 1, "{summary}");
         assert_eq!(summary["mediaFiles"], 0, "{summary}");
         assert!(app.store.file_keys(deleted.id).unwrap().is_none());
+    }
+
+    /// A list of used nonces over the bound goes unread and is reported; contacts and chats come.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_oversized_nonce_list_stops_nothing_else() {
+        use crate::android_backup::csv::write_row;
+        for name in ["nonces.csv", "nonces_d2d.csv"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = app_with_identity(dir.path(), [7; 32]);
+            let contacts = write_row(&["identity", "publickey", "identity_id"])
+                + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
+            let row = write_row(&[&"ab".repeat(32)]);
+            let nonces = write_row(&["nonces"]) + &row.repeat((2 << 20) / row.len());
+            let mut tables = vec![(name, nonces)];
+            if name != "nonces.csv" {
+                tables.push(("nonces.csv", write_row(&["nonces"]) + &row));
+            }
+            tables.push(("contacts.csv", contacts));
+            let path = backup_with(dir.path(), &tables);
+            let summary = app
+                .android_backup_import(
+                    path.to_string_lossy().into_owned(),
+                    Zeroizing::new("test-password".into()),
+                    "metadata",
+                )
+                .await
+                .unwrap();
+            assert_eq!(summary["nonces"]["missing"], true, "{summary}");
+            assert_eq!(summary["contacts"]["added"], 1, "{summary}");
+        }
     }
 
     /// A store that refuses a write ends the job with its error, undoes the batch and leaves no
