@@ -238,6 +238,8 @@ impl App {
     pub(crate) async fn delete_all_data(&mut self) -> Result<Value, ApiError> {
         // Whatever is under way for this ID ends here, and nothing it did is finished any more.
         self.drop_detached_work();
+        // A dropped task goes when it next gets a turn, and takes what it was writing along.
+        tokio::task::yield_now().await;
         self.stop_backups().await;
         // Both while the connection can still tell the others.
         self.call_end_for_removal();

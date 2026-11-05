@@ -87,17 +87,15 @@ impl Shared {
             crate::android_backup::export::time_stamp(now)
         );
         let path = std::path::Path::new(directory).join(&name);
-        let temporary = path.with_extension("zip.part");
-        let create = temporary.clone();
         let folder = std::path::PathBuf::from(directory);
-        let mut writer = tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
-            remove_leftovers(&folder);
-            let file =
-                std::fs::File::create(&create).map_err(|e| ApiError::Internal(e.to_string()))?;
-            Ok(zip::ZipWriter::new(file))
-        })
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))??;
+        crate::media::off_thread(move || remove_leftovers(&folder))
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // Here and not on the blocking thread: dropped before that has run, it would still come.
+        let temporary = PartFile::new(path.with_extension("zip.part"));
+        let file =
+            std::fs::File::create(&temporary.0).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let mut writer: Writer = zip::ZipWriter::new(file);
 
         let result = async {
             let mut text = format!(
@@ -109,10 +107,16 @@ impl Shared {
             let mut files = 0_usize;
             // Pages newest first, each one in order: read backwards, write forwards, without
             // ever holding a second copy of a long chat.
-            let history = self.chat_history(&key)?;
+            let history = self.chat_history(&key).await?;
+            let mut read = 0;
             for message in history.iter().rev().flatten() {
                 // Locked meanwhile: a private chat is out of bounds again, also for this.
                 self.check_readable(&key)?;
+                // A chat without files has nothing else to wait for.
+                read += 1;
+                if read % PAGE == 0 {
+                    tokio::task::yield_now().await;
+                }
                 // Status lines are the app talking to itself, as on Android.
                 if matches!(message.kind.as_str(), "status" | "deleted")
                     || message.kind.starts_with("call")
@@ -176,10 +180,13 @@ impl Shared {
                         };
                         match part.filter(|_| media) {
                             Some(part) => {
-                                let data = self
-                                    .media
-                                    .read(message.id, part)
-                                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                                let files_here = std::sync::Arc::clone(&self.media);
+                                let id = message.id;
+                                let data =
+                                    crate::media::off_thread(move || files_here.read(id, part))
+                                        .await
+                                        .and_then(|read| read)
+                                        .map_err(|e| ApiError::Internal(e.to_string()))?;
                                 if let Some(data) = data {
                                     writer = add(writer, in_file.clone(), data, &password).await?;
                                     files += 1;
@@ -206,13 +213,7 @@ impl Shared {
         }
         .await;
 
-        let (writer, messages, files) = match result {
-            Ok(done) => done,
-            Err(error) => {
-                let _ = std::fs::remove_file(&temporary);
-                return Err(error);
-            }
-        };
+        let (writer, messages, files) = result?;
         let finish = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
             let file = writer
                 .finish()
@@ -222,11 +223,11 @@ impl Shared {
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-        if let Err(error) = finish {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-        std::fs::rename(&temporary, &path).map_err(|e| ApiError::Internal(e.to_string()))?;
+        finish?;
+        // Locked during the last steps: no private chat gets out in one piece.
+        self.check_readable(&key)?;
+        std::fs::rename(&temporary.0, &path).map_err(|e| ApiError::Internal(e.to_string()))?;
+        temporary.moved();
         tracing::info!(messages, files, "chat exported");
         Ok(json!({
             "path": path.to_string_lossy(),
@@ -237,12 +238,14 @@ impl Shared {
     }
 
     /// A chat's messages in pages, newest page first, each page oldest first.
-    fn chat_history(&self, key: &str) -> Result<Vec<Vec<Message>>, ApiError> {
+    async fn chat_history(&self, key: &str) -> Result<Vec<Vec<Message>>, ApiError> {
         let mut pages = Vec::new();
         let mut page = self.store.conversation_messages(key, PAGE)?;
         while !page.is_empty() {
             let oldest = page[0].id;
             pages.push(page);
+            // The store is on this thread; a long chat lets the core loop in now and then.
+            tokio::task::yield_now().await;
             page = self.store.conversation_messages_before(key, oldest, PAGE)?;
         }
         Ok(pages)
@@ -259,9 +262,30 @@ impl Shared {
     }
 }
 
+/// The archive while it is being written, with the chat's messages inside: gone with this however
+/// the export ends, a dropped task (the ID is being removed) as well.
+struct PartFile(std::path::PathBuf);
+
+impl PartFile {
+    const fn new(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
+
+    /// It is not there any more by that name.
+    fn moved(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for PartFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// What an export left behind when the app was killed during it, with the chat's messages inside:
 /// the user doesn't know about the file and nothing else ever takes it away. Only one export runs
-/// at a time (`export_chat` holds the whole `App`), so none of these is in use.
+/// at a time (`Lane::InTurn`), so none of these is in use.
 fn remove_leftovers(directory: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
@@ -301,4 +325,101 @@ async fn add(
     })
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::Future, pin::Pin, task::Poll};
+
+    use super::*;
+    use crate::app::{App, StartConfig};
+
+    fn app(dir: &std::path::Path) -> App {
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .upsert_contact(&contacts::test_contact("ABCD1234"))
+            .unwrap();
+        app
+    }
+
+    fn part_files(directory: &std::path::Path) -> usize {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".zip.part"))
+            .count()
+    }
+
+    /// Runs the export until its temporary file is there. It stands still when not polled, so
+    /// this leaves it there with certainty.
+    async fn until_part_file<T>(
+        export: &mut Pin<Box<impl Future<Output = T>>>,
+        directory: &std::path::Path,
+    ) {
+        while part_files(directory) == 0 {
+            let polled =
+                std::future::poll_fn(|cx| Poll::Ready(export.as_mut().poll(cx).is_ready())).await;
+            assert!(!polled, "it ended before there was a file");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Removing the ID drops an export under way: no chat stays behind in the Downloads.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dropped_export_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let directory = out.path().to_str().unwrap().to_owned();
+        let mut export = Box::pin(app.export_chat("ABCD1234", false, &directory, None, None, None));
+        until_part_file(&mut export, out.path()).await;
+        drop(export);
+        assert_eq!(part_files(out.path()), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_export_says_where_it_went_and_leaves_only_that() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let directory = out.path().to_str().unwrap().to_owned();
+        let result = app
+            .export_chat("ABCD1234", false, &directory, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(part_files(out.path()), 0);
+        assert!(std::path::Path::new(result["path"].as_str().unwrap()).exists());
+    }
+
+    /// Locked as the last steps run: no archive of a private chat, and nothing "saved".
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lock_during_the_last_steps_leaves_no_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        app.unlocked.set(true);
+        app.mark_private("ABCD1234", true).unwrap();
+        let directory = out.path().to_str().unwrap().to_owned();
+        let mut export = Box::pin(app.export_chat("ABCD1234", false, &directory, None, None, None));
+        until_part_file(&mut export, out.path()).await;
+        app.unlocked.set(false);
+        assert!(export.as_mut().await.is_err());
+        drop(export);
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    }
 }
