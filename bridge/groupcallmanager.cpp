@@ -94,9 +94,16 @@ void GroupCallManager::join(const QString &conversation, bool create)
     args.insert(QStringLiteral("conversation"), conversation);
     args.insert(QStringLiteral("fingerprint"), m_engine->prepare());
     args.insert(QStringLiteral("create"), create);
+    const unsigned serial = ++m_joinSerial;
     m_backend->request(QStringLiteral("groupCallJoin"), args,
-                       [this](bool ok, const QVariantMap &result, const QString &kind) {
-                           if (m_state != QLatin1String("joining")) {
+                       [this, serial](bool ok, const QVariantMap &result, const QString &kind) {
+                           if (serial != m_joinSerial || m_state != QLatin1String("joining")) {
+                               // Joined after all with nobody here for it: the core lets go. A newer
+                               // join stays out of this, as a leave would end it in the core.
+                               if (ok && m_state == QLatin1String("idle")) {
+                                   m_backend->request(QStringLiteral("groupCallLeave"),
+                                                      QVariantMap());
+                               }
                                return;
                            }
                            if (!ok) {

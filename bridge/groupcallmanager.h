@@ -94,6 +94,8 @@ private:
     GroupCallEngine *m_engine = nullptr;
     QHash<QString, QVariantMap> m_calls;
     QString m_state = QStringLiteral("idle");
+    // Which join a reply belongs to: one left behind can answer during the next.
+    unsigned m_joinSerial = 0;
     QString m_conversation;
     QString m_error;
     QString m_errorMessage;
