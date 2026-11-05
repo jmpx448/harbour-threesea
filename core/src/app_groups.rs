@@ -340,7 +340,7 @@ impl App {
         let store = Rc::clone(&self.store);
         let media = std::sync::Arc::clone(&self.media);
         let events = self.media_events.clone();
-        let connection = self.connection.clone();
+        let connection = self.connection.borrow().clone();
         tokio::task::spawn_local(async move {
             let Ok(Some(group)) = store.group(&key) else {
                 return;
@@ -403,7 +403,7 @@ impl App {
             let store = Rc::clone(&self.store);
             let https = self.https.clone();
             let media = std::sync::Arc::clone(&self.media);
-            let connection = self.connection.clone();
+            let connection = self.connection.borrow().clone();
             tokio::task::spawn_local(async move {
                 let Ok(Some(group)) = store.group(&key) else {
                     return;
@@ -507,7 +507,7 @@ impl App {
         let config = std::sync::Arc::clone(&self.config);
         let store = Rc::clone(&self.store);
         let events = self.media_events.clone();
-        let connection = self.connection.clone();
+        let connection = self.connection.borrow().clone();
         tokio::task::spawn_local(async move {
             let Some(resolved) = resolve_members(&https, &config, &store, &identities).await else {
                 return;
@@ -693,7 +693,7 @@ impl App {
             let store = Rc::clone(&self.store);
             let https = self.https.clone();
             let media = std::sync::Arc::clone(&self.media);
-            let connection = self.connection.clone();
+            let connection = self.connection.borrow().clone();
             tokio::task::spawn_local(async move {
                 crate::app_multidevice::reflect_own_picture(
                     &store,
@@ -709,7 +709,7 @@ impl App {
                 let store = Rc::clone(&self.store);
                 let https = self.https.clone();
                 let media = std::sync::Arc::clone(&self.media);
-                let connection = self.connection.clone();
+                let connection = self.connection.borrow().clone();
                 tokio::task::spawn_local(async move {
                     crate::app_multidevice::reflect_group_picture(
                         &store,

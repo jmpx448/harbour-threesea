@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use data_encoding::BASE64;
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     call_video::{self, CaptureDevice, ChannelMessage, VideoParams},
     calls::{CallRecord, Candidate, Effect, RejectReason, Signal},
     connection::ToConnection,
@@ -214,7 +214,9 @@ impl App {
             at: crate::messages::now_ms(),
         });
     }
+}
 
+impl Shared {
     /// A call with `peer` goes only through TURN, which hides our IP address from them: always
     /// for someone unverified or not a contact, so that a stranger can't learn it just by calling
     /// (Android's `VoipCallService`), else if the user asked for it (Settings → Calls "Always
@@ -232,13 +234,14 @@ impl App {
     /// `callTurnServers {identity}`: for the media engine's call with `identity` (`{urls,
     /// username, password, relayOnly}`). `relayOnly` needs the dual-stack servers in case the
     /// device has IPv6 only (Android's `PeerConnectionClient.getIceServers`).
-    pub(crate) async fn call_turn_servers(&mut self, peer: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn call_turn_servers(&self, peer: &str) -> Result<Value, ApiError> {
         let relay_only = self.call_relay_only(peer)?;
         let now = crate::messages::now_ms();
-        if let Some((servers, until)) = &self.turn_servers
-            && *until > now + 60_000
+        let cached = self.turn_servers.borrow().clone();
+        if let Some((servers, until)) = cached
+            && until > now + 60_000
         {
-            return Ok(turn_json(servers, relay_only).await);
+            return Ok(turn_json(&servers, relay_only).await);
         }
         let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let servers = crate::directory::turn_servers(
@@ -250,10 +253,12 @@ impl App {
         .await?;
         let until = now + i64::try_from(servers.expiration).unwrap_or(0) * 1000;
         let result = turn_json(&servers, relay_only).await;
-        self.turn_servers = Some((servers, until));
+        self.turn_servers.replace(Some((servers, until)));
         Ok(result)
     }
+}
 
+impl App {
     /// `callStart`: the engine's offer for `identity`; returns `{callId}`.
     pub(crate) fn call_start(
         &mut self,
@@ -578,7 +583,7 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<ToConnection>,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(
+        let app = App::new(
             &StartConfig {
                 data_dir: dir.path().to_owned(),
                 app_version: "0.1.0".into(),
@@ -595,7 +600,7 @@ mod tests {
         )
         .unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.connection = Some(tx);
+        app.connection.replace(Some(tx));
         (dir, app, rx)
     }
 
@@ -940,7 +945,7 @@ mod tests {
                 .any(|event| event["event"] == "callEnded"),
             "the UI is told"
         );
-        assert!(app.connection.is_none());
+        assert!(app.connection.borrow().is_none());
     }
 
     #[test]

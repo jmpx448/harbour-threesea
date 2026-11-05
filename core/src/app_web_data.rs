@@ -1298,7 +1298,7 @@ impl App {
             self.store.changes(),
             shape,
             self.media.picture_writes(),
-            self.unlocked,
+            self.unlocked.get(),
         );
         if self.web.refresh.last == Some(now) {
             return;
@@ -1307,7 +1307,7 @@ impl App {
             .web
             .refresh
             .last
-            .is_some_and(|last| last.3 != self.unlocked)
+            .is_some_and(|last| last.3 != self.unlocked.get())
         {
             self.web.thumbnails.borrow_mut().clear();
         }
@@ -1344,7 +1344,7 @@ impl App {
             .store
             .receiver_generation()
             .ok()
-            .map(|generation| (generation, now.2, self.unlocked, shape));
+            .map(|generation| (generation, now.2, self.unlocked.get(), shape));
         let receivers = if self.web.subscriptions.values().any(|s| s.receivers)
             && (source.is_none() || source != self.web.refresh.receivers)
         {

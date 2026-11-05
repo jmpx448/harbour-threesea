@@ -1024,6 +1024,7 @@ impl App {
             .and_then(|call| self.store.group(&call.conversation).ok().flatten())
             .map(|group| group.members)
             .unwrap_or_default();
+        let shared = Rc::clone(&self.shared);
         let Some(call) = self.group_call.as_mut() else {
             return Ok(json!({}));
         };
@@ -1110,7 +1111,7 @@ impl App {
                         media_keys: &call.media_keys,
                     };
                     let user = identity.threema_id.clone();
-                    let store = &self.store;
+                    let store = &shared.store;
                     let lookup = |claimed: &str| {
                         if claimed == user {
                             return Some(Known {

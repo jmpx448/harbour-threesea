@@ -224,7 +224,7 @@ async fn unmarked_group_reaches_the_browser_as_receiver_first() {
         .unwrap();
     let key = group["key"].as_str().unwrap().to_owned();
     app.store.set_private(&key, true).unwrap();
-    app.unlocked = true;
+    app.unlocked.set(true);
     app.web_subscribe_receivers(1);
     app.web_conversations(1).unwrap();
     crate::runtime::settle_command(&mut app, &mut media_events, &emit);
@@ -419,9 +419,9 @@ async fn removing_the_id_leaves_no_media_log_or_gate() {
         .unwrap();
     std::fs::write(dir.path().join("threesea.log"), b"old lines").unwrap();
     std::fs::write(dir.path().join("threesea.log.0"), b"older lines").unwrap();
-    app.unlocked = true;
+    app.unlocked.set(true);
     app.update_media_gate();
-    app.unlocked = false;
+    app.unlocked.set(false);
     app.update_media_gate();
     assert!(!app.media.shown(message.id));
 
@@ -430,7 +430,7 @@ async fn removing_the_id_leaves_no_media_log_or_gate() {
     assert_eq!(app.media.size(), 0);
     assert!(app.media.read_picture("group:x").unwrap().is_none());
     assert!(app.media.shown(message.id), "the gate is gone");
-    assert!(!app.unlocked);
+    assert!(!app.unlocked.get());
     assert_eq!(crate::runtime::log_text(dir.path(), usize::MAX), "");
 }
 
@@ -586,7 +586,7 @@ async fn wrong_pins_pause_pin_entry() {
     assert_eq!(reply["error"]["kind"], "pinLockout");
     assert_eq!(reply["error"]["message"], "30");
     assert_eq!(kind(app.handle(&unlock("2468")).await), "pinLockout");
-    assert!(!app.unlocked);
+    assert!(!app.unlocked.get());
     pause_over(&app);
     for _ in 0..3 {
         assert_eq!(kind(app.handle(&unlock("0000")).await), "wrongPin");
@@ -596,7 +596,7 @@ async fn wrong_pins_pause_pin_entry() {
     assert_eq!(reply["error"]["message"], "60", "the next pause is longer");
     pause_over(&app);
     assert_eq!(kind(app.handle(&unlock("2468")).await), "ok");
-    assert!(app.unlocked);
+    assert!(app.unlocked.get());
     // Started over: three wrong ones are allowed again, then 30 s.
     for _ in 0..3 {
         assert_eq!(kind(app.handle(&unlock("0000")).await), "wrongPin");
@@ -893,7 +893,7 @@ fn private_mark_from_a_linked_device_reaches_the_gate_and_the_ui() {
         events
             .iter()
             .filter(|event| matches!(event, CoreEvent::PrivateChanged { .. }))
-            .map(|event| event.to_json(&app.store, app.unlocked))
+            .map(|event| event.to_json(&app.store, app.unlocked.get()))
             .collect()
     };
 
@@ -927,7 +927,7 @@ async fn marking_a_chat_private_tells_the_ui() {
     assert!(reply.contains("\"ok\":true"), "{reply}");
     let event = events.try_recv().unwrap();
     assert_eq!(
-        event.to_json(&app.store, app.unlocked),
+        event.to_json(&app.store, app.unlocked.get()),
         json!({"event": "privateChanged", "identity": "BBBBBBBB", "private": true})
     );
 }
@@ -2437,7 +2437,7 @@ fn a_group_setup_reaches_the_browser_as_receiver_then_chat() {
 /// (§7.8). Unlocked, it is found.
 #[test]
 fn search_shows_no_hidden_private_chat_on_any_of_its_ways() {
-    let (_dir, mut app) = fixture();
+    let (_dir, app) = fixture();
     let step = app.store.step().unwrap();
     // Plenty of each word in a chat that shows, older than all in the private one.
     for n in 0..3000u64 {
@@ -2473,12 +2473,12 @@ fn search_shows_no_hidden_private_chat_on_any_of_its_ways() {
     };
     let only_shown = HashSet::from(["CCCCCCCC".to_owned()]);
     let private = HashSet::from(["BBBBBBBB".to_owned()]);
-    app.unlocked = false;
+    app.unlocked.set(false);
     for query in ["rarest", "middle", "common", "zq"] {
         assert_eq!(chats(&app, query, None), only_shown, "{query}");
         assert!(chats(&app, query, Some("BBBBBBBB")).is_empty(), "{query}");
     }
-    app.unlocked = true;
+    app.unlocked.set(true);
     for query in ["rarest", "middle", "common", "zq"] {
         assert_eq!(chats(&app, query, Some("BBBBBBBB")), private, "{query}");
     }
@@ -2599,11 +2599,11 @@ fn receivers_are_built_again_only_when_something_of_them_changed() {
     app.web_refresh();
     assert_eq!(builds(&app), before + 2);
     assert!(visible(&sent_values(&mut rx)));
-    let unlocked = app.unlocked;
-    app.unlocked = !unlocked;
+    let unlocked = app.unlocked.get();
+    app.unlocked.set(!unlocked);
     app.web_refresh();
     assert_eq!(builds(&app), before + 3, "unlocked");
-    app.unlocked = unlocked;
+    app.unlocked.set(unlocked);
     app.web_refresh();
     assert_eq!(builds(&app), before + 4, "locked");
 

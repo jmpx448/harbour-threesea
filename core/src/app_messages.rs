@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     connection::{self, ConnectionSetup, FromConnection, ToConnection},
     contacts,
     messages::{EDIT_DELETE_MAX_AGE_MS, Message, OutgoingState, ReadMessage, now_ms},
@@ -163,7 +163,7 @@ impl App {
 
     /// Reading a private chat needs the app unlocked (ADR 0009).
     pub(crate) fn check_readable(&self, conversation: &str) -> Result<(), ApiError> {
-        if !self.unlocked && self.store.is_private(conversation)? {
+        if !self.unlocked.get() && self.store.is_private(conversation)? {
             return Err(ApiError::Locked);
         }
         Ok(())
@@ -198,18 +198,22 @@ impl App {
         self.check_readable(&key)?;
         Ok((key, conversation))
     }
+}
 
+impl Shared {
     /// The media readers for the UI (other threads) follow the lock: while private chats are
     /// hidden, their messages' media are not handed out.
     pub(crate) fn update_media_gate(&self) {
-        let hidden = if self.unlocked {
+        let hidden = if self.unlocked.get() {
             None
         } else {
             Some(self.store.private_message_ids().unwrap_or_default())
         };
         self.media.set_hidden(hidden);
     }
+}
 
+impl App {
     /// A new or changed message of a hidden private chat: its media stay hidden too. A chat
     /// marked private (or not) takes its older messages along.
     pub(crate) fn gate_media(&self, event: &crate::providers::CoreEvent) {
@@ -218,7 +222,7 @@ impl App {
             self.update_media_gate();
             return;
         }
-        if self.unlocked {
+        if self.unlocked.get() {
             return;
         }
         let messages: &[crate::messages::Message] = match event {
@@ -246,7 +250,7 @@ impl App {
                 "appLock": lock.app_lock,
                 "graceSecs": lock.grace_secs,
             })),
-            "unlocked": self.unlocked,
+            "unlocked": self.unlocked.get(),
             "graceTimes": crate::applock::GRACE_TIMES,
         }))
     }
@@ -263,7 +267,7 @@ impl App {
             }
             self.store.set_lock(None)?;
             // No lock, nothing open: marks arriving later wait for a new PIN.
-            self.unlocked = false;
+            self.unlocked.set(false);
             self.update_media_gate();
             return self.lock_status();
         };
@@ -346,7 +350,9 @@ impl App {
     pub(crate) fn check_pin(&self, pin: Option<Zeroizing<String>>) -> Result<(), ApiError> {
         self.check_lock(pin.as_deref().map(String::as_str))
     }
+}
 
+impl Shared {
     /// Store a private mark and let everyone who follows them know at once: the media readers
     /// here, and through the event the UI's notifications and the browsers.
     pub(crate) fn mark_private(&self, key: &str, private: bool) -> Result<(), ApiError> {
@@ -360,7 +366,9 @@ impl App {
             });
         Ok(())
     }
+}
 
+impl App {
     pub(crate) fn set_private(&mut self, identity: &str, private: bool) -> Result<Value, ApiError> {
         let (key, _) = self.conversation(identity)?;
         if self.store.lock()?.is_none() {
@@ -520,7 +528,12 @@ impl App {
     /// Start the chat server connection if there is an identity and it is not running yet.
     /// Returns the receiving end for connection events when newly started.
     pub fn ensure_connection(&mut self) -> Option<mpsc::UnboundedReceiver<FromConnection>> {
-        if self.connection.as_ref().is_some_and(|tx| !tx.is_closed()) {
+        if self
+            .connection
+            .borrow()
+            .as_ref()
+            .is_some_and(|tx| !tx.is_closed())
+        {
             return None;
         }
         // A store that refused to empty still holds the ID, which is on its way out.
@@ -553,7 +566,7 @@ impl App {
         self.connection_task = Some(tokio::task::spawn_local(connection::run(
             setup, to_rx, from_tx,
         )));
-        self.connection = Some(to_tx);
+        self.connection.replace(Some(to_tx));
         Some(from_rx)
     }
 
@@ -561,8 +574,8 @@ impl App {
     /// middle of logging in. The run loop drops what it had said already
     /// (`runtime::forget_stopped_connection`).
     pub(crate) fn stop_connection(&mut self) {
-        self.connection = None;
-        self.connection_state = "disconnected";
+        self.connection.replace(None);
+        self.connection_state.set("disconnected");
         if let Some(task) = &self.connection_task {
             task.abort();
         }
@@ -575,10 +588,12 @@ impl App {
             let _ = task.await;
         }
     }
+}
 
+impl Shared {
     /// Wait until the connection has handled what it was told so far, within a short limit.
     pub(crate) async fn connection_flushed(&self) {
-        if self.connection.is_none() {
+        if self.connection.borrow().is_none() {
             return;
         }
         let (reply, answer) = tokio::sync::oneshot::channel();
@@ -588,11 +603,13 @@ impl App {
     }
 
     pub(crate) fn tell_connection(&self, message: ToConnection) {
-        if let Some(tx) = &self.connection {
+        if let Some(tx) = &*self.connection.borrow() {
             let _ = tx.send(message);
         }
     }
+}
 
+impl App {
     /// Ask the connection to send what is pending (e.g. a file whose upload just finished).
     pub(crate) fn send_pending_messages(&self) {
         self.tell_connection(ToConnection::SendPending);
@@ -611,6 +628,7 @@ impl App {
             .is_ok_and(|since| since >= crate::app::MAINTENANCE_INTERVAL);
         let waiting = self
             .connection
+            .borrow()
             .as_ref()
             .is_some_and(|tx| tx.send(ToConnection::Wake).is_ok());
         // The loop's timer stands still while the phone sleeps, a pause goes by the clock.
@@ -626,7 +644,7 @@ impl App {
     }
 
     pub(crate) fn connection_json(&self) -> Value {
-        json!({ "state": self.connection_state })
+        json!({ "state": self.connection_state.get() })
     }
 
     /// The chat list, the archive or (`private`, unlocked only) the private chats. Private chats
@@ -636,7 +654,7 @@ impl App {
         archived: bool,
         private: bool,
     ) -> Result<Value, ApiError> {
-        if private && !self.unlocked {
+        if private && !self.unlocked.get() {
             return Err(ApiError::Locked);
         }
         // Everything the rows need, in one query each instead of one per chat: with a few

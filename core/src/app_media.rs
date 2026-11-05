@@ -1378,7 +1378,7 @@ impl App {
         let Ok((key, _)) = self.conversation(identity) else {
             return false;
         };
-        if self.unlocked || !self.store.is_private(&key).unwrap_or(false) {
+        if self.unlocked.get() || !self.store.is_private(&key).unwrap_or(false) {
             return false;
         }
         let Some(pass) = &mut self.write_pass else {
@@ -1681,7 +1681,7 @@ impl App {
     /// here again.
     pub(crate) fn retry_failed_transfers(&mut self) {
         self.transfer_retry_at = None;
-        if self.connection_state != "connected" {
+        if self.connection_state.get() != "connected" {
             return;
         }
         let now = now_ms();
@@ -2018,7 +2018,7 @@ impl App {
         } else {
             crate::messages::now_ms() - days_ms(days)
         };
-        let hidden = if self.unlocked {
+        let hidden = if self.unlocked.get() {
             Vec::new()
         } else {
             self.store.private_chats()?
@@ -3023,7 +3023,7 @@ mod tests {
         let (_dir, mut app) = app();
         tokio::task::LocalSet::new()
             .run_until(async {
-                app.connection_state = "connected";
+                app.connection_state.set("connected");
                 let id = outgoing_file(&app.store, 1, 1);
                 app.store.set_upload_state(id, STATE_FAILED).unwrap();
                 app.retry_failed_transfers();
@@ -3045,7 +3045,7 @@ mod tests {
         let (_dir, mut app) = app();
         tokio::task::LocalSet::new()
             .run_until(async {
-                app.connection_state = "connected";
+                app.connection_state.set("connected");
                 let id = outgoing_file(&app.store, 1, 1);
                 app.store.set_upload_failed(id, true, 0).unwrap();
                 app.wake_connection();
@@ -3060,7 +3060,7 @@ mod tests {
         let (_dir, mut app) = app();
         tokio::task::LocalSet::new()
             .run_until(async {
-                app.connection_state = "disconnected";
+                app.connection_state.set("disconnected");
                 let id = outgoing_file(&app.store, 1, 1);
                 app.store.set_upload_failed(id, true, 0).unwrap();
                 app.retry_failed_transfers();
@@ -3076,7 +3076,7 @@ mod tests {
     async fn only_a_change_to_what_is_still_to_go_out_sends_pending_messages() {
         let (_dir, mut app) = app();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        app.connection = Some(tx);
+        app.connection.replace(Some(tx));
         let mut asked = |app: &mut App, event: CoreEvent| {
             app.on_media_event(&event);
             let mut count = 0;
@@ -3132,7 +3132,7 @@ mod tests {
                 assert!(wait <= std::time::Duration::from_secs(60));
                 assert!(wait > std::time::Duration::from_secs(30));
 
-                app.connection_state = "connected";
+                app.connection_state.set("connected");
                 app.transfer_retry_at = None;
                 app.retry_failed_transfers();
                 assert!(app.transfer_retry_at.is_some());
@@ -3455,7 +3455,7 @@ mod tests {
         let (_dir, mut app) = app();
         tokio::task::LocalSet::new()
             .run_until(async {
-                app.connection_state = "connected";
+                app.connection_state.set("connected");
                 let id = received_file(&app.store, 1, 1);
                 app.store
                     .set_media_state(id, MediaPart::File, STATE_LOCAL)
@@ -3959,7 +3959,7 @@ mod tests {
         }
         arrived_when_written(&app.store);
         app.store.set_private("AAAAAAAA", true).unwrap();
-        assert!(!app.unlocked);
+        assert!(!app.unlocked.get());
 
         assert_eq!(app.clean_up(7, false).unwrap()["removed"], 1);
         assert_eq!(state(&app.store, files[0], "fileState"), Some(STATE_LOCAL));
@@ -3968,7 +3968,7 @@ mod tests {
         assert_eq!(app.store.message_count("AAAAAAAA").unwrap(), 2);
         assert_eq!(app.store.message_count("BBBBBBBB").unwrap(), 0);
 
-        app.unlocked = true;
+        app.unlocked.set(true);
         assert_eq!(app.clean_up(7, false).unwrap()["removed"], 1);
         assert_eq!(app.clean_up(7, true).unwrap()["removed"], 2);
         assert_eq!(app.store.message_count("AAAAAAAA").unwrap(), 0);

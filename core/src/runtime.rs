@@ -508,7 +508,7 @@ pub fn set_log_level(level: &str) {
 /// An event from the core's own queue (media, marks): the UI and the browsers learn of it.
 fn on_media_event(app: &mut App, event: &CoreEvent, emit: &Emit) {
     app.gate_media(event);
-    emit(event.to_json(&app.store, app.unlocked).to_string());
+    emit(event.to_json(&app.store, app.unlocked.get()).to_string());
     app.on_media_event(event);
     app.web_on_core_event(event);
     app.web_refresh();
@@ -537,8 +537,8 @@ fn forget_stopped_connection(
     connection: &mut Option<mpsc::UnboundedReceiver<FromConnection>>,
     emit: &Emit,
 ) {
-    if app.connection.is_none() && connection.take().is_some() {
-        emit(json!({"event": "connectionState", "state": app.connection_state}).to_string());
+    if app.connection.borrow().is_none() && connection.take().is_some() {
+        emit(json!({"event": "connectionState", "state": app.connection_state.get()}).to_string());
     }
 }
 
@@ -622,7 +622,7 @@ async fn run_loop(
                 match event {
                     None => connection = None,
                     Some(FromConnection::State(state)) => {
-                        app.connection_state = state.as_str();
+                        app.connection_state.set(state.as_str());
                         app.web_connection_changed(matches!(
                             state,
                             crate::connection::ConnectionState::Connected
@@ -642,7 +642,7 @@ async fn run_loop(
                         app.on_core_event(&event);
                         app.web_on_core_event(&event);
                         app.web_refresh();
-                        emit(event.to_json(&app.store, app.unlocked).to_string());
+                        emit(event.to_json(&app.store, app.unlocked.get()).to_string());
                         if matches!(*event, CoreEvent::MultiDeviceChanged) {
                             app.apply_multi_device();
                             if let Err(error) = app.publish_feature_mask().await {
@@ -818,7 +818,7 @@ mod tests {
 
         // Still running: it keeps its channel.
         let (to_connection, _to_rx) = mpsc::unbounded_channel();
-        app.connection = Some(to_connection);
+        app.connection.replace(Some(to_connection));
         forget_stopped_connection(&app, &mut connection, &emit);
         assert!(connection.is_some());
         assert!(said.lock().unwrap().is_empty());

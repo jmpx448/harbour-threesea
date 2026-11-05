@@ -9,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     safe::{
         self, MasterKey, PasswordCheck, SafeError,
         backup::{self, Backup},
@@ -232,7 +232,9 @@ impl App {
         };
         json!({ "result": result })
     }
+}
 
+impl Shared {
     fn safe_key(&self) -> Result<Option<MasterKey>, ApiError> {
         let Some(hex) = self.store.setting(keys::SAFE_MASTER_KEY)? else {
             return Ok(None);
@@ -280,10 +282,7 @@ impl App {
         }))
     }
 
-    pub(crate) async fn safe_enable(
-        &mut self,
-        password: Zeroizing<String>,
-    ) -> Result<Value, ApiError> {
+    pub(crate) async fn safe_enable(&self, password: Zeroizing<String>) -> Result<Value, ApiError> {
         match safe::check_password(&password) {
             PasswordCheck::TooShort => return Err(ApiError::PasswordTooShort),
             PasswordCheck::TooLong => return Err(ApiError::PasswordTooLong),
@@ -314,7 +313,7 @@ impl App {
         self.safe_status()
     }
 
-    pub(crate) async fn safe_backup_now(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn safe_backup_now(&self) -> Result<Value, ApiError> {
         if self.safe_key()?.is_none() {
             return Err(ApiError::Internal("Threema Safe is disabled".into()));
         }
@@ -324,7 +323,7 @@ impl App {
 
     /// Turn Safe off: first the backup goes from the server, as the key to it goes with the
     /// settings (Android's `disableSafe`). Off whatever the server says; the reply tells.
-    pub(crate) async fn safe_disable(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn safe_disable(&self) -> Result<Value, ApiError> {
         let deleted = match self.safe_key() {
             Ok(Some(key)) => server::delete(&self.https, &key)
                 .await
@@ -336,7 +335,7 @@ impl App {
     }
 
     /// The local half of [`Self::safe_disable`]: `deleted` is how the server copy fared.
-    fn forget_safe(&mut self, deleted: Result<(), ApiError>) -> Result<Value, ApiError> {
+    fn forget_safe(&self, deleted: Result<(), ApiError>) -> Result<Value, ApiError> {
         if let Err(error) = &deleted {
             tracing::warn!(kind = error.kind(), "Threema Safe backup not deleted");
             // The wait can outlast the page, and with the key gone nobody can delete it later.
@@ -359,7 +358,7 @@ impl App {
     }
 
     pub(crate) async fn safe_restore(
-        &mut self,
+        &self,
         identity: &str,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
@@ -593,7 +592,7 @@ impl App {
     /// like Android); IDs that don't exist any more are dropped. Groups and lists that exist
     /// already are left alone. On network errors everything stays pending for the next
     /// maintenance. Returns whether anything was imported.
-    pub(crate) async fn import_pending_groups(&mut self) -> Result<bool, ApiError> {
+    pub(crate) async fn import_pending_groups(&self) -> Result<bool, ApiError> {
         let mut pending: Value = self
             .store
             .setting(keys::SAFE_PENDING_IMPORT)?
@@ -760,7 +759,7 @@ impl App {
     /// `SAFE_IMPORT_ERROR` for the status page and cleared by the next successful attempt; the
     /// import is retried when the connection comes back, by `maintenance`, and on request
     /// (`safeRetryImport`). Returns the UI events the attempt caused.
-    pub(crate) async fn try_pending_import(&mut self) -> Vec<&'static str> {
+    pub(crate) async fn try_pending_import(&self) -> Vec<&'static str> {
         let mut events = Vec::new();
         let result = async {
             let contacts = self.import_pending_contacts().await?;
@@ -808,7 +807,9 @@ impl App {
         events.dedup();
         events
     }
+}
 
+impl App {
     /// The connection is up: try a pending Safe import right away — `maintenance` alone would
     /// leave restored groups waiting up to an hour after a network failure — and pick up
     /// picture recovery (kept downloads, restored contacts' requests in a bounded batch).
@@ -820,11 +821,12 @@ impl App {
         let now = tokio::time::Instant::now();
         if self
             .last_import_attempt
+            .get()
             .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60))
         {
             return Vec::new();
         }
-        self.last_import_attempt = Some(now);
+        self.last_import_attempt.set(Some(now));
         let mut events = Vec::new();
         let pending = self
             .pending_import_counts()
@@ -838,12 +840,14 @@ impl App {
         self.request_restored_pictures(PICTURE_REQUEST_BATCH);
         events
     }
+}
 
+impl Shared {
     /// A restored device's _Application Setup Steps_ (Android `ApplicationSetupSteps.kt`), once
     /// the import is done and the connection is up: its groups and sessions are as old as the
     /// backup. Upstream's first step comes first here too: nothing is said about forward secrecy
     /// before the directory knows our feature mask; if that fails, the next round tries again.
-    async fn run_restore_setup(&mut self) {
+    async fn run_restore_setup(&self) {
         let waiting = self.store.setting(keys::SAFE_RESTORE_SETUP);
         let imported = self
             .pending_import_counts()
@@ -851,7 +855,7 @@ impl App {
         // The feature mask goes first, and during a rest it stays home without saying so.
         if !matches!(waiting, Ok(Some(_)))
             || !imported
-            || self.connection_state != "connected"
+            || self.connection_state.get() != "connected"
             || self.store.directory_resting()
         {
             return;
@@ -1034,7 +1038,7 @@ impl App {
 
     /// Upload if the policy says so (or `force`). Returns whether an upload happened. Failures
     /// are recorded in `SAFE_LAST_ERROR` and returned.
-    async fn safe_upload(&mut self, force: bool) -> Result<bool, ApiError> {
+    async fn safe_upload(&self, force: bool) -> Result<bool, ApiError> {
         let Some(key) = self.safe_key()? else {
             return Ok(false);
         };
@@ -1050,7 +1054,7 @@ impl App {
         result
     }
 
-    async fn safe_upload_with(&mut self, key: &MasterKey, force: bool) -> Result<bool, ApiError> {
+    async fn safe_upload_with(&self, key: &MasterKey, force: bool) -> Result<bool, ApiError> {
         let json = Zeroizing::new(
             serde_json::to_vec(&self.build_backup()?)
                 .map_err(|e| ApiError::Internal(e.to_string()))?,
@@ -1087,7 +1091,9 @@ impl App {
         tracing::info!(size, "Threema Safe backup uploaded");
         Ok(true)
     }
+}
 
+impl App {
     /// Periodic work on the core thread (called at start and then hourly): pending Safe contact
     /// import and the automatic Safe backup. Returns the events to emit to the UI.
     pub async fn maintenance(&mut self) -> Vec<&'static str> {
@@ -1329,11 +1335,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn restore_setup_waits_for_a_directory_rest_to_end() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path());
+        let app = app_with_identity(dir.path());
         app.store
             .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)
             .unwrap();
-        app.connection_state = "connected";
+        app.connection_state.set("connected");
         app.store.rest_directory_calls();
         app.run_restore_setup().await;
         assert_eq!(
@@ -1545,10 +1551,10 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<crate::connection::ToConnection>,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path());
+        let app = app_with_identity(dir.path());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.connection = Some(tx);
-        app.connection_state = "connected";
+        app.connection.replace(Some(tx));
+        app.connection_state.set("connected");
         for id in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE", "FFFFFFFF"] {
             let mut contact = crate::contacts::test_contact(id);
             contact.feature_mask = libthreema::common::FeatureMask(
@@ -1713,7 +1719,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn the_setup_steps_wait_for_the_import_and_the_connection() {
-        let (_dir, mut app, mut rx) = restored_app();
+        let (_dir, app, mut rx) = restored_app();
         app.store
             .set_setting(
                 keys::SAFE_PENDING_IMPORT,
@@ -1730,7 +1736,7 @@ mod tests {
             Some(RESTORE_SETUP_START)
         );
         app.store.delete_setting(keys::SAFE_PENDING_IMPORT).unwrap();
-        app.connection_state = "connecting";
+        app.connection_state.set("connecting");
         app.run_restore_setup().await;
         assert!(inits_to(&mut rx).is_empty(), "the connection too");
     }
@@ -2015,7 +2021,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_groups_last_update_survives_a_restore() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path());
+        let app = app_with_identity(dir.path());
         app.store
             .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
             .unwrap();

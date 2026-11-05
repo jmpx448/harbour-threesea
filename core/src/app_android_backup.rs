@@ -2158,7 +2158,7 @@ impl App {
             |key: &str| -> Option<i64> { self.store.setting(key).ok().flatten()?.parse().ok() };
         // Private chats count only while the private chats are open (ADR 0009).
         let left_out = |key: &str, private_key: &str| {
-            let private = if self.unlocked {
+            let private = if self.unlocked.get() {
                 number(private_key)
             } else {
                 None
@@ -2284,7 +2284,7 @@ impl App {
             lookup: Some(crate::android_backup::export::ContactLookup {
                 https: self.https.clone(),
                 config: std::sync::Arc::clone(&self.config),
-                connection: self.connection.clone(),
+                connection: self.connection.borrow().clone(),
             }),
         };
         tokio::task::spawn_local(job.run());
@@ -2539,7 +2539,7 @@ mod export_tests {
             )
             .unwrap();
         app.store.set_private("B0B0B0B0", true).unwrap();
-        assert!(!app.unlocked);
+        assert!(!app.unlocked.get());
         for (key, value) in [
             (keys::ANDROID_EXPORT_DIR, folder.path().to_str().unwrap()),
             (keys::ANDROID_EXPORT_PASSWORD, "round-trip-pw"),
@@ -2770,7 +2770,7 @@ mod export_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_chat_left_out_of_the_backup_is_counted() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let out = tempfile::tempdir().unwrap();
         let store = std::rc::Rc::clone(&app.store);
         store
@@ -2786,11 +2786,11 @@ mod export_tests {
             done["summary"]["skipped"]["chatsWithoutContact"], 1,
             "the event goes out while they are hidden too: {done}"
         );
-        assert!(!app.unlocked);
+        assert!(!app.unlocked.get());
         assert_eq!(app.android_export_status().unwrap()["chatsLeftOut"], 1);
-        app.unlocked = true;
+        app.unlocked.set(true);
         assert_eq!(app.android_export_status().unwrap()["chatsLeftOut"], 2);
-        app.unlocked = false;
+        app.unlocked.set(false);
 
         // The directory's answer comes in as for anyone looked up: out of the contact list. The
         // next backup holds it, and says so.
@@ -2886,7 +2886,7 @@ mod export_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn an_unreadable_file_doesnt_fail_the_backup() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let body = serde_json::json!({
             "rendering": "media", "mediaType": "image/jpeg", "name": "a.jpg", "size": 4,
             "fileState": crate::app_media::STATE_LOCAL,
@@ -2928,7 +2928,7 @@ mod export_tests {
         assert_eq!(done["summary"]["mediaFiles"], 0);
         assert_eq!(done["summary"]["messages"], 2);
         assert_eq!(app.android_export_status().unwrap()["filesLeftOut"], 1);
-        app.unlocked = true;
+        app.unlocked.set(true);
         assert_eq!(app.android_export_status().unwrap()["filesLeftOut"], 2);
     }
 

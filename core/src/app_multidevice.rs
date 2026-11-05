@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     connection::{
         DeviceGroupError, DropOutcome, JOIN_REPLY_LIMIT, JoinOutcome, LinkedDevice, ToConnection,
     },
@@ -61,7 +61,7 @@ fn trimmed_name(input: &str) -> String {
     name
 }
 
-impl App {
+impl Shared {
     /// Point blob transfers at the device group's mirror (multi-device) or the usual server.
     pub(crate) fn apply_multi_device(&self) {
         let properties = self.store.multi_device().ok().flatten();
@@ -71,7 +71,9 @@ impl App {
                 .zip(properties.as_ref().map(|p| p.mediator_device_id)),
         );
     }
+}
 
+impl App {
     /// A picture changed on another device: fetch it from the mirror (local scope, as Android's
     /// `ReflectedBlobDownloader`) and store it like a received one; or remove it.
     /// A picture another device changed, as `synced_pictures` keeps it: fetched and stored, and
@@ -146,7 +148,9 @@ impl App {
             }
         });
     }
+}
 
+impl Shared {
     /// `multiDevice`: `{active}`.
     pub(crate) fn multi_device_json(&self) -> Result<Value, ApiError> {
         Ok(json!({ "active": self.store.multi_device()?.is_some() }))
@@ -155,7 +159,7 @@ impl App {
     /// `linkedDevices`: `{devices: [LinkedDevice]}` (this device first). Each device also
     /// carries the `alias` the user gave it here, and this device its own `label` (what the
     /// others show for it).
-    pub(crate) async fn linked_devices(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn linked_devices(&self) -> Result<Value, ApiError> {
         if self.store.multi_device()?.is_none() {
             return Ok(json!({ "devices": [] }));
         }
@@ -186,7 +190,7 @@ impl App {
 
     /// `linkedDevices` as the page asks for it: a list of just this device means nothing else
     /// is linked any more (removed on the other device, say), so multi-device ends now.
-    pub(crate) async fn linked_devices_checked(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn linked_devices_checked(&self) -> Result<Value, ApiError> {
         let devices = self.linked_devices().await?;
         let others = devices["devices"]
             .as_array()
@@ -214,15 +218,16 @@ impl App {
     }
 
     /// The periodic form of that, from `maintenance` and when connected.
-    pub(crate) fn check_device_group(&mut self) {
+    pub(crate) fn check_device_group(&self) {
         let now = tokio::time::Instant::now();
         if self
             .last_group_check
+            .get()
             .is_some_and(|at| now.duration_since(at) < ALONE_CHECK_INTERVAL)
         {
             return;
         }
-        self.last_group_check = Some(now);
+        self.last_group_check.set(Some(now));
         self.deactivate_if_alone();
     }
 
@@ -234,7 +239,9 @@ impl App {
             .filter(|label| !label.is_empty())
             .unwrap_or_else(|| crate::multidevice::DEVICE_LABEL.to_owned()))
     }
+}
 
+impl App {
     /// `setDeviceLabel`: what the other devices show for this one. It travels in the D2M
     /// client-hello, so the connection is started again for the mediator to learn it.
     pub(crate) fn set_device_label(&mut self, label: &str) -> Result<Value, ApiError> {
@@ -251,7 +258,9 @@ impl App {
         }
         Ok(json!({ "label": self.device_label()? }))
     }
+}
 
+impl Shared {
     /// The name the user gave another device of the group, for our own lists.
     fn device_alias(&self, id: &str) -> Result<Option<String>, ApiError> {
         Ok(self
@@ -259,7 +268,9 @@ impl App {
             .setting(&format!("{}{id}", crate::multidevice::SETTING_ALIAS_PREFIX))?
             .filter(|alias| !alias.is_empty()))
     }
+}
 
+impl App {
     /// `setDeviceAlias`: name another device of the group for this device's lists (a device's
     /// own label is encrypted with the device group key and only it can change it).
     pub(crate) fn set_device_alias(&mut self, id: &str, alias: &str) -> Result<Value, ApiError> {
@@ -275,7 +286,9 @@ impl App {
         }
         Ok(json!({}))
     }
+}
 
+impl Shared {
     /// Remove devices through the connection (see `ToConnection::DropDevices`).
     async fn drop_from_group(&self, ids: Option<Vec<u64>>) -> Result<DropOutcome, ApiError> {
         let (reply, answer) = oneshot::channel();
@@ -289,7 +302,7 @@ impl App {
 
     /// `dropDevices`: remove devices (hex ids) from the group. Once none but this one would
     /// remain, this one leaves too: multi-device ends and forward security returns.
-    pub(crate) async fn drop_devices(&mut self, ids: &[String]) -> Result<Value, ApiError> {
+    pub(crate) async fn drop_devices(&self, ids: &[String]) -> Result<Value, ApiError> {
         let ids = ids
             .iter()
             .map(|id| u64::from_str_radix(id, 16))
@@ -311,7 +324,7 @@ impl App {
     /// mediator stays out of reach (user report 2026-10-28: offline until the ID was set up
     /// anew).
     pub(crate) async fn deactivate_multi_device(
-        &mut self,
+        &self,
         leave_locally: bool,
     ) -> Result<Value, ApiError> {
         if self.store.multi_device()?.is_none() {
@@ -331,7 +344,7 @@ impl App {
     /// `ResetAppTask` does too), because afterwards this phone can't reach them any more. True
     /// if some may have stayed: no connection, or no answer in time. That doesn't stop the
     /// removal; the user asked for it and is told.
-    pub(crate) async fn drop_linked_devices_for_removal(&mut self) -> bool {
+    pub(crate) async fn drop_linked_devices_for_removal(&self) -> bool {
         if !matches!(self.store.multi_device(), Ok(Some(_))) {
             return false;
         }
@@ -346,7 +359,7 @@ impl App {
     /// The reply can take minutes and the page that asked may be gone by then, so a failed
     /// removal is also an event the UI hears wherever the user is.
     fn tell_failed_removal(
-        &mut self,
+        &self,
         outcome: Result<DropOutcome, ApiError>,
     ) -> Result<DropOutcome, ApiError> {
         if outcome.is_err() {
@@ -358,7 +371,7 @@ impl App {
     /// Multi-device off on this device, whatever the mediator knows: clear the stored
     /// properties, tell the UI, publish the feature mask (with forward security again, best
     /// effort) and reconnect — straight to the chat server from now on.
-    pub(crate) async fn leave_device_group_locally(&mut self) {
+    pub(crate) async fn leave_device_group_locally(&self) {
         match self.store.set_multi_device(None) {
             Ok(()) => self.note_ui_events(&["multiDeviceChanged"]),
             Err(error) => {
@@ -384,7 +397,7 @@ impl App {
     /// Turn multi-device on (linking, after the emoji check): new device group, forward
     /// security off (feature mask now, sessions terminated by the connection once logged in),
     /// then connect through the mediator. Android: `DeviceLinkingPartOneTask.activateMultiDevice`.
-    pub(crate) async fn activate_multi_device(&mut self) -> Result<(), ApiError> {
+    pub(crate) async fn activate_multi_device(&self) -> Result<(), ApiError> {
         if self.store.multi_device()?.is_some() {
             return Ok(());
         }
@@ -401,9 +414,10 @@ impl App {
 
     /// `startLinking`: parse the code, connect, return the emoji check (one right row, two
     /// random ones, like Android's `LinkNewDeviceVerifyFragment`).
-    pub(crate) async fn start_linking(&mut self, code: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn start_linking(&self, code: &str) -> Result<Value, ApiError> {
         use crate::{multidevice::RENDEZVOUS_EMOJIS, rendezvous::LinkError};
-        if let Some(old) = self.pending_link.take() {
+        let old = self.pending_link.take();
+        if let Some(old) = old {
             old.close().await;
         }
         let offer = crate::rendezvous::parse_join_code(code).map_err(|error| match error {
@@ -439,12 +453,12 @@ impl App {
                 choices.push(row(decoy));
             }
         }
-        self.pending_link = Some(link);
+        self.pending_link.replace(Some(link));
         Ok(json!({ "choices": choices, "correct": correct }))
     }
 
     /// `confirmLinking`: like Android's device linking part one (activation) and two (data).
-    pub(crate) async fn confirm_linking(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn confirm_linking(&self) -> Result<Value, ApiError> {
         let link = self
             .pending_link
             .take()
@@ -478,7 +492,7 @@ impl App {
     /// the ID and be in the group, so this device stays in charge until the mediator has
     /// removed what is there; a device group that was there before is the user's to manage.
     async fn finish_linking(
-        &mut self,
+        &self,
         outcome: JoinOutcome,
         was_active: bool,
     ) -> Result<Value, ApiError> {
@@ -514,7 +528,9 @@ impl App {
             },
         }
     }
+}
 
+impl App {
     /// A group we left is deleted here: from the other devices too (Android's
     /// `ReflectGroupSyncDeleteTask`), unless they never got it. Queued while the row is there.
     pub(crate) fn reflect_group_deleted(&self, group: &Group) -> Result<(), ApiError> {
@@ -602,7 +618,9 @@ impl App {
         }
         Ok(())
     }
+}
 
+impl Shared {
     /// After a command that changed something other devices keep too: reflect it.
     pub(crate) async fn reflect_change(&self, change: SyncChange, result: &Value) {
         use libthreema::protobuf::d2d::{
@@ -808,7 +826,8 @@ impl App {
         }
         // A picture may need its upload first, and is noted until that has worked: what fails comes
         // again with `resume_picture_downloads`.
-        let connection = self.connection.as_ref();
+        let connection = self.connection.borrow().clone();
+        let connection = connection.as_ref();
         if own_picture {
             reflect_own_picture(&self.store, &self.https, &self.media, connection).await;
         }
@@ -1207,7 +1226,7 @@ mod tests {
             .set_multi_device(Some(&Properties::generate()))
             .unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
-        app.connection = Some(tx);
+        app.connection.replace(Some(tx));
         rx
     }
 
@@ -2289,15 +2308,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn the_periodic_check_runs_about_hourly_and_only_with_multi_device() {
-        let (_dir, mut app) = app();
+        let (_dir, app) = app();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        app.connection = Some(tx);
+        app.connection.replace(Some(tx));
         app.check_device_group();
         assert!(rx.try_recv().is_err(), "no device group, nothing to check");
         app.store
             .set_multi_device(Some(&Properties::generate()))
             .unwrap();
-        app.last_group_check = None;
+        app.last_group_check.set(None);
         app.check_device_group();
         assert!(matches!(
             rx.try_recv(),

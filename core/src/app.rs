@@ -1346,15 +1346,68 @@ fn random_device_id() -> String {
     )
 }
 
-/// The core. Lives on the core thread only (libthreema state is not `Send`).
-pub struct App {
+/// The part of the core that a command or a round of maintenance keeps using while it waits for
+/// the network, beside the core loop: tasks hold on to this, and whatever else they want done
+/// comes back to the loop (`crate::detached`). Everything in it is good for use at any `.await`,
+/// as no borrow of its cells is held across one (clippy's `await_holding_refcell_ref`).
+pub struct Shared {
     pub(crate) store: std::rc::Rc<Store>,
     pub(crate) https: HttpsClient,
     pub(crate) version: ClientVersion,
     pub(crate) config: Arc<Config>,
     /// Channel to the running chat server connection, if any.
-    pub(crate) connection:
+    pub(crate) connection: std::cell::RefCell<
         Option<tokio::sync::mpsc::UnboundedSender<crate::connection::ToConnection>>,
+    >,
+    /// Last known connection state, for `connectionState`.
+    pub connection_state: std::cell::Cell<&'static str>,
+    /// Encrypted files of messages (shared with the bridge's image provider).
+    pub(crate) media: Arc<crate::media::MediaStore>,
+    /// Media downloads report their progress here (into the core loop).
+    pub(crate) media_events: tokio::sync::mpsc::UnboundedSender<crate::providers::CoreEvent>,
+    /// Contacts the request being handled changed beyond what its command says of itself, such as
+    /// making them direct, for the other devices.
+    pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
+    /// Contacts this command made that the other devices don't have yet: they go as a `Create`,
+    /// as those devices ignore an update of someone unknown (`ReflectedContactSyncTask`).
+    pub(crate) new_contacts: std::cell::RefCell<Vec<String>>,
+    /// Chats a message brought back from the archive during the current command.
+    pub(crate) unarchived: std::cell::RefCell<Vec<String>>,
+    /// This build has a media engine (ADR 0012).
+    pub(crate) calls_supported: bool,
+    /// Group calls: the SFU credentials while they last.
+    pub(crate) sfu: std::rc::Rc<std::cell::RefCell<crate::app_group_calls::SfuCache>>,
+    pub(crate) group_calls_watched:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    /// Cached TURN servers, with their expiry (ms).
+    pub(crate) turn_servers: std::cell::RefCell<Option<(crate::directory::TurnServers, i64)>>,
+    /// Device linking between the scan and the emoji confirmation.
+    pub(crate) pending_link: std::cell::RefCell<Option<crate::rendezvous::RendezvousLink>>,
+    /// Events for the UI caused by handling a command (e.g. a Safe import the command ran);
+    /// the core loop emits and clears them after every command.
+    pub(crate) pending_ui_events: std::cell::RefCell<Vec<&'static str>>,
+    /// When the pending Safe import was last tried automatically (reconnect rate limit).
+    pub(crate) last_import_attempt: std::cell::Cell<Option<tokio::time::Instant>>,
+    /// When this device last looked whether it is alone in its device group.
+    pub(crate) last_group_check: std::cell::Cell<Option<tokio::time::Instant>>,
+    /// Private chats readable (ADR 0009); memory only, starts locked.
+    pub(crate) unlocked: std::cell::Cell<bool>,
+    /// The app's data directory (store, media, the in-app log).
+    pub(crate) data_dir: PathBuf,
+}
+
+impl core::ops::Deref for App {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
+}
+
+/// The core. Lives on the core thread only (libthreema state is not `Send`).
+pub struct App {
+    /// What work beside the core loop (a task with a network wait) needs as well.
+    pub(crate) shared: std::rc::Rc<Shared>,
     /// Its task, to stop it wherever it is.
     pub(crate) connection_task: Option<tokio::task::JoinHandle<()>>,
     /// When maintenance last ran, by the clock.
@@ -1365,12 +1418,6 @@ pub struct App {
     pub(crate) transfers: crate::app_media::RunningTransfers,
     /// A wake-up is over but for those: `wakeSettled` follows when they have ended.
     pub(crate) wake_settled_held: bool,
-    /// Last known connection state, for `connectionState`.
-    pub connection_state: &'static str,
-    /// Encrypted files of messages (shared with the bridge's image provider).
-    pub(crate) media: Arc<crate::media::MediaStore>,
-    /// Media downloads report their progress here (into the core loop).
-    pub(crate) media_events: tokio::sync::mpsc::UnboundedSender<crate::providers::CoreEvent>,
     media_events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>>,
     /// Files of hidden private chats still on their way to the core.
     pub(crate) write_pass: Option<crate::app_media::WritePass>,
@@ -1391,17 +1438,6 @@ pub struct App {
         tokio::sync::mpsc::UnboundedSender<crate::app_media::FinishedFileWork>,
     file_work_done_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>>,
-    /// Contacts the request being handled changed beyond what its command says of itself, such as
-    /// making them direct, for the other devices.
-    pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
-    /// Contacts this command made that the other devices don't have yet: they go as a `Create`,
-    /// as those devices ignore an update of someone unknown (`ReflectedContactSyncTask`).
-    pub(crate) new_contacts: std::cell::RefCell<Vec<String>>,
-    /// Chats a message brought back from the archive during the current command.
-    pub(crate) unarchived: std::cell::RefCell<Vec<String>>,
-    /// Calls (ADR 0012): this build has a media engine; the current call, its SDP rules and
-    /// cached TURN servers (with their expiry, ms).
-    pub(crate) calls_supported: bool,
     /// The build may check for updates (ADR 0014); a check is under way.
     pub(crate) update_check_built: bool,
     pub(crate) update_check_running: std::rc::Rc<std::cell::Cell<bool>>,
@@ -1410,19 +1446,9 @@ pub struct App {
     pub(crate) calls: crate::calls::Calls,
     pub(crate) call_patcher: Option<crate::sdp::SdpPatcher>,
     pub(crate) call_media: crate::app_calls::CallMedia,
-    /// Group calls: the SFU credentials while they last.
-    pub(crate) sfu: std::rc::Rc<std::cell::RefCell<crate::app_group_calls::SfuCache>>,
     pub(crate) group_call: Option<crate::app_group_calls::ActiveGroupCall>,
-    pub(crate) group_calls_watched:
-        std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     /// Threema Web sessions running (ADR 0013).
     pub(crate) web: crate::app_web::WebSessions,
-    pub(crate) turn_servers: Option<(crate::directory::TurnServers, i64)>,
-    /// Device linking between the scan and the emoji confirmation.
-    pub(crate) pending_link: Option<crate::rendezvous::RendezvousLink>,
-    /// Events for the UI caused by handling a command (e.g. a Safe import the command ran);
-    /// the core loop emits and clears them after every command.
-    pub(crate) pending_ui_events: Vec<&'static str>,
     /// A running Android history import's cancel flag (set true when it ends).
     pub(crate) android_import: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// A data backup added contacts: what they support is unknown until the next refresh.
@@ -1431,19 +1457,11 @@ pub struct App {
     pub(crate) android_export: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// Tells the running export to give up (the ID is being removed).
     pub(crate) android_export_cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// When the pending Safe import was last tried automatically (reconnect rate limit).
-    pub(crate) last_import_attempt: Option<tokio::time::Instant>,
     /// When the core loop next looks for failed transfers to try again.
     pub(crate) transfer_retry_at: Option<tokio::time::Instant>,
-    /// When this device last looked whether it is alone in its device group.
-    pub(crate) last_group_check: Option<tokio::time::Instant>,
-    /// Private chats readable (ADR 0009); memory only, starts locked.
-    pub(crate) unlocked: bool,
     /// On an unmetered network (Wi-Fi/Ethernet, from the bridge): auto-download policy.
     pub(crate) on_wifi: bool,
     pub(crate) pictures_dir: Option<PathBuf>,
-    /// The app's data directory (store, media, the in-app log).
-    pub(crate) data_dir: PathBuf,
     /// `deleteAllData` went through: this core only waits for the bridge to stop it.
     pub(crate) identity_removed: bool,
 }
@@ -1478,7 +1496,7 @@ impl App {
             .map(std::rc::Rc::new)
             .map_err(|error| ApiError::store_failed(&error))?;
         forget_false_refusal(&store).map_err(|error| ApiError::store_failed(&error))?;
-        let app = Self {
+        let shared = Shared {
             store,
             https: HttpsClient::new().map_err(|e| ApiError::Internal(e.to_string()))?,
             version: ClientVersion {
@@ -1490,15 +1508,31 @@ impl App {
                 arch: std::env::consts::ARCH.to_owned(),
             },
             config: Arc::new(Config::from(ConfigEnvironment::Production)),
-            connection: None,
+            connection: std::cell::RefCell::default(),
+            connection_state: std::cell::Cell::new("disconnected"),
+            media,
+            media_events,
+            made_direct: std::cell::RefCell::default(),
+            new_contacts: std::cell::RefCell::default(),
+            unarchived: std::cell::RefCell::default(),
+            calls_supported: start.calls,
+            sfu: std::rc::Rc::default(),
+            group_calls_watched: std::rc::Rc::default(),
+            turn_servers: std::cell::RefCell::default(),
+            pending_link: std::cell::RefCell::default(),
+            pending_ui_events: std::cell::RefCell::default(),
+            last_import_attempt: std::cell::Cell::default(),
+            last_group_check: std::cell::Cell::default(),
+            unlocked: std::cell::Cell::default(),
+            data_dir: start.data_dir.clone(),
+        };
+        let app = Self {
+            shared: std::rc::Rc::new(shared),
             connection_task: None,
             maintenance_ran_at: std::time::SystemTime::now(),
             maintenance_overdue: false,
             transfers: crate::app_media::RunningTransfers::default(),
             wake_settled_held: false,
-            connection_state: "disconnected",
-            media,
-            media_events,
             media_events_rx: Some(media_events_rx),
             write_pass: None,
             attachments: Vec::new(),
@@ -1509,34 +1543,21 @@ impl App {
             file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),
             file_work_done,
             file_work_done_rx: Some(file_work_done_rx),
-            made_direct: std::cell::RefCell::default(),
-            new_contacts: std::cell::RefCell::default(),
-            unarchived: std::cell::RefCell::default(),
-            pending_link: None,
-            calls_supported: start.calls,
             update_check_built: start.update_check,
             update_check_running: std::rc::Rc::default(),
             update_check_manual: std::rc::Rc::default(),
             calls: crate::calls::Calls::default(),
             call_patcher: None,
             call_media: crate::app_calls::CallMedia::default(),
-            sfu: std::rc::Rc::default(),
             group_call: None,
-            group_calls_watched: std::rc::Rc::default(),
             web: crate::app_web::WebSessions::default(),
-            turn_servers: None,
-            pending_ui_events: Vec::new(),
             android_import: None,
             imported_contacts_unchecked: false,
             android_export: None,
             android_export_cancel: Arc::default(),
-            last_import_attempt: None,
             transfer_retry_at: None,
-            last_group_check: None,
-            unlocked: false,
             on_wifi: false,
             pictures_dir: start.pictures_dir.clone(),
-            data_dir: start.data_dir.clone(),
             identity_removed: false,
         };
         app.apply_display_settings()?;
@@ -1545,11 +1566,13 @@ impl App {
         app.apply_multi_device();
         Ok(app)
     }
+}
 
+impl Shared {
     /// Turn forward security off or on again, like [`Self::activate_multi_device`] does for
     /// a device group: off announces it (feature mask without FS), terminates every session
     /// with DisabledByLocal once connected, and reconnects so the running session follows.
-    async fn set_forward_security(&mut self, on: bool) -> Result<Value, ApiError> {
+    async fn set_forward_security(&self, on: bool) -> Result<Value, ApiError> {
         if on {
             self.store.delete_setting(keys::FORWARD_SECURITY)?;
             // Off and on again before the next login: nothing to end (unless multi-device
@@ -1571,7 +1594,9 @@ impl App {
         self.tell_connection(crate::connection::ToConnection::Reconnect);
         Ok(json!({ "on": on }))
     }
+}
 
+impl App {
     /// Settings → Advanced → Log → "Save support package": the facts a report needs, then
     /// the log, as one text file in `directory` (sharing it stays the user's step). Nothing
     /// in it is personal: versions, model, flags, and the log's fixed texts, kinds, codes
@@ -1603,7 +1628,7 @@ impl App {
             } else {
                 "off"
             },
-            self.connection_state,
+            self.connection_state.get(),
         );
         let name = format!(
             "threesea-log-{}.txt",
@@ -1641,19 +1666,24 @@ impl App {
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>> {
         self.file_work_done_rx.take()
     }
+}
 
+impl Shared {
     /// Remember events the current command caused, for [`Self::take_ui_events`].
-    pub(crate) fn note_ui_events(&mut self, events: &[&'static str]) {
+    pub(crate) fn note_ui_events(&self, events: &[&'static str]) {
+        let mut pending = self.pending_ui_events.borrow_mut();
         for event in events {
-            if !self.pending_ui_events.contains(event) {
-                self.pending_ui_events.push(event);
+            if !pending.contains(event) {
+                pending.push(event);
             }
         }
     }
+}
 
+impl App {
     /// The events the last command caused (emitted by the core loop after the reply).
     pub fn take_ui_events(&mut self) -> Vec<&'static str> {
-        std::mem::take(&mut self.pending_ui_events)
+        self.pending_ui_events.take()
     }
 
     /// [`Self::handle`] with binary attachments for the command.
@@ -1900,7 +1930,7 @@ impl App {
                 self.check_lock(Some(&pin))?;
                 self.write_pass = None;
                 if private_chats {
-                    self.unlocked = true;
+                    self.unlocked.set(true);
                     self.update_media_gate();
                     // Their names again, in a private group's call that went on.
                     self.emit_group_call_participants();
@@ -1908,7 +1938,7 @@ impl App {
                 self.lock_status()
             }
             Command::Lock { pending_files } => {
-                self.unlocked = false;
+                self.unlocked.set(false);
                 self.update_media_gate();
                 self.group_calls_locked();
                 if let Some(files) = pending_files {
@@ -2206,7 +2236,8 @@ impl App {
             }
             Command::ConfirmLinking => self.confirm_linking().await,
             Command::CancelLinking => {
-                if let Some(link) = self.pending_link.take() {
+                let link = self.pending_link.take();
+                if let Some(link) = link {
                     link.close().await;
                 }
                 Ok(json!({}))
@@ -2406,7 +2437,9 @@ impl App {
             "identity": identity.map(|i| i.threema_id),
         }))
     }
+}
 
+impl Shared {
     fn device_id(&self) -> Result<String, ApiError> {
         if let Some(id) = self.store.setting(keys::DEVICE_ID)? {
             return Ok(id);
@@ -2416,7 +2449,7 @@ impl App {
         Ok(id)
     }
 
-    async fn check_license(&mut self, input: &str) -> Result<Value, ApiError> {
+    async fn check_license(&self, input: &str) -> Result<Value, ApiError> {
         let license_key =
             Zeroizing::new(normalize_license_key(input).ok_or(ApiError::LicenseFormat)?);
         let device_id = self.device_id()?;
@@ -2436,7 +2469,9 @@ impl App {
         Ok(self.store.setting(keys::LICENSE_KEY)?.is_some()
             && self.store.setting(keys::LICENSE_REFUSED)?.is_none())
     }
+}
 
+impl App {
     fn license_status(&self) -> Result<Value, ApiError> {
         Ok(json!({
             "key": self.store.setting(keys::LICENSE_KEY)?,
@@ -2508,7 +2543,9 @@ impl App {
             }
         }
     }
+}
 
+impl Shared {
     /// The error for the UI from a directory call that runs by itself: a 429 also starts the rest.
     pub(crate) fn directory_error(&self, error: DirectoryError) -> ApiError {
         if matches!(error, DirectoryError::RateLimited) {
@@ -2545,7 +2582,7 @@ impl App {
         Ok(())
     }
 
-    async fn create_identity(&mut self) -> Result<Value, ApiError> {
+    async fn create_identity(&self) -> Result<Value, ApiError> {
         self.check_no_identity()?;
         let mut task = CreateIdentityTask::new(CreateIdentityContext {
             client_info: self.version.client_info(),
@@ -2578,7 +2615,7 @@ impl App {
     }
 
     async fn restore_identity_backup(
-        &mut self,
+        &self,
         backup: Zeroizing<String>,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
@@ -2604,7 +2641,7 @@ impl App {
     /// linked e-mail/phone via `identity/fetch_priv` (as `UserServiceImpl.restoreIdentity`), then
     /// store it.
     pub(crate) async fn adopt_identity(
-        &mut self,
+        &self,
         threema_id: &str,
         client_key: &ClientKey,
     ) -> Result<(), ApiError> {
@@ -2638,10 +2675,7 @@ impl App {
         Ok(())
     }
 
-    async fn export_identity_backup(
-        &mut self,
-        password: Zeroizing<String>,
-    ) -> Result<Value, ApiError> {
+    async fn export_identity_backup(&self, password: Zeroizing<String>) -> Result<Value, ApiError> {
         if password.chars().count() < MIN_BACKUP_PASSWORD_LENGTH {
             return Err(ApiError::PasswordTooShort);
         }
@@ -2887,7 +2921,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn no_session_termination_left_once_forward_security_is_back() {
         let fs_terminate = crate::multidevice::SETTING_FS_TERMINATE;
-        let (_dir, mut app) = app();
+        let (_dir, app) = app();
         // A linking that activated multi-device and was rolled back.
         app.activate_multi_device().await.unwrap();
         assert!(app.store.setting(fs_terminate).unwrap().is_some());
@@ -3086,7 +3120,7 @@ mod tests {
                     !app.apply_license_answer(Err(DirectoryError::RateLimited))
                         .unwrap()
                 );
-                assert!(app.connection.is_some(), "still running");
+                assert!(app.connection.borrow().is_some(), "still running");
                 assert_eq!(app.store.setting(keys::LICENSE_REFUSED).unwrap(), None);
                 assert_eq!(app.store.setting(keys::LICENSE_CHECKED_AT).unwrap(), None);
                 assert_eq!(state(&mut app), "ready");
@@ -3219,7 +3253,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn no_second_id_takes_the_place_of_the_first() {
-        let (_dir, mut app) = licensed_app();
+        let (_dir, app) = licensed_app();
         let other = StoredIdentity {
             threema_id: "EFGH5678".into(),
             client_key: Zeroizing::new([8; 32]),
@@ -3463,7 +3497,10 @@ mod tests {
                 assert!(app.ensure_connection().is_some(), "licensed: connects");
                 let no = DirectoryError::Server("no".into());
                 assert!(app.apply_license_answer(Err(no)).unwrap());
-                assert!(app.connection.is_none(), "the running one is stopped");
+                assert!(
+                    app.connection.borrow().is_none(),
+                    "the running one is stopped"
+                );
                 assert!(app.ensure_connection().is_none(), "and none starts");
                 assert!(app.maintenance().await.is_empty(), "nothing else goes out");
             })
@@ -3895,7 +3932,7 @@ mod tests {
 
         // A hidden private group: its name stays out of what the UI hears.
         app.store.set_private(&key, true).unwrap();
-        app.unlocked = false;
+        app.unlocked.set(false);
         let event = events.try_recv().unwrap().to_json(&app.store, true);
         assert_eq!(event["event"], "chatDeleted");
         app.on_core_event(&crate::providers::CoreEvent::GroupDeleted(key));
@@ -4128,7 +4165,7 @@ mod tests {
         let lock = json!({"id": 2, "cmd": "lock", "pendingFiles": {"ABCD1234": files}});
         let reply = call(&mut app, lock);
         assert_eq!(reply["ok"], true, "{reply}");
-        assert!(!app.unlocked, "the lock takes effect at once");
+        assert!(!app.unlocked.get(), "the lock takes effect at once");
         (dir, app)
     }
 
@@ -4547,7 +4584,7 @@ mod tests {
         );
         assert_eq!(stored_messages(&app, "ABCD1234"), 3);
         assert!(app.write_pass.as_ref().unwrap().files.is_empty());
-        assert!(!app.unlocked);
+        assert!(!app.unlocked.get());
     }
 
     #[test]

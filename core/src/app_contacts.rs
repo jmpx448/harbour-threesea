@@ -5,7 +5,7 @@ use libthreema::{common::keys::ClientKey, protobuf::d2d_sync::contact as pc};
 use serde_json::{Value, json};
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     connection::ToConnection,
     contacts::{self, Lookup},
     directory::DirectoryError,
@@ -64,10 +64,10 @@ pub const FEATURE_MASK: u64 = libthreema::common::FeatureMask::VOICE_MESSAGE_SUP
     | libthreema::common::FeatureMask::GROUP_SUPPORT
     | libthreema::common::FeatureMask::POLL_SUPPORT;
 
-impl App {
+impl Shared {
     /// Publish [`FEATURE_MASK`] if the directory doesn't have it yet; without forward security
     /// while multi-device is active (SE-199, like Android's `updateFeatureMask(isFsAllowed)`).
-    pub(crate) async fn publish_feature_mask(&mut self) -> Result<(), ApiError> {
+    pub(crate) async fn publish_feature_mask(&self) -> Result<(), ApiError> {
         let Some(identity) = self.store.identity()? else {
             return Ok(());
         };
@@ -133,7 +133,9 @@ impl App {
         self.store.set_setting(keys::APP_SETTINGS, &json)?;
         Ok(())
     }
+}
 
+impl App {
     /// The app settings plus the call video settings (kept apart: not in Threema Safe).
     pub(crate) fn settings_json(&self) -> Result<Value, ApiError> {
         let mut json = serde_json::to_value(self.app_settings()?)
@@ -251,16 +253,16 @@ impl App {
         }
         self.media.remove_all();
         // The next identity starts locked; its private marks wait for its own PIN.
-        self.unlocked = false;
+        self.unlocked.set(false);
         self.write_pass = None;
         self.update_media_gate();
         // Credentials and links belong to the deleted identity, and the empty store switches
         // off what was read from it into process-wide state.
-        self.turn_servers = None;
+        self.turn_servers.take();
         self.sfu.take();
-        self.pending_link = None;
-        self.last_group_check = None;
-        self.last_import_attempt = None;
+        self.pending_link.take();
+        self.last_group_check.set(None);
+        self.last_import_attempt.set(None);
         self.apply_multi_device();
         contacts::LAST_NAME_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
         self.apply_picture_gate();
@@ -353,7 +355,9 @@ impl App {
             .ok_or(ApiError::ContactNotFound)?;
         Ok(self.contact_value(&contact))
     }
+}
 
+impl Shared {
     /// Contact JSON with its picture version (0: none; `image://threesea/contact/<ID>?<v>`).
     pub(crate) fn contact_value(&self, contact: &libthreema::model::contact::Contact) -> Value {
         let mut value = contacts::to_json(contact);
@@ -395,7 +399,9 @@ impl App {
         );
         value
     }
+}
 
+impl App {
     /// The block list is part of the app settings (as on Android, and in Threema Safe).
     pub(crate) fn set_blocked(&mut self, identity: &str, blocked: bool) -> Result<Value, ApiError> {
         let id = contacts::parse_identity(identity)
@@ -490,8 +496,10 @@ impl App {
         self.store.set_chat_tone(&key, tone)?;
         Ok(json!({}))
     }
+}
 
-    pub(crate) async fn add_contact(&mut self, identity: &str) -> Result<Value, ApiError> {
+impl Shared {
+    pub(crate) async fn add_contact(&self, identity: &str) -> Result<Value, ApiError> {
         let id = contacts::parse_identity(identity)
             .ok_or(ApiError::IdentityFormat)?
             .to_string();
@@ -521,7 +529,9 @@ impl App {
         tracing::info!("contact added");
         Ok(self.contact_value(&contact))
     }
+}
 
+impl App {
     pub(crate) fn update_contact(
         &mut self,
         identity: &str,
@@ -638,7 +648,9 @@ impl App {
         }
         Ok(excluded)
     }
+}
 
+impl Shared {
     /// The directory says that `contact` has dropped forward secrecy: end what is left of the
     /// sessions, and say so in its chat (Android's `OnFSFeatureMaskDowngradedTask`).
     pub(crate) fn fs_support_lost(
@@ -691,7 +703,7 @@ impl App {
 
     /// `linkEmail` (Android `linkWithEmail` / `unlinkEmail`). Only on the user's request; the
     /// address goes to Threema's directory and nowhere else, and is never logged.
-    pub(crate) async fn link_email(&mut self, email: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn link_email(&self, email: &str) -> Result<Value, ApiError> {
         let email = email.trim().to_lowercase();
         let valid = email.contains('@') && email.len() <= 254;
         if !email.is_empty() && !valid {
@@ -724,7 +736,7 @@ impl App {
 
     /// A pending e-mail link: confirmed by now? (Android `checkEmailLinkState`, on opening the
     /// profile and in maintenance.) Returns whether it changed.
-    pub(crate) async fn check_email_link(&mut self) -> Result<bool, ApiError> {
+    pub(crate) async fn check_email_link(&self) -> Result<bool, ApiError> {
         let (Some(_), Some(email), Some(identity)) = (
             self.store.setting(keys::LINKED_EMAIL_PENDING)?,
             self.store.setting(keys::LINKED_EMAIL)?,
@@ -750,7 +762,7 @@ impl App {
 
     /// `linkMobile` (Android `linkWithMobileNumber` / `unlinkMobileNumber`). Only numbers that
     /// say their country: the SMS must not go to a number we guessed (ADR 0016).
-    pub(crate) async fn link_mobile(&mut self, number: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn link_mobile(&self, number: &str) -> Result<Value, ApiError> {
         let normalized = if number.trim().is_empty() {
             String::new()
         } else {
@@ -798,7 +810,7 @@ impl App {
 
     /// `verifyMobile`: the SMS code.
     pub(crate) async fn verify_mobile(
-        &mut self,
+        &self,
         code: &str,
         from_link: bool,
     ) -> Result<Value, ApiError> {
@@ -820,14 +832,14 @@ impl App {
     }
 
     /// `callMobile`: a call that reads the code.
-    pub(crate) async fn call_mobile(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn call_mobile(&self) -> Result<Value, ApiError> {
         let (_, id) = self.pending_mobile()?;
         crate::directory::call_mobile(&self.https, &id).await?;
         self.profile_json()
     }
 
     /// `revocationStatus` (Android `checkRevocationKey`).
-    pub(crate) async fn revocation_status(&mut self, cached: bool) -> Result<Value, ApiError> {
+    pub(crate) async fn revocation_status(&self, cached: bool) -> Result<Value, ApiError> {
         if cached {
             return self.revocation_json(false);
         }
@@ -848,10 +860,7 @@ impl App {
     }
 
     /// `setRevocationPassword` (Android `setRevocationKey`), then the server's state.
-    pub(crate) async fn set_revocation_password(
-        &mut self,
-        password: &str,
-    ) -> Result<Value, ApiError> {
+    pub(crate) async fn set_revocation_password(&self, password: &str) -> Result<Value, ApiError> {
         match password.chars().count() {
             0..=7 => return Err(ApiError::PasswordTooShort),
             257.. => return Err(ApiError::PasswordTooLong),
@@ -890,7 +899,9 @@ impl App {
             "pictureRecipients": self.store.picture_recipients()?,
         }))
     }
+}
 
+impl App {
     pub(crate) fn set_nickname(&mut self, nickname: &str) -> Result<Value, ApiError> {
         // Threema limits nicknames to 32 bytes (`ProfileUtil` / CSP metadata).
         let mut nickname = nickname.trim().to_owned();
@@ -920,13 +931,15 @@ impl App {
         }
         self.profile_json()
     }
+}
 
+impl Shared {
     /// The contacts' states and feature masks, in one `identity/check` (Android's
     /// `ContactUpdateWorker`). Every `checkInterval` the directory last gave, a day if it gave
     /// none, and without revoked IDs, which stay revoked; `force` (the user asked): now, and them
     /// too, as nothing else would ever correct one marked by mistake. Returns whether something
     /// changed.
-    pub(crate) async fn refresh_contacts(&mut self, force: bool) -> Result<bool, ApiError> {
+    pub(crate) async fn refresh_contacts(&self, force: bool) -> Result<bool, ApiError> {
         let now = crate::messages::now_ms() / 1000;
         let setting = |key| -> Result<i64, ApiError> {
             Ok(self
@@ -995,7 +1008,7 @@ impl App {
     /// Import restored Safe contacts (`ThreemaSafeServiceImpl` restore): one bulk lookup; IDs that
     /// are not valid any more are dropped, like on Android. Returns whether anything changed.
     /// On network errors the contacts stay pending and the next maintenance retries.
-    pub(crate) async fn import_pending_contacts(&mut self) -> Result<bool, ApiError> {
+    pub(crate) async fn import_pending_contacts(&self) -> Result<bool, ApiError> {
         let pending = self.pending_backup_contacts()?;
         if pending.is_empty() {
             return Ok(false);
@@ -1062,7 +1075,9 @@ impl App {
         );
         Ok(true)
     }
+}
 
+impl App {
     /// Ask up to `limit` of the contacts a restore left without a picture for one (Safe does not
     /// carry them), as far as there is reason to: a chat or a shared group, like Android's
     /// _Application Setup Steps_. The others stay marked, in case that changes. Called per round
@@ -1106,11 +1121,13 @@ impl App {
             crate::qr::modules(&text).ok_or_else(|| ApiError::Internal("QR code".into()))?;
         Ok(json!({ "text": text, "size": size, "bits": bits }))
     }
+}
 
+impl Shared {
     /// `verifyQrCode`: a scanned `3mid:` code. The key must be the one we have (or, for someone
     /// new, the directory's): then the contact is _fully verified_ (and added if new). A code
     /// that doesn't match, or has expired, changes nothing.
-    pub(crate) async fn verify_qr_code(&mut self, text: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn verify_qr_code(&self, text: &str) -> Result<Value, ApiError> {
         let code = crate::qr::parse(text).ok_or(ApiError::QrInvalid)?;
         if code.is_expired(crate::messages::now_ms() / 1000) {
             return Err(ApiError::QrExpired);
@@ -1141,7 +1158,7 @@ impl App {
     /// The key of a scanned code against the contact's (stored or just looked up, then stored
     /// only if it matches).
     fn verify_with_key(
-        &mut self,
+        &self,
         mut contact: libthreema::model::contact::ContactInit,
         public_key: &[u8; 32],
         new: bool,
@@ -1163,9 +1180,7 @@ impl App {
             .push(contact.identity.to_string());
         Ok(self.contact_value(&contact))
     }
-}
 
-impl App {
     /// What "Automatic" stands for here.
     fn automatic_address_book_country(
         &self,
@@ -1190,7 +1205,9 @@ impl App {
         };
         Ok(country.map_or("", |country| country.region))
     }
+}
 
+impl App {
     /// `addressBookCountry`: what the setting offers and has.
     pub(crate) fn address_book_country_json(&self) -> Result<Value, ApiError> {
         let countries: Vec<Value> = crate::address_book::COUNTRIES
@@ -1216,11 +1233,13 @@ impl App {
         }
         self.address_book_country_json()
     }
+}
 
+impl Shared {
     /// `matchAddressBook`: find address book entries on Threema (hashes only) and make them
     /// contacts, named as in the address book (unless the user named them), server verified.
     pub(crate) async fn match_address_book(
-        &mut self,
+        &self,
         entries: Vec<crate::address_book::Entry>,
     ) -> Result<Value, ApiError> {
         let own = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
@@ -1511,7 +1530,7 @@ mod contact_policy_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_new_contact_with_another_key_is_not_added() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app(dir.path());
+        let app = app(dir.path());
         let contact = crate::contacts::test_contact("BBBBBBBB");
         assert!(matches!(
             app.verify_with_key(contact, &[1; 32], true),
@@ -1523,7 +1542,7 @@ mod contact_policy_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_new_contact_with_the_right_key_is_added_verified() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app(dir.path());
+        let app = app(dir.path());
         let contact = crate::contacts::test_contact("BBBBBBBB");
         app.verify_with_key(contact, &[9; 32], true).unwrap();
         assert_eq!(*app.new_contacts.borrow(), ["BBBBBBBB"]);
@@ -2153,7 +2172,7 @@ mod contact_policy_tests {
         let mut app = app(dir.path());
         with_a_chat(&app, "BBBBBBBB");
         app.store.set_private("BBBBBBBB", true).unwrap();
-        app.unlocked = false;
+        app.unlocked.set(false);
 
         let reply = call(
             &mut app,
@@ -2166,7 +2185,7 @@ mod contact_policy_tests {
         let hidden = call(&mut app, read.clone()).await;
         assert_eq!(hidden["error"]["kind"], "locked");
 
-        app.unlocked = true;
+        app.unlocked.set(true);
         let opened = call(&mut app, read).await;
         assert_eq!(opened["result"]["messages"][0]["text"], "hello");
         let deleted = call(
@@ -2192,13 +2211,13 @@ mod contact_policy_tests {
         let delete = json!({"cmd": "deleteConversation", "identity": "BBBBBBBB"});
 
         app.store.set_private("BBBBBBBB", true).unwrap();
-        app.unlocked = false;
+        app.unlocked.set(false);
         for request in [&read, &mark, &empty, &delete] {
             let reply = call(&mut app, request.clone()).await;
             assert_eq!(reply["error"]["kind"], "locked", "{request}");
         }
         app.store.set_private("BBBBBBBB", false).unwrap();
-        app.unlocked = true;
+        app.unlocked.set(true);
         assert_eq!(unread_total(&app), 1);
 
         let shown = call(&mut app, read).await;
