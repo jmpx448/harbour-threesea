@@ -506,6 +506,7 @@ impl App {
             // Known from a group or deleted before: make it a regular contact again.
             existing.acquaintance_level = pc::AcquaintanceLevel::Direct;
             self.store.upsert_contact(&existing)?;
+            self.made_direct.borrow_mut().push(id);
             return Ok(self.contact_value(&existing));
         }
         let mut found =
@@ -516,6 +517,7 @@ impl App {
         let mut contact = *contact;
         contact.acquaintance_level = pc::AcquaintanceLevel::Direct;
         self.store.upsert_contact(&contact)?;
+        self.new_contacts.borrow_mut().push(id);
         tracing::info!("contact added");
         Ok(self.contact_value(&contact))
     }
@@ -569,6 +571,9 @@ impl App {
                 contact.read_receipt_policy_override = None;
                 contact.typing_indicator_policy_override = None;
                 self.store.upsert_contact(&contact)?;
+                self.made_direct
+                    .borrow_mut()
+                    .push(contact.identity.to_string());
                 cleared += 1;
             }
         }
@@ -1103,7 +1108,9 @@ impl App {
         if own.threema_id == code.identity {
             return Err(ApiError::ContactIsSelf);
         }
-        let contact = match self.store.contact(&code.identity)? {
+        let known = self.store.contact(&code.identity)?;
+        let new = known.is_none();
+        let contact = match known {
             Some(contact) => contact,
             None => {
                 let id = contacts::parse_identity(&code.identity)
@@ -1117,7 +1124,7 @@ impl App {
                 *contact
             }
         };
-        self.verify_with_key(contact, &code.public_key)
+        self.verify_with_key(contact, &code.public_key, new)
     }
 
     /// The key of a scanned code against the contact's (stored or just looked up, then stored
@@ -1126,6 +1133,7 @@ impl App {
         &mut self,
         mut contact: libthreema::model::contact::ContactInit,
         public_key: &[u8; 32],
+        new: bool,
     ) -> Result<Value, ApiError> {
         if contacts::hex_bytes(&contact.public_key.to_string()).as_slice() != public_key {
             tracing::warn!("scanned QR code doesn't match the contact's public key");
@@ -1134,6 +1142,14 @@ impl App {
         contact.verification_level = pc::VerificationLevel::FullyVerified;
         contact.acquaintance_level = pc::AcquaintanceLevel::Direct;
         self.store.upsert_contact(&contact)?;
+        let to_the_others = if new {
+            &self.new_contacts
+        } else {
+            &self.made_direct
+        };
+        to_the_others
+            .borrow_mut()
+            .push(contact.identity.to_string());
         Ok(self.contact_value(&contact))
     }
 }
@@ -1282,6 +1298,7 @@ impl App {
                         tracing::warn!("address book match with a different public key, skipped");
                         if contacts::distrust_changed_key(&mut contact) {
                             self.store.upsert_contact(&contact)?;
+                            self.made_direct.borrow_mut().push(hit.identity.clone());
                         }
                         continue;
                     }
@@ -1309,7 +1326,9 @@ impl App {
                 added += 1;
             }
             // `handle` tells the other devices, as for someone made direct by writing to them.
-            if fresh || change != AddressBookChange::None {
+            if fresh {
+                self.new_contacts.borrow_mut().push(hit.identity.clone());
+            } else if change != AddressBookChange::None {
                 self.made_direct.borrow_mut().push(hit.identity.clone());
             }
         }
@@ -1484,7 +1503,7 @@ mod contact_policy_tests {
         let mut app = app(dir.path());
         let contact = crate::contacts::test_contact("BBBBBBBB");
         assert!(matches!(
-            app.verify_with_key(contact, &[1; 32]),
+            app.verify_with_key(contact, &[1; 32], true),
             Err(crate::app::ApiError::QrMismatch)
         ));
         assert!(app.store.contact("BBBBBBBB").unwrap().is_none());
@@ -1495,7 +1514,8 @@ mod contact_policy_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(dir.path());
         let contact = crate::contacts::test_contact("BBBBBBBB");
-        app.verify_with_key(contact, &[9; 32]).unwrap();
+        app.verify_with_key(contact, &[9; 32], true).unwrap();
+        assert_eq!(*app.new_contacts.borrow(), ["BBBBBBBB"]);
         let stored = app.store.contact("BBBBBBBB").unwrap().expect("added");
         assert_eq!(
             stored.verification_level,
@@ -1941,7 +1961,8 @@ mod contact_policy_tests {
         for left_out in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"] {
             assert!(app.store.contact(left_out).unwrap().is_none(), "{left_out}");
         }
-        assert_eq!(*app.made_direct.borrow(), ["AAAAAAAA"]);
+        assert_eq!(*app.new_contacts.borrow(), ["AAAAAAAA"]);
+        assert!(app.made_direct.borrow().is_empty());
 
         // Once they are contacts, no lookup is needed, and nothing is new.
         let again = [claim("AAAAAAAA", key_of("AAAAAAAA"))];

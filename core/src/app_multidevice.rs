@@ -563,6 +563,24 @@ impl App {
         }
         let built = (|| -> Result<Vec<(Scope, Content)>, crate::store::StoreError> {
             Ok(match change {
+                SyncChange::NewContacts(identities) => {
+                    let mut out = Vec::new();
+                    for identity in identities {
+                        let Some(contact) = self.store.contact(&identity)? else {
+                            continue;
+                        };
+                        let synced = crate::join::contact_sync(&self.store, &contact)?;
+                        out.push((
+                            Scope::ContactSync,
+                            Content::ContactSync(ContactSync {
+                                action: Some(contact_sync::Action::Create(contact_sync::Create {
+                                    contact: Some(synced),
+                                })),
+                            }),
+                        ));
+                    }
+                    out
+                }
                 SyncChange::Contacts(identities) => {
                     let mut out = Vec::new();
                     for identity in identities {
@@ -904,7 +922,10 @@ async fn upload_sync_picture(
 
 /// What a command changed that other devices keep too (multi-device).
 pub(crate) enum SyncChange {
+    /// Contacts the other devices have.
     Contacts(Vec<String>),
+    /// Contacts new here, so to them too.
+    NewContacts(Vec<String>),
     /// A group (`None`: the new group's key from the command's result).
     Group {
         key: Option<String>,
@@ -1930,6 +1951,107 @@ mod tests {
             synced.acquaintance_level,
             Some(AcquaintanceLevel::GroupOrDeleted as i32)
         );
+    }
+
+    /// However the ID was typed: the command understands it, and so does what tells the others.
+    #[test]
+    fn an_id_typed_with_spaces_or_in_lower_case_is_still_reflected() {
+        use libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel;
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _connection = in_a_group(&mut app);
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        app.store.upsert_contact(&contact).unwrap();
+        let block_on = |app: &mut App, request: &str| {
+            let reply = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(app.handle(request));
+            assert!(reply.contains(r#""ok":true"#), "{reply}");
+        };
+
+        block_on(
+            &mut app,
+            r#"{"id":1,"cmd":"addContact","identity":" bbbbbbbb "}"#,
+        );
+        let synced = next_contact_sync(&app);
+        assert_eq!(synced.identity, "BBBBBBBB");
+        assert_eq!(
+            synced.acquaintance_level,
+            Some(AcquaintanceLevel::Direct as i32)
+        );
+
+        block_on(
+            &mut app,
+            r#"{"id":2,"cmd":"updateContact","identity":" bbbbbbbb ","firstName":"Ann"}"#,
+        );
+        assert_eq!(next_contact_sync(&app).first_name.as_deref(), Some("Ann"));
+    }
+
+    /// Scanning someone's code: verified on the other devices too.
+    #[test]
+    fn a_scanned_code_reaches_the_other_devices() {
+        use libthreema::protobuf::d2d_sync::contact::VerificationLevel;
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _connection = in_a_group(&mut app);
+        let contact = crate::contacts::test_contact("BBBBBBBB");
+        app.store.upsert_contact(&contact).unwrap();
+        let key = contact.public_key.to_string();
+        let scan = json!({"id": 1, "cmd": "verifyQrCode", "text": format!("3mid:BBBBBBBB,{key}")});
+        let reply = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(app.handle(&scan.to_string()));
+        assert!(reply.contains(r#""ok":true"#), "{reply}");
+        assert_eq!(
+            next_contact_sync(&app).verification_level,
+            Some(VerificationLevel::FullyVerified as i32)
+        );
+    }
+
+    /// New here, so to the others too: they ignore an update of someone they don't know.
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_new_goes_out_as_a_new_contact() {
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.new_contacts.borrow_mut().push("BBBBBBBB".to_owned());
+        // Any command: `handle` tells the others of what it did.
+        app.handle(r#"{"id":1,"cmd":"contacts"}"#).await;
+        assert_eq!(next_contact_create(&app), "BBBBBBBB");
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    /// One command, many contacts: each of those it changed, and only those.
+    #[tokio::test(flavor = "current_thread")]
+    async fn clearing_individual_receipt_settings_reaches_the_other_devices() {
+        use libthreema::protobuf::d2d_sync::contact::read_receipt_policy_override::Override;
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        let mut own_choice = crate::contacts::test_contact("BBBBBBBB");
+        own_choice.read_receipt_policy_override = crate::contacts::read_receipt_policy(1);
+        assert!(own_choice.read_receipt_policy_override.is_some());
+        app.store.upsert_contact(&own_choice).unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("CCCCCCCC"))
+            .unwrap();
+        let reply = app.handle(r#"{"id":1,"cmd":"clearContactPolicies"}"#).await;
+        assert!(reply.contains(r#""cleared":1"#), "{reply}");
+        let synced = next_contact_sync(&app);
+        assert_eq!(synced.identity, "BBBBBBBB");
+        assert!(matches!(
+            synced
+                .read_receipt_policy_override
+                .and_then(|o| o.r#override),
+            Some(Override::Default(_))
+        ));
+        assert!(app.store.next_sync().unwrap().is_none());
     }
 
     /// A pin is kept on the other devices too, so it goes there with the chat.

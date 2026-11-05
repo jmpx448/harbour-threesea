@@ -1367,6 +1367,9 @@ pub struct App {
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
     /// Contacts the request being handled made direct, for the other devices.
     pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
+    /// Contacts this command made that the other devices don't have yet: they go as a `Create`,
+    /// as those devices ignore an update of someone unknown (`ReflectedContactSyncTask`).
+    pub(crate) new_contacts: std::cell::RefCell<Vec<String>>,
     /// Chats a message brought back from the archive during the current command.
     pub(crate) unarchived: std::cell::RefCell<Vec<String>>,
     /// Calls (ADR 0012): this build has a media engine; the current call, its SDP rules and
@@ -1470,6 +1473,7 @@ impl App {
             write_pass: None,
             attachments: Vec::new(),
             made_direct: std::cell::RefCell::default(),
+            new_contacts: std::cell::RefCell::default(),
             unarchived: std::cell::RefCell::default(),
             pending_link: None,
             calls_supported: start.calls,
@@ -1637,6 +1641,11 @@ impl App {
         };
         let change = sync_change(&self.store, &request.command);
         let outcome = self.execute(request.command).await;
+        let new_contacts = self.new_contacts.take();
+        if !new_contacts.is_empty() {
+            let change = crate::app_multidevice::SyncChange::NewContacts(new_contacts);
+            self.reflect_change(change, &json!({})).await;
+        }
         let made_direct = self.made_direct.take();
         if !made_direct.is_empty() {
             let change = crate::app_multidevice::SyncChange::Contacts(made_direct);
@@ -2570,11 +2579,11 @@ fn sync_change(
 ) -> Option<crate::app_multidevice::SyncChange> {
     use crate::app_multidevice::SyncChange;
     Some(match command {
-        Command::AddContact { identity }
-        | Command::DeleteContact { identity }
+        // The command takes it as it comes (spaces, lower case), and so must this.
+        Command::DeleteContact { identity }
         | Command::UpdateContact { identity, .. }
         | Command::SetContactPolicies { identity, .. } => {
-            SyncChange::Contacts(vec![identity.clone()])
+            SyncChange::Contacts(vec![crate::contacts::parse_identity(identity)?.to_string()])
         }
         Command::SetPrivate { identity, .. }
         | Command::SetArchived { identity, .. }
