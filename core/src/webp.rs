@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! What a WebP file says beyond its picture. A RIFF file is a list of chunks: a four-letter name,
 //! a little-endian size, the content and a padding byte after an odd size. EXIF and XMP are chunks
-//! of their own, and readers skip what they don't know, so as for MP4 (ADR 0025) this keeps a list
-//! of what stays, not of what goes. Animation stays.
+//! of their own, and readers skip what they don't know, so as for MP4 (ADR 0025) this keeps what a
+//! decoder needs and nothing else. An ICC colour profile goes too: it holds free text (device,
+//! maker, copyright), and our other pictures lose theirs as well. Animation stays.
 
 use zeroize::Zeroizing;
 
-/// The chunks that make up the picture, besides `VP8X` and `ANMF`, which take more care. `ICCP` is
-/// how its colours are meant.
-const KEPT: [&[u8; 4]; 5] = [b"ICCP", b"ANIM", b"ALPH", b"VP8 ", b"VP8L"];
-/// The same within an animation's frame, after its header.
-const KEPT_IN_FRAME: [&[u8; 4]; 3] = [b"ALPH", b"VP8 ", b"VP8L"];
 const FRAME_HEADER: usize = 16;
-/// `VP8X` flags: the file has EXIF, the file has XMP.
-const FLAGS_METADATA: u8 = 0x08 | 0x04;
+const ANIM_SIZE: usize = 6;
+/// `VP8X`'s flags that stay: alpha and animation. Those of ICC, EXIF and XMP go, and the bits that
+/// mean nothing.
+const FLAGS_KEPT: u8 = 0x10 | 0x02;
 
 /// Not a well-formed WebP file: whatever it holds can't be vouched for.
 #[derive(Debug, PartialEq, Eq)]
@@ -22,26 +20,42 @@ pub struct NotCleanable;
 /// A chunk's name and content.
 type Chunk<'a> = (&'a [u8; 4], &'a [u8]);
 
-/// The chunks in `data`. Anything cut off or not adding up is an error.
-fn chunks(mut data: &[u8]) -> Result<Vec<Chunk<'_>>, NotCleanable> {
-    let mut found = Vec::new();
-    while !data.is_empty() {
-        let (name, rest) = data.split_first_chunk::<4>().ok_or(NotCleanable)?;
+/// The chunks in a piece of a file, one by one, in no more memory than that. Anything cut off or
+/// not adding up is an error, and the last thing it gives.
+struct Chunks<'a>(&'a [u8]);
+
+impl<'a> Chunks<'a> {
+    fn next_chunk(&mut self) -> Result<Chunk<'a>, NotCleanable> {
+        let (name, rest) = self.0.split_first_chunk::<4>().ok_or(NotCleanable)?;
         let (size, rest) = rest.split_first_chunk::<4>().ok_or(NotCleanable)?;
         let size = usize::try_from(u32::from_le_bytes(*size)).map_err(|_| NotCleanable)?;
         let padded = size.checked_add(size & 1).ok_or(NotCleanable)?;
         if padded > rest.len() {
             return Err(NotCleanable);
         }
-        found.push((name, &rest[..size]));
-        data = &rest[padded..];
+        self.0 = &rest[padded..];
+        Ok((name, &rest[..size]))
     }
-    Ok(found)
+}
+
+impl<'a> Iterator for Chunks<'a> {
+    type Item = Result<Chunk<'a>, NotCleanable>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let chunk = self.next_chunk();
+        if chunk.is_err() {
+            self.0 = &[];
+        }
+        Some(chunk)
+    }
 }
 
 /// The top level chunks of a WebP file. What follows the end the file gives for itself is outside
 /// of them.
-fn top_level(data: &[u8]) -> Result<Vec<Chunk<'_>>, NotCleanable> {
+fn top_level(data: &[u8]) -> Result<Chunks<'_>, NotCleanable> {
     if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
         return Err(NotCleanable);
     }
@@ -51,7 +65,7 @@ fn top_level(data: &[u8]) -> Result<Vec<Chunk<'_>>, NotCleanable> {
         .and_then(|size| size.checked_add(8))
         .filter(|end| (12..=data.len()).contains(end))
         .ok_or(NotCleanable)?;
-    chunks(&data[12..end])
+    Ok(Chunks(&data[12..end]))
 }
 
 fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], parts: &[&[u8]]) -> Result<(), NotCleanable> {
@@ -67,55 +81,97 @@ fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], parts: &[&[u8]]) -> Result<(),
     Ok(())
 }
 
-/// Takes out of a WebP file in memory everything but its picture, and tells the size of a picture
-/// whose file says it in plain view (an extended one). Doing it twice changes nothing more. On an
-/// error `data` is as it was; the old content is wiped.
+/// An animation's frame as it stays: its header, the first alpha before its first picture.
+fn write_frame(out: &mut Vec<u8>, content: &[u8]) -> Result<(), NotCleanable> {
+    if content.len() < FRAME_HEADER {
+        return Err(NotCleanable);
+    }
+    let (header, frame) = content.split_at(FRAME_HEADER);
+    let mut kept = Zeroizing::new(Vec::with_capacity(frame.len()));
+    let mut alpha = false;
+    let mut picture = false;
+    for chunk in Chunks(frame) {
+        let (name, content) = chunk?;
+        match name {
+            b"ALPH" if !alpha => {
+                alpha = true;
+                write_chunk(&mut kept, name, &[content])?;
+            }
+            b"VP8 " | b"VP8L" => {
+                picture = true;
+                write_chunk(&mut kept, name, &[content])?;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if !picture {
+        return Err(NotCleanable);
+    }
+    write_chunk(out, b"ANMF", &[header, &kept])
+}
+
+/// Takes out of a WebP file in memory everything but its picture or its animation, and tells the
+/// size of a picture whose file says it in plain view (an extended one). Doing it twice changes
+/// nothing more. On an error `data` is as it was; the old content is wiped.
 pub fn clean(data: &mut Vec<u8>) -> Result<Option<(u32, u32)>, NotCleanable> {
-    let top = top_level(data)?;
     let mut out = Zeroizing::new(Vec::with_capacity(data.len()));
     out.extend_from_slice(b"RIFF\0\0\0\0WEBP");
     let mut size = None;
-    let mut pictures = 0;
-    for (at, (name, content)) in top.iter().enumerate() {
-        if *name == b"VP8X" {
-            // Its place is first, and its fields are what the rest is read by.
-            if at != 0 || content.len() != 10 {
-                return Err(NotCleanable);
-            }
-            let side = |at: usize| {
-                u32::from_le_bytes([content[at], content[at + 1], content[at + 2], 0]) + 1
-            };
-            size = Some((side(4), side(7)));
-            let mut header = [0; 10];
-            header.copy_from_slice(content);
-            header[0] &= !FLAGS_METADATA;
-            write_chunk(&mut out, name, &[&header])?;
-        } else if *name == b"ANMF" {
-            if content.len() < FRAME_HEADER {
-                return Err(NotCleanable);
-            }
-            let (header, frame) = content.split_at(FRAME_HEADER);
-            let mut kept = Zeroizing::new(Vec::with_capacity(frame.len()));
-            let mut has_picture = false;
-            for (name, content) in chunks(frame)? {
-                if KEPT_IN_FRAME.contains(&name) {
-                    has_picture |= name != b"ALPH";
-                    write_chunk(&mut kept, name, &[content])?;
+    let mut first = true;
+    let mut alpha = false;
+    let mut animation = false;
+    let mut frames = false;
+    let mut still = false;
+    for chunk in top_level(data)? {
+        let (name, content) = chunk?;
+        match name {
+            b"VP8X" => {
+                // Its place is first, and its fields are what the rest is read by.
+                if !first || content.len() != 10 {
+                    return Err(NotCleanable);
                 }
+                let side = |at: usize| {
+                    u32::from_le_bytes([content[at], content[at + 1], content[at + 2], 0]) + 1
+                };
+                size = Some((side(4), side(7)));
+                let mut header = [0; 10];
+                header[0] = content[0] & FLAGS_KEPT;
+                header[4..].copy_from_slice(&content[4..]);
+                write_chunk(&mut out, name, &[&header])?;
             }
-            if !has_picture {
-                return Err(NotCleanable);
+            b"ANIM" if !animation => {
+                if content.len() != ANIM_SIZE {
+                    return Err(NotCleanable);
+                }
+                animation = true;
+                write_chunk(&mut out, name, &[content])?;
             }
-            write_chunk(&mut out, name, &[header, &kept])?;
-            pictures += 1;
-        } else if KEPT.contains(name) {
-            if matches!(*name, b"VP8 " | b"VP8L") {
-                pictures += 1;
+            b"ANMF" => {
+                if !animation {
+                    return Err(NotCleanable);
+                }
+                frames = true;
+                write_frame(&mut out, content)?;
             }
-            write_chunk(&mut out, name, &[content])?;
+            b"ALPH" if !alpha && !animation => {
+                alpha = true;
+                write_chunk(&mut out, name, &[content])?;
+            }
+            b"VP8 " | b"VP8L" if !frames => {
+                // A still picture, once it has been said what it is, ends the file.
+                if animation {
+                    return Err(NotCleanable);
+                }
+                still = true;
+                write_chunk(&mut out, name, &[content])?;
+                break;
+            }
+            _ => {}
         }
+        first = false;
     }
-    if pictures == 0 {
+    if !still && !frames {
         return Err(NotCleanable);
     }
     let riff = u32::try_from(out.len() - 8).map_err(|_| NotCleanable)?;
@@ -128,7 +184,10 @@ pub fn clean(data: &mut Vec<u8>) -> Result<Option<(u32, u32)>, NotCleanable> {
 /// Whether a WebP file is an animation.
 #[must_use]
 pub fn is_animated(data: &[u8]) -> bool {
-    top_level(data).is_ok_and(|chunks| chunks.iter().any(|(name, _)| *name == b"ANIM"))
+    let Ok(mut chunks) = top_level(data) else {
+        return false;
+    };
+    chunks.any(|chunk| matches!(chunk, Ok((b"ANIM", _))))
 }
 
 /// WebP files for other modules' tests.
@@ -152,7 +211,7 @@ pub(crate) mod fixture {
     pub(crate) fn animated() -> Vec<u8> {
         file(&[
             chunk(b"VP8X", &[0x02 | 0x08, 0, 0, 0, 63, 1, 0, 239, 0, 0]),
-            chunk(b"ANIM", b"loop"),
+            chunk(b"ANIM", b"loop.."),
             chunk(
                 b"ANMF",
                 &[&[7; FRAME_HEADER][..], &chunk(b"VP8 ", b"one")].concat(),
@@ -187,29 +246,37 @@ mod tests {
     fn metadata_goes_and_the_picture_stays() {
         let picture = chunk(b"VP8 ", b"PICTURE"); // odd: padded
         let mut data = file(&[
-            extended(0x20 | 0x10 | 0x08 | 0x04),
-            chunk(b"ICCP", b"colours"),
+            extended(0x20 | 0x10 | 0x08 | 0x04 | 0x01),
+            chunk(b"ICCP", b"my phone's profile"),
             chunk(b"ALPH", b"alpha"),
+            chunk(b"ALPH", b"more"),
+            chunk(b"JUNK", b"anything"),
             picture.clone(),
             chunk(b"EXIF", b"GPS here"),
             chunk(b"XMP ", b"who, odd"),
-            chunk(b"JUNK", b"anything"),
+            chunk(b"VP8L", b"another picture"),
+            chunk(b"ANMF", &[0; FRAME_HEADER]),
         ]);
         assert_eq!(clean(&mut data), Ok(Some((320, 240))));
         assert_eq!(
             data,
-            file(&[
-                extended(0x20 | 0x10),
-                chunk(b"ICCP", b"colours"),
-                chunk(b"ALPH", b"alpha"),
-                picture,
-            ])
+            file(&[extended(0x10), chunk(b"ALPH", b"alpha"), picture])
         );
         let riff = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         assert_eq!(riff as usize, data.len() - 8, "the file's size follows");
         let before = data.clone();
         clean(&mut data).unwrap();
         assert_eq!(data, before, "twice changes nothing");
+    }
+
+    #[test]
+    fn what_the_extended_header_could_hide_goes() {
+        let mut data = file(&[
+            chunk(b"VP8X", &[0, 1, 2, 3, 63, 1, 0, 239, 0, 0]),
+            chunk(b"VP8 ", b"pict"),
+        ]);
+        clean(&mut data).unwrap();
+        assert_eq!(data, file(&[extended(0), chunk(b"VP8 ", b"pict")]));
     }
 
     #[test]
@@ -224,14 +291,20 @@ mod tests {
     fn an_animation_stays_one_without_what_its_frames_carry() {
         let header = [7; FRAME_HEADER];
         let frame = |parts: &[Vec<u8>]| chunk(b"ANMF", &[&header[..], &parts.concat()].concat());
+        let anim = chunk(b"ANIM", b"loop..");
         let mut data = file(&[
             extended(0x02 | 0x08),
-            chunk(b"ANIM", b"loop"),
+            anim.clone(),
+            chunk(b"ANIM", b"second"),
             frame(&[
                 chunk(b"ALPH", b"a"),
+                chunk(b"ALPH", b"b"),
                 chunk(b"VP8 ", b"one"),
+                chunk(b"VP8L", b"more of it"),
                 chunk(b"EXIF", b"in a frame"),
             ]),
+            chunk(b"ALPH", b"outside"),
+            chunk(b"VP8 ", b"outside"),
             frame(&[chunk(b"VP8L", b"two!")]),
         ]);
         assert!(is_animated(&data));
@@ -240,7 +313,7 @@ mod tests {
             data,
             file(&[
                 extended(0x02),
-                chunk(b"ANIM", b"loop"),
+                anim,
                 frame(&[chunk(b"ALPH", b"a"), chunk(b"VP8 ", b"one")]),
                 frame(&[chunk(b"VP8L", b"two!")]),
             ])
@@ -250,11 +323,31 @@ mod tests {
     }
 
     #[test]
+    fn looking_for_an_animation_stops_at_it_and_at_what_doesnt_add_up() {
+        let anim = chunk(b"ANIM", b"loop..");
+        let mut data = file(&[anim, chunk(b"VP8 ", b"one")]);
+        assert!(is_animated(&data));
+        data.truncate(12);
+        assert!(!is_animated(&data));
+        assert!(!is_animated(b"not a webp"));
+    }
+
+    #[test]
     fn what_follows_the_files_end_goes() {
         let clean_file = file(&[chunk(b"VP8 ", b"pict")]);
         let mut data = [clean_file.as_slice(), b"Exif, outside any chunk"].concat();
         clean(&mut data).unwrap();
         assert_eq!(data, clean_file);
+    }
+
+    /// Fuzzing seed: `cargo test -p threesea-core --lib write_webp_seeds -- --ignored`
+    #[test]
+    #[ignore = "writes fuzzing seeds"]
+    fn write_webp_seeds() {
+        let seeds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/seeds/webp_clean");
+        std::fs::create_dir_all(&seeds).unwrap();
+        std::fs::write(seeds.join("still.webp"), super::fixture::still()).unwrap();
+        std::fs::write(seeds.join("animated.webp"), super::fixture::animated()).unwrap();
     }
 
     #[test]
@@ -273,12 +366,40 @@ mod tests {
             ),
             (
                 "VP8X not first",
-                file(&[chunk(b"VP8 ", b"pict"), extended(0)]),
+                file(&[
+                    chunk(b"JUNK", b"pict"),
+                    extended(0),
+                    chunk(b"VP8 ", b"pict"),
+                ]),
             ),
-            ("frame too short", file(&[chunk(b"ANMF", b"short")])),
+            (
+                "frame too short",
+                file(&[chunk(b"ANIM", b"loop.."), chunk(b"ANMF", b"short")]),
+            ),
             (
                 "frame without a picture",
-                file(&[chunk(b"ANMF", &[0; FRAME_HEADER])]),
+                file(&[
+                    chunk(b"ANIM", b"loop.."),
+                    chunk(b"ANMF", &[0; FRAME_HEADER]),
+                ]),
+            ),
+            (
+                "frame without an animation",
+                file(&[chunk(
+                    b"ANMF",
+                    &[[7; FRAME_HEADER].as_slice(), &chunk(b"VP8 ", b"one")].concat(),
+                )]),
+            ),
+            (
+                "animation of another size",
+                file(&[
+                    chunk(b"ANIM", b"long and free text"),
+                    chunk(b"VP8 ", b"one"),
+                ]),
+            ),
+            (
+                "animation of a still picture",
+                file(&[chunk(b"ANIM", b"loop.."), chunk(b"VP8 ", b"one")]),
             ),
         ] {
             let mut data = bad.clone();
