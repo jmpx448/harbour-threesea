@@ -144,6 +144,14 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   with linked devices also a read update (`d2d.IncomingMessageUpdate`) for every chat, receipt or
   not, removed on the mediator's ack. The spec would reflect the outgoing receipt where one goes
   out; the update says the same to the other devices and also covers a contact blocked meanwhile.
+- No message body over 7500 bytes goes out (`MESSAGE_BODY_MAX`): a frame holds 8192 and the
+  wrappings take up to about 600. A longer one is marked failed or, from the outbox, dropped, so it
+  isn't tried at every login. Closing a poll is refused up front when the results don't fit: the
+  poll stays open and the user gets an error. This differs from Android on purpose, which saves the
+  poll as closed before sending and only logs `MessageTooLongException`, so it ends there and nobody
+  else hears (`PollServiceImpl.close`, `PollUtil.closePoll`). Summary mode is no way out, since
+  clients must discard a poll's change of display mode (csp.struct.yml; Android's
+  `PollServiceImpl.update`).
 - Our nickname goes in the metadata of messages that distribute the profile. Three answers:
   a name; an empty string, which makes the receiver drop the name it knows (Android's
   `setNicknameFromRemote("")`); or nothing, which leaves it alone. An ID backup holds no nickname,

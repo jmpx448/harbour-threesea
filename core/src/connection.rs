@@ -1852,6 +1852,14 @@ impl<'a> Session<'a> {
                 let Some(body) = to_group_body(body) else {
                     continue;
                 };
+                if !self.fits_a_frame(&Outgoing::Group(group, body.clone())) {
+                    tracing::warn!(
+                        kind = message.kind,
+                        "message too long for a frame; not sent"
+                    );
+                    self.fail_outgoing(message.id)?;
+                    continue;
+                }
                 self.note_written_out(message.id)?;
                 if self
                     .send_to_group(
@@ -1883,14 +1891,15 @@ impl<'a> Session<'a> {
             // Queued before the contact was blocked or revoked: not sent, and nothing about it
             // reaches the other devices or the contact.
             if !self.may_receive(&message.conversation, &body)? {
-                if let Some(failed) = self
-                    .setup
-                    .store
-                    .set_outgoing_failed(message.id)
-                    .map_err(storage_error)?
-                {
-                    self.emit(CoreEvent::MessagesChanged(vec![failed]));
-                }
+                self.fail_outgoing(message.id)?;
+                continue;
+            }
+            if !self.fits_a_frame(&body) {
+                tracing::warn!(
+                    kind = message.kind,
+                    "message too long for a frame; not sent"
+                );
+                self.fail_outgoing(message.id)?;
                 continue;
             }
             self.note_written_out(message.id)?;
@@ -1930,20 +1939,44 @@ impl<'a> Session<'a> {
                     self.awaiting_ack
                         .push((message.conversation.clone(), message.message_id));
                 }
-                Ok(None) => {
-                    if let Some(failed) = self
-                        .setup
-                        .store
-                        .set_outgoing_failed(message.id)
-                        .map_err(storage_error)?
-                    {
-                        self.emit(CoreEvent::MessagesChanged(vec![failed]));
-                    }
-                }
+                Ok(None) => self.fail_outgoing(message.id)?,
                 Err(error) => return Err(error),
             }
         }
         self.send_outbox().await
+    }
+
+    /// A message that won't go out, and the chat hears so.
+    fn fail_outgoing(&self, id: i64) -> Result<(), ConnectionError> {
+        if let Some(failed) = self
+            .setup
+            .store
+            .set_outgoing_failed(id)
+            .map_err(storage_error)?
+        {
+            self.emit(CoreEvent::MessagesChanged(vec![failed]));
+        }
+        Ok(())
+    }
+
+    /// Whether `body` fits a frame, however it is wrapped. Something longer never goes out: the
+    /// server's answer to it isn't known, and it would be tried again at every login, with
+    /// everything queued behind it waiting.
+    fn fits_a_frame(&self, body: &Outgoing) -> bool {
+        // The receiver doesn't matter for the encoding.
+        let body = match body {
+            Outgoing::Contact(body) => OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: self.setup.identity,
+                body: body.clone(),
+            }),
+            Outgoing::Group(group_identity, body) => {
+                OutgoingMessageBody::Group(OutgoingGroupMessageBody {
+                    group_identity: *group_identity,
+                    body: body.clone(),
+                })
+            }
+        };
+        encode_message_body(&body).1.len() <= crate::messages::MESSAGE_BODY_MAX
     }
 
     /// Before a message's first byte goes out: someone may have it from here on, and the chat hears
@@ -2135,7 +2168,9 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         if let Some(group) = crate::groups::parse_key(&entry.conversation) {
-            let Some(body) = outbox_group_body(&entry) else {
+            let body = outbox_group_body(&entry)
+                .filter(|body| self.fits_a_frame(&Outgoing::Group(group, body.clone())));
+            let Some(body) = body else {
                 tracing::warn!(kind = entry.kind, "dropping unsendable group outbox entry");
                 self.setup
                     .store
@@ -2169,7 +2204,8 @@ impl<'a> Session<'a> {
         }
         let encoded = match outbox_body(&entry) {
             Some(body)
-                if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))? =>
+                if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))?
+                    && self.fits_a_frame(&Outgoing::Contact(body.clone())) =>
             {
                 // A delivery receipt says nothing the other devices go by, and of what was read
                 // they hear through `OUTBOX_READ_UPDATE`, receipt or not.
@@ -2287,9 +2323,10 @@ impl<'a> Session<'a> {
 
     /// Encode a message to a contact: forward-security encapsulated if the contact supports it
     /// (with an `Init` first for a new session), otherwise plain. `Ok(None)` if it can't be sent:
-    /// an unknown or revoked contact, or a blocked one unless the message is exempt. Every message
-    /// passes here, so receipts, typing, picture requests and call signals stay away from them too,
-    /// and no forward secrecy session starts.
+    /// an unknown or revoked contact, a blocked one unless the message is exempt, or a body too
+    /// long for a frame (group messages are checked before they get here, as there `None` means
+    /// "later"). Every message passes here, so receipts, typing, picture requests and call signals
+    /// stay away from them too, and no forward secrecy session starts.
     async fn encode(
         &self,
         receiver: &str,
@@ -2301,6 +2338,10 @@ impl<'a> Session<'a> {
             return Ok(None);
         };
         if !self.may_receive(receiver, &body)? {
+            return Ok(None);
+        }
+        if !self.fits_a_frame(&body) {
+            tracing::warn!("message too long for a frame; not sent");
             return Ok(None);
         }
         let receiver_identity = contact.identity;
@@ -4995,6 +5036,108 @@ mod sync_order_tests {
 
     fn text() -> Outgoing {
         Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    fn long_text(length: usize) -> ContactMessageBody {
+        ContactMessageBody::Text(TextMessage {
+            text: "x".repeat(length),
+        })
+    }
+
+    /// With forward secrecy, a long nickname and the most padding there can be, the longest body
+    /// fits a frame, 1:1 and in a group; what goes out adds its box and container to this.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_longest_body_fits_a_frame_however_it_is_wrapped() {
+        const WRAPPING: usize = 16 + 4;
+        const MOST_PADDING: usize = 255;
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        setup
+            .store
+            .set_setting(crate::store::keys::NICKNAME, &"n".repeat(32))
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let group = crate::groups::parse_key("g:USER0001:0000000000000001").unwrap();
+        let longest = || {
+            [
+                Outgoing::Contact(long_text(crate::messages::MESSAGE_BODY_MAX)),
+                Outgoing::Group(
+                    group,
+                    GroupMessageBody::Text(TextMessage {
+                        text: "x".repeat(crate::messages::MESSAGE_BODY_MAX - 16),
+                    }),
+                ),
+            ]
+        };
+        // The padding is random: the smallest of many is about the size without it.
+        let mut smallest = usize::MAX;
+        for id in 0..64 {
+            for body in longest() {
+                assert!(session.fits_a_frame(&body));
+                let sent = session.encode(CREATOR, id, 1, body).await.unwrap().unwrap();
+                let size = sent.last().unwrap().bytes.len();
+                assert!(size + WRAPPING <= 8192, "{size}");
+                smallest = smallest.min(size);
+            }
+        }
+        assert!(smallest + MOST_PADDING + WRAPPING <= 8192, "{smallest}");
+    }
+
+    /// Longer than a frame: not on the wire and not tried again at every login. In a group too,
+    /// where `encode` saying no would only mean "later".
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_frame_cannot_hold_fails_and_is_not_tried_again() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let too_long = "x".repeat(crate::messages::MESSAGE_BODY_MAX + 1);
+
+        assert!(
+            session
+                .encode(CREATOR, 1, 1, Outgoing::Contact(long_text(too_long.len())))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let group_key = "g:USER0001:0000000000000001";
+        store
+            .upsert_group(&crate::groups::Group {
+                key: group_key.to_owned(),
+                identity: crate::groups::parse_key(group_key).unwrap(),
+                name: "Crew".into(),
+                members: vec![CREATOR.to_owned()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let in_chat = store
+            .insert_outgoing(CREATOR, 2, "text", &too_long)
+            .unwrap();
+        let in_group = store
+            .insert_outgoing(group_key, 3, "text", &too_long)
+            .unwrap();
+        store
+            .set_pending_receivers(group_key, 3, &[CREATOR.to_owned()])
+            .unwrap();
+        // Nothing to write: this session could not.
+        session.send_pending().await.unwrap();
+        for id in [in_chat.id, in_group.id] {
+            let message = store.message(id).unwrap().unwrap();
+            assert_eq!(message.state, OutgoingState::Failed as i64);
+            assert!(!message.written_out);
+        }
+        assert!(session.awaiting_ack.is_empty());
+        assert!(store.pending_outgoing().unwrap().is_empty());
     }
 
     /// What the server's ack does.

@@ -17,6 +17,9 @@ function text(kind, message) {
         // Message texts and captions, and also group and list names and polls.
         //% "The text is too long. Shorten it and try again."
         return qsTrId("threesea-la-error-text-too-long")
+    case "pollResultsTooLong":
+        //% "The results of this poll are too long to send. The poll stays open."
+        return qsTrId("threesea-la-error-poll-results-too-long")
     case "licenseFormat":
         //% "A license key looks like ABCDE-12345."
         return qsTrId("threesea-la-error-license-format")

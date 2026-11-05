@@ -128,6 +128,9 @@ impl App {
         if state["state"] == 1 {
             return Ok(Value::Null);
         }
+        if !polls::closing_fits(&state) {
+            return Err(ApiError::PollResultsTooLong);
+        }
         state["state"] = json!(1);
         let closed = self.store.insert_outgoing(
             &key,

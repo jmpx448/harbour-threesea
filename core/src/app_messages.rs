@@ -1637,6 +1637,31 @@ mod tests {
         assert_eq!(read_reports(&app, PEER), receipts);
     }
 
+    /// Results that can't be sent leave the poll open, for everyone alike, and the user is told.
+    #[test]
+    fn a_poll_whose_results_are_too_long_stays_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), u64::MAX);
+        let choices: Vec<String> = (0..10).map(|choice| format!("Choice {choice}")).collect();
+        let poll = app.create_poll(PEER, "?", &choices, true, false).unwrap();
+        let id = poll["id"].as_i64().unwrap();
+        let mut state = poll["body"].clone();
+        let voted: Vec<usize> = (0..10).collect();
+        for voter in 0..255 {
+            state["votes"][format!("V{voter:07}")] = json!(voted);
+        }
+        app.store.set_message_body(id, &state).unwrap();
+
+        assert!(matches!(
+            app.close_poll(id),
+            Err(ApiError::PollResultsTooLong)
+        ));
+        let row = app.store.message(id).unwrap().unwrap();
+        let kept: Value = serde_json::from_str(&row.body).unwrap();
+        assert_eq!(kept["state"], 0);
+        assert_eq!(app.store.message_count(PEER).unwrap(), 1);
+    }
+
     /// A sender that asked for no receipts (flag `0x80`) gets no read receipt either; the other
     /// messages of the read get theirs.
     #[test]

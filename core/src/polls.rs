@@ -125,6 +125,16 @@ pub fn setup_json(poll: &Value) -> String {
     json.to_string()
 }
 
+/// Whether closing this poll, results included, fits a message (poll ID and, in a group, its
+/// identity in front). There is no shorter form: a poll can't turn to summary mode when it closes,
+/// other clients discard that.
+pub fn closing_fits(poll: &Value) -> bool {
+    const IN_FRONT: usize = 8 + 16;
+    let mut closed = poll.clone();
+    closed["state"] = json!(1);
+    setup_json(&closed).len() + IN_FRONT <= crate::messages::MESSAGE_BODY_MAX
+}
+
 /// Our UI state from a received `poll-setup` JSON.
 fn from_setup(poll_id: u64, creator: &str, setup: &Value) -> Option<Value> {
     let choices = setup["c"].as_array()?;
@@ -449,6 +459,32 @@ fn valid_vote(poll: &Value, choices: &Value) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poll with voters voting on every choice, its results as long as they get.
+    fn poll_with_voters(voters: usize, choices: usize) -> Value {
+        let voted: Vec<usize> = (0..choices).collect();
+        let votes: serde_json::Map<String, Value> = (0..voters)
+            .map(|voter| (format!("V{voter:07}"), json!(voted)))
+            .collect();
+        json!({
+            "pollId": "0000000000000001",
+            "description": "Lunch?",
+            "state": 0,
+            "multiple": true,
+            "choices": voted.iter().map(|&id| json!({"id": id, "name": "A"})).collect::<Vec<_>>(),
+            "votes": votes,
+        })
+    }
+
+    /// A closing goes out with everyone's votes, or not at all: summary mode isn't open to a poll
+    /// that was announced as a list.
+    #[test]
+    fn closing_a_poll_fits_a_message_or_says_so() {
+        assert!(closing_fits(&poll_with_voters(20, 4)));
+        let large = poll_with_voters(255, 10);
+        assert!(!closing_fits(&large));
+        assert_eq!(large["state"], 0);
+    }
 
     /// A poll deleted before this version's rule, by a client that shouldn't have: votes and a
     /// close leave its placeholder alone, and no "Poll closed" without a question appears.

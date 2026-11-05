@@ -1034,6 +1034,9 @@ pub enum ApiError {
     /// Message text too long.
     #[error("message too long")]
     MessageTooLong,
+    /// Closing this poll would not fit a message, with everyone's votes in it.
+    #[error("poll results too long")]
+    PollResultsTooLong,
     /// Not a Threema contact QR code.
     #[error("not a Threema contact code")]
     QrInvalid,
@@ -1192,6 +1195,7 @@ impl ApiError {
             Self::ContactIsSelf => "contactIsSelf",
             Self::ContactNotFound => "contactNotFound",
             Self::MessageTooLong => "messageTooLong",
+            Self::PollResultsTooLong => "pollResultsTooLong",
             Self::FileTooLarge => "fileTooLarge",
             Self::VideoKeepsMetadata => "videoKeepsMetadata",
             Self::NotGif => "notGif",

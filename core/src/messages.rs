@@ -238,6 +238,11 @@ pub struct ReadMessage {
     pub no_receipts: bool,
 }
 
+/// The longest message body we send (`encode_message_body`'s data). A frame holds 8192 bytes, and
+/// its wrappings take up to about 600: padding, boxes, the metadata with a nickname, and the
+/// envelope of forward secrecy.
+pub const MESSAGE_BODY_MAX: usize = 7500;
+
 pub const INCOMING_UNREAD: i64 = 0;
 pub const INCOMING_READ: i64 = 1;
 
