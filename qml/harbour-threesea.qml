@@ -12,6 +12,9 @@ import "components/NotificationActions.js" as NotificationActions
 
 ApplicationWindow {
     id: window
+
+    readonly property alias messageOut: messageOutItem
+    MessageOut { id: messageOutItem }
     // Names, messages, captions… come from other people: never interpret them as rich text
     // (Jolla's apps do the same). Labels that want markup set textFormat themselves.
     _defaultLabelFormat: Text.PlainText

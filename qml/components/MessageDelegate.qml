@@ -75,6 +75,7 @@ ListItem {
     signal detailsRequested()
     signal resendRequested()
     signal cancelTransferRequested()
+    signal shareRequested()
     signal locationRequested()
     signal pollRequested()
     signal closePollRequested()
@@ -154,6 +155,7 @@ ListItem {
         id: contextMenuComponent
         ContextMenu {
             id: contextMenu
+            readonly property string copyableText: Fmt.copyText(model.kind, model.text, model.body, model.mentions)
             // Its upload or file download is on the way.
             readonly property bool transferring: item.isFile && (model.body.fileState === 1
                                                                  || (item.outgoing && model.body.uploadState === 1))
@@ -250,10 +252,14 @@ ListItem {
             MenuItem {
                 //% "Copy"
                 text: qsTrId("threesea-me-copy")
-                visible: model.kind === "text" || item.isLocation
-                onClicked: Clipboard.text = item.isLocation
-                           ? Number(model.body.latitude).toFixed(6) + ", " + Number(model.body.longitude).toFixed(6)
-                           : Fmt.withMentions(model.text, model.mentions)
+                visible: contextMenu.copyableText.length > 0
+                onClicked: Clipboard.text = contextMenu.copyableText
+            }
+            MenuItem {
+                //% "Share"
+                text: qsTrId("threesea-me-share")
+                visible: contextMenu.copyableText.length > 0
+                onClicked: item.shareRequested()
             }
             MenuItem {
                 //% "Edit"

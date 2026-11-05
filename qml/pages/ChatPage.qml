@@ -3079,6 +3079,7 @@ Page {
                                                    { message: messages.get(index) })
                 onResendRequested: page.tell("resendMessage", { message: model.id })
                 onCancelTransferRequested: page.tell("cancelTransfer", { message: model.id })
+                onShareRequested: window.messageOut.shareText(Fmt.copyText(model.kind, model.text, model.body, model.mentions))
                 onForwardRequested: pageStack.push(Qt.resolvedUrl("SharePage.qml"),
                                                    { forwardMessage: model.id, text: Fmt.preview(messages.get(index)) })
                 onPollRequested: page.openPoll(model.id, model.body)

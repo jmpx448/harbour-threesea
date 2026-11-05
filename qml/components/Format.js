@@ -163,6 +163,17 @@ function withMentions(text, mentions) {
     })
 }
 
+// The text a message offers for copying or sharing, "" if it has none: its text, a file's caption
+// or a place's coordinates.
+function copyText(kind, text, body, mentions) {
+    if (kind === "text") return withMentions(text, mentions)
+    if (kind === "location" && body) {
+        return Number(body.latitude).toFixed(6) + ", " + Number(body.longitude).toFixed(6)
+    }
+    if (kind === "file" && body && body.caption) return withMentions(body.caption, mentions)
+    return ""
+}
+
 function escapeHtml(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
 }
