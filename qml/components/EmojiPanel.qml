@@ -4,14 +4,17 @@ import Sailfish.Silica 1.0
 import Sailfish.Pickers 1.0
 import harbour.threesea 1.0
 import "EmojiPickerData.js" as EmojiData
+import "EmojiSearch.js" as EmojiSearch
 import "Errors.js" as Errors
 import "Format.js" as Fmt
 
 // Threema's emoji picker in place of the keyboard (Android's EmojiPicker), looking like the
-// keyboard: its tinted background and top line, tabs as keys. Tabs: recently used, Threema's
-// categories, the favourite GIFs; backspace at the right (repeats while held). Long press an
-// emoji for its skin tones (a context menu, like a bubble's reactions). Threema's pictures always
+// keyboard: its tinted background and top line, tabs as keys. Tabs: search, recently used,
+// Threema's categories, the favourite GIFs; backspace at the right (repeats while held). Long press
+// an emoji for its skin tones (a context menu, like a bubble's reactions). Threema's pictures always
 // (the "emoji style" setting is about how text is drawn; the picker shows Threema's collection).
+// Searching needs the keyboard: the panel then shrinks to the search field and a few results above
+// it (`searchHeight`), like Android's.
 Item {
     id: panel
 
@@ -43,6 +46,28 @@ Item {
     property var gifs: []
 
     readonly property int gifTab: EmojiData.names.length
+
+    property bool searching: false
+    property bool searchReady: false
+    // How many rows of results fit beside the keyboard.
+    property int searchRows: 2
+    readonly property real searchHeight: topLine.height + searchField.height + searchRows * grid.cell
+
+    function startSearch() {
+        searching = true
+        searchField.forceActiveFocus()
+        EmojiSearch.load(Qt.resolvedUrl("../../emojis/search/"), Qt.locale().name, function(ok) {
+            panel.searchReady = ok
+        })
+    }
+    function endSearch() {
+        if (!searching) return
+        searching = false
+        searchField.text = ""
+        searchField.focus = false
+        Qt.inputMethod.hide()
+        grid.positionViewAtBeginning()
+    }
 
     // Each chat has a panel, most are never opened: the emoji list is read at the first opening.
     property bool opened: false
@@ -97,6 +122,7 @@ Item {
     // The grid's items: [text, cell, tones?].
     readonly property var items: {
         if (!opened) return []
+        if (searching) return searchReady ? EmojiSearch.search(searchField.text) : []
         if (tab === -1) {
             var list = []
             for (var i = 0; i < recent.length; ++i) {
@@ -145,12 +171,30 @@ Item {
     Row {
         id: tabs
         anchors.top: topLine.bottom
+        visible: !panel.searching
         width: parent.width
         height: Theme.itemSizeSmall
         readonly property real cellWidth: Math.floor(width / (EmojiData.names.length
-                                                             + (panel.reactionMode ? 1 : 3)))
+                                                             + (panel.reactionMode ? 2 : 4)))
         readonly property real iconSize: Math.min(Theme.iconSizeSmallPlus, Math.round(cellWidth * 0.7))
 
+        MouseArea {
+            id: searchKey
+            width: tabs.cellWidth
+            height: tabs.height
+            onPressed: panel.pressed(searchKey, mouse)
+            onPositionChanged: panel.moved(searchKey, mouse, null)
+            onClicked: panel.startSearch()
+            Icon {
+                anchors.centerIn: parent
+                width: tabs.iconSize
+                height: width
+                sourceSize.width: width
+                sourceSize.height: height
+                highlighted: searchKey.pressed
+                source: "image://theme/icon-m-search"
+            }
+        }
         Repeater {
             model: EmojiData.names.length + (panel.reactionMode ? 1 : 2)
             MouseArea {
@@ -195,7 +239,7 @@ Item {
         MouseArea {
             id: backspaceKey
             visible: !panel.reactionMode
-            width: parent.width - (EmojiData.names.length + 2) * tabs.cellWidth
+            width: parent.width - (EmojiData.names.length + 3) * tabs.cellWidth
             height: tabs.height
             onPressed: {
                 panel.backspace()
@@ -224,11 +268,26 @@ Item {
         }
     }
 
+    SearchField {
+        id: searchField
+        anchors.top: topLine.bottom
+        width: parent.width
+        visible: panel.searching
+        // What is around it doesn't scroll: this is the keyboard's place.
+        autoScrollEnabled: false
+        // Picking an emoji leaves the keyboard up for the next word.
+        focusOutBehavior: FocusBehavior.KeepFocus
+        canHide: true
+        onHideClicked: panel.endSearch()
+        EnterKey.iconSource: "image://theme/icon-m-enter-close"
+        EnterKey.onClicked: focus = false
+    }
+
     SilicaGridView {
         id: grid
-        visible: panel.tab !== panel.gifTab
+        visible: panel.searching || panel.tab !== panel.gifTab
         anchors {
-            top: tabs.bottom
+            top: panel.searching ? searchField.bottom : tabs.bottom
             left: parent.left
             right: parent.right
             bottom: parent.bottom
@@ -290,7 +349,7 @@ Item {
 
     SilicaGridView {
         id: gifGrid
-        visible: panel.tab === panel.gifTab && panel.gifs.length > 0
+        visible: !panel.searching && panel.tab === panel.gifTab && panel.gifs.length > 0
         anchors.fill: grid
         clip: true
         readonly property real cell: Math.floor(width / Math.max(1, Math.floor(width / Theme.itemSizeHuge)))
@@ -355,6 +414,14 @@ Item {
         VerticalScrollDecorator { }
     }
 
+    Label {
+        anchors.centerIn: grid
+        visible: panel.searching && panel.searchReady && grid.count === 0 && searchField.text.trim().length > 0
+        color: Theme.secondaryHighlightColor
+        //% "No emoji found"
+        text: qsTrId("threesea-la-no-emoji-found")
+    }
+
     // Nothing to show: centred in the panel (ViewPlaceholder centres on the page).
     Column {
         anchors {
@@ -363,7 +430,8 @@ Item {
             verticalCenter: grid.verticalCenter
         }
         spacing: Theme.paddingLarge
-        visible: (panel.tab === -1 && grid.count === 0) || (panel.tab === panel.gifTab && panel.gifs.length === 0)
+        visible: !panel.searching
+                 && ((panel.tab === -1 && grid.count === 0) || (panel.tab === panel.gifTab && panel.gifs.length === 0))
         InfoLabel {
             text: panel.tab === panel.gifTab
                   //% "No favourite GIFs"

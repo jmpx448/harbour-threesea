@@ -107,6 +107,10 @@ SAILFISHAPP_ICONS = 86x86 108x108 128x128 172x172
 emojis.files = emojis/*.png
 emojis.path = /usr/share/$${TARGET}/emojis
 INSTALLS += emojis
+# The emoji panel's search terms by language, from Threema Android, as well.
+emojisearch.files = emojis/search/*.csv
+emojisearch.path = /usr/share/$${TARGET}/emojis/search
+INSTALLS += emojisearch
 
 # Developer tool for the emulator (`qmake CONFIG+=demo`, set by scripts/sdk-build.sh for i486
 # only): the made-up chats, asked for over D-Bus (scripts/emulator-demo.sh) so that no build

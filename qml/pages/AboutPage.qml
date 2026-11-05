@@ -70,6 +70,8 @@ Page {
                         // Required attribution (CC-BY 4.0), as in Threema Libre's licence page.
                         //% "Emoji graphics by Twemoji (github.com/jdecked/twemoji), licensed under CC-BY 4.0."
                         qsTrId("threesea-la-twemoji-credit"),
+                        //% "Emoji search terms from threema-android (AGPL-3.0)."
+                        qsTrId("threesea-la-credit-emoji-search"),
                         //% "opus-pure by Stephen Berry, from Rust ports of libopus by the Xiph.Org Foundation and others (BSD-3-Clause): voice messages."
                         qsTrId("threesea-la-credit-opus"),
                         //% "webrtc-audio-processing, from Google's WebRTC (BSD-3-Clause): echo cancellation in calls."

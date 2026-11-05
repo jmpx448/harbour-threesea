@@ -1087,7 +1087,12 @@ Page {
     }
     // A bubble's menu → "+": the panel picks a reaction for that message instead of typing.
     property var reactionTarget: null
-    onEmojiPanelOpenChanged: if (!emojiPanelOpen) reactionTarget = null
+    onEmojiPanelOpenChanged: {
+        if (!emojiPanelOpen) {
+            reactionTarget = null
+            emojiPanel.endSearch()
+        }
+    }
     function pickReaction(message) {
         reactionTarget = message
         emojiPanel.load()
@@ -2386,9 +2391,10 @@ Page {
                 right: parent.right
                 bottom: parent.bottom
             }
-            height: page.emojiPanelOpen ? page.emojiPanelHeight : 0
+            height: !page.emojiPanelOpen ? 0 : searching ? searchHeight : page.emojiPanelHeight
             visible: height > 0
             clip: true
+            searchRows: page.isPortrait ? 2 : 1
             reactionMode: page.reactionTarget !== null
             onEmojiPicked: {
                 var target = page.reactionTarget

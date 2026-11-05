@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica.private 1.0
+import "../../qml/components/EmojiSearch.js" as EmojiSearch
 import "../../qml/components/Format.js" as Fmt
 
 QtObject {
@@ -112,6 +113,9 @@ QtObject {
         check("gate", Fmt.mayHaveMarkup("a *b\nc* d"), false)
         check("gate", Fmt.mayHaveMarkup("a *b* d"), true)
         check("gate", Fmt.mayHaveMarkup(undefined), false)
+        check("language", EmojiSearch.languageOf("de_CH"), "de")
+        check("language", EmojiSearch.languageOf("nb_NO"), "no")
+        check("language", EmojiSearch.languageOf("xx"), "en")
 
         // Previews lose the marks, and a name with marks in it stays as it is.
         check("preview", Fmt.preview({ kind: "text", text: "*Hi*  _you_\nthere" }), "Hi you there")
@@ -142,6 +146,15 @@ QtObject {
         // What comes in stays text.
         ["~a~ <img src=\"x\"> https://example.com/\"><img src=x> <s>", null, "<img"],
     ]
+    function searchIn(locale, then) {
+        EmojiSearch.load(Qt.resolvedUrl("../../emojis/search/"), locale, function(ok) {
+            root.check("search terms for " + locale, ok, true)
+            then()
+        })
+    }
+    function hasEmoji(items, emoji) {
+        return items.some(function(item) { return item[0] === emoji })
+    }
     property var parsers: []
     property Component linkParser: Component { LinkParser { } }
     property Timer linkerDone: Timer {
@@ -157,7 +170,21 @@ QtObject {
                 if (want[1] === null) root.check("link finder " + want[0], got.indexOf(want[2]), -1)
                 else root.check("link finder " + want[0], got.replace(/<a [^>]*>[^<]*<\/a>/g, "LINK"), want[1])
             }
-            root.done = true
+            root.searchIn("de_CH", function() {
+                var heart = "\u2764\uFE0F"
+                root.check("search, a word's beginning", root.hasEmoji(EmojiSearch.search("HERZ"), heart), true)
+                root.check("search, not in English here", root.hasEmoji(EmojiSearch.search("heart"), heart), false)
+                root.check("search, not a word's middle", EmojiSearch.search("xqzerz").length, 0)
+                root.check("search, nothing asked", EmojiSearch.search("  ").length, 0)
+                root.searchIn("xx_XX", function() {
+                    var found = EmojiSearch.search("heart")
+                    root.check("search, English by default", root.hasEmoji(found, heart), true)
+                    root.check("search, cells of the picker", /^[a-z]+-[0-9]+,/.test(found[0][1]), true)
+                    var thumbs = EmojiSearch.search("thumbs")
+                    root.check("search, skin tones come along", thumbs.length > 0 && thumbs[0].length, 3)
+                    root.done = true
+                })
+            })
         }
     }
 }

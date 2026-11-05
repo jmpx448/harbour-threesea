@@ -7,7 +7,7 @@ IMAGE=harbour-threesea-sdk:$SFOS
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 docker run --rm -i -e SFOS="$SFOS" -v "$ROOT:/src:ro" "$IMAGE" sh -euc '
     T=SailfishOS-$SFOS-i486
-    B=$HOME/build; mkdir -p $B/tests $B/qml
-    cp -r /src/tests/format $B/tests/; cp -r /src/qml/components $B/qml/
+    B=$HOME/build; mkdir -p $B/tests $B/qml $B/emojis
+    cp -r /src/tests/format $B/tests/; cp -r /src/qml/components $B/qml/; cp -r /src/emojis/search $B/emojis/
     cd $B/tests/format && sb2 -t $T qmake >/dev/null && sb2 -t $T make -s >/dev/null 2>&1 || sb2 -t $T make
     QT_QPA_PLATFORM=minimal QT_LOGGING_TO_CONSOLE=1 sb2 -t $T ./format-test'

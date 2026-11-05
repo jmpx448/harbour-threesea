@@ -127,7 +127,8 @@ Threesea stands on the work of others; thank you:
 - **[Threema AG](https://threema.ch)**: [threema-android](https://github.com/threema-ch/threema-android)
   (AGPL-3.0), the reference for nearly everything here, and its Rust library `libthreema`
   (AGPL-3.0, vendored with our changes in `third_party/libthreema`); the protocols of Threema,
-  Threema for Desktop and Threema Web.
+  Threema for Desktop and Threema Web; the emoji panel's search terms, from threema-android's
+  assets.
 - **[Twemoji](https://github.com/jdecked/twemoji)**: emoji graphics (CC-BY 4.0), as packaged
   in Threema Libre.
 - **[opus-pure](https://crates.io/crates/opus-pure)** by Stephen Berry, from rusty-opus and

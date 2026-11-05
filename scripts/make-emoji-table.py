@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 """Generate qml/components/EmojiTable.js and copy the Twemoji sprite sheets (Threema Libre's,
-CC-BY 4.0) from the upstream submodule into emojis/.
+CC-BY 4.0) and the search terms from the upstream submodule into emojis/.
 
 Android maps every emoji (a codepoint sequence, with and without variation selectors) to a
 64x64 cell of a sprite sheet in its generated EmojiParser.kt; we reuse that mapping so the same
@@ -144,4 +144,10 @@ target = ROOT / "emojis"
 target.mkdir(exist_ok=True)
 for png in sorted(SHEETS.glob("*.png")):
     shutil.copyfile(png, target / png.name)
+search = target / "search"
+search.mkdir(exist_ok=True)
+for csv in sorted((ROOT / "third_party/threema-android/app/assets/emojis/search-index").glob("*.csv")):
+    # orders.csv and diversities.csv: the picker's table has both already.
+    if csv.name not in ("orders.csv", "diversities.csv"):
+        shutil.copyfile(csv, search / csv.name)
 print(f"{len(table)} emoji, longest {longest} codepoints, {len(list(target.glob('*.png')))} sheets")
