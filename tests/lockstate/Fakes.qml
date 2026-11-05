@@ -75,7 +75,8 @@ QtObject {
         signal replyLost()
         signal blankReply()
         function actionToken() { return "" }
-        function retainTokens(identities) { }
+        property int retained: 0
+        function retainTokens(identities) { retained = retained + 1 }
         // Those whose grace started.
         property var released: []
         function releaseToken(identity) { released.push(identity) }

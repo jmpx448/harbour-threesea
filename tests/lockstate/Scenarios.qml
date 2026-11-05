@@ -212,6 +212,14 @@ QtObject {
             [function() { dbus.blankReply() }, 100],
             [function() { check("gone", lifecycle.left, 1) }, 0],
         ],
+        // A second process loads the window too, and the notifications it finds are the first's.
+        notificationsWaitForTheName: [
+            [function() {
+                check("not before the name is ours", dbus.retained, 0)
+                window.nameOwned()
+                check("then", dbus.retained, 1)
+            }, 0],
+        ],
         // A refused reply goes to its draft first.
         refusedReplyEndsTheRunWhenKept: [
             [function() {

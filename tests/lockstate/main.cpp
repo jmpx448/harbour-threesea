@@ -46,6 +46,10 @@ int main(int argc, char **argv)
     if (engine.rootObjects().isEmpty()) {
         return 2;
     }
+    // As main does once the D-Bus name is ours; this scenario does it itself.
+    if (QByteArray(argv[2]) != "notificationsWaitForTheName") {
+        QMetaObject::invokeMethod(engine.rootObjects().first(), "nameOwned");
+    }
     QQmlComponent scenariosComponent(&engine, QUrl::fromLocalFile(dir + QStringLiteral("/Scenarios.qml")));
     QVariantMap initial;
     QQmlContext context(engine.rootContext());

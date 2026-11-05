@@ -5,6 +5,7 @@
 #include <QGuiApplication>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickView>
 #include <QScopedPointer>
 #include <QSettings>
@@ -298,6 +299,7 @@ int main(int argc, char *argv[])
         }
         return 1;
     }
+    QMetaObject::invokeMethod(view->rootObject(), "nameOwned");
     const int result = app->exec();
 
     // The event loop has ended, so the window doesn't draw any more. The pages go first, as they

@@ -1135,7 +1135,9 @@ ApplicationWindow {
 
     // Notifications still shown from before a restart: take them over (by their chat).
     Notification { id: notificationQuery }
-    Component.onCompleted: {
+    // Called by main once the D-Bus name is ours, not on completion: a second process started from a
+    // shell loads this too before it finds the name taken, and the notifications are the first's.
+    function nameOwned() {
         var existing = notificationQuery.notifications()
         for (var i = 0; i < existing.length; ++i) takeOver(existing[i])
         dbus.retainTokens(Object.keys(notifications))
