@@ -13,6 +13,14 @@ Page {
     property var contact: ({})
     // An ID without a contact (earlier versions left chats like that behind).
     property bool noContact: false
+    // Attached to this contact's chat: that is one swipe back, nothing to offer here.
+    property bool besideChat: false
+    onStatusChanged: {
+        if (status === PageStatus.Activating || status === PageStatus.Active) {
+            var below = pageStack.previousPage(page)
+            besideChat = !!below && below.inputField !== undefined && below.identity === identity
+        }
+    }
 
     function load() {
         backend.call("contact", { identity: identity }, function(ok, result, kind) {
@@ -107,20 +115,20 @@ Page {
                 })
             }
             MenuItem {
-                visible: (page.contact.verification || 0) < 2
-                //% "Verify by QR code"
-                text: qsTrId("threesea-me-verify-qr")
-                onClicked: {
-                    var scan = pageStack.push(Qt.resolvedUrl("ScanQrPage.qml"), { expectedIdentity: page.identity })
-                    scan.verified.connect(function(contact) { page.contact = contact })
-                }
-            }
-            MenuItem {
-                // Not saved yet: added first (four items at most).
+                // Not saved yet: added first.
                 visible: !page.noContact && page.contact.hidden !== true
                 //% "Edit"
                 text: qsTrId("threesea-me-edit")
                 onClicked: page.edit()
+            }
+            MenuItem {
+                // The chat asks for the PIN itself if it is a private one. A blocked or revoked
+                // contact's chat has no input.
+                visible: !page.besideChat && !page.noContact
+                         && page.contact.blocked !== true && page.contact.invalid !== true
+                //% "Write message"
+                text: qsTrId("threesea-me-write-message")
+                onClicked: pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: page.identity })
             }
         }
 
@@ -281,6 +289,18 @@ Page {
                 font.pixelSize: Theme.fontSizeExtraSmall
                 color: Theme.secondaryHighlightColor
                 bottomPadding: Theme.paddingLarge
+            }
+
+            Button {
+                // Here beside the key it is about; the pulley has its four items.
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: !page.noContact && (page.contact.verification || 0) < 2
+                //% "Verify by QR code"
+                text: qsTrId("threesea-me-verify-qr")
+                onClicked: {
+                    var scan = pageStack.push(Qt.resolvedUrl("ScanQrPage.qml"), { expectedIdentity: page.identity })
+                    scan.verified.connect(function(contact) { page.contact = contact })
+                }
             }
         }
 
