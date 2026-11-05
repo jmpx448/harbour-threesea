@@ -73,6 +73,10 @@ Page {
                 text: qsTrId("threesea-la-restore-data-backup-intro")
             }
 
+            InfoLabel {
+                text: qsTrId("threesea-la-restore-one-phone")
+            }
+
             ValueButton {
                 enabled: !page.working
                 label: qsTrId("threesea-la-android-backup-file")

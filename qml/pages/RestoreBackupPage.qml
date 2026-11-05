@@ -61,6 +61,10 @@ Page {
                 text: qsTrId("threesea-la-restore-intro-scan")
             }
 
+            InfoLabel {
+                text: qsTrId("threesea-la-restore-one-phone")
+            }
+
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
                 enabled: !page.working

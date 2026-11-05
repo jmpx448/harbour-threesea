@@ -60,6 +60,11 @@ Page {
                 text: qsTrId("threesea-la-restore-safe-intro-data-backup")
             }
 
+            InfoLabel {
+                //% "An ID works on one phone at a time: new messages go only to the phone that connected last."
+                text: qsTrId("threesea-la-restore-one-phone")
+            }
+
             TextField {
                 id: identityField
                 width: parent.width

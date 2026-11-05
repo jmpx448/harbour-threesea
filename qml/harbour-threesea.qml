@@ -967,7 +967,7 @@ ApplicationWindow {
         appIcon: "harbour-threesea"
         //% "Threema ID used on another device"
         summary: qsTrId("threesea-la-device-cookie-title")
-        //% "The Threema server noticed a connection from another device with your Threema ID. If that was not you or one of your linked devices, contact Threema support."
+        //% "Threema's server noticed a connection from another device with your Threema ID. If that was you, on another phone or a linked device, you can ignore this. An ID works on one phone at a time: new messages go only to the phone that connected last. If it wasn't you, your private key may be compromised: protect this phone and its data, and create a new ID."
         body: qsTrId("threesea-la-device-cookie-body")
         previewSummary: summary
         previewBody: body
