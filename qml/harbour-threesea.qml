@@ -799,6 +799,8 @@ ApplicationWindow {
             id: chatNotification
             // Made by us, unlike one taken over after a restart.
             readonly property bool own: true
+            // When it last alerted, or would have (alert()).
+            property real alertedAt: 0
             property string identity
             // The message it shows, and who in a group wrote it.
             property var messageId
@@ -832,6 +834,7 @@ ApplicationWindow {
         Notification {
             id: plain
             readonly property bool own: true
+            property real alertedAt: 0
             // Under this it is in `notifications`.
             property string key
             // The chat tapping it opens; otherwise it opens the app.
@@ -1039,10 +1042,67 @@ ApplicationWindow {
         category: "x-nemo.messaging.im.preview"
     }
 
+    // After a login the servers hand out what they kept, as a burst: one alert for all of it, at the
+    // end, for the last message that may make itself heard. While it lasts, new messages only
+    // change their chats' notifications.
+    property bool receivingBacklog: false
+    property var backlogAlert: null
+    function backlogChanged(active) {
+        if (active) {
+            receivingBacklog = true
+            backlogLimit.restart()
+            return
+        }
+        backlogLimit.stop()
+        // Notifications on their way wait for a contact's name, and answers come in the order asked.
+        backend.call("lockStatus", {}, function() {
+            // The next one has begun, and takes this along.
+            if (backlogLimit.running) return
+            receivingBacklog = false
+            var last = backlogAlert
+            backlogAlert = null
+            // Its chat may have been opened meanwhile.
+            if (!last || Object.keys(notifications).every(function(key) { return notifications[key] !== last.n })) return
+            // What it shows by now: that message may have been deleted or edited since.
+            alertNow(last.n, last.identity, last.group, last.n.summary, last.n.body)
+        })
+    }
+    // Should the servers never say it is over: it is, this long after the last message.
+    Timer {
+        id: backlogLimit
+        interval: 30000
+        onTriggered: window.backlogChanged(false)
+    }
+    // More is coming in. Not once the servers have said it is over: what still arrives here then
+    // was on its way, and is what backlogChanged() waits for.
+    function backlogGoesOn() {
+        if (backlogLimit.running) backlogLimit.restart()
+    }
+
     // Shows a new message in `n` (the chat's notification, which also shows the banner) with the
-    // sound and vibration chosen in the settings.
+    // sound and vibration chosen in the settings, unless it is one of a burst: like Android, a
+    // notification alerts again after 30 seconds without news.
     // `identity`: the chat's own tone, if it has one ("": none, e.g. private chats).
     function alert(n, identity, group, title, text) {
+        var now = Date.now()
+        var recent = now - n.alertedAt < 30000
+        n.alertedAt = now
+        if (receivingBacklog) {
+            var heard = group ? backend.soundGroups || backend.vibrateGroups
+                              : backend.soundChats || backend.vibrateChats
+            if (heard || !backlogAlert) {
+                backlogAlert = { n: n, identity: identity, group: group }
+            }
+            backlogGoesOn()
+            publishQuietly(n, title, text, false)
+        } else if (recent) {
+            publishQuietly(n, title, text, false)
+        } else {
+            alertNow(n, identity, group, title, text)
+        }
+    }
+
+    function alertNow(n, identity, group, title, text) {
         var sound = group ? backend.soundGroups : backend.soundChats
         var vibrate = group ? backend.vibrateGroups : backend.vibrateChats
         n.category = sound ? "x-nemo.messaging.im" : "im.received"
@@ -1162,6 +1222,8 @@ ApplicationWindow {
         n.messageId = message.id
         n.sender = sender
         n.timestamp = new Date(message.createdAt)
+        // A missed call isn't one more of a chat's messages.
+        if (message.kind === "status") n.alertedAt = 0
         alert(n, identity, identity.indexOf("g:") === 0, title, notificationText(sender, message))
     }
 
@@ -1213,6 +1275,7 @@ ApplicationWindow {
         }
         n.itemCount = n.itemCount + 1
         n.timestamp = new Date(message.createdAt)
+        if (message.kind === "status") n.alertedAt = 0
         alert(n, "", message.conversation.indexOf("g:") === 0,
               //% "Private chat"
               qsTrId("threesea-la-private-chat"), qsTrId("threesea-la-new-message"))
@@ -1246,6 +1309,7 @@ ApplicationWindow {
         appLockedNews = true
         n.itemCount = n.itemCount + 1
         n.timestamp = new Date(message.createdAt)
+        if (message.kind === "status") n.alertedAt = 0
         alert(n, isPrivate ? "" : message.conversation, message.conversation.indexOf("g:") === 0,
               qsTrId("threesea-la-locked-notification"), appLockedBody())
     }
@@ -1319,8 +1383,8 @@ ApplicationWindow {
                 || (message.kind === "status" && String(message.body).indexOf("call|missed|") !== 0)) return
         if (!lockActive() && Qt.application.state === Qt.ApplicationActive && openChat === message.conversation) {
             // The message is right there, so no notification — only Android's quiet in-app
-            // feedback, and none for one that has been standing there.
-            if (!held) window.inAppFeedback()
+            // feedback, and none for one that has been standing there or a whole backlog.
+            if (!held && !receivingBacklog) window.inAppFeedback()
             return
         }
         if (isPrivate) {
@@ -1382,6 +1446,9 @@ ApplicationWindow {
         notificationsWaiting = []
         offlineReason = null
         offlineReasonNotified = ""
+        backlogLimit.stop()
+        receivingBacklog = false
+        backlogAlert = null
         appSettings = ({})
         lockInfo = null
         lockChecked = false
@@ -1714,6 +1781,8 @@ ApplicationWindow {
         }
         onNetworkChangedSettled: window.wakeOnNetworkChange()
         onCoreEvent: {
+            // Held back for now (notify: false) or not, the backlog is still coming.
+            if (name === "messageAdded") window.backlogGoesOn()
             // `notify`: the chat's own notification setting (muted, mentions only) allows it.
             if (name === "messageAdded" && !data.message.outgoing && data.notify !== false) {
                 window.notify(data.message, data.private === true)
@@ -1738,6 +1807,8 @@ ApplicationWindow {
                 }
             } else if (name === "offlineReason") {
                 window.offlineReasonArrived(data.reason)
+            } else if (name === "backlog") {
+                window.backlogChanged(data.active)
             } else if (name === "wakeSettled") {
                 window.endWake()
             } else if (name === "safeServerCopyLeft") {

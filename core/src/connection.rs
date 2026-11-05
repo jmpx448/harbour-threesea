@@ -342,6 +342,9 @@ pub enum FromConnection {
     Event(Box<CoreEvent>),
     /// Something the user should know, for as long as the next login is away.
     OfflineReason(OfflineReason),
+    /// The servers have begun handing out what they kept while we were away (`true`), or are
+    /// through with it (`false`): it comes as a burst, and it is one piece of news.
+    Backlog(bool),
     /// What a wake-up was for has happened or won't soon: the device may sleep again.
     WakeSettled,
 }
@@ -456,6 +459,20 @@ impl WakeHold {
         if self.wait.take() != WakeWait::Nothing {
             let _ = tx.send(FromConnection::WakeSettled);
         }
+    }
+}
+
+/// Which queues the servers are still handing out to this session. [`WakeHold`] knows something
+/// like it, but only while a wake-up is waiting.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct Backlog {
+    chat_queue: bool,
+    reflection_queue: bool,
+}
+
+impl Backlog {
+    const fn is_open(self) -> bool {
+        self.chat_queue || self.reflection_queue
     }
 }
 
@@ -1441,6 +1458,8 @@ struct Session<'a> {
     /// The mediator's backlog after login is not handed out completely yet: what it holds
     /// is decided at the end, when the read updates in it have arrived too.
     reflection_backlog: bool,
+    /// What the UI has been told is still coming ([`FromConnection::Backlog`]).
+    backlog: Backlog,
     /// Our reflect ids (apart from libthreema's, which count from 0 per connection).
     next_reflect_id: u32,
     /// Outgoing messages reflected on this connection: (conversation, message id).
@@ -1460,6 +1479,7 @@ impl Drop for Session<'_> {
     fn drop(&mut self) {
         self.emit_events_unless(needs_the_connection);
         self.release_held_notifications(true);
+        self.set_backlog(Backlog::default());
         let mut carried = self.setup.carried_events.borrow_mut();
         carried.extend(
             self.events
@@ -1486,6 +1506,12 @@ impl<'a> Session<'a> {
             .send(FromConnection::State(ConnectionState::Connected));
         tracing::info!("connected to chat server");
         self.setup.wake_hold.logged_in(self.transport.is_mediator());
+        // Through the mediator the chat server only hands out to the leader.
+        let through_mediator = self.transport.is_mediator();
+        self.set_backlog(Backlog {
+            chat_queue: !through_mediator,
+            reflection_queue: through_mediator,
+        });
         while let Some(payload) = self.d2m_queue.pop_front() {
             self.handle_d2m(payload).await?;
         }
@@ -1662,6 +1688,7 @@ impl<'a> Session<'a> {
             fs_resent: std::collections::HashSet::new(),
             held: Vec::new(),
             reflection_backlog: true,
+            backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
             csp,
@@ -2785,6 +2812,14 @@ impl<'a> Session<'a> {
         let _ = self.tx.send(FromConnection::Event(Box::new(event)));
     }
 
+    /// The UI hears when there begins to be a backlog and when there is none left.
+    fn set_backlog(&mut self, backlog: Backlog) {
+        if backlog.is_open() != self.backlog.is_open() {
+            let _ = self.tx.send(FromConnection::Backlog(backlog.is_open()));
+        }
+        self.backlog = backlog;
+    }
+
     /// Hand on the events that don't need the connection (`later`), so that it can't lose them.
     fn emit_events_unless(&self, later: fn(&CoreEvent) -> bool) {
         let events = core::mem::take(&mut *self.events.borrow_mut());
@@ -3562,6 +3597,10 @@ impl<'a> Session<'a> {
                 // The backlog is in, read updates included: what is still unread notifies.
                 self.reflection_backlog = false;
                 self.release_held_notifications(true);
+                self.set_backlog(Backlog {
+                    reflection_queue: false,
+                    ..self.backlog
+                });
                 self.storage_works(StorageStep::Reflected);
                 self.setup
                     .wake_hold
@@ -3570,6 +3609,10 @@ impl<'a> Session<'a> {
             // Only the leader receives from the chat server (Android's MonitoringLayer).
             D2mIncoming::RolePromotedToLeader => {
                 self.setup.wake_hold.promoted_to_leader();
+                self.set_backlog(Backlog {
+                    chat_queue: true,
+                    ..self.backlog
+                });
                 self.e2e
                     .update_d2m_state(D2mRole::Leader)
                     .map_err(protocol_error)?;
@@ -3796,6 +3839,10 @@ impl<'a> Session<'a> {
             }
             IncomingPayload::QueueSendComplete => {
                 tracing::debug!("message queue drained");
+                self.set_backlog(Backlog {
+                    chat_queue: false,
+                    ..self.backlog
+                });
                 self.storage_works(StorageStep::Incoming);
                 self.setup.wake_hold.chat_queue_through(Instant::now());
             }
@@ -5213,6 +5260,7 @@ mod sync_order_tests {
             fs_resent: std::collections::HashSet::new(),
             held: Vec::new(),
             reflection_backlog: false,
+            backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
             csp,
@@ -5373,6 +5421,58 @@ mod sync_order_tests {
         assert_eq!(logins.refused(), (true, false));
         assert_eq!(logins.refused(), (false, false));
         assert_eq!(logins.refused(), (false, false));
+    }
+
+    /// A message queue that comes in one piece of news: the UI is told when it starts and when no
+    /// queue is left, also when the connection goes first.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_ui_hears_when_a_backlog_starts_and_ends() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let mut told = move || {
+            let mut said = Vec::new();
+            while let Ok(message) = from.try_recv() {
+                if let FromConnection::Backlog(open) = message {
+                    said.push(open);
+                }
+            }
+            said
+        };
+        {
+            let mut session = session(&setup, &tx).await;
+            session.set_backlog(Backlog {
+                chat_queue: true,
+                reflection_queue: false,
+            });
+            assert_eq!(told(), [true]);
+            session
+                .handle_instruction(CspProtocolInstruction {
+                    state_update: None,
+                    outgoing_frame: None,
+                    incoming_payload: Some(IncomingPayload::QueueSendComplete),
+                })
+                .await
+                .unwrap();
+            assert_eq!(told(), [false]);
+            // The mediator's, then the chat server's, overlapping: one backlog.
+            session.set_backlog(Backlog {
+                chat_queue: false,
+                reflection_queue: true,
+            });
+            session.set_backlog(Backlog {
+                chat_queue: true,
+                ..session.backlog
+            });
+            assert_eq!(told(), [true]);
+            session
+                .handle_d2m(D2mIncoming::ReflectionQueueDry)
+                .await
+                .unwrap();
+            assert_eq!(told(), Vec::<bool>::new());
+            // Gone with the queue still open.
+        }
+        assert_eq!(told(), [false]);
     }
 
     /// The device stays up for as long as it takes, and no longer.

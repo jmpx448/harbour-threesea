@@ -510,6 +510,9 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     Some(FromConnection::OfflineReason(reason)) => emit(
                         json!({"event": "offlineReason", "reason": reason.to_json()}).to_string(),
                     ),
+                    Some(FromConnection::Backlog(active)) => {
+                        emit(json!({"event": "backlog", "active": active}).to_string());
+                    }
                     Some(FromConnection::WakeSettled) => wake_settled(&mut app, &emit),
                 }
             }

@@ -186,6 +186,11 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   connection after a change of network. After that the hold applies, so two devices fighting over
   an ID come down to a login every 10 minutes; a session over 10 minutes starts the count over,
   where Android's lasts until the connection is started anew.
+- Alerts: like Android's `NotificationServiceImpl`, a chat's notification only alerts after 30
+  seconds without news (`NOTIFY_AGAIN_TIMEOUT`, in `alert()`); inside that it only updates. Ours on
+  top: what the servers hand out after a login, up to `queue-send-complete` or the mediator's
+  queue being dry (`backlog`), alerts once at the end. Android has no such thing, and goes by the
+  chat only.
 
 ## Threema Safe
 Not in libthreema (only the URL template); implemented in `core/src/safe/` after upstream
