@@ -226,7 +226,6 @@ pub enum OutgoingState {
     Failed = 4,
 }
 
-/// Incoming message state.
 /// An incoming message that was just marked read.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadMessage {
@@ -243,6 +242,7 @@ pub struct ReadMessage {
 /// envelope of forward secrecy.
 pub const MESSAGE_BODY_MAX: usize = 7500;
 
+/// Incoming message state.
 pub const INCOMING_UNREAD: i64 = 0;
 pub const INCOMING_READ: i64 = 1;
 
