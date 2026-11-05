@@ -94,7 +94,7 @@ Page {
         }
     }
 
-    function open(id, kind, body) {
+    function open(id, kind, body, outgoing) {
         if (body.fileState !== 2) {
             if (body.fileState !== 1) backend.call("downloadFile", { message: id })
         } else if ((kind === "image" || kind === "gif") && Fmt.isPicture(body.mediaType)) {
@@ -104,6 +104,8 @@ Page {
                 voicePlayer.pause()
             } else if (voicePlayer.play(id)) {
                 window.voiceFrom = ""
+                // Heard is heard, wherever it was: its chat stops showing it as new.
+                if (!outgoing && body.listened !== true) backend.call("setVoiceListened", { message: id })
             } else {
                 Notices.show(qsTrId("threesea-la-cannot-play"), Notice.Long, Notice.Center)
             }
@@ -183,7 +185,7 @@ Page {
             readonly property bool playing: voicePlayer.messageId === model.id && voicePlayer.playing
             width: grid.cellWidth
             contentHeight: grid.cellHeight
-            onClicked: page.open(model.id, model.kind, body)
+            onClicked: page.open(model.id, model.kind, body, model.outgoing)
 
             Rectangle {
                 anchors.fill: parent

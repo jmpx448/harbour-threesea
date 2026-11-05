@@ -1213,12 +1213,8 @@ Page {
         if (index < 0) return
         var m = messages.get(index)
         if (!m.outgoing && m.body && m.body.listened !== true) {
-            backend.call("setVoiceListened", { message: id }, function(ok, result) {
-                if (ok && result) {
-                    page.addMessage(result)
-                    page.voiceRevision++
-                }
-            })
+            // The change comes back as a messagesChanged event, as for one played on the media page.
+            backend.call("setVoiceListened", { message: id })
         }
     }
     function indexOfLocalId(id) {
@@ -1695,6 +1691,7 @@ Page {
                 for (var i = 0; i < data.messages.length; ++i) {
                     if (data.messages[i].conversation === page.identity) {
                         page.addMessage(data.messages[i])
+                        if (page.isVoiceMessage(data.messages[i])) page.voiceRevision++
                     }
                 }
             } else if (name === "typing" && data.identity === page.identity) {

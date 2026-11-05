@@ -1919,10 +1919,17 @@ impl App {
                 if let Some(m) = self.store.message(message)? {
                     self.check_readable(&m.conversation)?;
                 }
-                Ok(self
-                    .store
-                    .set_listened(message)?
-                    .map_or(Value::Null, |m| self.store.message_json(&m)))
+                let changed = self.store.set_listened(message)?;
+                // It may have been played elsewhere than in its chat (the media page), which has
+                // to know as well.
+                if let Some(changed) = &changed {
+                    let _ = self
+                        .media_events
+                        .send(crate::providers::CoreEvent::MessagesChanged(vec![
+                            changed.clone(),
+                        ]));
+                }
+                Ok(changed.map_or(Value::Null, |m| self.store.message_json(&m)))
             }
             Command::SetStarred { message, starred } => {
                 // It returns the message: not one of a hidden private chat.

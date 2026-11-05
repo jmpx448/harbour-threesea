@@ -2806,6 +2806,30 @@ mod tests {
         assert!(!app.store.message_keeps_media(id).unwrap());
     }
 
+    /// Played on the media page, the open chat below it has to stop showing it as new.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_voice_message_heard_is_news_for_every_page() {
+        let (_dir, mut app) = app();
+        let mut events = app.take_media_events().unwrap();
+        let body =
+            json!({"mediaType": "audio/aac", "rendering": "media", "fileState": STATE_LOCAL});
+        let voice = app
+            .store
+            .insert_incoming("BBBBBBBB", 1, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap();
+        let request = json!({"id": 1, "cmd": "setVoiceListened", "message": voice.id});
+        let reply: Value = serde_json::from_str(&app.handle(&request.to_string()).await).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        let Ok(CoreEvent::MessagesChanged(changed)) = events.try_recv() else {
+            panic!("no event for the change");
+        };
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].id, voice.id);
+        let heard: Value = serde_json::from_str(&changed[0].body).unwrap();
+        assert_eq!(heard["listened"], true);
+    }
+
     /// What a video sent as media says about itself stays behind; a file is sent as it is.
     #[tokio::test(flavor = "current_thread")]
     async fn a_media_video_leaves_without_its_metadata() {

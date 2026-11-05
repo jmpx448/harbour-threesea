@@ -177,7 +177,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `chatMedia` | `identity`, optional `kinds` (default: the saved filter) | `{messages (each with mediaKind: image\|gif\|video\|voice\|audio\|file), kinds, counts: {kind: n}}`, newest first (media gallery) |
 | `setMediaKinds` | `kinds` | `{kinds}`; the gallery filter, saved for all chats (absent: all, like Android) |
 | `message` | `message` (local id) | the message JSON or null (message details) |
-| `setVoiceListened` | `message` (local id) | changed message JSON or null; sets `body.listened` on a voice (file) message, so the chat knows which voice messages are still new and where ear playback starts |
+| `setVoiceListened` | `message` (local id) | changed message JSON or null, also as a `messagesChanged` event for the other pages; sets `body.listened` on a voice (file) message, so the chat knows which voice messages are still new and where ear playback starts |
 | `setStarred` | `message` (local id), `starred` | the message JSON (field `starred`) |
 | `starredMessages` | optional `identity` | `{results: [message + displayName, group, senderName, snippet]}`, newest first |
 | `setPinned` | `identity`, `pinned` | `{}`; pinned chats come first in `conversations` (field `pinned`: their place, else null) |
