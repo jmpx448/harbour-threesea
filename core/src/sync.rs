@@ -139,12 +139,14 @@ fn apply_contact(
             }
         }
     };
+    let name_before = (contact.first_name.clone(), contact.last_name.clone());
     if let Some(name) = non_empty(synced.first_name) {
         contact.first_name = name;
     }
     if let Some(name) = non_empty(synced.last_name) {
         contact.last_name = name;
     }
+    let name_changed = name_before != (contact.first_name.clone(), contact.last_name.clone());
     if let Some(name) = non_empty(synced.nickname) {
         contact.nickname = name;
     }
@@ -177,6 +179,10 @@ fn apply_contact(
         .and_then(|v| contact::SyncState::try_from(v).ok())
     {
         contact.sync_state = state;
+    } else if name_changed {
+        // Android reflects a rename as the name alone. The user wrote it, on the other device: the
+        // address book's next match must not write over it.
+        contact.sync_state = contact::SyncState::Custom;
     }
     if let Some(mask) = synced.feature_mask {
         contact.feature_mask = FeatureMask(mask);
@@ -846,6 +852,63 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
         (dir, store)
+    }
+
+    /// A name from another device: the user's, unless that device says it is from an address book.
+    #[test]
+    fn a_name_from_another_device_stops_following_the_address_book() {
+        let (_dir, store) = store();
+        let state = |store: &Store| store.contact(BOB).unwrap().unwrap().sync_state;
+        let apply = |store: &Store, synced: d2d_sync::Contact| {
+            let mut events = Vec::new();
+            assert!(apply_contact(store, synced, &mut events).unwrap());
+        };
+        let mut contact = crate::contacts::test_contact(BOB);
+        contact.first_name = Some("Anna".into());
+        contact.sync_state = contact::SyncState::Imported;
+        store.upsert_contact(&contact).unwrap();
+        let of_bob = || d2d_sync::Contact {
+            identity: BOB.to_owned(),
+            ..Default::default()
+        };
+
+        // Something else changes, or the same name comes again: it stays as it was.
+        apply(
+            &store,
+            d2d_sync::Contact {
+                nickname: Some("Nick".into()),
+                first_name: Some("Anna".into()),
+                last_name: Some(String::new()),
+                ..of_bob()
+            },
+        );
+        assert_eq!(state(&store), contact::SyncState::Imported);
+
+        // Another device says where its name comes from.
+        apply(
+            &store,
+            d2d_sync::Contact {
+                first_name: Some("Anni".into()),
+                sync_state: Some(contact::SyncState::Imported as i32),
+                ..of_bob()
+            },
+        );
+        assert_eq!(state(&store), contact::SyncState::Imported);
+
+        // Only the name, as Android reflects a rename.
+        apply(
+            &store,
+            d2d_sync::Contact {
+                first_name: Some("Annika".into()),
+                last_name: Some("Muster".into()),
+                ..of_bob()
+            },
+        );
+        let stored = store.contact(BOB).unwrap().unwrap();
+        assert_eq!(stored.first_name.as_deref(), Some("Annika"));
+        assert_eq!(stored.sync_state, contact::SyncState::Custom);
+
+        // The next match leaves it alone: see `a_name_from_the_address_book_follows_it…`.
     }
 
     fn synced(creator: &str) -> d2d_sync::Group {

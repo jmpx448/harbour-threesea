@@ -612,7 +612,10 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
   the directory says too many requests, those found so far are kept and the command fails; the next
   sync gets the rest.
 - Hits become contacts (verification level server-verified, acquired directly) named after the
-  address book entry if they have no name yet. An ID claimed by different people's entries is left
+  address book entry if they have no name yet. Such a name is marked `SyncState::Imported` and follows
+  the entry at later syncs, as on Android; an entry without a name changes nothing. A name the user
+  wrote or cleared is `Custom` and stays. Names from before
+  this was kept (`Initial`) can't be told from the user's, so they stay too. An ID claimed by different people's entries is left
   alone, as Android does (`AndroidContactMatcher`); entries with the same name count as one person.
   Android also drops an entry that matches several IDs; we add those, under the same name.
   Whoever the user deleted is on the exclusion list and isn't brought back; adding them by hand

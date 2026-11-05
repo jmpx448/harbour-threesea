@@ -1296,8 +1296,10 @@ impl App {
         Ok(claims)
     }
 
-    /// A contact the address book matched: named from it unless the user named them, server
-    /// verified, in the contact list.
+    /// A contact the address book matched: named from it, server verified, in the contact list.
+    /// The name follows the entry while it came from there (`Imported`, as on Android); what the
+    /// user wrote or cleared (`Custom`) stays. A name from before we kept track (`Initial`) can't be
+    /// told from the user's, so it stays too.
     fn take_from_address_book(
         &self,
         mut contact: libthreema::model::contact::Contact,
@@ -1306,9 +1308,23 @@ impl App {
         let mut change = AddressBookChange::None;
         let unnamed = contact.first_name.as_deref().unwrap_or("").is_empty()
             && contact.last_name.as_deref().unwrap_or("").is_empty();
-        if unnamed && !(entry.first_name.is_empty() && entry.last_name.is_empty()) {
-            contact.first_name = Some(entry.first_name.clone()).filter(|n| !n.is_empty());
-            contact.last_name = Some(entry.last_name.clone()).filter(|n| !n.is_empty());
+        let name_follows = match contact.sync_state {
+            pc::SyncState::Imported => true,
+            pc::SyncState::Initial => unnamed,
+            pc::SyncState::Custom => false,
+        };
+        let first_name = clean(Some(entry.first_name.clone()));
+        let last_name = clean(Some(entry.last_name.clone()));
+        let entry_has_name = first_name.is_some() || last_name.is_some();
+        if name_follows
+            && entry_has_name
+            && (contact.first_name != first_name
+                || contact.last_name != last_name
+                || contact.sync_state != pc::SyncState::Imported)
+        {
+            contact.first_name = first_name;
+            contact.last_name = last_name;
+            contact.sync_state = pc::SyncState::Imported;
             change = AddressBookChange::Updated;
         }
         if contact.verification_level == pc::VerificationLevel::Unverified {
@@ -1926,6 +1942,77 @@ mod contact_policy_tests {
         // Nothing left to do the second time.
         let change = app.take_from_address_book(stored, &entry).unwrap();
         assert!(change == super::AddressBookChange::None);
+    }
+
+    /// A name from the address book follows it; a name the user wrote or cleared doesn't.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_name_from_the_address_book_follows_it_until_the_user_changes_it() {
+        use libthreema::protobuf::d2d_sync::contact::SyncState;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        let named = |first: &str, last: &str| crate::address_book::Entry {
+            first_name: first.into(),
+            last_name: last.into(),
+            emails: Vec::new(),
+            phones: Vec::new(),
+        };
+        let take = |app: &App, entry: &crate::address_book::Entry| {
+            let contact = app.store.contact("BBBBBBBB").unwrap().unwrap();
+            app.take_from_address_book(contact, entry).unwrap()
+        };
+        let name = |app: &App| {
+            let contact = app.store.contact("BBBBBBBB").unwrap().unwrap();
+            (contact.first_name, contact.last_name, contact.sync_state)
+        };
+        let anna = |last: &str, state| (Some("Anna".to_owned()), Some(last.to_owned()), state);
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.verification_level =
+            libthreema::protobuf::d2d_sync::contact::VerificationLevel::ServerVerified;
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
+        app.store.upsert_contact(&contact).unwrap();
+
+        // Named from the entry, and from then on following it.
+        assert!(take(&app, &named("Anna", "Muster")) == super::AddressBookChange::Updated);
+        assert_eq!(name(&app), anna("Muster", SyncState::Imported));
+        assert!(take(&app, &named("Anna", "Muster")) == super::AddressBookChange::None);
+        assert!(take(&app, &named(" Anna ", "Beispiel")) == super::AddressBookChange::Updated);
+        assert_eq!(name(&app), anna("Beispiel", SyncState::Imported));
+        // An entry without a name takes nothing away.
+        assert!(take(&app, &named("", "  ")) == super::AddressBookChange::None);
+        assert_eq!(name(&app), anna("Beispiel", SyncState::Imported));
+
+        // The user's own name stays, and so does clearing it.
+        call(
+            &mut app,
+            json!({"cmd": "updateContact", "identity": "BBBBBBBB",
+                   "firstName": "Anni", "lastName": ""}),
+        )
+        .await;
+        assert!(take(&app, &named("Anna", "Muster")) == super::AddressBookChange::None);
+        assert_eq!(
+            name(&app),
+            (Some("Anni".to_owned()), None, SyncState::Custom)
+        );
+        call(
+            &mut app,
+            json!({"cmd": "updateContact", "identity": "BBBBBBBB",
+                   "firstName": "", "lastName": ""}),
+        )
+        .await;
+        assert!(take(&app, &named("Anna", "Muster")) == super::AddressBookChange::None);
+        assert_eq!(name(&app), (None, None, SyncState::Custom));
+
+        // A name from before this was kept track of stays.
+        let mut contact = app.store.contact("BBBBBBBB").unwrap().unwrap();
+        contact.first_name = Some("Bea".into());
+        contact.sync_state = SyncState::Initial;
+        app.store.upsert_contact(&contact).unwrap();
+        assert!(take(&app, &named("Anna", "Muster")) == super::AddressBookChange::None);
+        assert_eq!(
+            name(&app),
+            (Some("Bea".to_owned()), None, SyncState::Initial)
+        );
     }
 
     /// The group pages go on showing someone's picture, whoever else they are to us.
