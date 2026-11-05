@@ -1994,7 +1994,8 @@ impl App {
                 Ok(json!({ "changed": changed }))
             }
             Command::ForwardMessage { message, identity } => {
-                self.forward_message(message, &identity).await
+                // Boxed: all the commands' futures together must fit the stack.
+                Box::pin(self.forward_message(message, &identity)).await
             }
             Command::SetDraft {
                 identity,
@@ -2052,7 +2053,7 @@ impl App {
             Command::ForwardMessages { messages, identity } => {
                 let (mut forwarded, mut failed) = (0, 0);
                 for message in messages {
-                    match self.forward_message(message, &identity).await {
+                    match Box::pin(self.forward_message(message, &identity)).await {
                         Ok(_) => forwarded += 1,
                         Err(error) => {
                             tracing::warn!(%error, "forwarding failed");
@@ -2138,9 +2139,9 @@ impl App {
                 if self.file_work_in_background {
                     self.send_file_in_background(file, under_pass)
                 } else if under_pass {
-                    self.send_file_under_pass(file).await
+                    Box::pin(self.send_file_under_pass(file)).await
                 } else {
-                    self.send_file(file).await
+                    Box::pin(self.send_file(file)).await
                 }
             }
             Command::RetryUpload { message } => self.retry_upload(message),
@@ -2148,7 +2149,7 @@ impl App {
                 if self.file_work_in_background {
                     self.save_file_in_background(message, directory)
                 } else {
-                    self.save_file(message, directory).await
+                    Box::pin(self.save_file(message, directory)).await
                 }
             }
             Command::EditMessage {
@@ -2258,7 +2259,7 @@ impl App {
             Command::SendGifFavourite {
                 identity,
                 favourite,
-            } => self.send_gif_favourite(identity, favourite).await,
+            } => Box::pin(self.send_gif_favourite(identity, favourite)).await,
             Command::UpdateSettings => self.update_settings_json(),
             Command::SetUpdateCheck { enabled } => {
                 if !self.update_check_built {
@@ -4400,6 +4401,82 @@ mod tests {
                 serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
             assert_eq!(reply["error"]["kind"], "locked", "{reply}");
         }));
+    }
+
+    /// Waiting behind another file while the app locks: its plain text stays where it is.
+    #[test]
+    fn a_file_to_save_that_waited_through_the_lock_is_not_written() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let message = stored_file(&app, "ABCD1234", 2);
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": downloads});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            let turn = std::rc::Rc::clone(&app.file_work_turn);
+            let before_us = turn.acquire().await.unwrap();
+            assert!(from_ui(&mut app, request).await.is_none());
+            tokio::task::yield_now().await;
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+            drop(before_us);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+        let written = std::fs::read_dir(&downloads).unwrap().count();
+        assert_eq!(written, 0, "nothing of it left the store");
+    }
+
+    /// Its message deleted while it waited, and the row id taken by another chat's message.
+    #[test]
+    fn a_file_to_save_whose_row_came_back_is_not_the_new_file() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let message = stored_file(&app, "IJKL9012", 2);
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": downloads});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            let turn = std::rc::Rc::clone(&app.file_work_turn);
+            let before_us = turn.acquire().await.unwrap();
+            assert!(from_ui(&mut app, request).await.is_none());
+            app.store.remove_message(message).unwrap();
+            let again = stored_file(&app, "QRST7890", 3);
+            assert_eq!(again, message, "the row id came back");
+            drop(before_us);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], false, "{reply}");
+        }));
+        assert_eq!(std::fs::read_dir(&downloads).unwrap().count(), 0);
+    }
+
+    fn stored_file(app: &App, identity: &str, message_id: u64) -> i64 {
+        let body = json!({"name": "a.txt", "mediaType": "text/plain"}).to_string();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(identity))
+            .unwrap();
+        let id = app
+            .store
+            .insert_incoming(identity, message_id, "file", &body, 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media
+            .write(id, crate::media::MediaPart::File, b"content")
+            .unwrap();
+        id
     }
 
     /// With a pass running nothing but the counted files gets through: the chat is hidden from

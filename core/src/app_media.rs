@@ -1210,6 +1210,8 @@ fn prepare_file(
 
 /// What a command's work on a blocking thread brought back.
 pub(crate) enum FileWork {
+    /// It wasn't started: what it was for is gone or hidden by the time its turn came.
+    Refused(ApiError),
     Send {
         identity: String,
         prepared: Result<PreparedFile, ApiError>,
@@ -1228,8 +1230,42 @@ pub(crate) struct FinishedFileWork {
 
 /// A file on its way out of the store (see [`App::save_file`]).
 struct FileToSave {
+    /// Which message it is. A row id can come back, as another message.
+    conversation: String,
+    message_id: u64,
     name: Option<String>,
     media_type: String,
+}
+
+impl FileToSave {
+    /// Whether the message is still this one, and the UI may still have its file. For the core
+    /// thread, right before the file is read: its plain text is what leaves here, and neither the
+    /// lock nor a deletion that came during the wait may be left for the answer to find out.
+    fn may_go(&self, store: &Store, media: &MediaStore, id: i64) -> Result<(), ApiError> {
+        if !media.shown(id) {
+            return Err(ApiError::Locked);
+        }
+        match store.message(id)? {
+            Some(message)
+                if message.kind == "file"
+                    && message.conversation == self.conversation
+                    && message.message_id == self.message_id =>
+            {
+                Ok(())
+            }
+            _ => Err(ApiError::Internal("no such file".into())),
+        }
+    }
+}
+
+/// How much memory working on a file takes: it came along, or it is read from `path`.
+fn file_work_size(file: &OutgoingFile, attachments: &[Zeroizing<Vec<u8>>]) -> usize {
+    match (attachments.first(), &file.path) {
+        (Some(data), _) if !data.is_empty() => data.len(),
+        (_, Some(path)) => std::fs::metadata(path)
+            .map_or(0, |file| usize::try_from(file.len()).unwrap_or(usize::MAX)),
+        _ => 0,
+    }
 }
 
 /// The file's decrypted copy in `directory`; for a blocking thread.
@@ -1354,12 +1390,27 @@ impl App {
         &mut self,
         file: OutgoingFile,
     ) -> Result<Value, ApiError> {
+        let size = file_work_size(&file, &self.attachments);
+        let memory = media::reserve_memory_within(size, media::COMMAND_MEMORY_WAIT).await;
+        self.send_file_with_memory(file, memory).await
+    }
+
+    /// Prepare the file with the attachments, then store it. The share of the memory goes as soon as
+    /// the file is on the disk: storing it can lead to more of this, for a list's members.
+    async fn send_file_with_memory(
+        &mut self,
+        file: OutgoingFile,
+        memory: media::TransferMemory,
+    ) -> Result<Value, ApiError> {
         let identity = file.identity.clone();
         let attachments = std::mem::take(&mut self.attachments);
         let media = Arc::clone(&self.media);
-        let prepared = media::off_thread(move || prepare_file(&media, file, attachments))
-            .await
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        let prepared = media::off_thread(move || {
+            let _memory = memory;
+            prepare_file(&media, file, attachments)
+        })
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
         self.finish_send_file(&identity, prepared).await
     }
 
@@ -1384,11 +1435,18 @@ impl App {
         }
         let identity = file.identity.clone();
         let attachments = std::mem::take(&mut self.attachments);
+        let size = file_work_size(&file, &attachments);
         let media = Arc::clone(&self.media);
-        self.spawn_file_work(move || FileWork::Send {
-            identity,
-            prepared: prepare_file(&media, file, attachments),
-        });
+        // Nothing of the store goes into it: what comes of a chat hidden or gone meanwhile is
+        // decided when it is stored.
+        self.spawn_file_work(
+            size,
+            || Ok(()),
+            move || FileWork::Send {
+                identity,
+                prepared: prepare_file(&media, file, attachments),
+            },
+        );
         Ok(json!({}))
     }
 
@@ -1398,18 +1456,32 @@ impl App {
         id: i64,
         directory: String,
     ) -> Result<Value, ApiError> {
-        let (conversation, file) = self.file_to_save(id)?;
-        let media = Arc::clone(&self.media);
-        self.spawn_file_work(move || FileWork::Save {
-            conversation,
-            saved: save_decrypted(&media, id, &directory, &file),
-        });
+        let file = self.file_to_save(id)?;
+        let size = self.media.stored_size(id, MediaPart::File);
+        let conversation = file.conversation.clone();
+        let (store, media) = (Rc::clone(&self.store), Arc::clone(&self.media));
+        let (checked, check) = (Arc::new(file), Arc::clone(&self.media));
+        let to_save = Arc::clone(&checked);
+        self.spawn_file_work(
+            size,
+            move || checked.may_go(&store, &check, id),
+            move || FileWork::Save {
+                conversation,
+                saved: save_decrypted(&media, id, &directory, &to_save),
+            },
+        );
         Ok(json!({}))
     }
 
     /// Start `work` on a blocking thread, one at a time: what was asked for first is in the chat
-    /// first. It holds a wake-up up, like the transfer it leads to.
-    fn spawn_file_work(&mut self, work: impl FnOnce() -> FileWork + Send + 'static) {
+    /// first. It holds a wake-up up, like the transfer it leads to. When its turn has come and `size`
+    /// bytes fit in memory, `ready` decides on the core thread whether it still may.
+    fn spawn_file_work(
+        &mut self,
+        size: usize,
+        ready: impl FnOnce() -> Result<(), ApiError> + 'static,
+        work: impl FnOnce() -> FileWork + Send + 'static,
+    ) {
         self.reply_later = true;
         self.file_work_running += 1;
         let request = self.current_request;
@@ -1417,7 +1489,16 @@ impl App {
         let turn = Rc::clone(&self.file_work_turn);
         tokio::task::spawn_local(self.transfers.track(async move {
             let _turn = turn.acquire().await;
-            let work = media::off_thread(work).await.ok();
+            let memory = media::reserve_memory_within(size, media::FILE_WORK_MEMORY_WAIT).await;
+            let work = match ready() {
+                Ok(()) => media::off_thread(move || {
+                    let _memory = memory;
+                    work()
+                })
+                .await
+                .ok(),
+                Err(error) => Some(FileWork::Refused(error)),
+            };
             let _ = done.send(FinishedFileWork { request, work });
         }));
     }
@@ -1426,6 +1507,7 @@ impl App {
     pub(crate) async fn finish_file_work(&mut self, finished: FinishedFileWork) -> String {
         self.file_work_running -= 1;
         let outcome = match finished.work {
+            Some(FileWork::Refused(error)) => Err(error),
             Some(FileWork::Send { identity, prepared }) => {
                 self.finish_send_file(&identity, prepared).await
             }
@@ -2153,6 +2235,16 @@ impl App {
                 self.send_location(identity, &body)
             }
             "file" => {
+                let size = self.media.stored_size(id, MediaPart::File);
+                let memory = media::reserve_memory_within(size, media::COMMAND_MEMORY_WAIT).await;
+                // That may have taken a moment. The same message, and still to be seen?
+                let same = self.store.message(id)?.is_some_and(|now| {
+                    now.conversation == message.conversation && now.message_id == message.message_id
+                });
+                if !same {
+                    return Err(ApiError::Internal("no such message".into()));
+                }
+                self.check_readable(&message.conversation)?;
                 let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
                 let media = Arc::clone(&self.media);
                 let (data, thumbnail) = media::off_thread(move || {
@@ -2174,21 +2266,26 @@ impl App {
                         .as_u64()
                         .and_then(|value| u32::try_from(value).ok())
                 };
+                let (_, conversation) = self.readable_conversation(identity)?;
+                conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
                 let result = self
-                    .send_file(OutgoingFile {
-                        identity: identity.to_owned(),
-                        path: None,
-                        name: text("name"),
-                        media_type: text("mediaType")
-                            .unwrap_or_else(|| "application/octet-stream".into()),
-                        caption: text("caption"),
-                        rendering: text("rendering").unwrap_or_else(|| "file".into()),
-                        width: dimension("width"),
-                        height: dimension("height"),
-                        duration: body["duration"].as_f64(),
-                        encode: None,
-                        keep_metadata: false,
-                    })
+                    .send_file_with_memory(
+                        OutgoingFile {
+                            identity: identity.to_owned(),
+                            path: None,
+                            name: text("name"),
+                            media_type: text("mediaType")
+                                .unwrap_or_else(|| "application/octet-stream".into()),
+                            caption: text("caption"),
+                            rendering: text("rendering").unwrap_or_else(|| "file".into()),
+                            width: dimension("width"),
+                            height: dimension("height"),
+                            duration: body["duration"].as_f64(),
+                            encode: None,
+                            keep_metadata: false,
+                        },
+                        memory,
+                    )
                     .await;
                 self.attachments.clear();
                 result
@@ -2204,15 +2301,20 @@ impl App {
         id: i64,
         directory: String,
     ) -> Result<Value, ApiError> {
-        let (_, file) = self.file_to_save(id)?;
+        let size = self.media.stored_size(id, MediaPart::File);
+        let memory = media::reserve_memory_within(size, media::COMMAND_MEMORY_WAIT).await;
+        let file = self.file_to_save(id)?;
         let media = Arc::clone(&self.media);
-        media::off_thread(move || save_decrypted(&media, id, &directory, &file))
-            .await
-            .map_err(|error| ApiError::Internal(error.to_string()))?
+        media::off_thread(move || {
+            let _memory = memory;
+            save_decrypted(&media, id, &directory, &file)
+        })
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
     }
 
     /// The chat and what the file is called, if it may leave.
-    fn file_to_save(&self, id: i64) -> Result<(String, FileToSave), ApiError> {
+    fn file_to_save(&self, id: i64) -> Result<FileToSave, ApiError> {
         let message = self
             .store
             .message(id)?
@@ -2220,11 +2322,12 @@ impl App {
             .ok_or_else(|| ApiError::Internal("no such file".into()))?;
         self.check_readable(&message.conversation)?;
         let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
-        let file = FileToSave {
+        Ok(FileToSave {
             name: body["name"].as_str().map(str::to_owned),
             media_type: body["mediaType"].as_str().unwrap_or("").to_owned(),
-        };
-        Ok((message.conversation, file))
+            conversation: message.conversation,
+            message_id: message.message_id,
+        })
     }
 }
 

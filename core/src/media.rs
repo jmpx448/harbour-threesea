@@ -64,9 +64,11 @@ pub static PICTURE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const
 /// running at once keeps them in bounds.
 const SMALL_TRANSFER: usize = MAX_PICTURE_DOWNLOAD;
 
-/// How many MiB large transfers may hold in memory together, each its blob or file once. One of the
-/// largest fits with room for a smaller one, so a big file on a slow link doesn't hold up all
-/// others, and two of them can't take the phone's memory together.
+/// How many MiB large transfers and the work on files to send or save may hold in memory together,
+/// each its blob or file once. One of the largest fits with room for a smaller one, so a big file on
+/// a slow link doesn't hold up all others, and two of them can't take the phone's memory together.
+/// Not in it: what the UI's readers hold (players, image viewer), and file work that has waited for
+/// long ([`reserve_memory_within`]).
 const TRANSFER_MEMORY_MIB: u32 = 128;
 const MIB: usize = 1024 * 1024;
 static TRANSFER_MEMORY: tokio::sync::Semaphore =
@@ -98,6 +100,34 @@ pub async fn reserve_transfer_memory(bytes: usize) -> TransferMemory {
             mib => TRANSFER_MEMORY.acquire_many(mib).await.ok(),
         },
     }
+}
+
+/// How long work on a file waits for its share when nothing but the file's sender is waiting.
+pub const FILE_WORK_MEMORY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The same when a command holds up the commands behind it meanwhile.
+pub const COMMAND_MEMORY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`reserve_transfer_memory`] for work that takes seconds, whose memory goes when it's done. It may
+/// have to wait for a transfer on a slow link, which can take many minutes, and neither a command
+/// nor stopping the app can wait that long: after `wait` it goes ahead without a share. It can't
+/// deadlock, as none of those holding a share waits for anything but the network and this thread.
+pub async fn reserve_memory_within(bytes: usize, wait: std::time::Duration) -> TransferMemory {
+    reserve_from(&TRANSFER_MEMORY, bytes, wait).await
+}
+
+async fn reserve_from(
+    memory: &'static tokio::sync::Semaphore,
+    bytes: usize,
+    wait: std::time::Duration,
+) -> TransferMemory {
+    let share = match transfer_memory_mib(bytes) {
+        0 => None,
+        mib => tokio::time::timeout(wait, memory.acquire_many(mib))
+            .await
+            .ok()
+            .and_then(Result::ok),
+    };
+    TransferMemory { _permit: share }
 }
 
 /// Run `work` on a blocking thread: the core thread answers the connection and the UI meanwhile.
@@ -437,6 +467,12 @@ impl MediaStore {
         let length = move_to_front(&mut stored, header + TAG_LENGTH);
         stored.truncate(length);
         Ok(Some(stored))
+    }
+
+    /// How much memory reading it takes; 0 if it isn't there.
+    pub fn stored_size(&self, message: i64, part: MediaPart) -> usize {
+        std::fs::metadata(self.path(message, part))
+            .map_or(0, |file| usize::try_from(file.len()).unwrap_or(usize::MAX))
     }
 
     pub fn has(&self, message: i64, part: MediaPart) -> bool {
@@ -1006,6 +1042,30 @@ mod tests {
         assert!(media_dir.join("0.file").exists());
         assert!(!media_dir.join("1.file").exists());
         assert_eq!(stored_names(&dir).len(), (files as usize).div_ceil(2) + 1);
+    }
+
+    /// Nothing else is in the way, or it gets no share after waiting; never stuck.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_share_of_the_memory_is_waited_for_only_so_long() {
+        static MEMORY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(200);
+        let wait = std::time::Duration::from_millis(10);
+        let large = 150 * MIB;
+        let first = reserve_from(&MEMORY, large, wait).await;
+        assert!(first._permit.is_some());
+        assert_eq!(
+            MEMORY.available_permits(),
+            200 - usize::try_from(TRANSFER_MEMORY_MIB).unwrap()
+        );
+        // Less than the rest fits, without waiting.
+        let small = reserve_from(&MEMORY, 20 * MIB, wait).await;
+        assert!(small._permit.is_some());
+        drop(small);
+        let second = reserve_from(&MEMORY, large, wait).await;
+        assert!(second._permit.is_none(), "goes ahead without a share");
+        drop(first);
+        assert!(reserve_from(&MEMORY, large, wait).await._permit.is_some());
+        // A small one needs none.
+        assert!(reserve_from(&MEMORY, 1024, wait).await._permit.is_none());
     }
 
     /// What the decrypted file leaves behind it in the buffer is plain text nobody tracks any more.
