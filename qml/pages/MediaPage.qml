@@ -159,9 +159,10 @@ Page {
         cellHeight: cellSize
         cacheBuffer: 1000
 
-        // Only worth it with more than one kind.
+        // Only worth it with more than one kind, or when the saved choice (it is for all chats)
+        // leaves this chat's only kind out: the way back.
         PullDownMenu {
-            visible: page.presentKinds.length > 1
+            visible: page.presentKinds.length > 1 || (grid.count === 0 && page.presentKinds.length > 0)
             MenuItem {
                 //% "Show"
                 text: qsTrId("threesea-me-media-show")
