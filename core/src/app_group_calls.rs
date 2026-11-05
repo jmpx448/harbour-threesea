@@ -7,7 +7,7 @@
 //! `groupCallOffer {sdp}` (a new remote offer: participants came or went),
 //! `groupCallParticipants {participants}`, `groupCallAlone` (alone for 3 minutes: leave).
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, future::Future, rc::Rc};
 
 use libthreema::common::keys::ClientKey;
 use libthreema::model::message::GroupCallStartMessage;
@@ -22,6 +22,7 @@ use libthreema::protobuf::group_call::{
     sfu_to_participant,
 };
 use prost::Message as _;
+use tokio::task::AbortHandle;
 
 use crate::{
     app::{ApiError, App, Shared},
@@ -75,6 +76,27 @@ const STALE_AFTER_MS: i64 = 10 * 3600 * 1000;
 #[derive(Default)]
 pub(crate) struct SfuCache(Option<(SfuCredentials, i64)>);
 
+/// The tasks of group calls, which run beside the core loop for minutes or as long as a call does:
+/// retrying the SFU credentials, peeking calls. They hold on to the store, so they go when the ID
+/// does ([`App::drop_detached_work`]).
+#[derive(Clone, Default)]
+pub(crate) struct GroupCallTasks(Rc<RefCell<Vec<AbortHandle>>>);
+
+impl GroupCallTasks {
+    fn spawn(&self, work: impl Future<Output = ()> + 'static) {
+        let task = tokio::task::spawn_local(work);
+        let mut running = self.0.borrow_mut();
+        running.retain(|task| !task.is_finished());
+        running.push(task.abort_handle());
+    }
+
+    pub(crate) fn abort_all(&self) {
+        for task in self.0.borrow_mut().drain(..) {
+            task.abort();
+        }
+    }
+}
+
 /// What the background tasks need from the app.
 #[derive(Clone)]
 struct Context {
@@ -84,6 +106,7 @@ struct Context {
     events: tokio::sync::mpsc::UnboundedSender<CoreEvent>,
     /// The groups with a task peeking their calls until they are over.
     watched: Rc<RefCell<HashSet<String>>>,
+    tasks: GroupCallTasks,
 }
 
 impl Context {
@@ -204,7 +227,8 @@ impl Context {
         let context = self.clone();
         let conversation = conversation.to_owned();
         let mut pause = REFRESH_MS;
-        tokio::task::spawn_local(async move {
+        let tasks = self.tasks.clone();
+        tasks.spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
                 let off = context.store.setting(keys::GROUP_CALLS).ok().flatten();
@@ -705,6 +729,7 @@ impl Shared {
             sfu: Rc::clone(&self.sfu),
             events: self.media_events.clone(),
             watched: Rc::clone(&self.group_calls_watched),
+            tasks: self.group_call_tasks.clone(),
         }
     }
 
@@ -724,15 +749,15 @@ impl App {
         caller: &str,
         start: &GroupCallStartMessage,
     ) {
-        if !self.group_calls_wanted() {
+        // Read from the queue after the wipe: there is nobody left to store it for.
+        if self.identity_removed || !self.group_calls_wanted() {
             return;
         }
         let context = self.group_call_context();
         let (conversation, caller, start) =
             (conversation.to_owned(), caller.to_owned(), start.clone());
-        tokio::task::spawn_local(
-            async move { context.on_start(conversation, caller, start).await },
-        );
+        self.group_call_tasks
+            .spawn(async move { context.on_start(conversation, caller, start).await });
     }
 
     /// The call this line announces was found running: a notification, unless we are in it.
@@ -775,7 +800,7 @@ impl App {
         }
         let context = self.group_call_context();
         let conversation = conversation.to_owned();
-        tokio::task::spawn_local(async move {
+        self.group_call_tasks.spawn(async move {
             context.announce_to(&conversation, &receivers).await;
         });
     }
@@ -790,7 +815,7 @@ impl Shared {
         }
         let context = self.group_call_context();
         let conversation = conversation.to_owned();
-        tokio::task::spawn_local(async move {
+        self.group_call_tasks.spawn(async move {
             context.refresh(&conversation).await;
         });
         json!({})
@@ -1540,6 +1565,50 @@ mod app_tests {
         .await;
         assert_eq!(never, None);
         assert_eq!(tries.get(), CREDENTIALS_RETRY.len() + 1);
+    }
+
+    /// A late announcement, or a peek, must not write to the store the removal just emptied.
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_call_tasks_go_when_the_id_does() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app, key) = app_with_group(false);
+                let context = app.group_call_context();
+                // Sleeps before it looks at anything: no network here.
+                context.keep_watching(&key);
+                tokio::task::yield_now().await;
+                assert!(app.group_calls_watched.borrow().contains(&key));
+
+                let held = Rc::new(());
+                let in_task = Rc::clone(&held);
+                app.group_call_tasks.spawn(async move {
+                    let _in_task = in_task;
+                    std::future::pending::<()>().await;
+                });
+                // Not polled before the end of this test, so this one reaches no server either.
+                app.on_group_call_start(
+                    &key,
+                    "BBBBBBBB",
+                    &GroupCallStartMessage {
+                        protocol_version: 1,
+                        gck: [1; 32],
+                        sfu_base_url: "https://sfu.example.org".into(),
+                    },
+                );
+                assert_eq!(app.group_call_tasks.0.borrow().len(), 3);
+
+                app.drop_detached_work();
+                tokio::task::yield_now().await;
+                assert_eq!(Rc::strong_count(&held), 1, "the task has gone");
+                assert!(app.group_call_tasks.0.borrow().is_empty());
+
+                // A next ID's group can be watched again: no name stays behind as "has a task".
+                assert!(app.group_calls_watched.borrow().is_empty());
+                context.keep_watching(&key);
+                assert_eq!(app.group_call_tasks.0.borrow().len(), 1);
+                app.drop_detached_work();
+            })
+            .await;
     }
 
     #[test]

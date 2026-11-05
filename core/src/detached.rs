@@ -189,12 +189,15 @@ impl App {
         self.detached.quiet_running = 0;
     }
 
-    /// Drops all of it, with what has finished and is still to be looked at: the ID is going, and
-    /// nothing written or sent on its behalf may follow.
+    /// Drops all of it, with what has finished and is still to be looked at, and the tasks of group
+    /// calls, which run beside the lanes: the ID is going, and nothing written or sent on its
+    /// behalf may follow.
     pub(crate) fn drop_detached_work(&mut self) {
         for work in self.detached.running.drain(..) {
             work.task.abort();
         }
+        self.group_call_tasks.abort_all();
+        self.group_calls_watched.borrow_mut().clear();
         self.detached.round += 1;
         self.detached.replies_due = 0;
         self.detached.maintenance_running = false;

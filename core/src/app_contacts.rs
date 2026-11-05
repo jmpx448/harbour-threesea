@@ -255,6 +255,8 @@ impl App {
         if let Err(error) = crate::runtime::mark_removal(&self.data_dir, linked_devices_remain) {
             tracing::warn!(%error, "the removal could not be marked");
         }
+        // And whatever started while the others were being told.
+        self.drop_detached_work();
         self.identity_removed = true;
         if let Err(error) = self.store.wipe() {
             tracing::error!(%error, "the store could not be emptied, its file goes next");

@@ -1428,6 +1428,7 @@ pub struct Shared {
     pub(crate) sfu: std::rc::Rc<std::cell::RefCell<crate::app_group_calls::SfuCache>>,
     pub(crate) group_calls_watched:
         std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    pub(crate) group_call_tasks: crate::app_group_calls::GroupCallTasks,
     /// Cached TURN servers, with their expiry (ms).
     pub(crate) turn_servers: std::cell::RefCell<Option<(crate::directory::TurnServers, i64)>>,
     /// Device linking between the scan and the emoji confirmation.
@@ -1577,6 +1578,7 @@ impl App {
             calls_supported: start.calls,
             sfu: std::rc::Rc::default(),
             group_calls_watched: std::rc::Rc::default(),
+            group_call_tasks: crate::app_group_calls::GroupCallTasks::default(),
             turn_servers: std::cell::RefCell::default(),
             pending_link: std::cell::RefCell::default(),
             pending_ui_events: std::cell::RefCell::default(),
