@@ -51,25 +51,40 @@ Made-up demo data, taken in the emulator. [Which version each picture is from](d
 | Feature | State |
 |---|---|
 | Builds and installs on SFOS 5.1+ (aarch64, armv7hl, i486) | ✅ |
-| Libre license check, ID creation, ID backup export/import, Threema Safe backup/restore | ✅ |
+| Libre license check, ID creation, ID backup export/import (as text or QR code), Threema Safe backup/restore (also finding a forgotten ID by its linked number or address) | ✅ |
+| Data backups in Threema for Android's format: create one by hand or on a schedule, import one, or start a new phone from one with ID and chats | ✅ (not yet restored on a real Android device) |
 | 1:1 chats with Perfect Forward Secrecy (off while a device is linked, as Threema's multi-device requires, and if you switch it off; no warning yet on a message sent without it), delivery/read receipts, typing indicators | ✅ |
 | Report spam, 1:1 and groups (the complete report is not tested end to end yet) | ✅ |
 | Groups (create, rename, members, leave, pictures), mentions, distribution lists | ✅ |
 | Photos (cut, turn, draw on them), videos, files, voice messages (pause, listen before sending), GIFs, polls with a chat's overview, locations (your position, or a place found nearby or by name), quotes, reactions, edit, delete | ✅ |
 | Threema's text formatting (*bold*, _italic_, ~strikethrough~), emoji picker with search | ✅ |
-| Profile pictures, contact verification by QR code, address book matching (opt-in, hashed) | ✅ |
+| Profile pictures (cut to a square, or taken with the camera), contact verification by QR code | ✅ |
+| Address book matching (opt-in, hashed) | ✅ (not yet tested on a phone with a real address book) |
 | App lock and private chats, encrypted storage (SQLCipher) | ✅ |
 | Notifications with quick reply, cover, background connection | ✅ |
+| Forward and share to several chats at once, share a message's text to other apps, export a chat as a ZIP | ✅ |
 | Share from other apps, Threema links (`threema://`, `threema.id`) | ✅ |
-| Multi-device (Threema for Desktop, with names for the linked devices), Threema Web | ✅ |
+| Multi-device (Threema for Desktop, with names for the linked devices), Threema Web (sessions with names of their own, self-hosted servers you allow) | ✅ |
 | Archive, pinned chats, mark as unread, chat search, starred messages, auto-delete | ✅ |
 | 1:1 calls and group calls, audio and video (Full flavour) | ✅ (phone tests pending) |
-| German translation | ✅ |
+| German and French translations | ✅ |
 
 Two flavours are built from this tree, both as RPMs on the GitHub releases page (not in the
 Jolla Store or Chum yet): **Full**, with a background service that connects at login and calls,
 and **Lite**, which follows the Jolla Store's rules (it stays connected only once opened, no
 calls). Install one of them; see [ADR 0014](docs/decisions/0014-lite-full-github-updates.md).
+
+### What it connects to
+
+Threesea talks to Threema's servers only: the chat server, the directory, the blob server, Threema
+Safe, the mediator for linked devices, the call servers, Threema Web's default server and the map
+server that finds places to send. Two exceptions, each only if you choose it:
+
+- **Check for updates** (builds from GitHub only): once a day it asks GitHub for the newest
+  release. It is asked once and stays off unless you agree; GitHub sees your IP address and the
+  app's version, nothing else. Builds for a store leave it out entirely.
+- **Self-hosted Threema Web servers**: a code that names another server asks you first, and the
+  servers you allowed are listed under Threema Web, where you can take them back.
 
 ## Install
 
@@ -88,8 +103,8 @@ This takes the chats and media on this phone with it; what comes back is what yo
 2. Restart the phone. Closing the window is not enough: with "Keep running in the background" on,
    which is the default, Threesea goes on running and keeps the deleted data open.
 3. Open Threesea. It starts as on a new phone, without the lock: enter the license key and restore
-   your ID from Threema Safe or an ID backup. A data backup brings the chats back after that, from
-   its page in the settings.
+   your ID from Threema Safe, an ID backup or a data backup. A data backup brings the chats along;
+   after a restore from Threema Safe or an ID backup, import it from its page in the settings.
 
 With a passphrase for the stored data (Settings → Security), Threesea asks for that passphrase
 before step 3: it is kept in Sailfish Secrets, not in the folder. Only that passphrase gets past
@@ -106,9 +121,12 @@ can pick up the work:
 - [docs/](docs) holds the decisions (`decisions/`, one per choice), protocol notes, the mapping
   to the Android app, research, the build and emulator guides, and the status log
   ([docs/STATUS.md](docs/STATUS.md)).
-- Security reviews: [docs/security-audit.md](docs/security-audit.md) and the audits of
-  2026-10-27 ([security](docs/security-audit-2026-10-27.md), [rules](docs/rules-audit-2026-10-27.md)),
-  each with what has been fixed since.
+- Security reviews, each with what has been fixed since: [docs/security-audit.md](docs/security-audit.md);
+  the audits of 2026-10-27 ([security](docs/security-audit-2026-10-27.md),
+  [rules](docs/rules-audit-2026-10-27.md), and the [deep re-audit](docs/deep-audit-2026-10-27.md),
+  whose header lists what is still open); and the [audit of 2026-10-30](docs/audit-2026-10-30.md).
+  A further review of 2026-11-04 was worked through for the next release; what it changed is in the
+  [CHANGELOG](CHANGELOG.md) and [docs/STATUS.md](docs/STATUS.md).
 - `scripts/check.sh` runs all checks; `git config core.hooksPath scripts/hooks` runs the quick
   ones before every commit.
 

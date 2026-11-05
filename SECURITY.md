@@ -29,9 +29,18 @@ This is a spare-time project: replies may take a few days. Fixes go into a new r
 
 These are AI-run reviews, not a professional audit or certification.
 
+The audits of 2026-10-27 say at their top what has been fixed since.
+
 - [docs/security-audit.md](docs/security-audit.md)
-- [docs/security-audit-2026-10-27.md](docs/security-audit-2026-10-27.md), with what has been
-  fixed since
+- [docs/security-audit-2026-10-27.md](docs/security-audit-2026-10-27.md)
+- [docs/rules-audit-2026-10-27.md](docs/rules-audit-2026-10-27.md): the code against the project's
+  own rules
+- [docs/deep-audit-2026-10-27.md](docs/deep-audit-2026-10-27.md): its header lists what is still
+  open, such as the device check of the notification actions
+- [docs/audit-2026-10-30.md](docs/audit-2026-10-30.md)
+- A review of 2026-11-04, not published as a document: its fixes are in the next release, listed in
+  the [CHANGELOG](CHANGELOG.md), and what still needs a phone is in
+  [docs/voice-video-device-checklist.md](docs/voice-video-device-checklist.md).
 
 ## What a data backup's password protects
 

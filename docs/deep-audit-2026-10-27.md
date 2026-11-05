@@ -4,8 +4,9 @@
 > (session events tied to their task; every content command and the UI's media readers behind the
 > private-chat check), D03 (decoding budget, bounded event queue), D05, R01 and P01 for the update
 > check, R02, P02 (unchanged refreshes, per-chat queries, an index for search), P03, P04, D04
-> (notification actions carry a per-chat token). Open: P01 for the other long operations (Threema
-> Safe, linking), and the device check of D04. The probes in `deep-audit-2026-10-27/` were written
+> (notification actions carry a per-chat token), and P01 for the other long operations (Threema
+> Safe, linking, export and the rest run beside the core's loop since November, ADR 0028). Open: the
+> device check of D04. The probes in `deep-audit-2026-10-27/` were written
 > against the audited code (they no longer compile against the changed session types); the regression
 > tests that replace them are in `core/src/app_web_security_tests.rs`, `core/src/app_updates.rs`,
 > `core/src/web/budget.rs` and `tests/models`.
