@@ -30,7 +30,11 @@ Item {
             var p = person.phoneDetails || []
             for (var k = 0; k < p.length; ++k) if (p[k].number) phones.push(p[k].number)
             if (emails.length > 0 || phones.length > 0) {
-                entries.push({ firstName: person.firstName || "", lastName: person.lastName || "",
+                var firstName = person.firstName || ""
+                var lastName = person.lastName || ""
+                // An entry with only a company. Not displayLabel: it can be the number itself.
+                if (!firstName && !lastName) firstName = person.companyName || ""
+                entries.push({ firstName: firstName, lastName: lastName,
                                emails: emails, phones: phones })
             }
         }
