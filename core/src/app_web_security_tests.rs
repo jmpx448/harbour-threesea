@@ -2323,3 +2323,54 @@ fn the_browser_hears_the_same_words_once_until_the_connection_stays_up() {
     app.web_server_said(&alert);
     assert_eq!(sent_values(&mut rx).len(), 1);
 }
+
+/// Being added to a group: the setup stores the group and its first status line in one go, and
+/// the browser would drop a conversation of a receiver it doesn't know yet.
+#[test]
+fn a_group_setup_reaches_the_browser_as_receiver_then_chat() {
+    use libthreema::{
+        common::{GroupIdentity, ThreemaId},
+        model::message::{GroupMessageBody, GroupSetupMessage, IncomingGroupMessageBody},
+    };
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    let id = |id: &str| ThreemaId::try_from(id).unwrap();
+    let group_identity = GroupIdentity {
+        creator_identity: id("BBBBBBBB"),
+        group_id: 0xabcd,
+    };
+    let outcome = crate::groups::receive(
+        &app.store,
+        "AAAAAAAA",
+        "BBBBBBBB",
+        1,
+        1,
+        IncomingGroupMessageBody {
+            group_identity,
+            body: GroupMessageBody::Setup(GroupSetupMessage {
+                members: vec![id("AAAAAAAA"), id("CCCCCCCC")],
+            }),
+        },
+        false,
+        &|_| true,
+        &|_| Ok(false),
+        &str::to_owned,
+    )
+    .unwrap();
+    assert!(outcome.change.created);
+    let key = crate::groups::key(&group_identity);
+
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    let position = |sub_type: &str, wanted: &str| {
+        sent.iter()
+            .position(|wire| {
+                let args = saltyrtc::field(wire, "args");
+                saltyrtc::field(wire, "subType") == Some(&Value::from(sub_type))
+                    && args.and_then(|a| saltyrtc::field(a, "mode")) == Some(&Value::from("new"))
+                    && format!("{wire:?}").contains(wanted)
+            })
+            .unwrap_or_else(|| panic!("no new {sub_type}: {sent:?}"))
+    };
+    assert!(position("receiver", &key) < position("conversation", &key));
+}
