@@ -791,14 +791,16 @@ Android's places come from Threema's own hosts, as in `app/build.gradle.kts` and
 `DefaultServerAddressProvider.kt`; `poi.threema.ch` falls under the `threema.ch` pins:
 
 - `GET https://poi.threema.ch/around/{lat}/{lon}/{radius}/` (radius 750): a JSON array of
-  `{id, name, lat, lon, <kind>}`. `<kind>` is one of `amenity`, `shop`, `tourism`, `sport`,
+  `{id, name, lat, lon, dist (m), <kind>}`. `<kind>` is one of `amenity`, `shop`, `tourism`, `sport`,
   `leisure`, `natural`, `public_transport`, `aeroway`, `aerialway`, `highway`; Android drops entries
-  with none of them.
+  with none of them. Android doesn't read `dist` here; we show it.
 - `GET https://poi.threema.ch/names/{lat}/{lon}/{query}/`: `{name, lat, lon, dist (m), …}`, from
   3 characters on; Android drops entries without `dist`. No request for 0/0.
 - Coordinates with six decimals; the query percent-encoded as one segment of the path. Android sends
   no authentication, only its user agent. These formats come from Android's parser
-  (`location/PoiRepository.kt`); a live answer hasn't been seen from here yet.
+  (`location/PoiRepository.kt`) and its test answers (`core/tests/fixtures/poi-*.json`); a live answer
+  hasn't been seen from here yet, nor `poi.threema.ch`'s own certificate: we pin the leaf, Android
+  accepts a pin anywhere in the chain, so a leaf outside the set would fail only here.
 
 Android's map style is `https://map.threema.ch/styles/threema/style.json`, drawn by MapLibre. The
 hosts of its tiles and fonts are named in that file only, not in the Android source. Addresses of a

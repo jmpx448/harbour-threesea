@@ -57,7 +57,8 @@ impl Center {
         })
     }
 
-    /// Metres to a point (haversine): the nearby list's answer holds no distance.
+    /// Metres to a point (haversine), for a nearby place that comes without `dist`: Android lists
+    /// those too, as it doesn't read the distance of this answer.
     fn distance_to(self, latitude: f64, longitude: f64) -> f64 {
         const EARTH_RADIUS_M: f64 = 6_371_000.0;
         let (from, to) = (self.latitude.to_radians(), latitude.to_radians());
@@ -138,7 +139,11 @@ fn parse_nearby(answer: &[u8], center: Center) -> Result<Value, ApiError> {
             return None;
         }
         let (name, latitude, longitude) = place_position(place)?;
-        let distance = center.distance_to(latitude, longitude).round();
+        let distance = place["dist"]
+            .as_f64()
+            .filter(|d| *d >= 0.0)
+            .unwrap_or_else(|| center.distance_to(latitude, longitude))
+            .round();
         Some(
             json!({ "name": name, "latitude": latitude, "longitude": longitude,
                      "distance": distance }),
@@ -253,11 +258,44 @@ mod tests {
         assert!(Center::new(0.0, 1.0).is_some());
     }
 
+    // Android's test/resources/api/responses, as in its PoiRepositoryTest.
+    #[test]
+    fn androids_nearby_answer() {
+        let answer = include_bytes!("../tests/fixtures/poi-nearby.json");
+        let center = Center::new(47.268, 8.715).unwrap();
+        let places = parse_nearby(answer, center).unwrap();
+        let places = places["places"].as_array().unwrap();
+        assert_eq!(places.len(), 15);
+        assert_eq!(
+            places[0],
+            json!({"name": "Rathaus", "latitude": 47.2690785, "longitude": 8.7142272,
+                   "distance": 64.0})
+        );
+        assert_eq!(places[5]["name"], "Waldhüüsli");
+        assert_eq!(places[8]["name"], "Bergli");
+        assert_eq!(places[14]["name"], "Threema Shop");
+        assert_eq!(places[14]["distance"], 622.0);
+    }
+
+    #[test]
+    fn androids_names_answer() {
+        let answer = include_bytes!("../tests/fixtures/poi-names.json");
+        let places = parse_names(answer).unwrap();
+        assert_eq!(
+            places["places"],
+            json!([
+                {"name": "POI 1", "latitude": 47.5, "longitude": 8.1, "distance": 20.0},
+                {"name": "POI 2", "latitude": 47.1, "longitude": 8.0, "distance": 25.0},
+                {"name": "POI 3", "latitude": 47.1, "longitude": 8.0, "distance": 30.0},
+            ])
+        );
+    }
+
     #[test]
     fn nearby_answer_gives_named_places_with_their_distance() {
         let answer = br#"[
             {"id": 1, "name": "Cafe", "lat": 47.221, "lon": 8.808609, "amenity": "cafe"},
-            {"id": 2, "name": "Summit", "lat": 47.22, "lon": 8.81, "natural": "peak"},
+            {"id": 2, "name": "Summit", "lat": 47.22, "lon": 8.81, "natural": "peak", "dist": 99},
             {"id": 3, "name": "No kind", "lat": 47.22, "lon": 8.81},
             {"id": 4, "lat": 47.22, "lon": 8.81, "shop": "kiosk"},
             {"id": 5, "name": "Off the globe", "lat": 91.0, "lon": 8.81, "shop": "kiosk"},
@@ -268,9 +306,10 @@ mod tests {
         assert_eq!(places.len(), 2, "{places:?}");
         assert_eq!(places[0]["name"], "Cafe");
         assert_eq!(places[0]["latitude"], 47.221);
-        // 0.000913 degrees north is about a hundred metres.
+        // Without `dist`: 0.000913 degrees north is about a hundred metres.
         assert_eq!(places[0]["distance"], 102.0);
         assert_eq!(places[1]["name"], "Summit");
+        assert_eq!(places[1]["distance"], 99.0);
     }
 
     #[test]
