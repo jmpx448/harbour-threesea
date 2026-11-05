@@ -282,6 +282,11 @@ pub enum Command {
         #[serde(default)]
         private: bool,
     },
+    /// Chats and contacts by name or ID, private chats only while unlocked:
+    /// `{chats: [...], contacts: [...]}`.
+    FindChats {
+        query: String,
+    },
     /// What the cover shows, without the list: `{unreadTotal, unreadFrom, unreadChat}` as in
     /// `Conversations`.
     UnreadSummary,
@@ -2092,6 +2097,7 @@ impl App {
             Command::SearchMessages { query, identity } => {
                 self.search_messages(&query, identity.as_deref())
             }
+            Command::FindChats { query } => self.find_chats_json(&query),
             Command::SendText {
                 identity,
                 text,
@@ -5138,6 +5144,130 @@ mod tests {
         assert_eq!(list["unreadTotal"], 0);
         assert_eq!(list["unreadFrom"], Value::Null);
         assert_eq!(list["unreadChat"], Value::Null);
+    }
+
+    /// One of the contact list's own, not only known from a group.
+    fn direct_contact(identity: &str) -> libthreema::model::contact::Contact {
+        let mut contact = crate::contacts::test_contact(identity);
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
+        contact
+    }
+
+    /// A group with a name and something in its chat.
+    fn named_group(app: &App, name: &str) -> String {
+        let group = crate::groups::Group {
+            key: "g:BBBBBBBB:00000000c0ffee77".to_owned(),
+            identity: libthreema::common::GroupIdentity {
+                creator_identity: "BBBBBBBB".parse().unwrap(),
+                group_id: 0xc0ff_ee77,
+            },
+            name: name.to_owned(),
+            members: vec!["BBBBBBBB".to_owned()],
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        app.store
+            .insert_incoming(&group.key, 9, "text", "hello", 5_000)
+            .unwrap();
+        group.key
+    }
+
+    #[test]
+    fn chats_and_contacts_are_found_by_name_and_id() {
+        let (_dir, mut app) = app();
+        for (identity, first, last) in [
+            ("ABCD1234", "Jos\u{e9}", "Garc\u{ed}a"),
+            ("BCDE2345", "Anna", "Berg"),
+            ("CDEF3456", "Anneli", "Ohlsson"),
+        ] {
+            app.store.upsert_contact(&direct_contact(identity)).unwrap();
+            app.update_contact(identity, Some(first.to_owned()), Some(last.to_owned()))
+                .unwrap();
+        }
+        // A chat only with Jos\u{e9} and Anna: Anneli is just a contact.
+        for (uid, identity) in [(1, "ABCD1234"), (2, "BCDE2345")] {
+            app.store
+                .insert_incoming(identity, uid, "text", "hello", 1_000 * uid as i64)
+                .unwrap();
+        }
+        let group = named_group(&app, "Annual dinner");
+        let keys = |value: &Value| -> Vec<String> {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["identity"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let found = app.find_chats_json("ann").unwrap();
+        assert_eq!(keys(&found["contacts"]), ["CDEF3456"], "{found}");
+        assert!(
+            keys(&found["chats"]).contains(&"BCDE2345".to_owned()),
+            "{found}"
+        );
+        assert!(keys(&found["chats"]).contains(&group), "{found}");
+        let group_row = found["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["identity"] == group.as_str())
+            .unwrap();
+        assert_eq!(group_row["group"], true);
+        assert_eq!(group_row["displayName"], "Annual dinner");
+
+        // Without its accents, in any case and order, and by ID.
+        for query in ["jose", "GARCIA JOSE", "abcd12"] {
+            let found = app.find_chats_json(query).unwrap();
+            assert_eq!(keys(&found["chats"]), ["ABCD1234"], "{query}: {found}");
+            assert_eq!(keys(&found["contacts"]), Vec::<String>::new(), "{query}");
+        }
+        // A group's key is not a name.
+        let part_of_key = group.rsplit(':').next().unwrap()[..4].to_owned();
+        let found = app.find_chats_json(&part_of_key).unwrap();
+        assert!(!keys(&found["chats"]).contains(&group), "{found}");
+
+        // Too short to mean anything, and nobody by that name.
+        assert_eq!(
+            keys(&app.find_chats_json(" a ").unwrap()["contacts"]).len(),
+            0
+        );
+        let nobody = app.find_chats_json("zzzz").unwrap();
+        assert_eq!(nobody, json!({ "chats": [], "contacts": [] }));
+    }
+
+    /// A hidden private chat stays out of a search by name as it does of the list, a group's above
+    /// all: its name is nowhere else. A contact stays what the contact list shows anyway.
+    #[test]
+    fn a_hidden_private_chat_is_not_found_by_name() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&direct_contact("ABCD1234"))
+            .unwrap();
+        app.update_contact("ABCD1234", Some("Hanna".to_owned()), None)
+            .unwrap();
+        app.store
+            .insert_incoming("ABCD1234", 1, "text", "hello", 1_000)
+            .unwrap();
+        let group = named_group(&app, "Hanna's hidden hangout");
+        app.store.set_private(&group, true).unwrap();
+        app.store.set_private("ABCD1234", true).unwrap();
+        app.unlocked.set(false);
+
+        let hidden = app.find_chats_json("han").unwrap();
+        assert_eq!(hidden["chats"], json!([]), "{hidden}");
+        assert_eq!(hidden["contacts"][0]["identity"], "ABCD1234", "{hidden}");
+        assert_eq!(hidden["contacts"].as_array().unwrap().len(), 1, "{hidden}");
+        assert_eq!(app.find_chats_json("hangout").unwrap()["chats"], json!([]));
+
+        app.unlocked.set(true);
+        let open = app.find_chats_json("han").unwrap();
+        assert_eq!(open["chats"].as_array().unwrap().len(), 2, "{open}");
+        assert_eq!(open["contacts"], json!([]), "{open}");
     }
 
     #[test]

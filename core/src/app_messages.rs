@@ -3,7 +3,10 @@
 
 use std::rc::Rc;
 
-use libthreema::common::{ChatServerGroup, DeviceCookie, FeatureMask, MessageId};
+use libthreema::{
+    common::{ChatServerGroup, DeviceCookie, FeatureMask, MessageId},
+    protobuf::d2d_sync::contact as pc,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -978,6 +981,124 @@ impl App {
             })
             .collect();
         Ok(json!({ "results": results }))
+    }
+
+    /// Chats and contacts by name or Threema ID, for what the search page shows above the messages:
+    /// `{chats, contacts}`, each row `{identity, displayName, group?, distributionList?,
+    /// pictureVersion}`, chats newest first, a contact only if no chat of theirs is among the chats.
+    /// A private chat stays out while hidden (ADR 0009); its contact is in the contact list anyway.
+    pub(crate) fn find_chats_json(&self, query: &str) -> Result<Value, ApiError> {
+        /// More than a screen of names above the messages helps nobody: the next letter will.
+        const MOST: usize = 30;
+        let words = contacts::name_query(query);
+        if query.trim().chars().count() < 2 || words.is_empty() {
+            return Ok(json!({ "chats": [], "contacts": [] }));
+        }
+        let hidden = self.store.private_chats()?;
+        let picture_versions = self.store.shown_contact_picture_versions()?;
+        let all_contacts = self.store.contacts()?;
+        let by_identity: std::collections::HashMap<String, _> = all_contacts
+            .iter()
+            .map(|contact| (contact.identity.to_string(), contact))
+            .collect();
+        let groups: std::collections::HashMap<String, _> = self
+            .store
+            .groups()?
+            .into_iter()
+            .map(|group| (group.key.clone(), group))
+            .collect();
+        let lists: std::collections::HashMap<String, _> = self
+            .store
+            .distribution_lists()?
+            .into_iter()
+            .map(|list| (list.key.clone(), list))
+            .collect();
+        let display_name = |identity: &str| {
+            by_identity
+                .get(identity)
+                .map_or_else(|| identity.to_owned(), |c| contacts::display_name(c))
+        };
+        let picture_of = |identity: &str| picture_versions.get(identity).copied().unwrap_or(0);
+
+        let mut chats = Vec::new();
+        let mut matched_chats = std::collections::HashSet::new();
+        for (last, _) in self.store.conversations()? {
+            let key = last.conversation;
+            if hidden.contains(&key) && !self.unlocked.get() {
+                continue;
+            }
+            // A group's or list's key is nothing anyone would type: their name alone counts.
+            let row = if let Some(group) = groups.get(&key) {
+                let title = crate::app_groups::title(&group.name, &group.members, &display_name);
+                contacts::names_match(&words, [title.as_str()]).then(|| {
+                    json!({
+                        "identity": key,
+                        "displayName": title,
+                        "group": true,
+                        "pictureVersion": group.picture_version,
+                    })
+                })
+            } else if let Some(list) = lists.get(&key) {
+                let title = crate::app_groups::title(&list.name, &list.members, &display_name);
+                contacts::names_match(&words, [title.as_str()]).then(|| {
+                    json!({
+                        "identity": key,
+                        "displayName": title,
+                        "distributionList": true,
+                        "pictureVersion": 0,
+                    })
+                })
+            } else {
+                let contact = by_identity.get(&key).copied();
+                let title = display_name(&key);
+                let names = contact
+                    .into_iter()
+                    .flat_map(contacts::all_names)
+                    .chain([title.as_str(), key.as_str()]);
+                contacts::names_match(&words, names).then(|| {
+                    json!({
+                        "identity": key,
+                        "displayName": title,
+                        "pictureVersion": picture_of(&key),
+                    })
+                })
+            };
+            if let Some(row) = row {
+                matched_chats.insert(key);
+                if chats.len() < MOST {
+                    chats.push(row);
+                }
+            }
+        }
+
+        // As the contact list has them: direct contacts, without the inactive if those are hidden.
+        let hide_inactive = self.store.setting(keys::HIDE_INACTIVE)?.as_deref() == Some("1");
+        let by_last_name = self.store.setting(keys::SORT_BY_LAST_NAME)?.as_deref() == Some("1");
+        let mut found: Vec<_> = all_contacts
+            .iter()
+            .filter(|c| c.acquaintance_level == pc::AcquaintanceLevel::Direct)
+            .filter(|c| !hide_inactive || c.activity_state == pc::ActivityState::Active)
+            .filter_map(|c| {
+                let identity = c.identity.to_string();
+                let title = contacts::display_name(c);
+                let names = contacts::all_names(c).chain([title.as_str(), identity.as_str()]);
+                (contacts::names_match(&words, names) && !matched_chats.contains(&identity))
+                    .then(|| (contacts::sort_key(c, by_last_name), identity, title))
+            })
+            .collect();
+        found.sort();
+        let found: Vec<Value> = found
+            .into_iter()
+            .take(MOST)
+            .map(|(_, identity, title)| {
+                json!({
+                    "identity": identity,
+                    "displayName": title,
+                    "pictureVersion": picture_of(&identity),
+                })
+            })
+            .collect();
+        Ok(json!({ "chats": chats, "contacts": found }))
     }
 
     /// A message of the chat (either direction) by message id; null if not (or no longer) here.

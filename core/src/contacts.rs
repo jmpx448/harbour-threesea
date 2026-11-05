@@ -521,6 +521,34 @@ const COMPOSED: &[(char, char, char)] = &[
     ('і', '\u{308}', 'ї'),
 ];
 
+/// What is searched for by name, word by word: any order, any case, accents or none.
+pub fn name_query(query: &str) -> Vec<String> {
+    folded(query)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether each word of a `name_query` is somewhere in these names. No words: no match.
+pub fn names_match<'a>(query: &[String], names: impl IntoIterator<Item = &'a str>) -> bool {
+    let names: Vec<String> = names.into_iter().map(folded).collect();
+    !query.is_empty()
+        && query
+            .iter()
+            .all(|word| names.iter().any(|name| name.contains(word.as_str())))
+}
+
+/// All a contact goes by: what `names_match` looks through.
+pub fn all_names(c: &Contact) -> impl Iterator<Item = &str> {
+    [
+        c.first_name.as_deref(),
+        c.last_name.as_deref(),
+        c.nickname.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 /// `text` in lower case with its letters' accents taken off, also those typed as a mark of their
 /// own after the letter, so that names sort as the alphabet does, whatever their accents.
 fn folded(text: &str) -> String {

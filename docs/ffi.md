@@ -147,6 +147,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `connectionState` | – | `{state: disconnected\|connecting\|connected}` |
 | `reconnect` | – | `{}`; "Connect now": skip the backoff wait, also the one after a server said not to come back by ourselves; if connected, verify with an echo |
 | `wake` | – | `{waiting}`; the same without the user asking (timer, network change, back in the app): leaves a wait a server asked for until that time has passed by the clock. `waiting`: `wakeSettled` follows |
+| `findChats` | `query` (≥ 2 characters; words in any order, any case, accents or none) | `{chats: [{identity, displayName, group?, distributionList?, pictureVersion}], contacts: [{identity, displayName, pictureVersion}]}`, at most 30 each; chats newest first by name, a 1:1 chat or contact also by first and last name, nickname and ID. A contact whose chat is among `chats` isn't in `contacts`. A private chat is left out unless unlocked; its contact stays as in `contacts` |
 | `searchMessages` | `query` (≥ 2 characters), optional `identity` (one chat) | `{results: [message JSON + snippet (the matching raw text/caption/name), displayName (chat), group, senderName]}`, newest first, at most 100; mentions match by name |
 | `createDistributionList` | `name` (may be empty), `members` | the list JSON `{key, name, displayName, members: [{identity, displayName}], pinned}` |
 | `distributionList` | `key` | the list JSON |
