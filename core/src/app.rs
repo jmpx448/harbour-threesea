@@ -1775,6 +1775,7 @@ impl App {
         if !new_contacts.is_empty() {
             let change = crate::app_multidevice::SyncChange::NewContacts(new_contacts);
             self.reflect_change(change, &json!({})).await;
+            self.apply_waiting_reflected();
         }
         let made_direct = self.made_direct.take();
         if !made_direct.is_empty() {

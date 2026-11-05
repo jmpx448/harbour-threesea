@@ -157,6 +157,14 @@ impl Shared {
         }))
     }
 
+    /// A contact may be there for a reflected message that waited for one: the connection sees to
+    /// it, as it does to every reflected message. Without one it is the next login's.
+    pub(crate) fn apply_waiting_reflected(&self) {
+        if self.store.reflected_waiting_count().unwrap_or(0) > 0 {
+            self.tell_connection(ToConnection::ApplyWaitingReflected);
+        }
+    }
+
     /// `linkedDevices`: `{devices: [LinkedDevice]}` (this device first). Each device also
     /// carries the `alias` the user gave it here, and this device its own `label` (what the
     /// others show for it).
@@ -2736,5 +2744,37 @@ mod tests {
         assert_eq!(app.multi_device_json().unwrap()["reflectedLeftOut"], 0);
         app.store.note_reflected_left_out().unwrap();
         assert_eq!(app.multi_device_json().unwrap()["reflectedLeftOut"], 1);
+    }
+
+    /// A change of contacts wakes what waits for one, and is quiet if nothing does.
+    #[test]
+    fn a_change_of_contacts_brings_what_waited() {
+        let (_dir, mut app) = app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        *app.connection.borrow_mut() = Some(tx);
+        let changed = crate::providers::CoreEvent::ContactsChanged;
+        app.on_core_event(&changed);
+        assert!(rx.try_recv().is_err());
+        app.store
+            .keep_reflected(&crate::multidevice::WaitingReflected {
+                id: 0,
+                sender: "C0C0C0C0".into(),
+                conversation: "C0C0C0C0".into(),
+                message_id: 1,
+                created_at: 1,
+                message: Vec::new(),
+            })
+            .unwrap();
+        app.on_core_event(&changed);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ToConnection::ApplyWaitingReflected)
+        ));
+        // A contact added by hand or from the address book comes this way.
+        app.on_media_event(&changed);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ToConnection::ApplyWaitingReflected)
+        ));
     }
 }

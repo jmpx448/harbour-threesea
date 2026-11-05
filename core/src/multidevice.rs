@@ -23,10 +23,24 @@ pub(crate) const MIGRATION: &str = "
 /// envelope is acknowledged and counts as seen, so this is all that is left of them.
 pub(crate) const MIGRATION_REFLECTED_WAITING: &str = "
     CREATE TABLE reflected_waiting (
-        id       INTEGER PRIMARY KEY,
-        sender   TEXT NOT NULL,
-        message  BLOB NOT NULL
+        id            INTEGER PRIMARY KEY,
+        sender        TEXT NOT NULL,
+        conversation  TEXT NOT NULL,
+        message_id    INTEGER NOT NULL,
+        created_at    INTEGER NOT NULL,
+        message       BLOB NOT NULL
     );";
+
+/// A reflected incoming message waiting for its sender's contact.
+pub struct WaitingReflected {
+    pub id: i64,
+    pub sender: String,
+    pub conversation: String,
+    pub message_id: u64,
+    pub created_at: i64,
+    /// The encoded `d2d::IncomingMessage`.
+    pub message: Vec<u8>,
+}
 
 /// Schema (store migration 23): sync envelopes waiting for the mediator (changed while offline or
 /// before the reflection went through); removed once committed.
@@ -190,11 +204,42 @@ impl Store {
         Ok(())
     }
 
-    /// Keep a reflected incoming message until `sender` has a contact.
-    pub fn keep_reflected(&self, sender: &str, message: &[u8]) -> Result<(), StoreError> {
+    /// Keep a reflected incoming message until its sender has a contact (`id` is assigned).
+    pub fn keep_reflected(&self, waiting: &WaitingReflected) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO reflected_waiting (sender, message) VALUES (?1, ?2)",
-            rusqlite::params![sender, message],
+            "INSERT INTO reflected_waiting (sender, conversation, message_id, created_at, message)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                waiting.sender,
+                waiting.conversation,
+                // Stored like a message's id: its bits.
+                waiting.message_id.cast_signed(),
+                waiting.created_at,
+                waiting.message
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A message that came late to its chat goes where its time says, among the others. A keyed
+    /// position as for imported history (store migration 28).
+    pub fn place_by_time(&self, conversation: &str, message_id: u64) -> Result<(), StoreError> {
+        let Some(message) = self.message_by_id(conversation, false, message_id)? else {
+            return Ok(());
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT sort_key, created_at FROM messages WHERE conversation = ?1 AND id <> ?2
+             ORDER BY sort_key, id",
+        )?;
+        let others = statement
+            .query_map(rusqlite::params![conversation, message.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<(i64, i64)>, _>>()?;
+        let key = crate::android_backup::place::Placer::new(others, 1).place(message.created_at);
+        self.conn.execute(
+            "UPDATE messages SET sort_key = ?1 WHERE id = ?2",
+            rusqlite::params![key, message.id],
         )?;
         Ok(())
     }
@@ -230,12 +275,22 @@ impl Store {
         )?)
     }
 
-    /// What is kept, oldest first: (id, sender, message).
-    pub fn reflected_waiting(&self) -> Result<Vec<(i64, String, Vec<u8>)>, StoreError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT id, sender, message FROM reflected_waiting ORDER BY id")?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    /// What is kept, oldest first.
+    pub fn reflected_waiting(&self) -> Result<Vec<WaitingReflected>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, sender, conversation, message_id, created_at, message
+             FROM reflected_waiting ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(WaitingReflected {
+                id: row.get(0)?,
+                sender: row.get(1)?,
+                conversation: row.get(2)?,
+                message_id: row.get::<_, i64>(3)?.cast_unsigned(),
+                created_at: row.get(4)?,
+                message: row.get(5)?,
+            })
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

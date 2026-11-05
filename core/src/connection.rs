@@ -187,6 +187,8 @@ impl ConnectionState {
 
 /// From the app to the connection.
 pub enum ToConnection {
+    /// Contacts changed: a reflected message may have been waiting for one of them.
+    ApplyWaitingReflected,
     /// A message or an outbox entry was queued in the store: send it if connected.
     SendPending,
     /// Send a typing indicator (ephemeral: dropped by the server if the contact is offline).
@@ -1358,6 +1360,8 @@ async fn wait_for_next_attempt(
                 // Lost while offline (like Android's tasks, which need a connection too).
                 // Queued in the store: sent after connecting.
                 Some(ToConnection::ReflectSync) => {}
+                // Looked at after connecting.
+                Some(ToConnection::ApplyWaitingReflected) => {}
                 Some(ToConnection::NewDeviceSync { reply, .. }) => {
                     // The mediator connection after activating multi-device did not come
                     // up: the join cannot run (the UI rolls the activation back).
@@ -3495,19 +3499,7 @@ impl<'a> Session<'a> {
                 .borrow_mut()
                 .retain(|event| !matches!(event, CoreEvent::Typing { .. }));
         }
-        // A message another device received first: its notification waits a moment.
-        for event in self.events.borrow().iter() {
-            if let CoreEvent::MessageAdded { message, .. } = event
-                && !message.outgoing
-            {
-                self.setup
-                    .store
-                    .held_notifications
-                    .borrow_mut()
-                    .insert(message.id);
-                self.held.push((message.id, Instant::now() + NOTIFY_GRACE));
-            }
-        }
+        self.hold_reflected_notifications();
         // Applied, so the UI hears of it even if the acknowledgement is what fails.
         self.emit_events_unless(needs_the_connection);
         // Every one, ephemeral ones (typing) too, like Android (IncomingReflectedMessageTask):
@@ -3523,14 +3515,33 @@ impl<'a> Session<'a> {
         self.after_incoming().await
     }
 
-    /// Apply the reflected messages that waited for a contact, now that one may be there.
+    /// A message another device received first: its notification waits a moment, as it may be read
+    /// there already.
+    fn hold_reflected_notifications(&mut self) {
+        for event in self.events.borrow().iter() {
+            if let CoreEvent::MessageAdded { message, .. } = event
+                && !message.outgoing
+            {
+                self.setup
+                    .store
+                    .held_notifications
+                    .borrow_mut()
+                    .insert(message.id);
+                self.held.push((message.id, Instant::now() + NOTIFY_GRACE));
+            }
+        }
+    }
+
+    /// Apply the reflected messages that waited for a contact, now that one may be there. Silent if
+    /// none did, so that a change of contacts leading here can't lead here again.
     async fn apply_waiting_reflected(&mut self) -> Result<(), ConnectionError> {
         if let Err(error) =
             crate::reflected::apply_waiting(&self.setup.store, &self.setup.config, &self.events)
         {
             tracing::warn!(%error, "applying reflected messages that waited failed");
         }
-        Box::pin(self.after_incoming()).await
+        self.hold_reflected_notifications();
+        self.after_incoming().await
     }
 
     /// Notify the held messages that are due (all of them when `all`) and still unread.
@@ -3947,6 +3958,9 @@ impl<'a> Session<'a> {
                         }
                     },
                     Some(ToConnection::ReflectSync) => self.reflect_queued_syncs().await?,
+                    Some(ToConnection::ApplyWaitingReflected) => {
+                        self.apply_waiting_reflected().await?;
+                    }
                     Some(ToConnection::CallSignal { peer, signal }) => {
                         self.send_call_signal(&peer, &signal).await?;
                     },
@@ -4312,7 +4326,6 @@ impl<'a> Session<'a> {
         for message in resolved.lines {
             self.emit(CoreEvent::MessageAdded { message });
         }
-        self.apply_waiting_reflected().await?;
         self.send_pending().await
     }
 
@@ -6838,6 +6851,59 @@ mod sync_order_tests {
         }
         assert_eq!(asked.get(), 1);
         assert_eq!(setup.store.owed_member_lookups().unwrap().len(), 3);
+    }
+
+    /// What waited notifies like any reflected message, after a moment and only if still unread,
+    /// and one change of contacts doesn't lead to another.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_waited_is_held_back_like_a_reflected_message() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody, TextMessage},
+            protobuf::d2d::IncomingMessage,
+        };
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let (message_type, body) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: setup.identity,
+                body: ContactMessageBody::Text(TextMessage { text: "hi".into() }),
+            }));
+        let message = IncomingMessage {
+            sender_identity: CREATOR.into(),
+            message_id: 1,
+            created_at: 1,
+            r#type: i32::from(message_type),
+            body,
+            nonce: Vec::new(),
+        };
+        setup
+            .store
+            .keep_reflected(&crate::multidevice::WaitingReflected {
+                id: 0,
+                sender: CREATOR.into(),
+                conversation: CREATOR.into(),
+                message_id: 1,
+                created_at: 1,
+                message: prost::Message::encode_to_vec(&message),
+            })
+            .unwrap();
+        session.apply_waiting_reflected().await.unwrap();
+        assert_eq!(session.held.len(), 1);
+        assert!(
+            setup
+                .store
+                .held_notifications
+                .borrow()
+                .contains(&session.held[0].0)
+        );
+        while rx.try_recv().is_ok() {}
+
+        session.apply_waiting_reflected().await.unwrap();
+        assert_eq!(session.held.len(), 1);
+        assert!(rx.try_recv().is_err());
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to

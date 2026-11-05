@@ -550,13 +550,6 @@ impl Shared {
             for message in resolved.lines {
                 let _ = events.send(CoreEvent::MessageAdded { message });
             }
-            let waited = crate::providers::EventSink::default();
-            if let Err(error) = crate::reflected::apply_waiting(&store, &config, &waited) {
-                tracing::warn!(%error, "applying reflected messages that waited failed");
-            }
-            for event in waited.take() {
-                let _ = events.send(event);
-            }
             // Reload contact names; the media/progress channel also triggers sending.
             let _ = events.send(CoreEvent::ContactsChanged);
         });

@@ -1771,6 +1771,9 @@ impl App {
                 return;
             }
         }
+        if matches!(event, CoreEvent::ContactsChanged) {
+            self.apply_waiting_reflected();
+        }
         self.send_pending_messages();
     }
 
@@ -1787,6 +1790,7 @@ impl App {
                 }
             }
             CoreEvent::UnknownMembers(identities) => self.fetch_members(identities.clone()),
+            CoreEvent::ContactsChanged => self.apply_waiting_reflected(),
             CoreEvent::RemoveGroupPicture(key) => self.media.remove_picture(key),
             CoreEvent::WebSessionResume(hash) => self.web_resume(hash),
             CoreEvent::DownloadGroupPicture(key) => self.download_group_picture(key.clone()),

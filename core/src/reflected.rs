@@ -250,7 +250,15 @@ pub fn apply_waiting(
         return Ok(());
     };
     let mut owed = Vec::new();
-    for (id, sender, message) in waiting {
+    for waited in waiting {
+        let crate::multidevice::WaitingReflected {
+            id,
+            sender,
+            conversation,
+            message_id,
+            created_at: _,
+            message,
+        } = waited;
         if crate::providers::identity_blocked(store, config, &sender)? {
             tracing::warn!("a reflected message's sender is blocked by now, message dropped");
             store.reflected_done(id)?;
@@ -280,6 +288,8 @@ pub fn apply_waiting(
                 apply(store, user, envelope, events)
             })
             .and_then(|()| {
+                // By its time: newer messages from them can have got here first.
+                store.place_by_time(&conversation, message_id)?;
                 store.reflected_done(id)?;
                 Ok(step.commit()?)
             });
@@ -370,7 +380,20 @@ pub fn apply(
                     // Asked for once per sender: a burst must not be one request per message, let
                     // alone one wait. The note is what later tries go by.
                     let first = !store.has_reflected_waiting(sender.as_str())?;
-                    store.keep_reflected(sender.as_str(), &message.encode_to_vec())?;
+                    let conversation = match &body {
+                        IncomingMessageBody::Contact(_) => sender.to_string(),
+                        IncomingMessageBody::Group(group) => {
+                            crate::groups::key(&group.group_identity)
+                        }
+                    };
+                    store.keep_reflected(&crate::multidevice::WaitingReflected {
+                        id: 0,
+                        sender: sender.to_string(),
+                        conversation,
+                        message_id: message.message_id,
+                        created_at: i64::try_from(message.created_at).unwrap_or(i64::MAX),
+                        message: message.encode_to_vec(),
+                    })?;
                     store.owe_member_lookups(&[sender.to_string()])?;
                     if first {
                         events
@@ -1579,7 +1602,16 @@ mod tests {
         let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
         let step = store.step().unwrap();
         for _ in 0..REFLECTED_WAITING_MAX {
-            store.keep_reflected("D0D0D0D0", b"kept").unwrap();
+            store
+                .keep_reflected(&crate::multidevice::WaitingReflected {
+                    id: 0,
+                    sender: "D0D0D0D0".into(),
+                    conversation: "D0D0D0D0".into(),
+                    message_id: 1,
+                    created_at: 1,
+                    message: b"kept".to_vec(),
+                })
+                .unwrap();
         }
         step.commit().unwrap();
         assert_eq!(store.reflected_left_out().unwrap(), 0);
@@ -1596,8 +1628,8 @@ mod tests {
         assert!(events.borrow().is_empty());
 
         // The count holds on; room again, and the next one waits.
-        let (first, _, _) = store.reflected_waiting().unwrap().remove(0);
-        store.reflected_done(first).unwrap();
+        let first = store.reflected_waiting().unwrap().remove(0);
+        store.reflected_done(first.id).unwrap();
         apply_sealed(&store, &stranger_text(2, vec![2; 24]), &events);
         assert_eq!(
             store.reflected_waiting_count().unwrap(),
@@ -1613,7 +1645,16 @@ mod tests {
         let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
         let step = store.step().unwrap();
         for _ in 0..REFLECTED_WAITING_MAX {
-            store.keep_reflected("D0D0D0D0", b"kept").unwrap();
+            store
+                .keep_reflected(&crate::multidevice::WaitingReflected {
+                    id: 0,
+                    sender: "D0D0D0D0".into(),
+                    conversation: "D0D0D0D0".into(),
+                    message_id: 1,
+                    created_at: 1,
+                    message: b"kept".to_vec(),
+                })
+                .unwrap();
         }
         step.commit().unwrap();
         store
@@ -1721,5 +1762,28 @@ mod tests {
         assert!(!asked(2));
         assert_eq!(store.reflected_waiting().unwrap().len(), 2);
         assert_eq!(store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
+    }
+
+    /// What waited goes where its time says, not below what got here while it waited.
+    #[test]
+    fn what_waited_is_placed_by_its_time() {
+        let (_dir, store) = with_identity();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+        let mut contact = stranger();
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        store.upsert_contact(&contact).unwrap();
+        let mut newer = stranger_text(2, vec![2; 24]);
+        if let Some(envelope::Content::IncomingMessage(message)) = &mut newer.content {
+            message.created_at = 1000;
+        }
+        apply_sealed(&store, &newer, &Rc::default());
+        apply_waiting(&store, &test_config(), &Rc::default()).unwrap();
+        let times: Vec<i64> = store
+            .conversation_positions("C0C0C0C0")
+            .unwrap()
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect();
+        assert_eq!(times, [1, 1000]);
     }
 }
