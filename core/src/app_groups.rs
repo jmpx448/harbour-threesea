@@ -394,7 +394,7 @@ impl App {
     }
 
     /// Whoever is to get a group's picture from us: uploaded anew, then sent to them. What fails
-    /// stays noted, for the next `resume_picture_downloads`.
+    /// for a passing reason stays noted, for the next `resume_picture_downloads`.
     pub(crate) fn send_group_pictures(&self) {
         let Ok(keys) = self.store.groups_owing_picture() else {
             return;
@@ -413,17 +413,21 @@ impl App {
                 } else {
                     media.read_picture(&key)
                 };
-                let fresh = match on_device {
-                    Ok(Some(data)) => match upload_group_picture(&https, &data).await {
-                        Ok(picture) => Some(picture),
-                        Err(error) => {
-                            tracing::warn!(%error, "group picture not uploaded");
-                            return;
-                        }
-                    },
-                    Ok(None) => None,
+                let uploaded = match on_device {
+                    Ok(Some(data)) => upload_group_picture(&https, &data).await.map(Some),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
+                };
+                let fresh = match uploaded {
+                    Ok(fresh) => fresh,
                     Err(error) => {
-                        tracing::warn!(%error, "group picture not read");
+                        tracing::warn!(%error, "group picture not uploaded");
+                        // No later try changes that: they can ask again.
+                        if !error.is_transient()
+                            && let Err(error) = store.forget_group_picture_sends(&key)
+                        {
+                            tracing::warn!(%error, "group picture sends not cleared");
+                        }
                         return;
                     }
                 };
@@ -444,7 +448,6 @@ impl App {
     /// persistently, then sent to every member.
     pub(crate) async fn set_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
-        self.store.cancel_synced_picture(key)?;
         let data = std::mem::take(&mut self.attachments)
             .into_iter()
             .next()
@@ -456,7 +459,8 @@ impl App {
         self.media
             .write_picture(key, &data)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        // Everyone gets it now.
+        // Newer than what another device said of it, and everyone gets it now.
+        self.store.cancel_synced_picture(key)?;
         self.store.forget_group_picture_sends(key)?;
         self.store.group_outbox_add(
             key,

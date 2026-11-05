@@ -894,7 +894,8 @@ fn member_changes_by_command(previous: &[String], group: &Group) -> HashMap<Stri
     added.chain(removed).collect()
 }
 
-/// A group's picture from its creator reached this device: the others get it from the mirror.
+/// A group's new picture is on this device, set here or from its creator: the others get it from
+/// the mirror.
 /// Noted as owed until the entry is queued (`Store::store_new_group_picture`), so a failed
 /// upload or a crash is made up for by the next `resume_picture_downloads`.
 pub(crate) async fn reflect_group_picture(
@@ -930,6 +931,10 @@ pub(crate) async fn reflect_group_picture(
         Ok(None) => return done(store),
         Err(error) => {
             tracing::warn!(%error, "picture not uploaded to the mirror");
+            // No later try changes that, and each would cost the upload again.
+            if !error.is_transient() {
+                done(store);
+            }
             return;
         }
     };
@@ -977,6 +982,10 @@ pub(crate) async fn reflect_own_picture(
         Ok(None) => return done(store),
         Err(error) => {
             tracing::warn!(%error, "picture not uploaded to the mirror");
+            // No later try changes that, and each would cost the upload again.
+            if !error.is_transient() {
+                done(store);
+            }
             return;
         }
     };

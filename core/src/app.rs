@@ -1365,7 +1365,8 @@ pub struct App {
     pub(crate) write_pass: Option<crate::app_media::WritePass>,
     /// Binary attachments of the request being handled (e.g. `sendFile`: file, thumbnail).
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
-    /// Contacts the request being handled made direct, for the other devices.
+    /// Contacts the request being handled changed beyond what its command says of itself, such as
+    /// making them direct, for the other devices.
     pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
     /// Contacts this command made that the other devices don't have yet: they go as a `Create`,
     /// as those devices ignore an update of someone unknown (`ReflectedContactSyncTask`).
