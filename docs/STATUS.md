@@ -1530,8 +1530,8 @@ By area, in short:
   from Threema Web, forwarded pictures, GIFs and Qt's re-encoded photos lose their metadata (JPEG
   comments and PNG text included), videos keep only what a player needs (ADR 0025, 0029).
 - **The core's loop**: long work (Threema Safe, linking, exports, maintenance, lookups) runs beside it
-  (ADR 0028), which closes P01 of the deep re-audit; heavy media work runs off the core thread
-  within a memory budget.
+  (ADR 0028), which closes P01 of the deep re-audit for the UI's commands (Threema Web's still
+  answer in the loop); heavy media work runs off the core thread within a memory budget.
 - **Receiving**: what a message brings is stored in one step before it is acknowledged; a failing
   store is told apart from a bad network and leaves the message on the server; read receipts,
   delivery receipts and forward secrecy answers wait in the store until they went out.
