@@ -11,13 +11,16 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQuickImageProvider>
+#include <QQuickWindow>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QTranslator>
 #include <QUrl>
 #include <cstdio>
+#include <unistd.h>
 #include <qqml.h>
 #include <qpa/qwindowsysteminterface.h>
+#include <private/qquickwindow_p.h>
 
 #include "contactlistmodel.h"
 #include "emojihighlighter.h"
@@ -86,6 +89,12 @@ public:
         QWindowSystemInterface::flushWindowSystemEvents();
     }
     Q_INVOKABLE void finish() { QCoreApplication::exit(problems > 0 ? 1 : 0); }
+    // Without Qt's own way out, which doesn't survive the window of the laid-out round.
+    Q_INVOKABLE void finishNow()
+    {
+        fflush(stderr);
+        _exit(problems > 0 ? 1 : 0);
+    }
 };
 
 }
@@ -96,6 +105,7 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
     const QString dir = QString::fromLocal8Bit(argv[1]);
     const QString flavour = QString::fromLocal8Bit(argv[2]);
+    const bool layout = argc > 4 && qstrcmp(argv[4], "layout") == 0;
 
     // The texts as they would be without a translation, for %1 and %n to be there.
     QTranslator texts;
@@ -143,10 +153,27 @@ int main(int argc, char **argv)
     context.setContextProperty(QStringLiteral("fakes"), fakes);
     context.setContextProperty(QStringLiteral("flavour"), flavour);
     context.setContextProperty(QStringLiteral("pagePath"), QString::fromLocal8Bit(argv[3]));
+    context.setContextProperty(QStringLiteral("layoutCheck"), layout);
     QObject *driver = driverComponent.create(&context);
     if (!driver) {
         fprintf(stderr, "%s\n", qPrintable(driverComponent.errorString()));
         return 2;
+    }
+    // Silica's window is an item here, and only a window polishes: Columns and lists never lay out
+    // without it. This one stays hidden (showing one takes OpenGL); its polishing is all that's
+    // needed. Only for the check of where lists come to rest (argv[4]), which ends the run there
+    // with finishNow: Qt's normal way out crashes with this window in place.
+    QQuickWindow layoutWindow;
+    QTimer polish;
+    if (layout) {
+        auto *windowItem = qobject_cast<QQuickItem *>(engine.rootObjects().first());
+        if (windowItem && !windowItem->window()) {
+            windowItem->setParentItem(layoutWindow.contentItem());
+        }
+        QObject::connect(&polish, &QTimer::timeout, &layoutWindow, [&layoutWindow] {
+            QQuickWindowPrivate::get(&layoutWindow)->polishItems();
+        });
+        polish.start(16);
     }
     QTimer::singleShot(30000, &app, [] {
         fprintf(stderr, "timed out\n");

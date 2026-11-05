@@ -25,6 +25,9 @@ does. Sources are listed at the end; re-check them before building a new page.
   Pulleys are for **actions**. Details of the current object (e.g. the contact of a chat) are an
   **attached page** (`pageStack.pushAttached`), reached by swiping left — like Jolla Messages.
 - **Dialogs:** accept = swipe forward / DialogHeader, cancel = swipe back. No OK/Cancel buttons.
+- **Lists with a header whose height changes** get `components/StayAtTop.qml`: ListView leaves
+  `contentY` alone when its header grows, and a list resting past its top has a pull-down menu
+  that doesn't open. `scripts/test-pages.sh` checks where lists come to rest.
 - **Destructive actions:** `remorseAction`/`RemorsePopup`, never a confirmation box.
 - **Every scrollable view** gets a `VerticalScrollDecorator`. Empty views use `ViewPlaceholder`
   with text + hint.

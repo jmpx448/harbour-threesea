@@ -3,7 +3,7 @@
 # generated from the bridge's headers. Built and run by scripts/test-pages.sh; nothing of it goes
 # into the package.
 TARGET = pageload-test
-QT = core gui gui-private qml quick
+QT = core gui gui-private qml quick quick-private
 CONFIG += c++14 console
 INCLUDEPATH += bridge
 SOURCES += main.cpp bridge/jsonlistmodel.cpp bridge/contactlistmodel.cpp bridge/enterkeyfilter.cpp bridge/emojihighlighter.cpp

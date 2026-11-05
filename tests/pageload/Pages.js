@@ -8,6 +8,11 @@ var table = {
     "pages/ContactPage.qml": { identity: "ABCD1234" },
     "pages/GroupPage.qml": { identity: "g:ABCD1234:0102030405060708" },
     "pages/DistributionListPage.qml": { identity: "d:1" },
+    "pages/MemberPickerDialog.qml": { askName: true, title: "New group", acceptText: "Create" },
+    "pages/PollPage.qml": { messageId: 12, conversation: "ABCD1234",
+                            poll: { id: 1, creator: "AAAAAAAA", description: "When?", multiple: false, announce: true,
+                                    state: 0, choices: [{ id: 0, name: "Now" }, { id: 1, name: "Later" }],
+                                    votes: { ABCD1234: [0], AAAAAAAA: [1] } } },
 }
 
 function properties(path) {

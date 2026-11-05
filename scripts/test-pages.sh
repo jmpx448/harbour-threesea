@@ -4,6 +4,7 @@
 # Silica, without a window system, in the Sailfish SDK (i486, sb2; no device needed), for both
 # flavours, whose C++ side differs. One page per process. Any warning from Qt or the QML engine is a
 # failure. The fake C++ side is generated from the bridge's headers (tests/pageload/make-fakes.py).
+# A last round, laid out as in a real window, checks that a list nobody touched rests at its top.
 # Usage: scripts/test-pages.sh [page under qml/, e.g. pages/ChatPage.qml ...]
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -48,6 +49,22 @@ docker run --rm -i -e "PAGES=$*" -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS"
                 failed=1
             else
                 echo "ok   $flavour $page"
+            fi
+        done
+        # Once more laid out, for where the lists come to rest (one flavour is enough).
+        [ $flavour = full ] || continue
+        mkdir -p $A/rest
+        printf "%s\n" $PAGES | xargs -P 6 -I PAGE sh -c "
+            out=$A/rest/\$(echo PAGE | tr / _)
+            if QT_QPA_PLATFORM=minimal QT_LOGGING_TO_CONSOLE=1 sb2 -t $T ./pageload-test $A $flavour PAGE layout >\$out 2>&1; then
+                rm \$out
+            fi" || true
+        for page in $PAGES; do
+            out=$A/rest/$(echo $page | tr / _)
+            if [ -f $out ]; then
+                echo "FAIL laid out $page"
+                sort $out | uniq -c | sort -rn | cut -c1-300 | head -20
+                failed=1
             fi
         done
     done

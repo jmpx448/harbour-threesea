@@ -23,6 +23,19 @@ QtObject {
         return into
     }
 
+    // A list nobody has touched rests at its top: Silica's pull-down menu only opens exactly there.
+    // (The chat's starts at the other end.)
+    function checkRestPosition() {
+        var lists = collect(page, function(item) { return item.pullDownMenu !== undefined && item.headerItem !== undefined }, [])
+        for (var i = 0; i < lists.length; ++i) {
+            var list = lists[i]
+            if (list.verticalLayoutDirection === ListView.TopToBottom && !list.moving
+                    && Math.abs(list.contentY - list.originY) >= 1) {
+                console.warn("list not at its top:", pagePath, list.contentY, "against", list.originY)
+            }
+        }
+    }
+
     readonly property var steps: [
         [function() {
             harness.setActive(true)
@@ -36,6 +49,12 @@ QtObject {
             if (!page) console.warn("could not be opened:", pagePath)
         }, 800],
         [function() {
+            // First: a page may have closed itself (the call pages, with no call), and the run
+            // must not end Qt's way under the laid-out round's window.
+            if (layoutCheck) {
+                if (stack.currentPage === page) checkRestPosition()
+                harness.finishNow()
+            }
             if (stack.currentPage !== page) return
             var lists = collect(page, function(item) { return item.cacheBuffer !== undefined }, [])
             for (var i = 0; i < lists.length; ++i) lists[i].cacheBuffer = 20000
