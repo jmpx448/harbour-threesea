@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import Sailfish.Share 1.0
 import "../components"
 import "../components/Errors.js" as Errors
 
@@ -11,6 +12,11 @@ Page {
 
     property bool working: false
     property string backup: ""
+    property var qrCode: ({ size: 0, bits: "" })
+    // Copied or shared: it can't be lost by a swipe any more. Until then leaving asks first, as
+    // what is shown goes with the page, like Android's export.
+    property bool handedOver: false
+    backNavigation: backup.length === 0 || handedOver
     // The app lock's PIN, while this page lives (window.pushWithPin).
     property string pin
 
@@ -21,6 +27,7 @@ Page {
             working = false
             if (ok) {
                 backup = result.backup
+                qrCode = result.qr
                 passwordField.text = ""
                 repeatField.text = ""
                 Qt.inputMethod.hide()
@@ -28,6 +35,19 @@ Page {
                 errorLabel.text = Errors.text(kind, message)
             }
         })
+    }
+
+    function close() {
+        if (pageStack.currentPage === page) pageStack.pop()
+    }
+
+    RemorsePopup { id: remorse }
+
+    ShareAction {
+        id: shareAction
+        //% "Share ID backup"
+        title: qsTrId("threesea-he-share-id-backup")
+        mimeType: "text/plain"
     }
 
     SilicaFlickable {
@@ -90,6 +110,15 @@ Page {
                 visible: running
             }
 
+            QrCodeView {
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: page.backup.length > 0
+                // All of it on screen at once in landscape too.
+                width: Math.min(page.width - 2 * Theme.horizontalPageMargin,
+                                page.height - 2 * Theme.paddingLarge)
+                code: page.qrCode
+            }
+
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
@@ -101,12 +130,41 @@ Page {
                 color: Theme.highlightColor
             }
 
+            ButtonLayout {
+                visible: page.backup.length > 0
+
+                Button {
+                    //% "Copy to clipboard"
+                    text: qsTrId("threesea-bt-copy")
+                    onClicked: {
+                        Clipboard.text = page.backup
+                        page.handedOver = true
+                        //% "Copied"
+                        Notices.show(qsTrId("threesea-la-copied"), Notice.Short, Notice.Center)
+                    }
+                }
+                Button {
+                    //% "Share"
+                    text: qsTrId("threesea-bt-share")
+                    onClicked: {
+                        shareAction.resources = [{ name: "id-backup.txt", data: page.backup,
+                                                   type: "text/plain", status: page.backup }]
+                        shareAction.trigger()
+                        page.handedOver = true
+                    }
+                }
+            }
+
             Button {
                 anchors.horizontalCenter: parent.horizontalCenter
                 visible: page.backup.length > 0
-                //% "Copy to clipboard"
-                text: qsTrId("threesea-bt-copy")
-                onClicked: Clipboard.text = page.backup
+                //% "Done"
+                text: qsTrId("threesea-bt-done")
+                onClicked: {
+                    if (page.handedOver) page.close()
+                    //% "Closing ID backup"
+                    else remorse.execute(qsTrId("threesea-la-closing-id-backup"), page.close)
+                }
             }
         }
 
