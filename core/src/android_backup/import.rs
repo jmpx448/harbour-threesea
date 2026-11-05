@@ -96,6 +96,18 @@ impl Family {
     }
 }
 
+/// What the archive holds beside its chats, looked up while they are imported.
+#[derive(Default)]
+struct ArchiveIndex {
+    /// Media and thumbnail entries, by family and uid.
+    media: std::collections::HashMap<(&'static str, String), String>,
+    thumbnails: std::collections::HashMap<(&'static str, String), String>,
+    /// People whose key in the archive differs from the one stored here. The archive may be old
+    /// or wrong about them, so nothing it says in their name goes into their chat, groups or
+    /// messages here.
+    other_key: std::collections::HashSet<String>,
+}
+
 /// One chat file of the archive, resolved to a local conversation.
 struct ChatPlan {
     entry: String,
@@ -111,6 +123,10 @@ pub struct Summary {
     pub skipped_chats: usize,
     /// Chat files beyond what is read into memory: left out, the rest of the archive goes on.
     pub too_large_chats: usize,
+    /// Chats of contacts whose key in the archive differs from the one stored here: left out.
+    pub key_conflict_chats: usize,
+    /// Group messages and reactions in the name of such a contact: left out.
+    pub key_conflict_rows: usize,
     pub imported: usize,
     pub existing: usize,
     /// Same message id from a different group sender: reported, neither record touched.
@@ -312,8 +328,7 @@ impl HistoryImport {
         };
 
         // Resolve every chat file to a local conversation; media/thumbnail presence by uid.
-        let (plans, media_entries, thumbnail_entries) =
-            self.plan_chats(&archive, contacts, &groups, &mut summary);
+        let (plans, index) = self.plan_chats(&archive, contacts, &groups, &mut summary)?;
         let total = plans.len();
         let mut checks = CrossChecks::default();
 
@@ -371,8 +386,7 @@ impl HistoryImport {
                     &plan,
                     &source,
                     messages,
-                    &media_entries,
-                    &thumbnail_entries,
+                    &index,
                     &polls,
                     &mut summary,
                 )
@@ -381,7 +395,7 @@ impl HistoryImport {
         }
 
         if !summary.cancelled {
-            archive = self.import_reactions(archive, &mut summary).await?;
+            archive = self.import_reactions(archive, &index, &mut summary).await?;
         }
         drop(archive);
         // Partially written media without a committed row are removed like other orphans.
@@ -392,22 +406,35 @@ impl HistoryImport {
     }
 
     /// Chat files resolved to local conversations, plus which uids have media/thumbnails.
-    #[allow(clippy::type_complexity)]
     fn plan_chats(
         &self,
         archive: &Archive,
         contacts: Vec<records::Contact>,
         groups: &[records::Group],
         summary: &mut Summary,
-    ) -> (
-        Vec<ChatPlan>,
-        std::collections::HashMap<(&'static str, String), String>,
-        std::collections::HashMap<(&'static str, String), String>,
-    ) {
+    ) -> Result<(Vec<ChatPlan>, ArchiveIndex), StoreError> {
+        let stored_keys: std::collections::HashMap<String, Vec<u8>> = self
+            .store
+            .contacts()?
+            .iter()
+            .map(|contact| {
+                (
+                    contact.identity.to_string(),
+                    crate::contacts::hex_bytes(&contact.public_key.to_string()),
+                )
+            })
+            .collect();
+        let mut index = ArchiveIndex::default();
         // Alias maps from the metadata CSVs (the metadata import must have run: chats whose
         // conversation is missing are counted and skipped, nothing is created here).
         let mut contact_alias = std::collections::HashMap::new();
         for contact in contacts {
+            if stored_keys
+                .get(&contact.identity)
+                .is_some_and(|key| key.as_slice() != contact.public_key)
+            {
+                index.other_key.insert(contact.identity.clone());
+            }
             let alias = contact
                 .alias
                 .clone()
@@ -428,8 +455,6 @@ impl HistoryImport {
             }
         }
         let mut plans = Vec::new();
-        let mut media = std::collections::HashMap::new();
-        let mut thumbnails = std::collections::HashMap::new();
         for entry in archive.entries() {
             let (family, conversation) = match &entry.kind {
                 EntryKind::ContactMessages(alias) => {
@@ -444,27 +469,39 @@ impl HistoryImport {
                         .map(|id| format!("d:{:016x}", id.cast_unsigned())),
                 ),
                 EntryKind::ContactMedia(uid) => {
-                    media.insert(("contact", uid.clone()), entry.name.clone());
+                    index
+                        .media
+                        .insert(("contact", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::GroupMedia(uid) => {
-                    media.insert(("group", uid.clone()), entry.name.clone());
+                    index
+                        .media
+                        .insert(("group", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::ListMedia(uid) => {
-                    media.insert(("list", uid.clone()), entry.name.clone());
+                    index
+                        .media
+                        .insert(("list", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::ContactThumbnail(uid) => {
-                    thumbnails.insert(("contact", uid.clone()), entry.name.clone());
+                    index
+                        .thumbnails
+                        .insert(("contact", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::GroupThumbnail(uid) => {
-                    thumbnails.insert(("group", uid.clone()), entry.name.clone());
+                    index
+                        .thumbnails
+                        .insert(("group", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::ListThumbnail(uid) => {
-                    thumbnails.insert(("list", uid.clone()), entry.name.clone());
+                    index
+                        .thumbnails
+                        .insert(("list", uid.clone()), entry.name.clone());
                     continue;
                 }
                 _ => continue,
@@ -475,6 +512,9 @@ impl HistoryImport {
                 Family::List => self.store.distribution_list(key).ok().flatten().is_some(),
             };
             match conversation {
+                Some(key) if family == Family::Contact && index.other_key.contains(&key) => {
+                    summary.key_conflict_chats += 1;
+                }
                 Some(key) if exists(&key) => plans.push(ChatPlan {
                     entry: entry.name.clone(),
                     conversation: key,
@@ -483,7 +523,7 @@ impl HistoryImport {
                 _ => summary.skipped_chats += 1,
             }
         }
-        (plans, media, thumbnails)
+        Ok((plans, index))
     }
 
     /// Insert one chat's rows in bounded transactions, then its media.
@@ -494,8 +534,7 @@ impl HistoryImport {
         plan: &ChatPlan,
         source: &str,
         messages: Vec<records::Message>,
-        media_entries: &std::collections::HashMap<(&'static str, String), String>,
-        thumbnail_entries: &std::collections::HashMap<(&'static str, String), String>,
+        index: &ArchiveIndex,
         polls: &ArchivePolls,
         summary: &mut Summary,
     ) -> Result<Archive, crate::app::ApiError> {
@@ -517,8 +556,7 @@ impl HistoryImport {
                     source,
                     message,
                     &mut placer,
-                    media_entries,
-                    thumbnail_entries,
+                    index,
                     polls,
                     &mut media_jobs,
                     summary,
@@ -546,8 +584,8 @@ impl HistoryImport {
                 }));
             }
             for (part, entries) in [
-                (MediaPart::File, media_entries),
-                (MediaPart::Thumbnail, thumbnail_entries),
+                (MediaPart::File, &index.media),
+                (MediaPart::Thumbnail, &index.thumbnails),
             ] {
                 let Some(entry) = entries.get(&(plan.family.name(), job.uid.clone())) else {
                     continue;
@@ -600,8 +638,7 @@ impl HistoryImport {
         source: &str,
         message: &records::Message,
         placer: &mut Placer,
-        media_entries: &std::collections::HashMap<(&'static str, String), String>,
-        thumbnail_entries: &std::collections::HashMap<(&'static str, String), String>,
+        index: &ArchiveIndex,
         polls: &ArchivePolls,
         media_jobs: &mut Vec<MediaJob>,
         summary: &mut Summary,
@@ -647,9 +684,12 @@ impl HistoryImport {
             )?,
         };
         // Availability of file content reflects the archive, not Android's stale flag.
-        let has_media = media_entries.contains_key(&(plan.family.name(), message.uid.clone()));
-        let has_thumbnail =
-            thumbnail_entries.contains_key(&(plan.family.name(), message.uid.clone()));
+        let has_media = index
+            .media
+            .contains_key(&(plan.family.name(), message.uid.clone()));
+        let has_thumbnail = index
+            .thumbnails
+            .contains_key(&(plan.family.name(), message.uid.clone()));
         if kind == "file" {
             let mut value: Value = serde_json::from_str(&body).unwrap_or_default();
             // Failed until the media job has written the bytes; not "on the server", which would
@@ -665,6 +705,10 @@ impl HistoryImport {
         }
         let sender = match plan.family {
             Family::Group if !message.outgoing => match &message.sender {
+                Some(sender) if index.other_key.contains(sender) => {
+                    summary.key_conflict_rows += 1;
+                    return Ok(());
+                }
                 Some(sender) => Some(sender.clone()),
                 None => {
                     summary.invalid_rows += 1;
@@ -788,7 +832,7 @@ impl HistoryImport {
             }
         }
         if kind != "deleted" {
-            self.apply_thumbs(key, row, message)?;
+            self.apply_thumbs(key, row, message, index, summary)?;
         }
         Ok(())
     }
@@ -822,6 +866,8 @@ impl HistoryImport {
         _key: &str,
         row: i64,
         message: &records::Message,
+        index: &ArchiveIndex,
+        summary: &mut Summary,
     ) -> Result<(), StoreError> {
         let at = message.modified_at.unwrap_or(message.at);
         let emoji_for = |state: &str| match state {
@@ -842,6 +888,10 @@ impl HistoryImport {
         }
         for (member, state) in &message.group_states {
             if let Some(emoji) = emoji_for(state) {
+                if index.other_key.contains(member) {
+                    summary.key_conflict_rows += 1;
+                    continue;
+                }
                 let sender = if *member == self.me {
                     ""
                 } else {
@@ -857,6 +907,7 @@ impl HistoryImport {
     async fn import_reactions(
         &self,
         mut archive: Archive,
+        index: &ArchiveIndex,
         summary: &mut Summary,
     ) -> Result<Archive, crate::app::ApiError> {
         for (entry, group) in [
@@ -884,6 +935,15 @@ impl HistoryImport {
                     return Ok(archive);
                 }
                 for reaction in chunk {
+                    if index.other_key.contains(&reaction.sender)
+                        || reaction
+                            .contact
+                            .as_ref()
+                            .is_some_and(|contact| index.other_key.contains(contact))
+                    {
+                        summary.key_conflict_rows += 1;
+                        continue;
+                    }
                     let conversation = match (&reaction.contact, &reaction.group) {
                         (Some(contact), _) => contact.clone(),
                         (_, Some((creator, id))) => match creator.parse() {

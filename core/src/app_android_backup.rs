@@ -237,7 +237,8 @@ impl App {
     /// messages Android already received are refused as replays) into the running identity,
     /// entirely offline and without any sending side effect — dedicated store writes only, no message
     /// is queued, no lookup made, nothing distributed. Existing local data wins: a contact
-    /// whose stored key differs is a counted conflict, pictures only fill empty slots, an
+    /// whose stored key differs is a counted conflict and keeps its picture and chat as they are,
+    /// pictures only fill empty slots, an
     /// existing group's membership and left state stay untouched. Running it again adds
     /// nothing. Message history is not part of this scope.
     pub(crate) async fn android_backup_import(
@@ -316,6 +317,8 @@ impl App {
         let mut alias_to_identity: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let (mut added, mut existing, mut updated, mut key_conflicts) = (0, 0, 0, 0);
+        // The archive may be old or wrong about these: nothing of it goes into their contact.
+        let mut other_key = std::collections::HashSet::new();
         for c in &data.contacts {
             // Both naming schemes: identity_id (19+) and the identity itself (older).
             alias_to_identity.insert(
@@ -332,6 +335,7 @@ impl App {
                     if stored_key.as_slice() != c.public_key {
                         // Never overwrite a key: the archive may be old or wrong.
                         key_conflicts += 1;
+                        other_key.insert(c.identity.as_str());
                         continue;
                     }
                     // The backup knows them as a direct contact: show them in the contact
@@ -492,26 +496,36 @@ impl App {
         // the normal distribution policy with the next messages.
         let mut events: Vec<&'static str> = Vec::new();
         let mut own_imported = false;
+        let mut pictures_skipped = data.pictures_skipped;
         if let Some(picture) = &data.own_picture
             && self
                 .store
                 .setting(crate::store::keys::PROFILE_PICTURE_VERSION)?
                 .is_none()
-            && self
+        {
+            if self
                 .media
                 .write_picture(crate::profile_pictures::OWN_PICTURE, picture)
                 .is_ok()
-        {
-            self.store.bump_profile_picture_version()?;
-            own_imported = true;
-            events.push("profileChanged");
+            {
+                self.store.bump_profile_picture_version()?;
+                own_imported = true;
+                events.push("profileChanged");
+            } else {
+                pictures_skipped += 1;
+            }
         }
         let (mut contact_pictures, mut kept) = (0, 0);
         for (alias, picture) in &data.contact_pictures {
-            let Some(identity) = alias_to_identity.get(alias) else {
+            let Some(identity) = alias_to_identity
+                .get(alias)
+                .filter(|identity| !other_key.contains(identity.as_str()))
+            else {
+                pictures_skipped += 1;
                 continue;
             };
             if self.store.contact(identity)?.is_none() {
+                pictures_skipped += 1;
                 continue;
             }
             if self.store.contact_picture_version(identity)? != 0 {
@@ -529,14 +543,18 @@ impl App {
                 self.store
                     .set_contact_picture(identity, Some(crate::messages::now_ms()))?;
                 contact_pictures += 1;
+            } else {
+                pictures_skipped += 1;
             }
         }
         let mut group_pictures = 0;
         for (alias, picture) in &data.group_pictures {
             let Some(key) = group_keys.get(alias) else {
+                pictures_skipped += 1;
                 continue;
             };
             let Some(mut group) = self.store.group(key)? else {
+                pictures_skipped += 1;
                 continue;
             };
             if group.picture_version != 0 || group.picture.is_some() {
@@ -549,6 +567,8 @@ impl App {
                     crate::profile_pictures::next_version(group.picture_version);
                 self.store.upsert_group(&group)?;
                 group_pictures += 1;
+            } else {
+                pictures_skipped += 1;
             }
         }
         // Nonces: hashes beside our raw nonces, checked on every receive (idempotent).
@@ -575,7 +595,7 @@ impl App {
                 "groups": group_pictures,
                 "kept": kept,
                 "localAvatarsNotImported": data.local_avatars,
-                "skipped": data.pictures_skipped,
+                "skipped": pictures_skipped,
             },
             "nonces": {
                 "csp": csp_nonces,
@@ -682,6 +702,37 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), "backupInvalid");
+    }
+
+    /// A picture that can't be written (a full disk, say) counts as left out and stays open for
+    /// the next run.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_picture_that_cannot_be_written_is_counted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let media = dir.path().join("media");
+        std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root writes anyway: nothing to see then.
+        let writable = std::fs::File::create(media.join("probe")).is_ok();
+        let summary = app
+            .android_backup_import(
+                fixture(),
+                Zeroizing::new("test-password".into()),
+                "metadata",
+            )
+            .await
+            .unwrap();
+        std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if writable {
+            return;
+        }
+        assert_eq!(summary["pictures"]["own"], false);
+        assert_eq!(summary["pictures"]["contacts"], 0);
+        assert_eq!(summary["pictures"]["groups"], 0);
+        assert_eq!(summary["pictures"]["skipped"], 3, "{summary}");
+        assert_eq!(app.store.contact_picture_version("B0B0B0B0").unwrap(), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -819,6 +870,28 @@ mod tests {
             .unwrap();
         assert_eq!(summary["contacts"]["keyConflicts"], 1);
         assert_eq!(summary["contacts"]["added"], 2);
+        // What the backup holds in that contact's name stays out of it.
+        assert_eq!(summary["pictures"]["contacts"], 0);
+        assert_eq!(summary["pictures"]["skipped"], 1);
+        assert_eq!(other.store.contact_picture_version("B0B0B0B0").unwrap(), 0);
+        let history = super::history_tests::run_import(&other).await;
+        assert_eq!(history["keyConflictChats"], 1, "{history}");
+        assert_eq!(history["skippedChats"], 0, "{history}");
+        // Their group message and their reaction.
+        assert_eq!(history["keyConflictRows"], 2, "{history}");
+        assert!(
+            other
+                .store
+                .conversation_messages("B0B0B0B0", 50)
+                .unwrap()
+                .is_empty()
+        );
+        let team = other
+            .store
+            .conversation_messages("g:B0B0B0B0:0102030405060708", 50)
+            .unwrap();
+        assert!(!team.is_empty());
+        assert!(team.iter().all(|m| m.sender.as_deref() != Some("B0B0B0B0")));
 
         // Another identity's backup is refused before any change.
         let foreign_dir = tempfile::tempdir().unwrap();
