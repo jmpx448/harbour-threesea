@@ -570,9 +570,9 @@ impl Store {
         Ok(rows)
     }
 
-    /// A picture from the group's creator is on the device. One store step with the note that the
-    /// other devices are owed it, so a crash before the upload can't lose that.
-    pub(crate) fn store_received_group_picture(&self, group: &Group) -> Result<(), StoreError> {
+    /// A new picture of a group is on the device, set here or from its creator. One store step with
+    /// the note that the other devices are owed it, so a crash or a failed upload can't lose that.
+    pub(crate) fn store_new_group_picture(&self, group: &Group) -> Result<(), StoreError> {
         let step = self.step()?;
         self.upsert_group(group)?;
         if self.multi_device()?.is_some() {
@@ -2753,12 +2753,12 @@ mod tests {
         let (_dir, store) = store();
         let group_key = stored_group(&store, CREATOR, &[CREATOR], false);
         let group = store.group(&group_key).unwrap().unwrap();
-        store.store_received_group_picture(&group).unwrap();
+        store.store_new_group_picture(&group).unwrap();
         assert!(store.group_picture_syncs().unwrap().is_empty());
         store
             .set_multi_device(Some(&crate::multidevice::Properties::generate()))
             .unwrap();
-        store.store_received_group_picture(&group).unwrap();
+        store.store_new_group_picture(&group).unwrap();
         assert_eq!(
             store.group_picture_syncs().unwrap(),
             vec![group_key.clone()]
@@ -2784,7 +2784,7 @@ mod tests {
         let group_key = stored_group(&store, CREATOR, &[CREATOR], false);
         let mut group = store.group(&group_key).unwrap().unwrap();
         group.picture_version = 2;
-        store.store_received_group_picture(&group).unwrap();
+        store.store_new_group_picture(&group).unwrap();
         let outcome = run(
             &store,
             CREATOR,
@@ -2813,7 +2813,7 @@ mod tests {
         let note = |store: &Store| {
             let group = store.group(&group_key).unwrap();
             store
-                .store_received_group_picture(group.as_ref().unwrap())
+                .store_new_group_picture(group.as_ref().unwrap())
                 .unwrap();
             store.add_member_lookup(&group_key, BOB, true).unwrap();
         };

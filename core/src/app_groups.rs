@@ -345,7 +345,7 @@ impl App {
                     {
                         group.picture_version =
                             crate::profile_pictures::next_version(group.picture_version);
-                        if store.store_received_group_picture(&group).is_ok() {
+                        if store.store_new_group_picture(&group).is_ok() {
                             let _ = events.send(CoreEvent::GroupsChanged);
                             // Now that it is here, for the other devices too.
                             crate::app_multidevice::reflect_group_picture(
@@ -399,7 +399,7 @@ impl App {
         )?;
         group.picture = Some(picture);
         group.picture_version = now_ms();
-        self.store.upsert_group(&group)?;
+        self.store.store_new_group_picture(&group)?;
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
@@ -605,6 +605,21 @@ impl App {
         }
         // What the other devices are still owed: a picture not on the mirror yet, a member whose
         // lookup failed or never got to run.
+        if self.store.own_picture_sync_owed().unwrap_or(false) {
+            let store = Rc::clone(&self.store);
+            let https = self.https.clone();
+            let media = std::sync::Arc::clone(&self.media);
+            let connection = self.connection.clone();
+            tokio::task::spawn_local(async move {
+                crate::app_multidevice::reflect_own_picture(
+                    &store,
+                    &https,
+                    &media,
+                    connection.as_ref(),
+                )
+                .await;
+            });
+        }
         if let Ok(owed) = self.store.group_picture_syncs() {
             for key in owed {
                 let store = Rc::clone(&self.store);
@@ -669,6 +684,7 @@ impl App {
         self.store.set_picture_upload(None)?;
         self.store.purge_picture_distribution(None)?;
         self.store.bump_profile_picture_version()?;
+        self.store.owe_own_picture_sync()?;
         self.profile_json()
     }
 

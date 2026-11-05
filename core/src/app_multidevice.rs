@@ -548,6 +548,12 @@ impl App {
         if !matches!(self.store.multi_device(), Ok(Some(_))) {
             return;
         }
+        // A picture that is here needs the network first: see below.
+        let own_picture = matches!(change, SyncChange::Profile { picture: true });
+        let group_picture = match &change {
+            SyncChange::GroupPicture(key) => Some(key.clone()),
+            _ => None,
+        };
         let built = (|| -> Result<Vec<(Scope, Content)>, crate::store::StoreError> {
             Ok(match change {
                 SyncChange::NewContacts(identities) => {
@@ -677,6 +683,11 @@ impl App {
                     let Some(group) = self.store.group(&key)? else {
                         return Ok(Vec::new());
                     };
+                    if group.picture_version != 0 {
+                        return Ok(Vec::new());
+                    }
+                    // Removed: a new picture that was still owed isn't any more.
+                    self.store.group_picture_synced(&key)?;
                     let mut synced = crate::sync::group_only(&group);
                     synced.profile_picture = Some(DeltaImage {
                         image: Some(delta_image::Image::Removed(Unit {})),
@@ -701,8 +712,15 @@ impl App {
                 )],
                 SyncChange::Profile { picture } => {
                     let mut profile = crate::join::profile_sync(&self.store)?;
-                    // `profile_sync` says "removed"; a picture is filled in below.
-                    if !picture {
+                    // `profile_sync` says "removed". A picture that is here goes by itself below.
+                    let removed = picture
+                        && self
+                            .store
+                            .setting(crate::store::keys::PROFILE_PICTURE_VERSION)?
+                            .is_none();
+                    if removed {
+                        self.store.own_picture_synced()?;
+                    } else {
                         profile.profile_picture = None;
                     }
                     vec![(
@@ -718,57 +736,21 @@ impl App {
                 }
             })
         })();
-        let mut built = built;
-        // A picture that is here goes to the mirror first (Android: BlobScope.Local).
-        if let Ok(items) = built.as_mut() {
-            for (_, content) in items.iter_mut() {
-                let (target, slot) = match content {
-                    Content::UserProfileSync(UserProfileSync {
-                        action:
-                            Some(user_profile_sync::Action::Update(user_profile_sync::Update {
-                                user_profile: Some(profile),
-                            })),
-                    }) => (
-                        crate::profile_pictures::OWN_PICTURE.to_owned(),
-                        &mut profile.profile_picture,
-                    ),
-                    Content::GroupSync(GroupSync {
-                        action:
-                            Some(group_sync::Action::Update(group_sync::Update {
-                                group: Some(group),
-                                ..
-                            })),
-                    }) => match group.group_identity.as_ref().and_then(|g| {
-                        Some(crate::groups::key(&libthreema::common::GroupIdentity {
-                            group_id: g.group_id,
-                            creator_identity: g.creator_identity.parse().ok()?,
-                        }))
-                    }) {
-                        Some(key) => (key, &mut group.profile_picture),
-                        None => continue,
-                    },
-                    _ => continue,
-                };
-                // Only where the picture is part of this change ("removed" placeholder set).
-                if slot.is_none() {
-                    continue;
-                }
-                match upload_sync_picture(&self.https, &self.media, &target).await {
-                    Ok(Some(image)) => *slot = Some(image),
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "picture not uploaded to the mirror");
-                        *slot = None;
-                    }
-                }
-            }
-        }
         match built {
             Ok(items) => {
                 queue_syncs(&self.store, items);
                 self.tell_connection(ToConnection::ReflectSync);
             }
             Err(error) => tracing::warn!(%error, "sync not reflected"),
+        }
+        // To the mirror first (Android: BlobScope.Local), and noted until that has worked: what
+        // fails comes again with `resume_picture_downloads`.
+        let connection = self.connection.as_ref();
+        if own_picture {
+            reflect_own_picture(&self.store, &self.https, &self.media, connection).await;
+        }
+        if let Some(key) = group_picture {
+            reflect_group_picture(&self.store, &self.https, &self.media, &key, connection).await;
         }
     }
 }
@@ -789,8 +771,10 @@ fn store_synced_picture(
     }
     let step = store.step()?;
     let event = if target == OWN_PICTURE {
-        // A new own picture: contacts get it again; Safe's copy is made on demand.
+        // A new own picture: contacts get it again; Safe's copy is made on demand. What the others
+        // may still have been owed is what they have just replaced.
         media.remove_picture(crate::profile_pictures::OWN_PICTURE_SAFE);
+        store.own_picture_synced()?;
         store.set_picture_upload(None)?;
         store.purge_picture_distribution(None)?;
         match data {
@@ -848,7 +832,7 @@ fn member_changes_by_command(previous: &[String], group: &Group) -> HashMap<Stri
 }
 
 /// A group's picture from its creator reached this device: the others get it from the mirror.
-/// Noted as owed until the entry is queued (`Store::store_received_group_picture`), so a failed
+/// Noted as owed until the entry is queued (`Store::store_new_group_picture`), so a failed
 /// upload or a crash is made up for by the next `resume_picture_downloads`.
 pub(crate) async fn reflect_group_picture(
     store: &Store,
@@ -897,6 +881,86 @@ pub(crate) async fn reflect_group_picture(
         Ok(false) => {}
         Err(error) => tracing::warn!(%error, "group picture sync not queued"),
     }
+}
+
+/// Our picture reached this device or was set here: the others get it from the mirror, by itself.
+/// Noted as owed until the entry is queued, as with a group's (`reflect_group_picture`).
+pub(crate) async fn reflect_own_picture(
+    store: &Store,
+    https: &crate::https::HttpsClient,
+    media: &crate::media::MediaStore,
+    connection: Option<&UnboundedSender<ToConnection>>,
+) {
+    use crate::{profile_pictures::OWN_PICTURE, store::keys};
+    let done = |store: &Store| {
+        if let Err(error) = store.own_picture_synced() {
+            tracing::warn!(%error, "owed own picture not cleared");
+        }
+    };
+    if !store.own_picture_sync_owed().unwrap_or(false) {
+        return;
+    }
+    let version = match store.setting(keys::PROFILE_PICTURE_VERSION) {
+        Ok(Some(version)) if matches!(store.multi_device(), Ok(Some(_))) => version,
+        // Nobody left to tell, or nothing to tell them: a removal has been queued by itself.
+        Ok(_) => return done(store),
+        Err(error) => {
+            tracing::warn!(%error, "owed own picture not read");
+            return;
+        }
+    };
+    let image = match upload_sync_picture(https, media, OWN_PICTURE).await {
+        Ok(Some(image)) => image,
+        Ok(None) => return done(store),
+        Err(error) => {
+            tracing::warn!(%error, "picture not uploaded to the mirror");
+            return;
+        }
+    };
+    match queue_owed_own_picture(store, &version, image) {
+        Ok(true) => {
+            if let Some(connection) = connection {
+                let _ = connection.send(ToConnection::ReflectSync);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "own picture sync not queued"),
+    }
+}
+
+/// One store step, as for a group's picture: only if it is still owed and still this picture.
+fn queue_owed_own_picture(
+    store: &Store,
+    version: &str,
+    image: DeltaImage,
+) -> Result<bool, StoreError> {
+    use libthreema::protobuf::{
+        d2d::{UserProfileSync, user_profile_sync},
+        d2d_sync::UserProfile,
+    };
+    let step = store.step()?;
+    let same = store
+        .setting(crate::store::keys::PROFILE_PICTURE_VERSION)?
+        .is_some_and(|now| now == version);
+    if !same || !store.own_picture_sync_owed()? {
+        return Ok(false);
+    }
+    store.own_picture_synced()?;
+    store.queue_sync_content(
+        Scope::UserProfileSync,
+        Content::UserProfileSync(UserProfileSync {
+            action: Some(user_profile_sync::Action::Update(
+                user_profile_sync::Update {
+                    user_profile: Some(UserProfile {
+                        profile_picture: Some(image),
+                        ..UserProfile::default()
+                    }),
+                },
+            )),
+        }),
+    )?;
+    step.commit()?;
+    Ok(true)
 }
 
 /// One store step: only if it is still owed and still the picture that was uploaded (`version`).
@@ -1447,7 +1511,7 @@ mod tests {
         let _rx = in_a_group(&mut app);
         let mut group = foreign_group(&app);
         group.picture_version = 2;
-        app.store.store_received_group_picture(&group).unwrap();
+        app.store.store_new_group_picture(&group).unwrap();
         assert_eq!(
             app.store.group_picture_syncs().unwrap(),
             vec![group.key.clone()]
@@ -1465,7 +1529,7 @@ mod tests {
         let _rx = in_a_group(&mut app);
         let mut group = foreign_group(&app);
         group.picture_version = 2;
-        app.store.store_received_group_picture(&group).unwrap();
+        app.store.store_new_group_picture(&group).unwrap();
         let synced = crate::sync::group_only(&group);
 
         // An upload of an older picture finishes: not sent, and the newer one is still owed.
@@ -1486,6 +1550,110 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn removing_a_group_picture_ends_what_was_owed_and_says_so() {
+        let (_dir, mut app) = app();
+        with_identity(&app);
+        let _rx = in_a_group(&mut app);
+        let mut group = foreign_group(&app);
+        group.picture_version = 2;
+        app.store.store_new_group_picture(&group).unwrap();
+        group.picture_version = 0;
+        app.store.upsert_group(&group).unwrap();
+
+        app.reflect_change(SyncChange::GroupPicture(group.key.clone()), &json!({}))
+            .await;
+
+        assert!(app.store.group_picture_syncs().unwrap().is_empty());
+        let synced = update_of(next_group_sync(&app)).group.unwrap();
+        assert!(matches!(
+            synced.profile_picture.and_then(|picture| picture.image),
+            Some(delta_image::Image::Removed(_))
+        ));
+    }
+
+    fn next_profile_sync(app: &App) -> libthreema::protobuf::d2d_sync::UserProfile {
+        use libthreema::protobuf::d2d::{UserProfileSync, user_profile_sync};
+        use prost::Message as _;
+        let (id, scope, content) = app.store.next_sync().unwrap().unwrap();
+        app.store.sync_done(id).unwrap();
+        assert_eq!(scope, Scope::UserProfileSync as i32);
+        let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+        let Some(Content::UserProfileSync(UserProfileSync {
+            action: Some(user_profile_sync::Action::Update(update)),
+        })) = envelope.content
+        else {
+            panic!("not a profile");
+        };
+        update.user_profile.unwrap()
+    }
+
+    /// Noted, and the note ends only with the entry queued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn our_picture_stays_owed_until_it_is_on_its_way() {
+        use crate::store::keys::PROFILE_PICTURE_VERSION;
+        let (_dir, mut app) = app();
+        // Nobody to owe it to.
+        app.store.owe_own_picture_sync().unwrap();
+        assert!(!app.store.own_picture_sync_owed().unwrap());
+
+        let _rx = in_a_group(&mut app);
+        app.store.bump_profile_picture_version().unwrap();
+        app.store.owe_own_picture_sync().unwrap();
+        let version = app.store.setting(PROFILE_PICTURE_VERSION).unwrap().unwrap();
+        let image = || DeltaImage {
+            image: Some(delta_image::Image::Removed(Unit {})),
+        };
+
+        // An upload of an older picture finishes: not sent, the newer one is still owed.
+        assert!(!queue_owed_own_picture(&app.store, "older", image()).unwrap());
+        assert!(app.store.next_sync().unwrap().is_none());
+        assert!(app.store.own_picture_sync_owed().unwrap());
+
+        assert!(queue_owed_own_picture(&app.store, &version, image()).unwrap());
+        assert!(!app.store.own_picture_sync_owed().unwrap());
+        let profile = next_profile_sync(&app);
+        assert!(profile.profile_picture.is_some());
+        // The picture alone: what else the profile says may have moved on elsewhere.
+        assert!(profile.nickname.is_none());
+
+        // The second try of the same picture: already sent.
+        assert!(!queue_owed_own_picture(&app.store, &version, image()).unwrap());
+        assert!(app.store.next_sync().unwrap().is_none());
+    }
+
+    /// The rest of the profile doesn't wait for the picture's upload, nor says it was removed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn setting_our_picture_says_nothing_of_it_before_the_upload() {
+        let (_dir, mut app) = app();
+        let _rx = in_a_group(&mut app);
+        app.store.bump_profile_picture_version().unwrap();
+        // No file: no upload, no network, in the test.
+        app.reflect_change(SyncChange::Profile { picture: true }, &json!({}))
+            .await;
+        assert!(next_profile_sync(&app).profile_picture.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_our_picture_says_so_and_nothing_is_owed() {
+        let (_dir, mut app) = app();
+        let _rx = in_a_group(&mut app);
+        app.store.bump_profile_picture_version().unwrap();
+        app.store.owe_own_picture_sync().unwrap();
+        app.store
+            .delete_setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+            .unwrap();
+        app.reflect_change(SyncChange::Profile { picture: true }, &json!({}))
+            .await;
+        assert!(matches!(
+            next_profile_sync(&app)
+                .profile_picture
+                .and_then(|picture| picture.image),
+            Some(delta_image::Image::Removed(_))
+        ));
+        assert!(!app.store.own_picture_sync_owed().unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn a_deleted_pictures_file_is_not_sent_to_the_others() {
         let (_dir, mut app) = app();
         with_identity(&app);
@@ -1494,7 +1662,7 @@ mod tests {
         assert_eq!(group.picture_version, 0);
         // A try still under way or a removal that didn't finish: the file is still there.
         app.media.write_picture(&group.key, b"old").unwrap();
-        app.store.store_received_group_picture(&group).unwrap();
+        app.store.store_new_group_picture(&group).unwrap();
         reflect_group_picture(&app.store, &app.https, &app.media, &group.key, None).await;
         assert!(app.store.group_picture_syncs().unwrap().is_empty());
         assert!(app.store.next_sync().unwrap().is_none());

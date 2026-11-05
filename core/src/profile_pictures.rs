@@ -644,6 +644,25 @@ impl Store {
         Ok(true)
     }
 
+    /// Our new picture is here and the other devices of the group are to get it: noted until it
+    /// is on its way to them, so a failed upload can't lose that.
+    pub(crate) fn owe_own_picture_sync(&self) -> Result<(), StoreError> {
+        if self.multi_device()?.is_some() {
+            self.set_setting(crate::store::keys::OWN_PICTURE_SYNC_OWED, "1")?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn own_picture_sync_owed(&self) -> Result<bool, StoreError> {
+        Ok(self
+            .setting(crate::store::keys::OWN_PICTURE_SYNC_OWED)?
+            .is_some())
+    }
+
+    pub(crate) fn own_picture_synced(&self) -> Result<(), StoreError> {
+        self.delete_setting(crate::store::keys::OWN_PICTURE_SYNC_OWED)
+    }
+
     /// A device of the group changed a picture: what it said, in place of what it said before.
     pub(crate) fn set_synced_picture(
         &self,
