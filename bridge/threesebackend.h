@@ -17,6 +17,7 @@ class QJsonObject;
 #include <QRunnable>
 #include <QString>
 #include <QStringList>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantMap>
@@ -254,6 +255,9 @@ public:
     // Decrypted media of a message (thumbnail or file); empty if not on the device. Thread-safe
     // (image providers call it from their loader threads).
     QByteArray readMedia(qint64 message, bool thumbnail) const;
+    // Where the players read (MediaReader): one decrypted file on its way at a time, whichever
+    // player asks, and this object outlives every read.
+    QThreadPool *mediaReads() const { return &m_mediaReads; }
     // A picture by name (group pictures: the group key); empty if none. Thread-safe.
     QByteArray readPicture(const QString &name) const;
 
@@ -439,6 +443,7 @@ private:
     // The database key while the core runs (to encrypt it when key encryption is switched on);
     // memory only, wiped on exit.
     QByteArray m_dbKey;
+    mutable QThreadPool m_mediaReads;
     QByteArray m_wrappedKey;
     class QNetworkConfigurationManager *m_network = nullptr;
     // The networks in use: a change wakes the connection, once things have calmed down.

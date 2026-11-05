@@ -1329,12 +1329,16 @@ Page {
     }
     // Play a voice message and remember that it is not new any more.
     function playVoice(id) {
-        if (!voicePlayer.play(id)) {
-            //% "This voice message could not be played"
-            Notices.show(qsTrId("threesea-la-cannot-play"), Notice.Long, Notice.Center)
-            return
-        }
+        voicePlayer.play(id)
         window.voiceFrom = page.isPrivate ? "" : (page.contact.displayName || page.identity)
+        voiceToHear = id
+        if (voicePlayer.messageId === id) voiceHeard()
+    }
+    // Asked for, and it is heard once it could be read (the player says when, or that it couldn't).
+    property int voiceToHear: -1
+    function voiceHeard() {
+        var id = voiceToHear
+        voiceToHear = -1
         var index = messages.indexOfKey(id)
         if (index < 0) return
         var m = messages.get(index)
@@ -1403,7 +1407,10 @@ Page {
         target: voicePlayer
         onPlayingChanged: if (voicePlayer.playing) page.voicePausedAtEar = false
         // Another message was started by hand during the chime: that one goes first.
-        onMessageIdChanged: if (voicePlayer.messageId >= 0) page.voiceQueueNext = -1
+        onMessageIdChanged: {
+            if (voicePlayer.messageId >= 0) page.voiceQueueNext = -1
+            if (voicePlayer.messageId >= 0 && voicePlayer.messageId === page.voiceToHear) page.voiceHeard()
+        }
         onFinished: {
             // The next one waits behind the lock.
             if (window.locked) return

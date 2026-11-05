@@ -9,6 +9,7 @@
 #include <QTimer>
 
 class EarpiecePlayer;
+class MediaReader;
 class SoftSound;
 class ThreeseBackend;
 
@@ -29,7 +30,7 @@ class VoicePlayer : public QObject
     Q_OBJECT
     // The message being played or paused (local id), -1 if none.
     Q_PROPERTY(int messageId READ messageId NOTIFY messageIdChanged)
-    // A message is loaded or the chime before the next one is sounding: the system's media
+    // A message is loaded or being loaded, or the chime before the next one is sounding: the system's media
     // controls stay up (MediaSession.qml).
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)
     Q_PROPERTY(bool chiming READ chiming NOTIFY activeChanged)
@@ -60,8 +61,9 @@ public:
     qreal speed() const { return m_speed; }
     void setSpeed(qreal speed);
 
-    // Play `message` (resume if it is the paused one); false if it can't be played.
-    Q_INVOKABLE bool play(int message);
+    // Play `message` (resume if it is the paused one) once it's decrypted, which happens on a
+    // worker; messageIdChanged says it is there, failed() that it can't be played.
+    Q_INVOKABLE void play(int message);
     // Carry on with the paused message.
     Q_INVOKABLE void resume();
     Q_INVOKABLE void pause();
@@ -89,6 +91,7 @@ signals:
     void failed(const QString &error);
 
 private:
+    void onRead(int message, QByteArray &bytes);
     void release();
     void releaseRoute();
     bool startRoute(int startMs, bool autoplay);
@@ -102,6 +105,9 @@ private:
     QMediaPlayer *m_player;
     QBuffer *m_buffer = nullptr;
     QByteArray m_data;
+    MediaReader *m_reader;
+    // The message being decrypted, -1 if none.
+    int m_loading = -1;
     int m_messageId = -1;
     QAudioOutput *m_output = nullptr;
     // The loaded message is PCM decoded by the core, not the data as it was received.

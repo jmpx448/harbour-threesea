@@ -1709,7 +1709,13 @@ ApplicationWindow {
         }
         // The chime leads to the next message: that must not start in the call either.
         if (voicePlayer.playing || voicePlayer.chiming) voicePlayer.pause()
-        if (videoPlayer.playing) videoPlayer.pause()
+        if (videoPlayer.playing || videoPlayer.loading) videoPlayer.pause()
+    }
+    // Wherever it was started from: the file turned out unreadable, or the player gave up on it.
+    Connections {
+        target: voicePlayer
+        //% "This voice message could not be played"
+        onFailed: Notices.show(qsTrId("threesea-la-cannot-play"), Notice.Long, Notice.Center)
     }
 
     // The group of the group call we are in (cover); empty for a private group, as in the

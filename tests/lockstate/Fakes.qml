@@ -115,6 +115,7 @@ QtObject {
         function leave() { }
     }
     property QtObject voicePlayer: QtObject {
+        signal failed(string error)
         property int messageId: -1
         property bool active
         property bool chiming
@@ -138,6 +139,7 @@ QtObject {
     }
     property QtObject videoPlayer: QtObject {
         property int messageId: -1
+        property bool loading
         property bool playing
         property int position
         property int duration

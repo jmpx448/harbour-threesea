@@ -91,6 +91,8 @@ if $full; then
         scripts/test-models.sh >/dev/null 2>&1 || fail "list models (scripts/test-models.sh)"
         step "GIF decoder (SDK)"
         scripts/test-gifdecoder.sh >/dev/null 2>&1 || fail "GIF decoder (scripts/test-gifdecoder.sh)"
+        step "reading media off the GUI thread (SDK)"
+        scripts/test-mediareader.sh >/dev/null 2>&1 || fail "media reader (scripts/test-mediareader.sh)"
         step "pictures upright (SDK)"
         scripts/test-mediaimage.sh >/dev/null 2>&1 || fail "pictures (scripts/test-mediaimage.sh)"
         step "app lock (SDK)"

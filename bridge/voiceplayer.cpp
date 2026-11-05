@@ -6,6 +6,7 @@
 
 #include <cmath>
 
+#include "mediareader.h"
 #include "softsound.h"
 #include "threesebackend.h"
 #ifdef THREESEA_FULL
@@ -52,6 +53,7 @@ VoicePlayer::VoicePlayer(const ThreeseBackend *backend, QObject *parent)
     : QObject(parent)
     , m_backend(backend)
     , m_player(new QMediaPlayer(this))
+    , m_reader(new MediaReader(backend->mediaReads(), this))
     , m_chime(new SoftSound(this))
 {
     connect(m_chime, &SoftSound::done, this, &VoicePlayer::onChimeEnded);
@@ -159,13 +161,13 @@ int VoicePlayer::duration() const
     return static_cast<int>(m_player->duration());
 }
 
-bool VoicePlayer::play(int message)
+void VoicePlayer::play(int message)
 {
     if (message == m_messageId && !m_data.isEmpty()) {
 #ifdef THREESEA_FULL
         if (m_earpiece && m_earpiecePlayer) {
             m_earpiecePlayer->resume();
-            return true;
+            return;
         }
 #endif
         if (m_output) {
@@ -175,30 +177,49 @@ bool VoicePlayer::play(int message)
             m_wantPlaying = true;
             m_player->play();
         }
-        return true;
+        return;
+    }
+    if (message == m_loading) {
+        return;
     }
     m_holdActive = true;
     stop();
     m_holdActive = false;
     // Without a platform player (the SDK emulator) the core decodes Opus for us.
-    m_pcm = m_player->availability() != QMultimedia::Available;
-    m_data = m_pcm ? m_backend->decodeVoice(message) : m_backend->readMedia(message, false);
-    if (m_data.isEmpty()) {
+    const bool pcm = m_player->availability() != QMultimedia::Available;
+    m_loading = message;
+    updateActive();
+    const ThreeseBackend *backend = m_backend;
+    m_reader->start([backend, message, pcm]() {
+        return pcm ? backend->decodeVoice(message) : backend->readMedia(message, false);
+    }, [this, message, pcm](QByteArray &bytes) {
+        m_pcm = pcm;
+        onRead(message, bytes);
+    });
+}
+
+void VoicePlayer::onRead(int message, QByteArray &bytes)
+{
+    m_loading = -1;
+    if (bytes.isEmpty()) {
         if (m_pcm) {
             qWarning() << "voice playback: no media player and not an Opus message";
         }
+        m_pcm = false;
         updateActive();
-        return false;
+        emit failed(QString());
+        return;
     }
+    m_data.swap(bytes);
     m_messageId = message;
     emit messageIdChanged();
     emit durationChanged();
     if (!startRoute(0, true)) {
         release();
-        return false;
+        emit failed(QString());
+        return;
     }
     updateActive();
-    return true;
 }
 
 void VoicePlayer::resume()
@@ -374,7 +395,7 @@ void VoicePlayer::onChimeEnded()
 
 void VoicePlayer::updateActive()
 {
-    const bool active = m_messageId != -1 || m_chimePending;
+    const bool active = m_messageId != -1 || m_loading != -1 || m_chimePending;
     if (!m_holdActive && active != m_active) {
         m_active = active;
         emit activeChanged();
@@ -473,6 +494,8 @@ void VoicePlayer::releaseRoute()
 
 void VoicePlayer::release()
 {
+    m_reader->cancel();
+    m_loading = -1;
     releaseRoute();
     // Wiped only here: nothing reads the bytes any more (the pipeline's threads are joined).
     m_data.fill('\0');

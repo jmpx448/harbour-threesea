@@ -19,6 +19,7 @@ Page {
 
     Component.onCompleted: {
         voicePlayer.stop()
+        // Decrypted on a worker: this page shows at once, playing when that's done.
         if (!videoPlayer.play(messageId)) {
             //% "This video could not be played"
             Notices.show(qsTrId("threesea-la-cannot-play-video"), Notice.Long, Notice.Center)
@@ -40,7 +41,7 @@ Page {
     Connections {
         target: Qt.application
         onStateChanged: {
-            if (Qt.application.state !== Qt.ApplicationActive && videoPlayer.playing) videoPlayer.pause()
+            if (Qt.application.state !== Qt.ApplicationActive && (videoPlayer.playing || videoPlayer.loading)) videoPlayer.pause()
         }
     }
 
@@ -60,6 +61,12 @@ Page {
         onClicked: page.controlsShown = !page.controlsShown
     }
 
+    BusyIndicator {
+        anchors.centerIn: parent
+        size: BusyIndicatorSize.Large
+        running: videoPlayer.loading
+    }
+
     Item {
         id: controls
         anchors.fill: parent
@@ -69,6 +76,7 @@ Page {
 
         IconButton {
             anchors.centerIn: parent
+            visible: !videoPlayer.loading
             icon.source: "image://theme/" + (videoPlayer.playing ? "icon-l-pause" : "icon-l-play")
             onClicked: videoPlayer.playing ? videoPlayer.pause() : videoPlayer.resume()
         }
@@ -81,6 +89,7 @@ Page {
                 bottom: parent.bottom
                 bottomMargin: Theme.paddingLarge
             }
+            enabled: !videoPlayer.loading
             minimumValue: 0
             maximumValue: Math.max(1, videoPlayer.duration)
             valueText: Fmt.duration(videoPlayer.position / 1000) + " / " + Fmt.duration(videoPlayer.duration / 1000)

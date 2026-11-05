@@ -4,12 +4,14 @@
 #include <QDebug>
 #include <QTimer>
 
+#include "mediareader.h"
 #include "threesebackend.h"
 
 VideoPlayer::VideoPlayer(const ThreeseBackend *backend, QObject *parent)
     : QObject(parent)
     , m_backend(backend)
     , m_player(new QMediaPlayer(this))
+    , m_reader(new MediaReader(backend->mediaReads(), this))
 {
     m_player->setNotifyInterval(250);
     connect(m_player, &QMediaPlayer::stateChanged, this, [this](QMediaPlayer::State state) {
@@ -62,15 +64,39 @@ bool VideoPlayer::play(int message)
     if (!available()) {
         return false;
     }
-    m_data = m_backend->readMedia(message, false);
-    if (m_data.isEmpty()) {
-        return false;
+    m_pausedWhileLoading = false;
+    setLoading(true);
+    const ThreeseBackend *backend = m_backend;
+    m_reader->start([backend, message]() { return backend->readMedia(message, false); },
+                    [this, message](QByteArray &bytes) { onRead(message, bytes); });
+    return true;
+}
+
+void VideoPlayer::onRead(int message, QByteArray &bytes)
+{
+    setLoading(false);
+    if (bytes.isEmpty()) {
+        qWarning() << "video playback: nothing to read";
+        emit failed(QString());
+        return;
     }
+    m_data.swap(bytes);
     load();
     m_messageId = message;
     emit messageIdChanged();
-    resume();
-    return true;
+    if (m_pausedWhileLoading) {
+        m_player->pause();
+    } else {
+        resume();
+    }
+}
+
+void VideoPlayer::setLoading(bool loading)
+{
+    if (m_loading != loading) {
+        m_loading = loading;
+        emit loadingChanged();
+    }
 }
 
 // A fresh stream over the same bytes. The one it replaces goes only after the player let go of it.
@@ -98,6 +124,10 @@ void VideoPlayer::reloadAfterEnd()
 
 void VideoPlayer::pause()
 {
+    if (m_loading) {
+        m_pausedWhileLoading = true;
+        return;
+    }
     m_wantPlaying = false;
     m_player->pause();
 }
@@ -121,6 +151,8 @@ void VideoPlayer::seek(int position)
 
 void VideoPlayer::stop()
 {
+    m_reader->cancel();
+    setLoading(false);
     m_reloadDue = false;
     m_wantPlaying = false;
     m_player->stop();

@@ -94,6 +94,16 @@ Page {
         }
     }
 
+    property int voiceToHear: -1
+    function voiceHeard() {
+        if (voiceToHear >= 0) backend.call("setVoiceListened", { message: voiceToHear })
+        voiceToHear = -1
+    }
+    Connections {
+        target: voicePlayer
+        onMessageIdChanged: if (voicePlayer.messageId >= 0 && voicePlayer.messageId === voiceToHear) voiceHeard()
+    }
+
     function open(id, kind, body, outgoing) {
         if (body.fileState !== 2) {
             if (body.fileState !== 1) backend.call("downloadFile", { message: id })
@@ -102,12 +112,13 @@ Page {
         } else if (kind === "voice") {
             if (voicePlayer.messageId === id && voicePlayer.playing) {
                 voicePlayer.pause()
-            } else if (voicePlayer.play(id)) {
-                window.voiceFrom = ""
-                // Heard is heard, wherever it was: its chat stops showing it as new.
-                if (!outgoing && body.listened !== true) backend.call("setVoiceListened", { message: id })
             } else {
-                Notices.show(qsTrId("threesea-la-cannot-play"), Notice.Long, Notice.Center)
+                voicePlayer.play(id)
+                window.voiceFrom = ""
+                // Heard is heard, wherever it was: its chat stops showing it as new. Once it could
+                // be read.
+                voiceToHear = !outgoing && body.listened !== true ? id : -1
+                if (voicePlayer.messageId === id) voiceHeard()
             }
         } else if (kind === "video" && videoPlayer.available) {
             pageStack.push(Qt.resolvedUrl("VideoPlayerPage.qml"), { messageId: id })

@@ -99,6 +99,7 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
         emit dataEncryptionChanged();
         emit stateChanged();
     });
+    m_mediaReads.setMaxThreadCount(1);
     connect(this, &ThreeseBackend::keyWorkDone, this, &ThreeseBackend::onKeyWorkDone, Qt::QueuedConnection);
     m_network = new QNetworkConfigurationManager(this);
     connect(m_network, &QNetworkConfigurationManager::configurationChanged, this, &ThreeseBackend::reportNetwork);
@@ -129,6 +130,8 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
 
 ThreeseBackend::~ThreeseBackend()
 {
+    // They read through this object and the core.
+    m_mediaReads.waitForDone();
     m_dbKey.fill('\0');
     QWriteLocker locker(&m_coreLock);
     if (m_core) {
