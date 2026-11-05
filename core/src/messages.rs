@@ -227,6 +227,17 @@ pub enum OutgoingState {
 }
 
 /// Incoming message state.
+/// An incoming message that was just marked read.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadMessage {
+    /// Its row.
+    pub id: i64,
+    /// Its protocol ID.
+    pub message_id: u64,
+    /// The sender asked for no delivery receipts.
+    pub no_receipts: bool,
+}
+
 pub const INCOMING_UNREAD: i64 = 0;
 pub const INCOMING_READ: i64 = 1;
 
@@ -264,6 +275,11 @@ pub struct Message {
     /// [`MIGRATION_WRITTEN_OUT`]).
     pub written_out: bool,
 }
+
+/// Whether the sender asked for no delivery receipts (flag `0x80`, Threema Gateway's): the read
+/// receipt stays away too.
+pub(crate) const MIGRATION_NO_RECEIPTS: &str = "
+    ALTER TABLE messages ADD COLUMN no_receipts INTEGER NOT NULL DEFAULT 0;";
 
 /// Received 1:1 messages stored on a leader whose reflection isn't confirmed
 /// ([`Store::await_reflection`]).
@@ -1191,16 +1207,34 @@ impl Store {
         Ok(())
     }
 
-    /// Mark a chat's incoming messages read; the protocol IDs of those that weren't. The second
-    /// time there are none, so what the others have to hear of it is queued with this
-    /// ([`crate::reactions::OUTBOX_READ_RECEIPT`]).
-    pub fn mark_conversation_read(&self, conversation: &str) -> Result<Vec<u64>, StoreError> {
-        let mut statement = self.conn.prepare(
-            "SELECT message_id FROM messages WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
+    /// The sender of this message asked for no delivery receipts.
+    pub fn set_no_receipts(&self, sender: &str, message_id: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE messages SET no_receipts = 1
+             WHERE conversation = ?1 AND message_id = ?2 AND outgoing = 0",
+            params![sender, message_id.cast_signed()],
         )?;
-        let ids: Vec<u64> = statement
+        Ok(())
+    }
+
+    /// Mark a chat's incoming messages read; those that weren't. The second time there are none,
+    /// so what the others have to hear of it is queued with this
+    /// ([`crate::reactions::OUTBOX_READ_RECEIPT`]).
+    pub fn mark_conversation_read(
+        &self,
+        conversation: &str,
+    ) -> Result<Vec<ReadMessage>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, message_id, no_receipts FROM messages
+             WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
+        )?;
+        let read: Vec<ReadMessage> = statement
             .query_map(params![conversation, INCOMING_UNREAD], |row| {
-                row.get::<_, i64>(0).map(i64::cast_unsigned)
+                Ok(ReadMessage {
+                    id: row.get(0)?,
+                    message_id: row.get::<_, i64>(1)?.cast_unsigned(),
+                    no_receipts: row.get(2)?,
+                })
             })?
             .collect::<Result<_, _>>()?;
         self.conn.execute(
@@ -1210,7 +1244,7 @@ impl Store {
         )?;
         // Reading the chat takes the hand-set mark away, as on Android.
         self.set_marked_unread(conversation, false)?;
-        Ok(ids)
+        Ok(read)
     }
 
     /// The key of every chat holding more than the app's own status lines (a call is a message).
@@ -1899,7 +1933,9 @@ mod tests {
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].0.message_id, 9);
         assert_eq!(conversations[0].1, 1, "one unread");
-        assert_eq!(store.mark_conversation_read("ECHOECHO").unwrap(), vec![9]);
+        let read = store.mark_conversation_read("ECHOECHO").unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].message_id, 9);
         assert_eq!(store.conversations().unwrap()[0].1, 0);
         assert_eq!(
             store.conversation_messages("ECHOECHO", 50).unwrap().len(),
@@ -2538,6 +2574,7 @@ mod tests {
                      DROP TABLE picture_restored; DROP TABLE synced_pictures;
                      DROP TABLE group_picture_sends;
                      ALTER TABLE groups DROP COLUMN picture_pending;
+                     ALTER TABLE messages DROP COLUMN no_receipts;
                      PRAGMA user_version = 35;",
                 )
                 .unwrap();

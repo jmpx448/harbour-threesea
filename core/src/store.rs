@@ -213,6 +213,8 @@ const MIGRATIONS: &[&str] = &[
     crate::groups::MIGRATION_PICTURE_SENDS,
     // 41: a count of the changes to what Threema Web's receivers are made of, kept by triggers
     crate::app_web_data::MIGRATION_RECEIVER_GENERATION,
+    // 42: incoming messages say whether their sender wants no receipts
+    crate::messages::MIGRATION_NO_RECEIPTS,
 ];
 
 /// Setting keys.

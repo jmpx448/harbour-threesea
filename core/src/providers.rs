@@ -993,7 +993,14 @@ impl StoreConversations {
         overrides: &MessageOverrides,
         message_id: u64,
     ) -> Result<(), ProviderError> {
-        if self.from_sync || overrides.disable_delivery_receipts {
+        if overrides.disable_delivery_receipts {
+            // For when it is read.
+            self.store
+                .set_no_receipts(sender, message_id)
+                .map_err(foreign)?;
+            return Ok(());
+        }
+        if self.from_sync {
             return Ok(());
         }
         let receipt_id = MessageId::random().0;
@@ -1305,6 +1312,15 @@ mod tests {
         receive(10, true, false);
         receive(11, false, true);
         assert_eq!(receipts(), ["0000000000000009"]);
+        // Asked for none: the read receipt remembers it.
+        let without: Vec<u64> = store
+            .mark_conversation_read(MEMBER)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.no_receipts)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(without, [11]);
     }
 
     #[test]

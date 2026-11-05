@@ -12,7 +12,7 @@ use crate::{
     app::{ApiError, App},
     connection::{self, ConnectionSetup, FromConnection, ToConnection},
     contacts,
-    messages::{EDIT_DELETE_MAX_AGE_MS, Message, OutgoingState, now_ms},
+    messages::{EDIT_DELETE_MAX_AGE_MS, Message, OutgoingState, ReadMessage, now_ms},
     reactions,
     store::keys,
 };
@@ -1079,13 +1079,13 @@ impl App {
         &self,
         chat: &str,
         conversation: Option<&Conversation>,
-        read: &[u64],
+        read: &[ReadMessage],
     ) -> Result<(), ApiError> {
         if read.is_empty() {
             return Ok(());
         }
-        let queue = |kind: &str| -> Result<(), ApiError> {
-            for bundle in read.chunks(reactions::READ_REPORT_IDS_MAX) {
+        let queue = |kind: &str, ids: &[u64]| -> Result<(), ApiError> {
+            for bundle in ids.chunks(reactions::READ_REPORT_IDS_MAX) {
                 self.store.outbox_add(
                     chat,
                     MessageId::random().0,
@@ -1096,7 +1096,8 @@ impl App {
             Ok(())
         };
         if self.store.multi_device()?.is_some() {
-            queue(reactions::OUTBOX_READ_UPDATE)?;
+            let all: Vec<u64> = read.iter().map(|message| message.message_id).collect();
+            queue(reactions::OUTBOX_READ_UPDATE, &all)?;
         }
         // Groups have no read receipts (lists have nothing incoming); no contact, no way to send.
         if !matches!(conversation, Some(Conversation::Contact(_))) {
@@ -1112,7 +1113,12 @@ impl App {
             None => self.app_settings()?.read_receipts,
         };
         if send {
-            queue(reactions::OUTBOX_READ_RECEIPT)?;
+            let wanted: Vec<u64> = read
+                .iter()
+                .filter(|message| !message.no_receipts)
+                .map(|message| message.message_id)
+                .collect();
+            queue(reactions::OUTBOX_READ_RECEIPT, &wanted)?;
         }
         Ok(())
     }
@@ -1629,6 +1635,30 @@ mod tests {
         assert_eq!(read_reports(&app, PEER), receipts);
         assert_eq!(app.mark_read(PEER).unwrap()["read"], 0);
         assert_eq!(read_reports(&app, PEER), receipts);
+    }
+
+    /// A sender that asked for no receipts (flag `0x80`) gets no read receipt either; the other
+    /// messages of the read get theirs.
+    #[test]
+    fn a_message_without_receipts_is_left_out_of_the_read_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        unread_from_peer(&app, 3);
+        app.store.set_no_receipts(PEER, 2).unwrap();
+        assert_eq!(app.mark_read(PEER).unwrap()["read"], 3);
+        let queued = app.store.outbox().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(reactions::read_report_ids(&queued[0].body), [1, 3]);
+        app.store.outbox_clear(PEER).unwrap();
+
+        // Nothing wanted: no empty receipt.
+        app.store
+            .insert_incoming(PEER, 4, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+        app.store.set_no_receipts(PEER, 4).unwrap();
+        assert_eq!(app.mark_read(PEER).unwrap()["read"], 1);
+        assert!(app.store.outbox().unwrap().is_empty());
     }
 
     /// With read receipts off, the contact hears nothing and the other devices still do; with a
