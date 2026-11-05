@@ -4134,7 +4134,7 @@ mod tests {
                 "ABCD1234",
                 3,
                 "location",
-                &json!({"lat": 59.9, "lon": 10.7, "name": "North pier"}).to_string(),
+                &json!({"latitude": 59.9, "longitude": 10.7, "name": "North pier"}).to_string(),
                 1_700_000_060_000,
             )
             .unwrap();

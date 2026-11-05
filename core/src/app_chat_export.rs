@@ -131,7 +131,7 @@ impl App {
                 match message.kind.as_str() {
                     "text" => line.push_str(split_quote(&message.body).1),
                     "location" => {
-                        let (lat, lon) = (body["lat"].as_f64(), body["lon"].as_f64());
+                        let (lat, lon) = (body["latitude"].as_f64(), body["longitude"].as_f64());
                         for field in ["name", "address"] {
                             if let Some(value) = body[field].as_str().filter(|v| !v.is_empty()) {
                                 line.push_str(value);

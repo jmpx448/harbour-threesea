@@ -596,7 +596,7 @@ impl Seeder<'_> {
 
         // Location, a quote of it, an edited message and one deleted for everyone.
         let location = json!({
-            "lat": 59.9139, "lon": 10.7522, "accuracy": 12.0,
+            "latitude": 59.9139, "longitude": 10.7522, "accuracy": 12.0,
             "name": "North pier", "address": "Havnegata 1",
         });
         let located = self.chat(
