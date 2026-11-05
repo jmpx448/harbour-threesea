@@ -212,10 +212,11 @@ impl App {
             }
         };
         let finish = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-            let mut file = writer
+            let file = writer
                 .finish()
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            file.flush().map_err(|e| ApiError::Internal(e.to_string()))
+            file.sync_all()
+                .map_err(|e| ApiError::Internal(e.to_string()))
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;

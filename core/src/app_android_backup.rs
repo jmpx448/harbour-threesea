@@ -2462,6 +2462,44 @@ mod export_tests {
         assert_eq!(status["interval"], "weekly", "from what is stored");
     }
 
+    /// A killed export's partial file goes with the next backup; nothing else in the folder does,
+    /// and the new archive ends up complete under its final name.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_backup_clears_what_a_killed_one_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path(), [7; 32]);
+        let name = |n: &str| folder.path().join(n);
+        std::fs::write(name("threema-backup-20231114-221320.zip.part"), b"x").unwrap();
+        for stays in [
+            "threema-backup-20231114-221320.zip",
+            "threema-backup-2023.zip.part",
+            "holiday.zip.part",
+        ] {
+            std::fs::write(name(stays), b"x").unwrap();
+        }
+        let done = run_export(&app, folder.path(), 0).await;
+        let mut left: Vec<String> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let written = std::path::Path::new(done["path"].as_str().unwrap())
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let mut expected = vec![
+            "holiday.zip.part".to_owned(),
+            "threema-backup-20231114-221320.zip".to_owned(),
+            "threema-backup-2023.zip.part".to_owned(),
+            written,
+        ];
+        expected.sort();
+        assert_eq!(left, expected);
+    }
+
     #[test]
     fn backup_file_names() {
         let name = backup_file_name(1_700_000_000_000);

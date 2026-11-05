@@ -116,6 +116,42 @@ type Writer = zip::ZipWriter<std::fs::File>;
 /// How much of an entry is compressed before looking at the cancel flag again.
 const ADD_CHUNK_BYTES: usize = 1 << 20;
 
+/// What an export left behind when the phone restarted or the app was killed during it: gigabytes
+/// nothing else ever takes away. Only one export runs at a time, and this runs before it creates
+/// its own, so none of these is in use.
+fn remove_leftovers(directory: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_ours = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".part"))
+            .is_some_and(is_backup_file_name);
+        if is_ours {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// A folder's entries onto the disk. File systems without that (some answer it this way) lose
+/// nothing to it: anything else is a real failure.
+fn sync_directory(directory: &std::path::Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    match std::fs::File::open(directory).and_then(|folder| folder.sync_all()) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::Unsupported | ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 /// What a failed write means for the user. Never `BackupInvalid`: that is about reading a file.
 fn write_error(error: &std::io::Error) -> ApiError {
     use std::io::ErrorKind;
@@ -200,7 +236,9 @@ impl Export {
         // file that looks like a finished backup.
         let temporary = self.directory.join(format!("{name}.part"));
         let create = temporary.clone();
+        let folder = self.directory.clone();
         let writer = tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
+            remove_leftovers(&folder);
             let file = std::fs::File::create(&create).map_err(|e| write_error(&e))?;
             Ok(zip::ZipWriter::new(file))
         })
@@ -210,9 +248,9 @@ impl Export {
         let result = self.write_entries(writer, &mut summary).await;
         let finished = match result {
             Ok(writer) => tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-                let mut file = writer.finish().map_err(zip_error)?;
-                file.flush().map_err(|e| write_error(&e))?;
-                Ok(())
+                let file = writer.finish().map_err(zip_error)?;
+                // On the disk before it takes the place of an older backup.
+                file.sync_all().map_err(|e| write_error(&e))
             })
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?,
@@ -230,8 +268,23 @@ impl Export {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
         }
-        std::fs::rename(&temporary, &path).map_err(|e| write_error(&e))?;
-        summary.removed_old_backups = self.rotate(&name);
+        // A rename to a new name is only lasting once the folder is on the disk too, and rotating
+        // may delete the only other backup: the battery can die seconds after this.
+        let (from, to, folder) = (temporary.clone(), path.clone(), self.directory.clone());
+        let placed = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
+            std::fs::rename(&from, &to).map_err(|e| write_error(&e))?;
+            Ok(sync_directory(&folder).is_ok())
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        match placed {
+            Ok(true) => summary.removed_old_backups = self.rotate(&name),
+            Ok(false) => tracing::warn!("backup folder not synced, older backups stay"),
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+        }
         Ok((summary, path))
     }
 
