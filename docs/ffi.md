@@ -11,7 +11,7 @@ small and debuggable; secrets inside messages are wiped on both sides after use.
 | `threesea_core_start(config_json, db_key, 32, callback, user_data)` | Starts the core thread. `db_key` comes from `SecretStore` (Sailfish Secrets) and is copied. |
 | `threesea_core_send(core, request_json)` | Queues a request, never blocks. |
 | `threesea_core_stop(core)` | Stops and joins the thread, however long what it is doing takes; no callbacks after it returns. |
-| `threesea_core_quit(core)` | For the end of the process: requests in the queue and the running one get 3 s, then a wait that goes on is dropped; 5 s at most. True: as `threesea_core_stop`. False: the thread still runs and can still call back, so the caller keeps `user_data` and leaves with `_exit`. |
+| `threesea_core_quit(core)` | For the end of the process: requests in the queue and the running one get 3 s, then a wait that goes on is dropped and what was queued behind it and file work on its way get 1 s, and a file that doesn't make it gets no answer; 5.5 s at most. True: as `threesea_core_stop`. False: the thread still runs and can still call back, so the caller keeps `user_data` and leaves with `_exit`. |
 | `threesea_data_removal_mark(data_dir)` | The core's mark of a removal of the ID that never finished (the app was killed in it): -1 none, else whether linked devices remain (0 or 1). The bridge then finishes it. |
 | `threesea_data_remove(data_dir)` | With the core stopped: removes everything in the data directory (database, media, logs), the last step of removing the ID (ADR 0018). False if something stayed. |
 | `threesea_core_version()` / `threesea_string_free()` | Version string. |

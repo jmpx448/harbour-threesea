@@ -36,8 +36,10 @@ pub type Emit = Box<dyn Fn(String) + Send>;
 /// How long [`CoreHandle::quit`] lets the core finish what it is doing and what is queued.
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 /// How long it then gives the core to end after being told to drop what it is waiting for.
-const QUIT_CUT_OFF: Duration = Duration::from_secs(2);
-/// Of that, how long the end waits for blocking tasks; those left run on until the process ends.
+const QUIT_CUT_OFF: Duration = Duration::from_millis(2500);
+/// Of that, how long the requests behind what was dropped have to run.
+const QUIT_QUEUE: Duration = Duration::from_secs(1);
+/// And how long the end waits for blocking tasks; those left run on until the process ends.
 const QUIT_BLOCKING_TASKS: Duration = Duration::from_secs(1);
 
 /// What [`CoreHandle::quit`] tells the core thread.
@@ -45,7 +47,7 @@ const QUIT_BLOCKING_TASKS: Duration = Duration::from_secs(1);
 struct QuitSignal {
     /// The process is ending: nothing holds the thread's end back for long.
     quitting: AtomicBool,
-    /// Drop what the core is waiting for.
+    /// Drop what the core is doing.
     cut_off: Notify,
 }
 
@@ -120,7 +122,7 @@ impl CoreHandle {
                 };
                 drop(db_key);
                 emit(json!({"event": "started", "version": crate::VERSION}).to_string());
-                drive(runtime, run_loop(app, rx, emit), &core_quit);
+                drive(runtime, run_until_quit(app, rx, emit, &core_quit), &core_quit);
             })?;
         Ok(Self {
             tx: Some(tx),
@@ -131,11 +133,12 @@ impl CoreHandle {
     }
 
     /// Stop the core for the end of the process, without waiting on it for long: what is queued
-    /// and running gets [`QUIT_GRACE`], then a wait that goes on is dropped. All of that is what a
-    /// killed process leaves too, which every command has to bear: the store's writes stand or
-    /// fall together, an export is a `.part` file until it is done, and an import that was cut
-    /// off fills in the rest when run again. Returns whether the thread has ended; if not, it
-    /// still runs and can still emit, so the caller leaves the process at once.
+    /// and running gets [`QUIT_GRACE`], then a wait that goes on is dropped and what was queued
+    /// behind it gets [`QUIT_QUEUE`]: a draft or a message from just before the window closed. All
+    /// of that is what a killed process leaves too, which every command has to bear: the store's
+    /// writes stand or fall together, an export is a `.part` file until it is done, and an import
+    /// that was cut off fills in the rest when run again. Returns whether the thread has ended; if
+    /// not, it still runs and can still emit, so the caller leaves the process at once.
     pub fn quit(self) -> bool {
         self.quit_within(QUIT_GRACE, QUIT_CUT_OFF)
     }
@@ -199,22 +202,61 @@ fn finished_within(thread: &JoinHandle<()>, wait: Duration) -> bool {
     true
 }
 
-/// Runs the core's work until it ends or a quit cuts it off.
+/// Runs the core's work and ends the runtime.
 ///
 /// A `LocalSet`: the chat server connection runs as a local task next to the command loop
-/// (libthreema state is not `Send`). Dropping the work drops the `App` with it, which closes the
-/// store as on any other end.
+/// (libthreema state is not `Send`).
 fn drive(runtime: tokio::runtime::Runtime, work: impl Future<Output = ()>, quit: &QuitSignal) {
     let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async {
-        tokio::select! {
-            () = work => {}
-            () = quit.cut_off.notified() => tracing::warn!("quitting: cut off what the core was doing"),
-        }
-    });
+    local.block_on(&runtime, work);
     drop(local);
     if quit.quitting.load(Ordering::SeqCst) {
         runtime.shutdown_timeout(QUIT_BLOCKING_TASKS);
+    }
+}
+
+/// Runs the work until it ends or a quit cuts it off. Says whether it was cut off.
+async fn until_cut_off(work: impl Future<Output = ()>, quit: &QuitSignal) -> bool {
+    tokio::select! {
+        () = work => false,
+        () = quit.cut_off.notified() => true,
+    }
+}
+
+/// The command loop, and after a cut-off what it had not got to. The `App` goes with this, which
+/// closes the store as on any other end.
+async fn run_until_quit(
+    mut app: App,
+    mut rx: mpsc::UnboundedReceiver<CoreRequest>,
+    emit: Emit,
+    quit: &QuitSignal,
+) {
+    // Out here, as file work on a blocking thread still reports after a cut-off.
+    let mut media_events = app.take_media_events();
+    let mut file_work = app.take_file_work();
+    let work = run_loop(&mut app, &mut rx, &mut media_events, &mut file_work, &emit);
+    if until_cut_off(work, quit).await {
+        tracing::warn!("quitting: cut off what the core was doing");
+        let rest = async {
+            run_queued_requests(&mut app, &mut rx, &emit).await;
+            finish_running_file_work(&mut app, &mut file_work, &mut media_events, &emit).await;
+        };
+        // What doesn't make it stays without an answer, which is how the bridge knows.
+        if tokio::time::timeout(QUIT_QUEUE, rest).await.is_err() {
+            tracing::warn!("quitting: requests or file work left");
+        }
+    }
+}
+
+/// What the user did just before the end, behind the command that was cut off: its words would
+/// be gone. Nothing new can arrive, the sender having gone.
+async fn run_queued_requests(
+    app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<CoreRequest>,
+    emit: &Emit,
+) {
+    while let Ok(request) = rx.try_recv() {
+        emit(app.handle_with(&request.json, request.attachments).await);
     }
 }
 
@@ -520,15 +562,19 @@ pub(crate) async fn run_maintenance(app: &mut App, emit: &Emit) {
 }
 
 /// The core loop: commands (in order), connection events, hourly maintenance.
-async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, emit: Emit) {
+async fn run_loop(
+    app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<CoreRequest>,
+    media_events: &mut Option<mpsc::UnboundedReceiver<CoreEvent>>,
+    file_work: &mut Option<mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>>,
+    emit: &Emit,
+) {
     let mut tick = tokio::time::interval(crate::app::MAINTENANCE_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     if let Err(error) = crate::sync::reflect_group_contacts_once(&app.store) {
         tracing::warn!(%error, "group contacts not queued for the other devices");
     }
     let mut connection: Option<mpsc::UnboundedReceiver<FromConnection>> = app.ensure_connection();
-    let mut media_events = app.take_media_events();
-    let mut file_work = app.take_file_work();
     let mut web_events = app.take_web_events();
     app.resume_media();
     // Downloads of contact and group pictures that never finished (kept descriptors).
@@ -536,7 +582,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
     // Locked at start: the private chats' media stay hidden from the UI's readers.
     app.update_media_gate();
     loop {
-        forget_stopped_connection(&app, &mut connection, &emit);
+        forget_stopped_connection(app, &mut connection, emit);
         let transfer_retry_at = app.transfer_retry_at;
         let wake_settled_held = app.wake_settled_held;
         tokio::select! {
@@ -548,7 +594,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 for event in app.take_ui_events() {
                     emit(json!({ "event": event }).to_string());
                 }
-                settle_command(&mut app, &mut media_events, &emit);
+                settle_command(app, media_events, emit);
                 if app.refresh_imported_contacts().await {
                     emit(json!({ "event": "contactsChanged" }).to_string());
                     app.web_refresh();
@@ -561,7 +607,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     }
                 }
                 if core::mem::take(&mut app.maintenance_overdue) {
-                    run_maintenance(&mut app, &emit).await;
+                    run_maintenance(app, emit).await;
                     tick.reset();
                 }
             }
@@ -612,7 +658,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     Some(FromConnection::Backlog(active)) => {
                         emit(json!({"event": "backlog", "active": active}).to_string());
                     }
-                    Some(FromConnection::WakeSettled) => wake_settled(&mut app, &emit),
+                    Some(FromConnection::WakeSettled) => wake_settled(app, emit),
                 }
             }
             finished = async {
@@ -622,7 +668,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 }
             } => {
                 if let Some(finished) = finished {
-                    finish_file_work(&mut app, finished, &mut media_events, &emit).await;
+                    finish_file_work(app, finished, media_events, emit).await;
                 }
             }
             event = async {
@@ -632,7 +678,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 }
             } => {
                 if let Some(event) = event {
-                    on_media_event(&mut app, &event, &emit);
+                    on_media_event(app, &event, emit);
                 }
             }
             event = async {
@@ -652,12 +698,21 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     None => std::future::pending().await,
                 }
             } => app.retry_failed_transfers(),
-            () = app.transfers.ended(), if wake_settled_held => wake_settled(&mut app, &emit),
-            _ = tick.tick() => run_maintenance(&mut app, &emit).await,
+            () = app.transfers.ended(), if wake_settled_held => wake_settled(app, emit),
+            _ = tick.tick() => run_maintenance(app, emit).await,
         }
     }
     // Asked to stop: what was asked for before that still counts, as commands waiting in the queue
     // do. A file sent just before closing the window must not be lost.
+    finish_running_file_work(app, file_work, media_events, emit).await;
+}
+
+async fn finish_running_file_work(
+    app: &mut App,
+    file_work: &mut Option<mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>>,
+    media_events: &mut Option<mpsc::UnboundedReceiver<CoreEvent>>,
+    emit: &Emit,
+) {
     while app.file_work_running > 0 {
         let Some(finished) = (match file_work.as_mut() {
             Some(rx) => rx.recv().await,
@@ -665,7 +720,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
         }) else {
             break;
         };
-        finish_file_work(&mut app, finished, &mut media_events, &emit).await;
+        finish_file_work(app, finished, media_events, emit).await;
     }
 }
 
@@ -897,15 +952,90 @@ mod tests {
         let waiting = Gone(Arc::clone(&gone));
         let quit = QuitSignal::default();
         quit.cut_off.notify_one();
-        drive(
-            runtime(),
+        let cut_off = runtime().block_on(until_cut_off(
             async move {
                 let _waiting = waiting;
                 std::future::pending::<()>().await;
             },
             &quit,
-        );
+        ));
+        assert!(cut_off);
         assert!(gone.load(Ordering::SeqCst), "and with it what it holds");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_is_queued_behind_a_cut_off_command_still_runs() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                app.store
+                    .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+                    .unwrap();
+                let said = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let emit: Emit = {
+                    let said = Arc::clone(&said);
+                    Box::new(move |message| said.lock().unwrap().push(message))
+                };
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                for (id, cmd) in [
+                    (
+                        1,
+                        json!({"cmd": "setDraft", "identity": "ABCD1234", "text": "typed"}),
+                    ),
+                    (2, json!({"cmd": "draft", "identity": "ABCD1234"})),
+                ] {
+                    let mut request = cmd;
+                    request["id"] = json!(id);
+                    tx.send(CoreRequest {
+                        json: Zeroizing::new(request.to_string()),
+                        attachments: Vec::new(),
+                    })
+                    .unwrap();
+                }
+                drop(tx);
+                run_queued_requests(&mut app, &mut rx, &emit).await;
+                let said = said.lock().unwrap();
+                assert_eq!(said.len(), 2);
+                let draft: serde_json::Value = serde_json::from_str(&said[1]).unwrap();
+                assert_eq!(draft["result"]["text"], "typed", "{draft}");
+            })
+            .await;
+    }
+
+    /// Being on a blocking thread when the command loop is cut off doesn't lose a file.
+    #[test]
+    fn a_cut_off_still_finishes_the_file_on_its_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let (said_tx, said) = std::sync::mpsc::channel();
+        let said_tx = std::sync::Mutex::new(said_tx);
+        let emit: Emit = Box::new(move |message| {
+            let _ = said_tx.lock().unwrap().send(message);
+        });
+        // Still open: the loop has no end of the queue to stop at, only the cut-off.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let quit = QuitSignal::default();
+        quit.quitting.store(true, Ordering::SeqCst);
+        quit.cut_off.notify_one();
+        let request = json!({"id": 3, "cmd": "sendFile", "identity": "ABCD1234",
+                             "rendering": "file", "mediaType": "text/plain", "name": "a.txt"});
+        let work = async {
+            let reply = app
+                .handle_from_ui(&request.to_string(), vec![vec![1_u8, 2, 3].into()])
+                .await;
+            assert!(reply.is_none(), "it went to a blocking thread");
+            run_until_quit(app, rx, emit, &quit).await;
+        };
+        drive(runtime(), work, &quit);
+        let answered = said.try_iter().any(|message: String| {
+            let message: serde_json::Value = serde_json::from_str(&message).unwrap();
+            message["reply"] == 3 && message["result"]["kind"] == "file"
+        });
+        assert!(answered, "the file was stored and answered");
     }
 
     #[test]
@@ -915,13 +1045,17 @@ mod tests {
         quit.quitting.store(true, Ordering::SeqCst);
         quit.cut_off.notify_one();
         let began = Instant::now();
-        drive(
-            runtime(),
-            async move {
-                let _ = tokio::task::spawn_blocking(move || blocked.recv()).await;
-            },
-            &quit,
-        );
+        let work = async {
+            let task = tokio::task::spawn_blocking(move || blocked.recv());
+            until_cut_off(
+                async {
+                    let _ = task.await;
+                },
+                &quit,
+            )
+            .await;
+        };
+        drive(runtime(), work, &quit);
         // The task only ends after the drop below, so the end got there without it.
         assert!(began.elapsed() < Duration::from_secs(10));
         drop(release);
