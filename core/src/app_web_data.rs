@@ -342,6 +342,15 @@ fn file_message_type(body: &str) -> &'static str {
     }
 }
 
+/// A file's length in whole seconds, if it says. The browser shows any length it is given, an
+/// empty one too, so none is left out.
+fn file_seconds(body: &serde_json::Value) -> Option<i64> {
+    body["duration"]
+        .as_f64()
+        .filter(|seconds| *seconds >= 0.0)
+        .map(|seconds| seconds.round() as i64)
+}
+
 /// Status lines as Threema Web shows them (our UI translates the codes; the browser can't).
 fn status_text(code: &str) -> String {
     let (kind, argument) = code.split_once('|').unwrap_or((code, ""));
@@ -622,11 +631,25 @@ impl App {
                 if let Some(thumbnail) = self.web_thumbnail_field(message) {
                     fields.push(("thumbnail", thumbnail));
                 }
+                let size = body["size"].as_i64().unwrap_or(0);
+                match (kind, file_seconds(body)) {
+                    ("video", Some(seconds)) => {
+                        let mut video = vec![("duration", seconds.into())];
+                        if size > 0 {
+                            video.push(("size", size.into()));
+                        }
+                        fields.push(("video", map(video)));
+                    }
+                    ("audio", Some(seconds)) => {
+                        fields.push(("audio", map(vec![("duration", seconds.into())])));
+                    }
+                    _ => {}
+                }
                 fields.push((
                     "file",
                     map(vec![
                         ("name", body["name"].as_str().unwrap_or("file").into()),
-                        ("size", body["size"].as_i64().unwrap_or(0).into()),
+                        ("size", size.into()),
                         ("type", media_type.into()),
                         ("inApp", (body["rendering"] == "media").into()),
                     ]),

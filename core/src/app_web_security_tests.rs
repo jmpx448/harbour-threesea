@@ -505,6 +505,52 @@ async fn web_names_too_long_are_value_too_long() {
         .await;
 }
 
+/// A file message as stored, with `body`, and as the browser gets it.
+fn web_file_message(app: &App, id: u64, body: &serde_json::Value) -> (Value, Value) {
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", id, "file", &body.to_string(), 1_762_300_000_000)
+        .unwrap()
+        .unwrap();
+    let wire = app.web_message(&message, "AAAAAAAA");
+    let file = saltyrtc::field(&wire, "file").unwrap().clone();
+    (wire, file)
+}
+
+/// A video and a voice message say how long they are, if they know.
+#[test]
+fn web_videos_and_voice_messages_have_a_length() {
+    let (_dir, app) = fixture();
+    let (video, _) = web_file_message(
+        &app,
+        1,
+        &json!({"rendering": "media", "mediaType": "video/mp4", "name": "a.mp4", "size": 2000,
+            "duration": 61.6}),
+    );
+    let video = saltyrtc::field(&video, "video").unwrap();
+    assert_eq!(saltyrtc::field(video, "duration"), Some(&Value::from(62)));
+    assert_eq!(saltyrtc::field(video, "size"), Some(&Value::from(2000)));
+
+    let (voice, _) = web_file_message(
+        &app,
+        2,
+        &json!({"rendering": "media", "mediaType": "audio/ogg", "name": "a.ogg", "duration": 4.2}),
+    );
+    let audio = saltyrtc::field(&voice, "audio").unwrap();
+    assert_eq!(saltyrtc::field(audio, "duration"), Some(&Value::from(4)));
+    assert!(saltyrtc::field(&voice, "video").is_none());
+
+    for (id, media_type) in [(3, "video/mp4"), (4, "audio/ogg")] {
+        let (unknown, _) = web_file_message(
+            &app,
+            id,
+            &json!({"rendering": "media", "mediaType": media_type, "name": "a"}),
+        );
+        assert!(saltyrtc::field(&unknown, "video").is_none());
+        assert!(saltyrtc::field(&unknown, "audio").is_none());
+    }
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {
