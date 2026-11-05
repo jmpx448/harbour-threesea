@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::{
     app::App,
+    app_web_data::receiver_type,
     providers::CoreEvent,
     web::{
         arp::{self, Incoming, map},
@@ -18,6 +19,14 @@ use crate::{
 };
 
 type Code = &'static str;
+
+/// Threema's limit for a contact's first and last name, in bytes.
+const CONTACT_NAME_BYTES_MAX: usize = 256;
+
+/// The contact an `update/contact` is about: threema-web and Android name it `identity`.
+fn contact_arg<'a>(incoming: &Incoming<'a>) -> Option<&'a str> {
+    incoming.arg("identity").or_else(|| incoming.arg("id"))
+}
 
 /// A string field: `Some(None)` for an explicit `null` (clear it), `None` if left out.
 fn optional<'a>(data: Option<&'a Value>, name: &str) -> Option<Option<&'a str>> {
@@ -101,13 +110,17 @@ impl App {
         // Private chats stay out of the browser's reach (ADR 0013): also for managing them, not
         // only for reading (security audit 2026-10-27, S02).
         let invalid = match (incoming.kind, incoming.sub_type) {
-            ("update", "contact") => Some("invalidContact"),
-            ("update" | "delete", "group") | ("request", "groupSync") => Some("invalidGroup"),
-            ("update" | "delete", "distributionList") => Some("invalidDistributionList"),
+            ("update", "contact") => Some(("invalidContact", contact_arg(incoming))),
+            ("update" | "delete", "group") | ("request", "groupSync") => {
+                Some(("invalidGroup", incoming.arg("id")))
+            }
+            ("update" | "delete", "distributionList") => {
+                Some(("invalidDistributionList", incoming.arg("id")))
+            }
             _ => None,
         };
-        if let Some(code) = invalid
-            && self.web_receiver_key(incoming.arg("id")).is_err()
+        if let Some((code, target)) = invalid
+            && self.web_receiver_key(target).is_err()
         {
             return Some(Err(code));
         }
@@ -141,11 +154,21 @@ impl App {
                 }
             }
             ("update", "contact") => {
-                let Some(id) = incoming.arg("id").map(str::to_owned) else {
+                let Ok(id) = self.web_receiver_key(contact_arg(incoming)) else {
                     return Some(Err("invalidContact"));
                 };
+                if receiver_type(&id) != "contact" {
+                    return Some(Err("invalidContact"));
+                }
                 let first = optional(data, "firstName");
                 let last = optional(data, "lastName");
+                let too_long = |name: Option<Option<&str>>| {
+                    name.flatten()
+                        .is_some_and(|name| name.trim().len() > CONTACT_NAME_BYTES_MAX)
+                };
+                if too_long(first) || too_long(last) {
+                    return Some(Err("valueTooLong"));
+                }
                 if first.is_some() || last.is_some() {
                     let current = self.store.contact(&id).ok().flatten();
                     let keep = |new: Option<Option<&str>>, old: Option<String>| match new {
@@ -163,7 +186,7 @@ impl App {
                 Ok(arp::message(
                     "update",
                     "contact",
-                    Some(map(vec![("id", id.as_str().into())])),
+                    Some(map(vec![("identity", id.as_str().into())])),
                     Some(map(vec![(
                         "receiver",
                         self.web_receiver("contact", &id).unwrap_or(Value::Nil),

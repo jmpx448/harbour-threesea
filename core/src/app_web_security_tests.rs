@@ -323,6 +323,80 @@ fn web_pending_download_not_delivered_after_chat_becomes_private() {
     assert!(blob.is_none(), "no file data for a private chat");
 }
 
+/// A browser can edit a contact, named as threema-web and Android name it, but not a private one.
+#[tokio::test(flavor = "current_thread")]
+async fn web_edits_a_contact_named_by_identity() {
+    let (_dir, mut app) = fixture();
+    let update = |identity: &str, first: &str| {
+        arp::message(
+            "update",
+            "contact",
+            Some(arp::map(vec![
+                ("identity", identity.into()),
+                ("temporaryId", "request-1".into()),
+            ])),
+            Some(arp::map(vec![("firstName", first.into())])),
+        )
+    };
+    let wire = update("BBBBBBBB", "Anna");
+    let reply = app
+        .web_manage(&Incoming::parse(&wire).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let contact = app.store.contact("BBBBBBBB").unwrap().unwrap();
+    assert_eq!(contact.first_name.as_deref(), Some("Anna"));
+    let receiver = saltyrtc::field(&reply, "data")
+        .and_then(|data| saltyrtc::field(data, "receiver"))
+        .unwrap();
+    assert_eq!(
+        saltyrtc::field(receiver, "firstName"),
+        Some(&Value::from("Anna"))
+    );
+
+    let wire = update("BBBBBBBB", &"x".repeat(257));
+    assert_eq!(
+        app.web_manage(&Incoming::parse(&wire).unwrap())
+            .await
+            .unwrap()
+            .unwrap_err(),
+        "valueTooLong"
+    );
+
+    app.store.set_private("CCCCCCCC", true).unwrap();
+    let wire = update("CCCCCCCC", "Hidden");
+    assert_eq!(
+        app.web_manage(&Incoming::parse(&wire).unwrap())
+            .await
+            .unwrap()
+            .unwrap_err(),
+        "invalidContact"
+    );
+    let contact = app.store.contact("CCCCCCCC").unwrap().unwrap();
+    assert_eq!(
+        contact.first_name, None,
+        "a private contact stays as it was"
+    );
+
+    // Whichever key the browser uses, the check and the change go by the same one.
+    let wire = arp::message(
+        "update",
+        "contact",
+        Some(arp::map(vec![
+            ("identity", "CCCCCCCC".into()),
+            ("id", "BBBBBBBB".into()),
+        ])),
+        Some(arp::map(vec![("firstName", "Hidden".into())])),
+    );
+    assert_eq!(
+        app.web_manage(&Incoming::parse(&wire).unwrap())
+            .await
+            .unwrap()
+            .unwrap_err(),
+        "invalidContact"
+    );
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {
