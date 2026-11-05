@@ -18,10 +18,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The full checks (tests, clippy, format, logging rule, cargo audit) gate everything below.
+  # All of CI but its builds (checks, every text translated, libthreema's tests, the SDK tests)
+  # gates everything below.
   checks:
     if: github.ref == 'refs/heads/release'
     uses: ./.github/workflows/ci.yml
+    with:
+      release_gate: true
 
   version:
     needs: checks

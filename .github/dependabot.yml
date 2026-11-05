@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The workflows' actions are pinned by commit: Dependabot proposes their updates (security fixes
+# included) as pull requests. Crates are not here: Cargo.lock changes go through review with a
+# reason (CLAUDE.md §7.7), and the weekly cargo audit (advisories.yml) says when one is due.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

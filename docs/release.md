@@ -15,10 +15,12 @@ hand. `main` is where work happens; `release` only ever receives merges from `ma
    `THREESEA_SCHEMA_OUT=$PWD/core/tests/fixtures/store-schema-<version>.sql cargo test -p
    threesea-core --lib write_a_releases_schema -- --ignored`, and add the version, its
    migration count and the file to `RELEASED` in `core/src/store_upgrade_tests.rs`.
-2. Open a pull request from `main` into `release`. CI runs the checks and builds both flavours
-   for i486 with the Sailfish SDK.
+2. Open a pull request from `main` into `release`. CI runs the checks (now also requiring every
+   text in `translations/`, `scripts/check.sh --release`), libthreema's and the SDK tests, and
+   builds both flavours for all three architectures, as it does on every push.
 3. Merge it. `.github/workflows/release.yml` then (only on `release`, also when started by hand):
-   - runs all of CI's checks again (the same workflow); nothing is built without them,
+   - runs all of CI's checks and tests again (the same workflow, without its builds); nothing is
+     built without them,
    - checks the version again (and that the tag `v<version>` doesn't exist yet),
    - builds Full and Lite for aarch64, armv7hl and i486,
    - writes `SHA256SUMS` and a build provenance attestation per RPM,
@@ -34,7 +36,9 @@ A failed release workflow changes nothing (the tag and release are made last); f
 
 - Settings → Actions → General → Workflow permissions: "Read and write permissions" (the release
   job creates the tag and the release; the other jobs are read-only by their own settings).
-- Settings → Code security: enable "Private vulnerability reporting" (SECURITY.md points there).
+- Settings → Code security: enable "Private vulnerability reporting" (SECURITY.md points there),
+  and "Dependabot alerts" (advisories for the crates in Cargo.lock; `.github/dependabot.yml`
+  only proposes updates of the workflows' actions).
 - Your account: Settings → Emails → "Keep my email addresses private" and "Block command line
   pushes that expose my email".
 
@@ -93,7 +97,7 @@ scripts/validate-rpm.sh RPMS/lite/harbour-threesea-<version>-1.aarch64.rpm
 `FLAVOUR_SUFFIX=0` keeps the plain file name: the store insists on
 `harbour-threesea-<version>-<release>.<arch>.rpm`, while a release on GitHub carries the
 flavour in the name (`…-lite-…`) so both can sit side by side. CI runs the validator on every
-Lite build, so a change that would be refused shows up at once.
+Lite build, for every push, so a change that would be refused shows up at once.
 
 What the validator checks and passes today (2026-10-30): file name and package name, the
 `.desktop` file, the icons, the installed paths, the libraries linked, the RPATH, sandboxing

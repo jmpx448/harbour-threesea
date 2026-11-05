@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# cargo audit once a week as well, not only on pushes: an advisory published while main is quiet
+# would otherwise wait for the next push. GitHub stops schedules after 60 days without activity
+# in the repository and mails a failure only to whoever last changed this file; Dependabot alerts
+# (repository settings) cover the same ground from GitHub's side.
+name: Advisories
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: The app's crates and libthreema's
+        run: |
+          cargo audit
+          cargo audit --file third_party/libthreema/Cargo.lock

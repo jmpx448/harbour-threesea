@@ -34,10 +34,11 @@ All checks in one go: `scripts/check.sh` (private data, logging rules, format, c
 UI's commands and imports against the core and the Jolla Store's list (`scripts/check-qml.py`),
 that the fuzz targets build, how many texts await translation, `cargo audit` if installed);
 `--full` adds libthreema's own tests (`scripts/libthreema-tests.sh`) and every test in the SDK
-(`scripts/run-sdk-tests.sh`: each `scripts/test-*.sh`, the call engine's built only), and fails
-without the SDK image; `--release` fails while a text is missing from `translations/`;
+(`scripts/run-sdk-tests.sh`: each `scripts/test-*.sh` in the SDK, the call engine's built only)
+and the C ABI under AddressSanitizer (`scripts/test-ffi-asan.sh`, nightly), and fails without the
+SDK image; `--release` fails while a text is missing from `translations/`;
 `--quick` does only the first three. CI (`.github/workflows/ci.yml`) runs the default checks,
-libthreema's tests, the SDK tests and builds of both flavours for all three architectures on
+libthreema's tests, the ASan run, the SDK tests and builds of both flavours for all three architectures on
 every push; `advisories.yml` runs `cargo audit` weekly too. `scripts/test-lockstate.sh` runs the real
 window QML on the real Silica with a fake backend and no window system (`tests/lockstate`): the
 app lock, calls and the page stack, one scenario per process, no device or emulator needed.
