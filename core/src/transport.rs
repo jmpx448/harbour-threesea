@@ -6,7 +6,7 @@
 //!
 //! Upstream: Android's `D2mFrameLayer` / `MultiplexLayer` (`domain/.../connection`).
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Duration};
 
 use libthreema::{
     common::{ClientInfo, D2xDeviceId, config::Config},
@@ -19,9 +19,15 @@ use libthreema::{
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpStream,
+    time::timeout,
 };
 
 use crate::websocket::{Datagrams, WebSocketError};
+
+/// How long one write may take. It only waits when the kernel's send buffer is full, and while it
+/// waits the connection's loop hears nothing, timers and "Connect now" included: on a stalled link
+/// TCP alone would take many minutes to give up.
+const WRITE_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -33,6 +39,8 @@ pub enum TransportError {
     D2m(String),
     #[error("connection closed")]
     Closed,
+    #[error("writing timed out")]
+    WriteTimeout,
 }
 
 fn d2m_error(error: impl std::fmt::Display) -> TransportError {
@@ -54,10 +62,13 @@ pub enum Transport {
 
 impl Transport {
     pub async fn write_csp(&mut self, frame: &[u8]) -> Result<(), TransportError> {
-        match self {
-            Self::Direct(stream) => Ok(stream.write_all(frame).await?),
-            Self::Mediator(mediator) => mediator.send(D2mOutgoing::Proxy(frame.to_vec())).await,
-        }
+        within_write_limit(async {
+            match self {
+                Self::Direct(stream) => Ok(stream.write_all(frame).await?),
+                Self::Mediator(mediator) => mediator.send(D2mOutgoing::Proxy(frame.to_vec())).await,
+            }
+        })
+        .await
     }
 
     /// A mediator payload (multi-device only; an error without it).
@@ -66,7 +77,7 @@ impl Transport {
             Self::Direct(_) => Err(TransportError::D2m(
                 "not connected through the mediator".into(),
             )),
-            Self::Mediator(mediator) => mediator.send(payload).await,
+            Self::Mediator(mediator) => within_write_limit(mediator.send(payload)).await,
         }
     }
 
@@ -88,6 +99,14 @@ impl Transport {
     pub fn is_mediator(&self) -> bool {
         matches!(self, Self::Mediator(_))
     }
+}
+
+async fn within_write_limit(
+    write: impl Future<Output = Result<(), TransportError>>,
+) -> Result<(), TransportError> {
+    timeout(WRITE_LIMIT, write)
+        .await
+        .map_err(|_| TransportError::WriteTimeout)?
 }
 
 /// The connection to the mediator, after its handshake.
@@ -203,5 +222,41 @@ impl Mediator {
             let datagram = self.socket.receive().await?;
             self.d2m.add_datagrams(vec![datagram]).map_err(d2m_error)?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{net::TcpListener, time::Instant};
+
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_write_into_a_stalled_link_gives_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        // Accepted, and never read: more than the kernel's buffers hold can't go anywhere.
+        let (_peer, _) = listener.accept().await.unwrap();
+        let mut transport = Transport::Direct(stream);
+        let start = Instant::now();
+        let written = transport.write_csp(&vec![0_u8; 64 * 1024 * 1024]).await;
+        assert!(matches!(written, Err(TransportError::WriteTimeout)));
+        assert_eq!(start.elapsed(), WRITE_LIMIT);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_write_that_goes_through_is_not_touched() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let mut transport = Transport::Direct(stream);
+        transport.write_csp(b"frame").await.unwrap();
+        let mut read = [0_u8; 5];
+        peer.read_exact(&mut read).await.unwrap();
+        assert_eq!(&read, b"frame");
     }
 }

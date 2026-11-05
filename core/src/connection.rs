@@ -646,6 +646,7 @@ impl From<TransportError> for ConnectionError {
         match error {
             TransportError::Io(error) => Self::Io(error),
             TransportError::Closed => Self::Io(std::io::ErrorKind::ConnectionAborted.into()),
+            TransportError::WriteTimeout => Self::Timeout,
             // The socket itself, or its end without a close code.
             TransportError::WebSocket(WebSocketError::Socket(error)) => {
                 Self::Io(std::io::Error::other(error))
@@ -4103,6 +4104,7 @@ mod device_group_error_tests {
             ConnectionError::Timeout,
             ConnectionError::Reconnect,
             ConnectionError::from(TransportError::Closed),
+            ConnectionError::from(TransportError::WriteTimeout),
             ConnectionError::from(TransportError::Io(
                 std::io::ErrorKind::ConnectionReset.into(),
             )),
