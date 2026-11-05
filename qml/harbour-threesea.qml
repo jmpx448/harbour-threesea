@@ -386,6 +386,8 @@ ApplicationWindow {
     onLockedChanged: {
         if (locked) {
             hideNotifications()
+            // It named the caller a moment ago.
+            if (callNotificationWanted) showCallNotification()
         } else {
             clearNotification("appLocked")
             appLockedNews = false
