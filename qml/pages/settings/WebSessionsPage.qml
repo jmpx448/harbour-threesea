@@ -8,7 +8,7 @@ import "../../components/Format.js" as Fmt
 
 // Threema Web (ADR 0013): the switch and the browsers this phone serves, like Linked devices. Pull
 // down to scan the code web.threema.ch shows; tap a session to connect or disconnect it; long press
-// to remove.
+// to rename or remove it, or pull down to remove them all.
 Page {
     id: page
     // The window opens this page from its notifications, unless it is on top already.
@@ -29,7 +29,7 @@ Page {
     JsonListModel {
         id: sessionRows
         keyField: "id"
-        roles: ["id", "state", "client", "host", "selfHosted", "lastConnection"]
+        roles: ["id", "state", "client", "label", "host", "selfHosted", "lastConnection"]
     }
     onSessionsChanged: sessionRows.update(sessions)
     JsonListModel {
@@ -105,6 +105,23 @@ Page {
         })
     }
 
+    function clientName(client) {
+        return client ? client.charAt(0).toUpperCase() + client.slice(1)
+                        //% "Browser"
+                      : qsTrId("threesea-la-web-browser")
+    }
+
+    function renameSession(id, label, client) {
+        var dialog = pageStack.push(Qt.resolvedUrl("WebSessionNameDialog.qml"),
+                                    { name: label, ownName: clientName(client) })
+        dialog.accepted.connect(function() {
+            backend.call("webRename", { session: id, label: dialog.name }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
+            })
+        })
+    }
+
     function removeServer(item, host) {
         item.remorseAction(qsTrId("threesea-la-web-removing"), function() {
             backend.call("webRemoveServer", { host: host }, function(ok, result, kind, message) {
@@ -157,8 +174,22 @@ Page {
         StayAtTop { target: list }
 
         PullDownMenu {
-            visible: page.webOn
+            // Switched off, the browsers are still listed, and can still be removed.
+            visible: page.webOn || page.sessions.length > 0
             MenuItem {
+                visible: page.sessions.length > 0
+                //% "Remove all browsers"
+                text: qsTrId("threesea-me-web-remove-all")
+                //% "Removing all browsers"
+                onClicked: Remorse.popupAction(page, qsTrId("threesea-la-web-removing-all"), function() {
+                    backend.call("webDeleteAll", {}, function(ok, result, kind, message) {
+                        if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        page.load()
+                    })
+                })
+            }
+            MenuItem {
+                visible: page.webOn
                 //% "Scan Threema Web code"
                 text: qsTrId("threesea-me-scan-web-code")
                 onClicked: {
@@ -214,6 +245,11 @@ Page {
             contentHeight: Theme.itemSizeMedium
             menu: ContextMenu {
                 MenuItem {
+                    //% "Rename"
+                    text: qsTrId("threesea-me-web-rename")
+                    onClicked: page.renameSession(model.id, model.label, model.client)
+                }
+                MenuItem {
                     //% "Remove"
                     text: qsTrId("threesea-me-web-remove")
                     onClicked: page.removeSession(item, model.id)
@@ -244,10 +280,9 @@ Page {
                     width: parent.width
                     truncationMode: TruncationMode.Fade
                     color: item.highlighted ? Theme.highlightColor : Theme.primaryColor
-                    text: model.client
-                          ? model.client.charAt(0).toUpperCase() + model.client.slice(1)
-                          //% "Browser"
-                          : qsTrId("threesea-la-web-browser")
+                    // Typed by the user or said by the browser: text, never markup.
+                    textFormat: Text.PlainText
+                    text: model.label || page.clientName(model.client)
                 }
                 Label {
                     width: parent.width
