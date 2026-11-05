@@ -3,6 +3,7 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import Sailfish.Pickers 1.0
 import QtMultimedia 5.6
+import "../components/Format.js" as Fmt
 
 // Choose a notification tone, like Jolla's sound settings: the default first, "Select from
 // music", then the system's tones; choosing one plays it. Nothing changes until the dialog is
@@ -31,7 +32,7 @@ Dialog {
         tone = path
         preview.stop()
         if (path.length > 0) {
-            preview.source = "file://" + path
+            preview.source = Fmt.fileUrl(path)
             preview.play()
         }
     }

@@ -728,7 +728,7 @@ Page {
                 Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
                 // Documents and media open in the app registered for the type (e.g. Documents
                 // for PDFs), if any; the core decides by the name the file has now.
-                if (open && result.openable) Qt.openUrlExternally("file://" + result.path)
+                if (open && result.openable) Qt.openUrlExternally(Fmt.fileUrl(result.path))
             }
         })
     }
@@ -1876,7 +1876,7 @@ Page {
         id: wallpaper
         visible: page.shown && backend.wallpaper !== ""
         anchors.fill: parent
-        source: visible ? "file://" + backend.wallpaper : ""
+        source: visible ? Fmt.fileUrl(backend.wallpaper) : ""
         fillMode: Image.PreserveAspectCrop
         asynchronous: true
         clip: true
@@ -2371,7 +2371,7 @@ Page {
                             asynchronous: true
                             sourceSize.width: width
                             sourceSize.height: height
-                            source: modelData.photo ? "file://" + modelData.path
+                            source: modelData.photo ? Fmt.fileUrl(modelData.path)
                                   : modelData.video ? "image://nemoThumbnail/" + modelData.path
                                   : "image://theme/icon-m-attach?" + Theme.highlightColor
                             // Show the photo the way it will be sent (EXIF rotation applied).
@@ -2917,7 +2917,7 @@ Page {
             videoPreparer.file = entry
             seconds = 0
             frame.path = entry.path
-            durationProbe.source = entry.path
+            durationProbe.source = Fmt.fileUrl(entry.path)
             giveUp.restart()
         }
         function finish(image) {

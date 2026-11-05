@@ -125,7 +125,7 @@ Page {
                 //% "Saved to Downloads"
                 Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
                 // Documents and media only; the core decides by the name the file has now.
-                if (open && result.openable) Qt.openUrlExternally("file://" + result.path)
+                if (open && result.openable) Qt.openUrlExternally(Fmt.fileUrl(result.path))
             }
         })
     }

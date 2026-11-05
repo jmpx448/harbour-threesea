@@ -169,6 +169,15 @@ function coordinates(location) {
     return text
 }
 
+// A local path as a file: URL. Names come from senders and from the device's files: #, ? and % in
+// them are part of the name, and only encoded do they stay that (as a query or a fragment the rest
+// of the name would be lost, and %2F would lead to another folder). Some paths come as URLs already.
+function fileUrl(path) {
+    path = String(path)
+    if (path.indexOf("file://") === 0) return path
+    return "file://" + path.split("/").map(encodeURIComponent).join("/")
+}
+
 // A geo: link (RFC 5870) for maps apps.
 function geoUri(location) {
     return "geo:" + location.latitude + "," + location.longitude

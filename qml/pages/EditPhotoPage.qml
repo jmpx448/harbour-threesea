@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import "../components/Format.js" as Fmt
 
 // Cut and turn a photo before it is sent (Android's editor, without the drawing). Accepting
 // writes a new picture into the app's capture folder and hands back its path; the original is
@@ -100,7 +101,7 @@ Dialog {
                     width: dialog.sideways ? view.height : view.width
                     height: dialog.sideways ? view.width : view.height
                     rotation: dialog.turn
-                    source: dialog.path ? "file://" + dialog.path : ""
+                    source: dialog.path ? Fmt.fileUrl(dialog.path) : ""
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
                     // As the camera stored it: QML's Image leaves the EXIF rotation alone
