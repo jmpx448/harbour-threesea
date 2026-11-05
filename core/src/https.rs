@@ -240,13 +240,23 @@ pub fn server_url(url: &str) -> std::borrow::Cow<'_, str> {
 /// # Errors
 /// Only if the configuration cannot be built (a programming error).
 pub fn tls_config() -> Result<rustls::ClientConfig, String> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let roots = Arc::new(rustls::RootCertStore {
+    tls_config_with(mozilla_roots())
+}
+
+/// The certificate authorities of the Web, which every certificate must chain to.
+fn mozilla_roots() -> rustls::RootCertStore {
+    rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    });
-    let webpki = WebPkiServerVerifier::builder_with_provider(roots, Arc::clone(&provider))
-        .build()
-        .map_err(|e| e.to_string())?;
+    }
+}
+
+/// [`tls_config`], with these roots: all that differs under test.
+fn tls_config_with(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let webpki =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .map_err(|e| e.to_string())?;
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
@@ -334,13 +344,20 @@ pub fn tofu_tls_config(
     expected: Option<String>,
     seen: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<rustls::ClientConfig, String> {
+    tofu_tls_config_with(mozilla_roots(), expected, seen)
+}
+
+/// [`tofu_tls_config`], with these roots: all that differs under test.
+fn tofu_tls_config_with(
+    roots: rustls::RootCertStore,
+    expected: Option<String>,
+    seen: Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<rustls::ClientConfig, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let roots = Arc::new(rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    });
-    let webpki = WebPkiServerVerifier::builder_with_provider(roots, Arc::clone(&provider))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let webpki =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .map_err(|e| e.to_string())?;
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
@@ -533,13 +550,21 @@ impl HttpsClient {
     /// Fails only if the TLS configuration cannot be built (a programming error).
     pub fn new() -> Result<Self, HttpsError> {
         let tls = tls_config().map_err(HttpsError::InvalidRequest)?;
+        Self::with(tls, Arc::new(IpVersionResolver))
+    }
+
+    /// The client, with this TLS and these name lookups: all that differs under test.
+    fn with(
+        tls: rustls::ClientConfig,
+        resolver: Arc<dyn reqwest::dns::Resolve>,
+    ) -> Result<Self, HttpsError> {
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .user_agent(user_agent())
             .https_only(true)
             .connect_timeout(CONNECT_TIMEOUT)
             .tcp_user_timeout(TCP_USER_TIMEOUT)
-            .dns_resolver(std::sync::Arc::new(IpVersionResolver))
+            .dns_resolver(resolver)
             // Stopping hands the redirect back as the response: an unexpected status for callers.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
@@ -964,3 +989,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "https_pinning_tests.rs"]
+mod pinning_tests;

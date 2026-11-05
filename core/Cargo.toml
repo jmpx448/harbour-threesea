@@ -94,3 +94,6 @@ rusqlite = { version = "0.37", features = ["bundled-sqlcipher", "hooks"] }
 tempfile = "3"
 # The same tokio, its clock under the tests' control.
 tokio = { version = "1.52", default-features = false, features = ["test-util"] }
+# TLS pinning tests: certificates of a throwaway CA, made at test time, for a local TLS server, so
+# no private key lies in the repository. Over the same ring; only ever in tests.
+rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "ring"] }
