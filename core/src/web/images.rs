@@ -101,9 +101,33 @@ pub fn sent_image(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     ))
 }
 
+/// A GIF's size from its header.
+#[must_use]
+pub fn gif_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !matches!(bytes.get(..6)?, b"GIF87a" | b"GIF89a") {
+        return None;
+    }
+    let side = |at: usize| {
+        Some(u32::from(u16::from_le_bytes([
+            *bytes.get(at)?,
+            *bytes.get(at + 1)?,
+        ])))
+    };
+    Some((side(6)?, side(8)?)).filter(|(width, height)| *width > 0 && *height > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gifs_size_is_in_its_header() {
+        let gif = b"GIF89a\x40\x01\xf0\x00rest";
+        assert_eq!(gif_size(gif), Some((320, 240)));
+        assert_eq!(gif_size(b"GIF89a\x40"), None);
+        assert_eq!(gif_size(b"GIF89a\x00\x00\xf0\x00"), None);
+        assert_eq!(gif_size(b"PNG"), None);
+    }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(

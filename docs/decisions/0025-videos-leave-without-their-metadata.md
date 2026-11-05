@@ -25,7 +25,8 @@ moment nobody is looking, and silently dropping it would lose the user's video. 
 
 Where there is nobody to ask, it isn't sent, and a notice says so: a chat being left (videos still
 waiting go to the core at once, without a thumbnail, and captures of ours go with the refusal, as
-for any file refused then), and a forward. A video picked "as a file" is the user's file and isn't
+for any file refused then), a forward, and a video from Threema Web, where an alert says to send it
+as a file instead. A video picked "as a file" is the user's file and isn't
 touched; every other way a video reaches a chat goes through the core's cleaning, a shared one and
 one the thumbnailer has no frame for included.
 

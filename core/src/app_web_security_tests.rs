@@ -660,6 +660,119 @@ fn web_files_have_a_name_to_save_under() {
     );
 }
 
+/// What a `create/fileMessage` stored, or its refusal.
+async fn web_send(app: &mut App, wire: Value) -> Result<serde_json::Value, &'static str> {
+    let reply = app
+        .web_media_action(1, &Incoming::parse(&wire).unwrap())
+        .await
+        .unwrap()?
+        .unwrap();
+    let id = saltyrtc::field(&reply, "data")
+        .and_then(|data| saltyrtc::field(data, "messageId"))
+        .and_then(Value::as_str)
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    let message = app.store.message(id).unwrap().unwrap();
+    Ok(serde_json::from_str(&message.body).unwrap())
+}
+
+/// What the browser sends goes as media like on Android, unless sent as a file; a video only
+/// without its metadata.
+#[tokio::test(flavor = "current_thread")]
+async fn web_sends_media_as_media() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(&mut app);
+    let wire = |data: &[u8], media_type: &str, as_file: bool| {
+        arp::message(
+            "create",
+            "fileMessage",
+            Some(arp::map(vec![
+                ("type", "contact".into()),
+                ("id", "BBBBBBBB".into()),
+            ])),
+            Some(arp::map(vec![
+                ("data", Value::Binary(data.to_vec())),
+                ("fileType", media_type.into()),
+                ("name", "my holiday".into()),
+                ("sendAsFile", as_file.into()),
+            ])),
+        )
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let gif = b"GIF89a\x40\x01\xf0\x00rest";
+            let (video, _) = crate::mp4::fixture::video(640, 360, false);
+            let body = web_send(&mut app, wire(gif, "image/gif", false))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "media");
+            assert_eq!(body["animated"], true);
+            assert_eq!(body["width"], 320);
+            assert_eq!(body["height"], 240);
+            assert_eq!(body["thumbnail"], false);
+            assert_eq!(
+                body["name"], "image.gif",
+                "says nothing, like any picture sent"
+            );
+
+            let body = web_send(&mut app, wire(b"RIFF....WEBP", "image/webp", false))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "media");
+
+            let body = web_send(&mut app, wire(&video, "video/mp4", false))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "media");
+            assert_eq!(body["width"], 640);
+            assert_eq!(body["name"], "video.mp4");
+
+            for (data, media_type) in [(&gif[..], "image/gif"), (&video[..], "video/mp4")] {
+                let body = web_send(&mut app, wire(data, media_type, true))
+                    .await
+                    .unwrap();
+                assert_eq!(body["rendering"], "file", "{media_type} as a file");
+                assert_eq!(body["name"], "my holiday");
+            }
+
+            // Nobody here to ask about what a video would keep: not sent, and it says why.
+            let before = app
+                .store
+                .conversation_messages("BBBBBBBB", 100)
+                .unwrap()
+                .len();
+            while rx.try_recv().is_ok() {}
+            assert_eq!(
+                web_send(&mut app, wire(b"\x1aE\xdf\xa3 a webm", "video/webm", false))
+                    .await
+                    .unwrap_err(),
+                "internalError"
+            );
+            let mut alerted = false;
+            while let Ok(message) = rx.try_recv() {
+                if let ToWeb::Send(message) = message {
+                    alerted |= saltyrtc::field(&message, "subType") == Some(&Value::from("alert"));
+                }
+            }
+            assert!(alerted, "the browser hears why");
+            assert_eq!(
+                app.store
+                    .conversation_messages("BBBBBBBB", 100)
+                    .unwrap()
+                    .len(),
+                before
+            );
+            let body = web_send(&mut app, wire(b"\x1aE\xdf\xa3 a webm", "video/webm", true))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "file", "the user's file, as it is");
+        })
+        .await;
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {
