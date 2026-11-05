@@ -820,6 +820,13 @@ Page {
     }
 
     // A command whose result is the changed message.
+    // A command with nothing to show but a problem.
+    function tell(command, args) {
+        backend.call(command, args, function(ok, result, kind, message) {
+            if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+        })
+    }
+
     function run(command, args) {
         backend.call(command, args, function(ok, result, kind, message) {
             if (ok) {
@@ -3070,6 +3077,8 @@ Page {
                                             function(ok, result) { if (ok && result) page.addMessage(result) })
                 onDetailsRequested: pageStack.push(Qt.resolvedUrl("MessageDetailsPage.qml"),
                                                    { message: messages.get(index) })
+                onResendRequested: page.tell("resendMessage", { message: model.id })
+                onCancelTransferRequested: page.tell("cancelTransfer", { message: model.id })
                 onForwardRequested: pageStack.push(Qt.resolvedUrl("SharePage.qml"),
                                                    { forwardMessage: model.id, text: Fmt.preview(messages.get(index)) })
                 onPollRequested: page.openPoll(model.id, model.body)
@@ -3140,8 +3149,11 @@ Page {
             anchors {
                 left: parent.left
                 leftMargin: Theme.horizontalPageMargin
+                right: selectionButtons.left
+                rightMargin: Theme.paddingMedium
                 verticalCenter: parent.verticalCenter
             }
+            truncationMode: TruncationMode.Fade
             text: page.selectedCount > 0
                   //% "%n selected"
                   ? qsTrId("threesea-he-n-selected", page.selectedCount)
@@ -3151,6 +3163,7 @@ Page {
             font.pixelSize: Theme.fontSizeSmall
         }
         Row {
+            id: selectionButtons
             anchors {
                 right: parent.right
                 rightMargin: Theme.horizontalPageMargin - Theme.paddingMedium

@@ -73,6 +73,8 @@ ListItem {
     signal forwardRequested()
     signal starToggled()
     signal detailsRequested()
+    signal resendRequested()
+    signal cancelTransferRequested()
     signal locationRequested()
     signal pollRequested()
     signal closePollRequested()
@@ -98,6 +100,8 @@ ListItem {
     // Ours, sent and young enough; messages nobody can have yet are simply changed or removed. Once
     // its send has begun someone may have it, even while one member keeps it pending.
     readonly property bool unsent: outgoing && ((model.state === 0 && !model.writtenOut) || model.state === 4)
+    // It didn't go out, for good: a tap or the menu sends it again.
+    readonly property bool failed: outgoing && model.state === 4 && !isDeleted
     readonly property bool recent: noAgeLimit || Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
 
     // Inner Repeaters have their own `model`.
@@ -139,6 +143,7 @@ ListItem {
 
     onClicked: {
         if (selectionMode) selectToggled()
+        else if (failed && !readOnly) resendRequested()
         else if (isFile) fileRequested()
         else if (isPoll) pollRequested()
         else if (isLocation) locationRequested()
@@ -149,6 +154,9 @@ ListItem {
         id: contextMenuComponent
         ContextMenu {
             id: contextMenu
+            // Its upload or file download is on the way.
+            readonly property bool transferring: item.isFile && (model.body.fileState === 1
+                                                                 || (item.outgoing && model.body.uploadState === 1))
             readonly property bool canDeleteEveryone: item.outgoing && !item.isDeleted && !item.isPoll
                                                       && !item.unsent && item.canDelete && item.recent
                                                       && !item.readOnly
@@ -223,6 +231,21 @@ ListItem {
                     else if (id === "forward") item.forwardRequested()
                     else item.starToggled()
                 }
+            }
+            MenuItem {
+                //% "Send again"
+                text: qsTrId("threesea-me-send-again")
+                visible: item.failed && !item.readOnly
+                onClicked: item.resendRequested()
+            }
+            MenuItem {
+                text: item.isFile && model.body.fileState === 1
+                      //% "Stop download"
+                      ? qsTrId("threesea-me-stop-download")
+                      //% "Stop sending"
+                      : qsTrId("threesea-me-stop-upload")
+                visible: contextMenu.transferring
+                onClicked: item.cancelTransferRequested()
             }
             MenuItem {
                 //% "Copy"

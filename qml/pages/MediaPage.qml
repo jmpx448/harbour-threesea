@@ -8,7 +8,7 @@ import "../components/Format.js" as Fmt
 // Harbour-allowed, so the same layout with Silica). Like Android's gallery it filters by kind
 // (photos, GIFs, videos, voice messages, audio, files; pull-down "Show", a dialog accepted by
 // swipe, saved for all chats). Tap: view, play or open (downloading first if needed); long press:
-// show in chat, save to Downloads, delete (on this device, with a remorse timer).
+// show in chat, save to Downloads, stop a download, delete (on this device, with a remorse timer).
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -373,6 +373,11 @@ Page {
                         text: qsTrId("threesea-me-save-downloads")
                         visible: tile.body.fileState === 2
                         onClicked: page.save(model.id, false)
+                    }
+                    MenuItem {
+                        text: qsTrId("threesea-me-stop-download")
+                        visible: tile.body.fileState === 1
+                        onClicked: backend.call("cancelTransfer", { message: model.id })
                     }
                     MenuItem {
                         text: qsTrId("threesea-me-delete")
