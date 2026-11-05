@@ -80,9 +80,26 @@ FilePreparer::FilePreparer(const QString &path, const QVariantMap &request, cons
 {
 }
 
+FilePreparer::FilePreparer(std::function<QImage()> picture, const QVariantMap &request)
+    : m_picture(std::move(picture))
+    , m_request(request)
+{
+}
+
 void FilePreparer::run()
 {
     QVariantMap request = m_request;
+    if (m_picture) {
+        const QImage image = m_picture();
+        if (image.isNull()) {
+            emit prepared(request, QByteArray(), QByteArray(), QStringLiteral("the picture could not be read"));
+            return;
+        }
+        request.insert(QStringLiteral("name"), image.hasAlphaChannel() ? QStringLiteral("picture.png")
+                                                                       : QStringLiteral("picture.jpg"));
+        preparePicture(image, request);
+        return;
+    }
     const QFileInfo info(m_path);
     if (!info.isFile()) {
         emit prepared(request, QByteArray(), QByteArray(), QStringLiteral("not a file"));
@@ -150,11 +167,16 @@ void FilePreparer::run()
 
     QImageReader reader(m_path);
     reader.setAutoTransform(true); // apply the EXIF rotation before EXIF is dropped
-    QImage image = reader.read();
+    const QImage image = reader.read();
     if (image.isNull()) {
         emit prepared(request, QByteArray(), QByteArray(), reader.errorString());
         return;
     }
+    preparePicture(image, request);
+}
+
+void FilePreparer::preparePicture(QImage image, QVariantMap request)
+{
     // Settings → Media & storage → Image size (Android's: default 1600 px; 0: original).
     const int maxSide = QSettings().value(QStringLiteral("imageSize"), 1600).toInt();
     if (maxSide > 0) {

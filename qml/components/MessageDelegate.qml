@@ -68,6 +68,7 @@ ListItem {
     // Tapped a file message: show it, or fetch it first.
     signal fileRequested()
     signal saveRequested()
+    signal drawRequested()
     signal gifFavouriteRequested()
     signal forwardRequested()
     signal starToggled()
@@ -246,6 +247,14 @@ ListItem {
                 text: qsTrId("threesea-me-save-downloads")
                 visible: item.isFile && model.body.fileState === 2
                 onClicked: item.saveRequested()
+            }
+            MenuItem {
+                //% "Draw on it"
+                text: qsTrId("threesea-me-draw-on-picture")
+                visible: item.isFile && model.body.fileState === 2 && !item.readOnly
+                         && model.body.rendering !== "file" && Fmt.isPicture(model.body.mediaType)
+                         && String(model.body.mediaType).toLowerCase() !== "image/gif"
+                onClicked: item.drawRequested()
             }
             MenuItem {
                 //% "Add to favourite GIFs"

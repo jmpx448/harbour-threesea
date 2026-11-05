@@ -562,6 +562,14 @@ ApplicationWindow {
         }
     }
 
+    // The same for a picture drawn on (sendEditedPicture): nothing comes back to the chat's input.
+    function editedPictureAnswer(chat, alive) {
+        return function(ok, result, kind, message) {
+            if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            else if (alive.yes && result.id !== undefined) chat.messageSent(result)
+        }
+    }
+
     // Close the page holding a PIN (pushWithPin or the app lock settings; it and what it opened):
     // the next person gets the prompt again. Its PIN goes first, in case the stack can't pop right
     // now; settleStack takes the page away.

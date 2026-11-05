@@ -68,6 +68,12 @@ QtObject {
             return !!path
         }
         function decodeQr(image, callback) { callback("") }
+        // What the photo editor asked for last.
+        property var edit
+        function editPhoto(path, crop, rotation, marks, callback) {
+            edit = { path: path, crop: crop, rotation: rotation, marks: marks }
+            callback("/cache/capture/edited.jpg")
+        }
     }
     property QtObject dbus: QtObject {
         signal openChatRequested(string identity)

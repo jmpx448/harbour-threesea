@@ -31,6 +31,7 @@
 #include "coreresult.h"
 #include "endofprocess.h"
 #include "filepreparer.h"
+#include "peerimage.h"
 #include "photoedit.h"
 #include "voicerecorder.h"
 #include "secretstore.h"
@@ -693,7 +694,8 @@ QString ThreeseBackend::captureFile(const QString &extension) const
             .arg(extension);
 }
 
-void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rotation, const QJSValue &callback)
+void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rotation, const QVariantList &marks,
+                               const QJSValue &callback)
 {
     const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
     const quint64 id = m_nextId++;
@@ -708,13 +710,13 @@ void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rota
         }
     });
     // A camera photo takes seconds to decode, turn and encode.
-    QThreadPool::globalInstance()->start(new Task([this, id, local, crop, rotation]() {
+    QThreadPool::globalInstance()->start(new Task([this, id, local, crop, rotation, marks]() {
         // With the EXIF rotation applied, like the preview (Qt Quick does it) and FilePreparer:
         // without it a camera photo would be cut in the wrong place and come out sideways.
         QImageReader reader(local);
         reader.setAutoTransform(true);
         const QImage image = reader.read();
-        const QImage result = image.isNull() ? QImage() : PhotoEdit::edited(image, crop, rotation);
+        const QImage result = image.isNull() ? QImage() : PhotoEdit::edited(image, crop, rotation, marks);
         QString out;
         if (image.isNull()) {
             qWarning("photo could not be read for editing");
@@ -727,6 +729,44 @@ void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rota
         }
         emit keyWorkDone(id, out.toUtf8());
     }));
+}
+
+void ThreeseBackend::sendEditedPicture(const QString &identity, qint64 message, const QRectF &crop, int rotation,
+                                       const QVariantList &marks, const QJSValue &callback)
+{
+    const quint64 id = m_nextId++;
+    if (m_core || m_ending) {
+        m_mustArrive.insert(id);
+    }
+    if (!m_core) {
+        answerNoCore(callback, id);
+        return;
+    }
+    if (callback.isCallable()) {
+        m_callbacks.insert(id, callback);
+    }
+    QVariantMap request;
+    request.insert(QStringLiteral("id"), static_cast<double>(id));
+    request.insert(QStringLiteral("cmd"), QStringLiteral("sendFile"));
+    request.insert(QStringLiteral("identity"), identity);
+    request.insert(QStringLiteral("caption"), QString());
+    request.insert(QStringLiteral("rendering"), QStringLiteral("media"));
+    m_filesPreparing.insert(id, identity);
+    auto picture = [this, message, crop, rotation, marks]() {
+        QByteArray data = readMedia(message, false);
+        // From someone else, so read as everything from someone else is.
+        QString problem;
+        const QImage image = data.isEmpty() ? QImage() : PeerImage::decode(data, QSize(), &problem);
+        data.fill('\0');
+        if (image.isNull()) {
+            qWarning("picture of a message could not be read for editing");
+            return QImage();
+        }
+        return PhotoEdit::edited(image, crop, rotation, marks);
+    };
+    auto *preparer = new FilePreparer(picture, request);
+    connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
+    QThreadPool::globalInstance()->start(preparer);
 }
 
 void ThreeseBackend::removeTempSources(quint64 id, const QJSValue &callbackAnswer)

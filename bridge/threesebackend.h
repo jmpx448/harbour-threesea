@@ -327,13 +327,18 @@ public:
     // this was one).
     Q_INVOKABLE QString captureFile(const QString &extension) const;
     Q_INVOKABLE bool removeCapture(const QString &path) const;
-    // A picked photo turned by `rotation` (0, 90, 180, 270 degrees clockwise) and cut to `crop`
-    // — a rectangle in fractions (0..1) of the turned picture — written as a new capture, a PNG
-    // if it has transparency. Off the GUI thread: `callback(path)` gets its path, empty if the
+    // A picked photo with `marks` drawn on it, turned and cut (PhotoEdit::edited says how), written
+    // as a new capture, a PNG if it has transparency. Off the GUI thread: `callback(path)` gets its path, empty if the
     // picture could not be read or written, and returns that path to keep the file; anything
     // else, such as the error of a function whose page has gone, removes it. EXIF data (the
     // camera's GPS!) stays behind with the original, as it does for everything we send.
-    Q_INVOKABLE void editPhoto(const QString &path, const QRectF &crop, int rotation, const QJSValue &callback);
+    Q_INVOKABLE void editPhoto(const QString &path, const QRectF &crop, int rotation, const QVariantList &marks,
+                               const QJSValue &callback);
+    // The picture of `message` edited the same way and sent to `identity`, like sendFile with a
+    // photo. From the decrypted bytes in memory to the core: no plain copy of a received picture
+    // on disk at any point (ADR 0029).
+    Q_INVOKABLE void sendEditedPicture(const QString &identity, qint64 message, const QRectF &crop, int rotation,
+                                       const QVariantList &marks, const QJSValue &callback);
     // Keep a GIF from the device as a favourite (`addGifFavourite`).
     Q_INVOKABLE void addGifFavourite(const QString &path, const QJSValue &callback = QJSValue());
     VoiceRecorder *voiceRecorder() const;

@@ -55,7 +55,7 @@ Made-up demo data, taken in the emulator. [Which version each picture is from](d
 | 1:1 chats with forward secrecy (off while a device is linked, as Threema's multi-device requires, and if you switch it off; no warning yet on a message sent without it), delivery/read receipts, typing indicators | ✅ |
 | Report spam, 1:1 and groups (the complete report is not tested end to end yet) | ✅ |
 | Groups (create, rename, members, leave, pictures), mentions, distribution lists | ✅ |
-| Photos, videos, files, voice messages (pause, listen before sending), GIFs, polls with a chat's overview, locations, quotes, reactions, edit, delete | ✅ |
+| Photos (cut, turn, draw on them), videos, files, voice messages (pause, listen before sending), GIFs, polls with a chat's overview, locations, quotes, reactions, edit, delete | ✅ |
 | Threema's text formatting (*bold*, _italic_, ~strikethrough~), emoji picker with search | ✅ |
 | Profile pictures, contact verification by QR code, address book matching (opt-in, hashed) | ✅ |
 | App lock and private chats, encrypted storage (SQLCipher) | ✅ |

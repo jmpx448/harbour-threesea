@@ -3,6 +3,6 @@
 # against a fake backend (Fakes.qml) and plain pages (pages/). Built and run by
 # scripts/test-lockstate.sh; nothing of it goes into the package.
 TARGET = lockstate-test
-QT = core gui gui-private qml quick
+QT = core gui gui-private qml quick quick-private
 CONFIG += c++14 console
 SOURCES += main.cpp

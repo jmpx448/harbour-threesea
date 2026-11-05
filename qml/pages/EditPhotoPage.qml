@@ -3,17 +3,31 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components/Format.js" as Fmt
 
-// Cut and turn a photo before it is sent (Android's editor, without the drawing). Whoever opened
-// it calls save() when it is accepted, for a new picture in the app's capture folder; the original
-// is never changed.
+// Cut, turn and draw on a photo before it is sent (Android's editor and ImagePaintActivity, with a
+// pen and text). Whoever opened it calls save() when it is accepted, for a new picture in the app's
+// capture folder, or send() for the picture of a message; the original is never changed.
 Dialog {
     id: dialog
     allowedOrientations: Orientation.All
 
     // The photo to work on.
     property string path
-    // The frame stays a square (profile and group pictures).
+    // Or the picture of this message (its id), which stays in memory: see send().
+    property var message: -1
+    readonly property bool ofMessage: message >= 0
+    // The frame stays a square, and nothing is drawn (profile and group pictures).
     property bool square
+
+    // What a touch on the picture does: "cut", "draw" or "text".
+    property string tool: "cut"
+    property color penColor: "#e60003"
+
+    // What was drawn, in fractions of the picture before turning, so that it turns with the picture
+    // and is the same at any resolution (PhotoEdit::edited). The lines; the texts are in `texts`.
+    property var strokes: []
+    // For undoing: "stroke" or "text", the latest last.
+    property var history: []
+    ListModel { id: texts }
 
     // Turned clockwise, in steps of 90° (`rotation` itself is Item's own).
     property int turn: 0
@@ -28,9 +42,53 @@ Dialog {
                        frame.width / view.width, frame.height / view.height)
     }
 
+    function marks() {
+        var list = strokes.slice()
+        for (var i = 0; i < texts.count; ++i) {
+            var text = texts.get(i)
+            list.push({ text: text.text, x: text.x, y: text.y, color: text.color, size: text.size,
+                        angle: text.angle, family: Theme.fontFamily })
+        }
+        return list
+    }
+
     // See ThreeseBackend::editPhoto for `callback`.
     function save(callback) {
-        backend.editPhoto(dialog.path, crop(), dialog.turn, callback)
+        backend.editPhoto(dialog.path, crop(), dialog.turn, marks(), callback)
+    }
+
+    // See ThreeseBackend::sendEditedPicture.
+    function send(identity, callback) {
+        backend.sendEditedPicture(identity, dialog.message, crop(), dialog.turn, marks(), callback)
+    }
+
+    function undo() {
+        var kinds = history.slice()
+        if (kinds.pop() === "text") {
+            texts.remove(texts.count - 1)
+        } else {
+            var lines = strokes.slice()
+            lines.pop()
+            strokes = lines
+            drawing.requestPaint()
+        }
+        history = kinds
+    }
+
+    // Where a touch on the picture is, in fractions of it.
+    function fraction(value, whole) {
+        return Math.max(0, Math.min(1, value / whole))
+    }
+
+    function addText(x, y) {
+        var editor = pageStack.push(Qt.resolvedUrl("PhotoTextDialog.qml"))
+        editor.accepted.connect(function() {
+            texts.append({ text: editor.text.trim(), x: x, y: y, color: "" + dialog.penColor,
+                           size: Theme.fontSizeLarge / Math.max(picture.width, picture.height),
+                           // Upright as the picture lies now.
+                           angle: (360 - dialog.turn) % 360 })
+            dialog.history = dialog.history.concat(["text"])
+        })
     }
 
     // The whole picture again, or the largest square in its middle.
@@ -65,8 +123,10 @@ Dialog {
 
         DialogHeader {
             id: header
-            //% "Use"
-            acceptText: qsTrId("threesea-he-photo-use")
+            acceptText: dialog.ofMessage
+                        ? qsTrId("threesea-he-send")
+                        //% "Use"
+                        : qsTrId("threesea-he-photo-use")
             //% "Edit photo"
             title: qsTrId("threesea-he-edit-photo")
         }
@@ -77,7 +137,7 @@ Dialog {
                 top: header.bottom
                 left: parent.left
                 right: parent.right
-                bottom: parent.bottom
+                bottom: tools.top
                 topMargin: Theme.paddingLarge
                 bottomMargin: Theme.paddingLarge
                 // Wide enough that a grip never sits where a swipe closes the dialog.
@@ -101,23 +161,115 @@ Dialog {
                 onWidthChanged: dialog.reset()
                 onHeightChanged: dialog.reset()
 
-                Image {
-                    id: photo
+                // The picture as it lies before turning, with what is drawn on it.
+                Item {
+                    id: picture
+                    objectName: "picture"
                     anchors.centerIn: parent
                     width: dialog.sideways ? view.height : view.width
                     height: dialog.sideways ? view.width : view.height
                     rotation: dialog.turn
-                    source: dialog.path ? Fmt.fileUrl(dialog.path) : ""
-                    fillMode: Image.PreserveAspectFit
-                    asynchronous: true
-                    // As the camera stored it: QML's Image leaves the EXIF rotation alone
-                    // unless asked. The cut is made on the turned picture (editPhoto), and
-                    // what is sent is turned too (FilePreparer), so the view must be.
-                    autoTransform: true
-                    // Shown no larger than the screen; the cut is made from the original.
-                    sourceSize.width: Screen.width
-                    sourceSize.height: Screen.height
-                    onStatusChanged: if (status === Image.Ready) dialog.reset()
+
+                    Image {
+                        id: photo
+                        anchors.fill: parent
+                        source: dialog.ofMessage ? "image://threesea/" + dialog.message + "/file"
+                              : dialog.path ? Fmt.fileUrl(dialog.path) : ""
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                        // As the camera stored it: QML's Image leaves the EXIF rotation alone
+                        // unless asked. The cut is made on the turned picture (editPhoto), and
+                        // what is sent is turned too (FilePreparer), so the view must be.
+                        autoTransform: true
+                        // Shown no larger than the screen; the cut is made from the original.
+                        sourceSize.width: Screen.width
+                        sourceSize.height: Screen.height
+                        onStatusChanged: if (status === Image.Ready) dialog.reset()
+                    }
+
+                    Canvas {
+                        id: drawing
+                        anchors.fill: parent
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
+                        onPaint: {
+                            var context = getContext("2d")
+                            context.clearRect(0, 0, width, height)
+                            context.lineCap = "round"
+                            context.lineJoin = "round"
+                            var longest = Math.max(width, height)
+                            for (var i = 0; i < dialog.strokes.length; ++i) {
+                                var stroke = dialog.strokes[i]
+                                var points = stroke.points
+                                context.lineWidth = stroke.width * longest
+                                context.strokeStyle = stroke.color
+                                context.beginPath()
+                                context.moveTo(points[0] * width, points[1] * height)
+                                // A single point is a dot: a line too short to see, with its round ends.
+                                if (points.length === 2) {
+                                    context.lineTo(points[0] * width + 0.01, points[1] * height)
+                                }
+                                for (var at = 2; at < points.length; at += 2) {
+                                    context.lineTo(points[at] * width, points[at + 1] * height)
+                                }
+                                context.stroke()
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: dialog.tool !== "cut"
+                        // Or the dialog's own swipe takes the line away after a few pixels.
+                        preventStealing: true
+                        onPressed: {
+                            if (dialog.tool !== "draw") return
+                            var lines = dialog.strokes.slice()
+                            lines.push({ points: [dialog.fraction(mouse.x, width), dialog.fraction(mouse.y, height)],
+                                         color: "" + dialog.penColor,
+                                         width: Theme.paddingSmall / Math.max(width, height) })
+                            dialog.strokes = lines
+                            dialog.history = dialog.history.concat(["stroke"])
+                            drawing.requestPaint()
+                        }
+                        onPositionChanged: {
+                            if (dialog.tool !== "draw") return
+                            var points = dialog.strokes[dialog.strokes.length - 1].points
+                            points.push(dialog.fraction(mouse.x, width), dialog.fraction(mouse.y, height))
+                            drawing.requestPaint()
+                        }
+                        onClicked: {
+                            if (dialog.tool === "text") {
+                                dialog.addText(dialog.fraction(mouse.x, width), dialog.fraction(mouse.y, height))
+                            }
+                        }
+                    }
+
+                    // Moved with a finger; the picture gets them as they lie (PhotoEdit: on top of
+                    // the lines, centred on x, y).
+                    Repeater {
+                        model: texts
+                        Label {
+                            x: model.x * picture.width - width / 2
+                            y: model.y * picture.height - height / 2
+                            rotation: model.angle
+                            text: model.text
+                            textFormat: Text.PlainText
+                            color: model.color
+                            font.pixelSize: Math.max(1, model.size * Math.max(picture.width, picture.height))
+
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: dialog.tool === "text"
+                                preventStealing: true
+                                onPositionChanged: {
+                                    var point = mapToItem(picture, mouse.x, mouse.y)
+                                    texts.setProperty(index, "x", dialog.fraction(point.x, picture.width))
+                                    texts.setProperty(index, "y", dialog.fraction(point.y, picture.height))
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Everything outside the frame is dimmed: left, right, above, below.
@@ -144,6 +296,7 @@ Dialog {
 
                     MouseArea {
                         anchors.fill: parent
+                        enabled: dialog.tool === "cut"
                         // Or the dialog's own left/right swipe (accept, cancel) takes the drag
                         // away after a few pixels and the frame stops following the finger.
                         preventStealing: true
@@ -161,6 +314,8 @@ Dialog {
                 Repeater {
                     model: 4
                     Item {
+                        objectName: "grip" + index
+                        visible: dialog.tool === "cut"
                         readonly property bool atRight: index === 1 || index === 2
                         readonly property bool atBottom: index >= 2
                         width: Theme.itemSizeSmall
@@ -227,6 +382,56 @@ Dialog {
                         }
                     }
                 }
+            }
+        }
+
+        Row {
+            id: tools
+            visible: !dialog.square
+            height: visible ? Theme.itemSizeSmall : 0
+            anchors {
+                bottom: parent.bottom
+                bottomMargin: visible ? Theme.paddingMedium : 0
+                horizontalCenter: parent.horizontalCenter
+            }
+
+            Repeater {
+                model: [{ tool: "cut", icon: "icon-m-crop" },
+                        { tool: "draw", icon: "icon-m-edit" },
+                        { tool: "text", icon: "icon-m-text-input" }]
+                IconButton {
+                    icon.source: "image://theme/" + modelData.icon
+                    highlighted: down || dialog.tool === modelData.tool
+                    onClicked: dialog.tool = modelData.tool
+                }
+            }
+            // The colour of what is drawn next, as Silica's picker offers them.
+            BackgroundItem {
+                width: Theme.itemSizeSmall
+                height: Theme.itemSizeSmall
+                onClicked: pageStack.push(colorPage)
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: Theme.iconSizeSmall
+                    height: width
+                    radius: width / 2
+                    color: dialog.penColor
+                }
+            }
+            IconButton {
+                icon.source: "image://theme/icon-m-backspace"
+                enabled: dialog.history.length > 0
+                onClicked: dialog.undo()
+            }
+        }
+    }
+
+    Component {
+        id: colorPage
+        ColorPickerPage {
+            onColorClicked: {
+                dialog.penColor = color
+                pageStack.pop()
             }
         }
     }

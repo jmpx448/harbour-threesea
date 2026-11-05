@@ -1193,6 +1193,15 @@ Page {
         })
     }
 
+    // Draw on the picture of a message and send it to this chat, in two taps as on Android. It goes
+    // straight out: an attachment would need a plain copy of it on disk (ADR 0029).
+    function drawOnPicture(message) {
+        var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"), { message: message, tool: "draw" })
+        editor.accepted.connect(function() {
+            editor.send(identity, window.editedPictureAnswer(page, pageAlive))
+        })
+    }
+
     // Whether this took a photo or video away for good (the device's own files stay where they are).
     function dropAttachments() {
         var captures = false
@@ -2995,6 +3004,7 @@ Page {
                 quoted: model.quoteId ? page.quotedFor(model.quoteId, page.quoteCacheRevision) : null
                 onQuotedRequested: page.showQuoted(model.quoteId)
                 onSaveRequested: page.saveFile(model.id, false)
+                onDrawRequested: page.drawOnPicture(model.id)
                 onGifFavouriteRequested: backend.call("addGifFavourite", { message: model.id }, function(ok, result, kind, message) {
                     //% "Added to favourite GIFs"
                     Notices.show(ok ? qsTrId("threesea-la-gif-favourite-added") : Errors.text(kind, message),

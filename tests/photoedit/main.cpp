@@ -2,9 +2,15 @@
 // What a picture carries out of the app: nothing but its pixels, whichever way it goes. Exit 0:
 // passed.
 #include <QBuffer>
+#include <QDirIterator>
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QImage>
+#include <QRunnable>
 #include <QTemporaryDir>
+#include <QThreadPool>
+#include <QVariantList>
+#include <QVariantMap>
 #include <cstdio>
 
 #include "filepreparer.h"
@@ -139,6 +145,100 @@ void transparencyStays(const QString &dir)
     check(PhotoEdit::edited(marked, QRectF(0, 0, 0.5, 1), 90).textKeys().isEmpty(), "edited and cut: no text left");
 }
 
+// A line and a text on a white picture, where a preview would have shown them.
+void marksLandInPlace()
+{
+    QImage white(400, 200, QImage::Format_RGB32);
+    white.fill(Qt::white);
+
+    QVariantMap line;
+    // Across the left part, in fractions of the picture, 2 % of its longest side wide.
+    line.insert(QStringLiteral("points"), QVariantList() << 0.1 << 0.5 << 0.4 << 0.5);
+    line.insert(QStringLiteral("color"), QStringLiteral("#ff0000"));
+    line.insert(QStringLiteral("width"), 0.02);
+    QVariantMap dot;
+    dot.insert(QStringLiteral("points"), QVariantList() << 0.9 << 0.9);
+    dot.insert(QStringLiteral("color"), QStringLiteral("#0000ff"));
+    dot.insert(QStringLiteral("width"), 0.05);
+    const QVariantList marks = QVariantList() << line << dot;
+
+    const QRectF whole(0, 0, 1, 1);
+    const QImage drawn = PhotoEdit::edited(white, whole, 0, marks);
+    check(qRed(drawn.pixel(100, 100)) == 255 && qGreen(drawn.pixel(100, 100)) == 0, "the line is where it was drawn");
+    check(drawn.pixel(100, 50) == qRgb(255, 255, 255), "and not elsewhere");
+    check(qBlue(drawn.pixel(360, 180)) == 255 && qRed(drawn.pixel(360, 180)) == 0, "a single point is a dot");
+
+    // The marks belong to the picture: turned with it, whichever came first.
+    const QImage turned = PhotoEdit::edited(white, whole, 90, marks);
+    check(turned.size() == QSize(200, 400), "drawn and turned");
+    check(qGreen(turned.pixel(100, 100)) == 0 && qRed(turned.pixel(100, 100)) == 255, "the line turned along");
+
+    // Twice the pixels: the same drawing, twice as wide.
+    QImage large(800, 400, QImage::Format_RGB32);
+    large.fill(Qt::white);
+    const QImage drawnLarge = PhotoEdit::edited(large, whole, 0, marks);
+    check(qGreen(drawnLarge.pixel(200, 200 + 6)) == 0, "the width follows the picture's size");
+
+    // On a picture with transparency: the marks are drawn, the rest stays see-through.
+    const QImage seeThrough = PhotoEdit::edited(halves(true), whole, 0, QVariantList() << line);
+    check(seeThrough.hasAlphaChannel(), "drawing keeps transparency");
+    check(qAlpha(seeThrough.pixel(2, 2)) == 0, "what wasn't drawn on stays see-through");
+    check(qAlpha(seeThrough.pixel(10, 10)) == 255, "what was is not");
+
+    // A palette can't be painted on as it is.
+    const QImage indexed = white.convertToFormat(QImage::Format_Indexed8);
+    check(qGreen(PhotoEdit::edited(indexed, whole, 0, marks).pixel(100, 100)) == 0, "drawn on a palette picture");
+
+    QVariantMap text;
+    text.insert(QStringLiteral("text"), QStringLiteral("HHHH"));
+    text.insert(QStringLiteral("x"), 0.5);
+    text.insert(QStringLiteral("y"), 0.5);
+    text.insert(QStringLiteral("color"), QStringLiteral("#000000"));
+    text.insert(QStringLiteral("size"), 0.1);
+    text.insert(QStringLiteral("family"), QString());
+    text.insert(QStringLiteral("angle"), 0);
+    // On the thread pool, where it really runs. The platform plugin here knows no fonts by itself.
+    QDirIterator fonts(QStringLiteral("/usr/share/fonts"), QStringList() << QStringLiteral("*.ttf"), QDir::Files,
+                       QDirIterator::Subdirectories);
+    QString family;
+    while (family.isEmpty() && fonts.hasNext()) {
+        family = QFontDatabase::applicationFontFamilies(QFontDatabase::addApplicationFont(fonts.next())).value(0);
+    }
+    text.insert(QStringLiteral("family"), family);
+    QImage written;
+    class Drawing : public QRunnable
+    {
+    public:
+        Drawing(const QImage &white, const QVariantMap &text, QImage *out) : m_white(white), m_text(text), m_out(out) {}
+        void run() override
+        {
+            *m_out = PhotoEdit::edited(m_white, QRectF(0, 0, 1, 1), 0, QVariantList() << m_text);
+        }
+        const QImage m_white;
+        const QVariantMap m_text;
+        QImage *m_out;
+    };
+    QThreadPool::globalInstance()->start(new Drawing(white, text, &written));
+    QThreadPool::globalInstance()->waitForDone();
+    check(!family.isEmpty(), "a font to test with");
+    check(written != white, "the text is drawn");
+    {
+        int minX = 400, maxX = -1, minY = 200, maxY = -1;
+        for (int y = 0; y < 200; ++y) {
+            for (int x = 0; x < 400; ++x) {
+                if (written.pixel(x, y) != qRgb(255, 255, 255)) {
+                    minX = qMin(minX, x);
+                    maxX = qMax(maxX, x);
+                    minY = qMin(minY, y);
+                    maxY = qMax(maxY, y);
+                }
+            }
+        }
+        check(qAbs((minX + maxX) / 2 - 200) < 8, "the text is centred on its place across");
+        check(qAbs((minY + maxY) / 2 - 100) < 12, "and down");
+    }
+}
+
 }
 
 int main(int argc, char **argv)
@@ -148,6 +248,7 @@ int main(int argc, char **argv)
     metadataStaysBehind(dir.path());
     turnsAndCuts();
     transparencyStays(dir.path());
+    marksLandInPlace();
     if (failures == 0) {
         std::printf("photoedit: passed\n");
     }

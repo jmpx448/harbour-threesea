@@ -450,6 +450,124 @@ QtObject {
                 check("nothing removed", backend.removedCaptures.length, 0)
             }, 0],
         ],
+        // Silica sizes a page from a screen, and there is none here: the scenario sizes it, and
+        // touches stay out of the page stack's indicator, a 240 by 320 item in the middle for lack of
+        // one. Lines and texts land in fractions of the picture as it lies before turning, wherever the
+        // finger was on the turned one; another page on top doesn't count as an answer.
+        touchEditorDrawsOnThePicture: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var editor = push("pages/EditPhotoPage.qml", { objectName: "editor", path: "/tmp/threesea-wide.png", tool: "draw" })
+                editor.width = 540
+                editor.height = 960
+            }, 600],
+            [function() {
+                var editor = page("editor")
+                check("can be accepted", editor.canAccept, true)
+                var crop = editor.crop()
+                check("the whole picture", [crop.x, crop.y, crop.width, crop.height].join(), "0,0,1,1")
+                var picture = findItem(editor, function(i) { return i.objectName === "picture" })
+                harness.press(picture, picture.width / 4, picture.height / 2)
+                harness.move(picture, picture.width / 2, picture.height / 2)
+                harness.release(picture, picture.width / 2, picture.height / 2)
+                check("a line", editor.strokes.length, 1)
+                var points = editor.strokes[0].points
+                check("from where the finger was", Math.round(points[0] * 100), 25)
+                check("to where it went", Math.round(points[points.length - 2] * 100), 50)
+                check("a single colour", editor.strokes[0].color, "#e60003")
+                editor.turn = 90
+            }, 100],
+            [function() {
+                var editor = page("editor")
+                var picture = findItem(editor, function(i) { return i.objectName === "picture" })
+                harness.press(picture, picture.width * 0.9, picture.height / 5)
+                harness.release(picture, picture.width * 0.9, picture.height / 5)
+                check("a dot", editor.strokes[1].points.length, 2)
+                check("in the turned picture's own place", Math.round(editor.strokes[1].points[0] * 100), 90)
+                check("down as well", Math.round(editor.strokes[1].points[1] * 100), 20)
+                editor.tool = "text"
+                harness.press(picture, picture.width * 0.8, picture.height / 2)
+                harness.release(picture, picture.width * 0.8, picture.height / 2)
+            }, 1000],
+            [function() {
+                var dialog = stack.currentPage
+                check("asked for the text", dialog.objectName !== "editor", true)
+                dialog.text = " Look "
+                dialog.accept()
+            }, 1000],
+            [function() {
+                var editor = page("editor")
+                check("the editor is showing again", stack.currentPage, editor)
+                check("the text page didn't answer for it", editor.result, DialogResult.None)
+                var marks = editor.marks()
+                check("two lines and a text", marks.length, 3)
+                check("the text", marks[2].text, "Look")
+                check("upright on the turned picture", marks[2].angle, 270)
+                check("in its place", Math.round(marks[2].x * 100), 80)
+                editor.undo()
+                check("undone: the text", editor.marks().length, 2)
+                editor.undo()
+                check("undone: the dot", editor.marks().length, 1)
+                editor.save(function(path) { root.handedOver = path; return path })
+                check("sent to the bridge", backend.edit.marks.length, 1)
+                check("turned", backend.edit.rotation, 90)
+                check("nothing wrong with its points", backend.edit.marks[0].points.length >= 4, true)
+                check("answered", root.handedOver, "/cache/capture/edited.jpg")
+            }, 0],
+        ],
+        // A square stays one whichever way a corner goes, and starts in the picture's middle.
+        touchEditorKeepsItsSquare: [
+            [function() { ready(false) }, 100],
+            [function() {
+                var editor = push("pages/EditPhotoPage.qml", { objectName: "editor", path: "/tmp/threesea-wide.png", square: true })
+                editor.width = 540
+                editor.height = 960
+            }, 600],
+            [function() {
+                var editor = page("editor")
+                var crop = editor.crop()
+                // 300 by 100: a third of its width, all of its height, in the middle.
+                check("a square", Math.round(crop.width * 300), Math.round(crop.height * 100))
+                check("as high as the picture", crop.height, 1)
+                check("in the middle", Math.round(crop.x * 100), 33)
+                var grip = findItem(editor, function(i) { return i.objectName === "grip2" })
+                var inside = grip.width / 2
+                harness.press(grip, inside, inside)
+                harness.move(grip, inside - Theme.itemSizeExtraSmall / 2, inside - Theme.itemSizeExtraSmall)
+            }, 50],
+            [function() {
+                var crop = page("editor").crop()
+                check("smaller", crop.height < 1, true)
+                check("still a square", Math.round(crop.width * 300), Math.round(crop.height * 100))
+                check("the opposite corner stayed", Math.round(crop.x * 100), 33)
+                check("and down", crop.y, 0)
+                var grip = findItem(page("editor"), function(i) { return i.objectName === "grip2" })
+                harness.release(grip, grip.width / 2, grip.height / 2)
+            }, 0],
+        ],
+        // From a shot to the square editor, and only the cut copy goes on; the shot doesn't stay.
+        touchPictureChooserLeadsThroughTheEditor: [
+            [function() { ready(false) }, 100],
+            [function() {
+                push("pages/ChooserPage.qml").chooser.chosen.connect(function(path) { root.handedOver = path })
+                page("chooserPage").chooser.edit("/tmp/threesea-wide.png")
+            }, 800],
+            [function() {
+                stack.currentPage.width = 540
+                stack.currentPage.height = 960
+            }, 800],
+            [function() {
+                var editor = stack.currentPage
+                check("the editor came", editor.square, true)
+                check("on the picture", editor.path, "/tmp/threesea-wide.png")
+                editor.accept()
+            }, 1000],
+            [function() {
+                check("passed on", root.handedOver, "/cache/capture/edited.jpg")
+                check("told to remove the shot", backend.removedCaptures.indexOf("/tmp/threesea-wide.png") >= 0, true)
+                checkStack("conversations chooserPage")
+            }, 0],
+        ],
         // It is only seen while the app is in front and it is on top.
         cameraPagesFollowTheApp: [
             [function() { ready(false) }, 100],

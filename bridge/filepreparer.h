@@ -9,6 +9,8 @@
 #include <QString>
 #include <QVariantMap>
 
+#include <functional>
+
 // Prepares a picked file for sending, on a worker thread: photos are re-encoded (at most
 // 2048 px, JPEG; PNG if they have transparency) which also drops their EXIF data (GPS!) and text
 // (PhotoEdit::withoutMetadata), and get a 512 px JPEG thumbnail. Videos larger than the setting asks for are scaled down where the
@@ -21,6 +23,9 @@ public:
     // `scratchPath`: where a scaled-down video may be written (the cache's capture folder,
     // emptied at every start); empty: send videos as they are.
     FilePreparer(const QString &path, const QVariantMap &request, const QString &scratchPath = QString());
+    // A picture that only exists in memory, sent as a photo: made by `picture` on the worker
+    // thread (null: `prepared` says it failed).
+    FilePreparer(std::function<QImage()> picture, const QVariantMap &request);
     // A video: its first frame (from the thumbnailer) becomes the thumbnail, if there is one.
     void setVideoFrame(const QImage &frame) { m_videoFrame = frame; }
     void run() override;
@@ -33,6 +38,9 @@ signals:
                   const QString &error);
 
 private:
+    void preparePicture(QImage image, QVariantMap request);
+
+    std::function<QImage()> m_picture;
     QString m_path;
     QVariantMap m_request;
     QString m_scratchPath;
