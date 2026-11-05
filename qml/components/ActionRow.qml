@@ -8,6 +8,7 @@ Row {
     id: row
 
     property var actions: []
+    property color color: Theme.primaryColor
     signal triggered(string id)
 
     visible: actions.length > 0
@@ -26,7 +27,7 @@ Row {
                 Image {
                     anchors.horizontalCenter: parent.horizontalCenter
                     source: "image://theme/" + modelData.icon + "?"
-                            + (action.highlighted ? Theme.highlightColor : Theme.primaryColor)
+                            + (action.highlighted ? Theme.highlightColor : row.color)
                 }
                 Label {
                     width: parent.width
@@ -34,7 +35,7 @@ Row {
                     text: modelData.text
                     font.pixelSize: Theme.fontSizeExtraSmall
                     truncationMode: TruncationMode.Fade
-                    color: action.highlighted ? Theme.highlightColor : Theme.primaryColor
+                    color: action.highlighted ? Theme.highlightColor : row.color
                 }
             }
         }
