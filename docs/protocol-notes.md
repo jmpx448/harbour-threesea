@@ -102,7 +102,9 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   (prod `450b9757…c909`, prodAlt `da7c7379…6f15`) — match libthreema.
 - CSP is not TLS; server authentication is the protocol's key pinning.
 - HTTPS pins (SHA-256 SPKI): `app/src/main/res/xml/network_security_config.xml`
-  (threema.ch, threema.com, sfu.threema.ch, …). We must replicate these in our HTTPS client.
+  (threema.ch, threema.com, sfu.threema.ch, …), copied into `core/src/https.rs`;
+  `scripts/check-pins.py` (part of `scripts/check.sh`) fails when they differ from the
+  submodule's, so a new upstream tag with other pins is noticed.
 
 ## Background on Libre
 - Libre has no FCM: `forceThreemaPush = (this is Libre)`, i.e. a foreground service holding a

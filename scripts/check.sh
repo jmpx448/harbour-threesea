@@ -5,6 +5,7 @@
 #                  extended regex per line, e.g. test credentials) in the tracked files, or with
 #                  --staged in what is about to be committed
 #   logging        scripts/check-logging.py (CLAUDE.md §7.3)
+#   TLS pins       scripts/check-pins.py: the same as upstream's (CLAUDE.md §7.5)
 #   format         cargo fmt --check (our crate; libthreema keeps its own style)
 #   lints, tests   cargo clippy (no warnings; twice, the emulator's `demo` feature too),
 #                  cargo test
@@ -12,7 +13,7 @@
 #   libthreema     its library tests, and the list models', GIF decoder's, app lock's, pages' and
 #                  notification tokens' tests in the SDK
 #                  if its image is there (--full only: they take a while)
-# --quick: private data, logging and format only (the pre-commit hook, scripts/hooks).
+# --quick: private data, logging, TLS pins and format only (the pre-commit hook, scripts/hooks).
 set -eu
 cd "$(dirname "$0")/.."
 quick=false
@@ -52,6 +53,9 @@ fi
 
 step "logging"
 python3 scripts/check-logging.py || fail "logging"
+
+step "TLS pins"
+python3 scripts/check-pins.py || fail "TLS pins"
 
 step "format"
 cargo fmt -p threesea-core -- --check >/dev/null || fail "format (cargo fmt -p threesea-core)"
