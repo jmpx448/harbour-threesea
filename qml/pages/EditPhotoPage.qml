@@ -37,7 +37,6 @@ Dialog {
 
     SilicaFlickable {
         anchors.fill: parent
-        interactive: false
 
         PullDownMenu {
             MenuItem {
