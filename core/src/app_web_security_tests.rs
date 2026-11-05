@@ -2176,6 +2176,54 @@ fn web_rename_of_a_removed_session_says_so() {
     ));
 }
 
+/// Removing all: each running browser is told to forget and reported stopped, one not running
+/// goes too, nothing of theirs can act any more, and no wake-up finds them; the allowed server
+/// stays.
+#[tokio::test(flavor = "current_thread")]
+async fn web_delete_all_stops_and_forgets_every_session() {
+    let (_dir, mut app) = fixture();
+    let mut events = app.take_media_events().unwrap();
+    app.store.set_web_host("web.example.org", None).unwrap();
+    let running = stored_web_session(&app, 1, WEB_HOST, true);
+    let (mut rx, task) = app.web_test_session(running);
+    let never_stored = stored_web_session(&app, 2, WEB_HOST, false);
+    let (mut other_rx, _) = app.web_test_session(never_stored);
+    let resting = stored_web_session(&app, 3, "web.example.org", true);
+
+    let after = app.web_delete_all().unwrap();
+
+    assert_eq!(after["sessions"], json!([]));
+    assert_eq!(after["servers"], json!(["web.example.org"]));
+    assert!(app.store.web_session(resting).unwrap().is_none());
+    assert!(matches!(rx.try_recv(), Ok(ToWeb::Stop(StopReason::Delete))));
+    assert!(matches!(
+        other_rx.try_recv(),
+        Ok(ToWeb::Stop(StopReason::Delete))
+    ));
+    assert!(app.web.running.is_empty());
+    let mut stopped = Vec::new();
+    while let Ok(CoreEvent::Call(event)) = events.try_recv() {
+        assert_eq!(event["state"], "stopped");
+        stopped.push(event["id"].as_i64().unwrap());
+    }
+    stopped.sort_unstable();
+    assert_eq!(stopped, [running, never_stored]);
+
+    // A wake-up for one of them starts nothing, and what its old task still says doesn't count.
+    app.web_resume(&web_wake_up_hash(3));
+    assert!(app.web.running.is_empty());
+    app.on_web_event((
+        task,
+        FromWeb::Ended {
+            session: running,
+            delete: false,
+            error: None,
+        },
+    ))
+    .await;
+    assert!(events.try_recv().is_err());
+}
+
 /// A refused license leaves a stored pairing alone, but a session the browser never stored can't
 /// survive it, so that browser hears "delete".
 #[test]

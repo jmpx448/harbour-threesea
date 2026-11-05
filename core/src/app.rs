@@ -832,6 +832,7 @@ pub enum Command {
     WebDelete {
         session: i64,
     },
+    WebDeleteAll,
     WebRename {
         session: i64,
         label: String,
@@ -2518,6 +2519,7 @@ impl App {
             Command::WebStart { session } => self.web_start(session),
             Command::WebStop { session } => Ok(self.web_stop(session)),
             Command::WebDelete { session } => self.web_delete(session),
+            Command::WebDeleteAll => self.web_delete_all(),
             Command::WebRename { session, label } => self.web_rename(session, &label),
             Command::WebAcceptCertificate { session } => self.web_accept_certificate(session),
             Command::WebDeclineCertificate { session } => Ok(self.web_decline_certificate(session)),

@@ -282,6 +282,7 @@ stays `null` in the callback; a reply without one (an error) gives an empty obje
 | `webStart` / `webStop` / `webDelete` | `session` | `{}`: connect a stored session / disconnect / forget it (also ends its task's authority) |
 | `webAcceptCertificate` | `session` | `{}`: pin a self-hosted server's new certificate and connect again; `{scanAgain: true}`: pinned, but the session was never stored by the browser, so its code must be scanned again |
 | `webDeclineCertificate` | `session` | `{}`: not this certificate; the pin stays, and the session asks again when it next connects |
+| `webDeleteAll` | – | like `webSessions`: stop and forget every session, telling running browsers `delete`; the allowed servers stay |
 | `webRename` | `session`, `label` (empty: none) | `{}`: a name for this phone's list; `webSessionNotFound` if the session is gone |
 | `webRemoveServer` | `host` | like `webSessions`: take back an allowed server's permission and pin, and remove its sessions |
 | `recentEmoji` / `useEmoji` | – / `emoji` | `{emoji: [text]}` newest first / record one as used |

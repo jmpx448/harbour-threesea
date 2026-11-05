@@ -3,7 +3,7 @@
 //! (WebSocket, SaltyRTC responder, ARP connection layer), and the app's answers to the browser.
 //!
 //! Commands: `webSessions`, `webSetEnabled {enabled}`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
-//! {session}`, `webDelete {session}`, `webRename {session, label}`, `webAcceptCertificate {session}`, `webDeclineCertificate
+//! {session}`, `webDelete {session}`, `webDeleteAll`, `webRename {session, label}`, `webAcceptCertificate {session}`, `webDeclineCertificate
 //! {session}`, `webRemoveServer {host}`. Events: `webSession {id, state, error?}`
 //! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
 //! code), `webCertificateChanged {id, host}`.
@@ -443,7 +443,7 @@ impl App {
     }
 
     /// Stop every session at once and forget what they were waiting for: the identity they were
-    /// paired with is going away (security audit 2026-10-27, S01) with `Delete`; the license was
+    /// paired with is going away (security audit 2026-10-27, S01), or the user removes them all, with `Delete`; the license was
     /// refused with `Stop` or Threema Web switched off with `Disable`, which leave the pairings.
     /// Their tasks have no say any more, so this is also where their end is reported.
     pub(crate) fn web_stop_all(&mut self, reason: StopReason) {
@@ -487,6 +487,15 @@ impl App {
             self.emit_web_state(id, "stopped", None);
         }
         Ok(json!({}))
+    }
+
+    /// `webDeleteAll`: stop and forget every session, for someone who no longer trusts a browser.
+    /// All of them are cut off and told to forget first, so a failing store can't leave one
+    /// connected; the allowed servers stay, they are a choice of their own.
+    pub(crate) fn web_delete_all(&mut self) -> Result<serde_json::Value, ApiError> {
+        self.web_stop_all(StopReason::Delete);
+        self.store.remove_web_sessions()?;
+        self.web_sessions_json()
     }
 
     /// `webRename {session, label}`: name a browser for this phone's list; empty, it goes by what

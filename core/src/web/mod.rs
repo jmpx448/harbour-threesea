@@ -185,6 +185,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn remove_web_sessions(&self) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM web_sessions", [])?;
+        Ok(())
+    }
+
     /// A self-hosted server the user allowed: `Some(pin)` (SPKI SHA-256, Base64; `None` until
     /// the first connection pinned it), or `None` if not allowed.
     pub fn web_host(&self, host: &str) -> Result<Option<Option<String>>, StoreError> {
