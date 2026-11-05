@@ -128,8 +128,9 @@ Dialog {
         anchors.fill: parent
         model: page.poll.choices || []
 
+        // Silica opens a menu with nothing in it too.
         PullDownMenu {
-            visible: !page.closed && !page.readOnly
+            visible: !page.closed && !page.readOnly && (page.mine || page.selection.length > 0)
             MenuItem {
                 visible: page.mine
                 //% "Close poll"

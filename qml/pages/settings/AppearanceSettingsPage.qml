@@ -27,9 +27,10 @@ Page {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
 
+        // On the menu, not its item: Silica opens a menu with nothing in it too.
         PullDownMenu {
+            visible: backend.wallpaper !== ""
             MenuItem {
-                visible: backend.wallpaper !== ""
                 //% "Use the Ambience's background"
                 text: qsTrId("threesea-me-wallpaper-clear")
                 onClicked: backend.wallpaper = ""
