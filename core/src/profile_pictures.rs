@@ -1010,7 +1010,8 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "ALTER TABLE messages DROP COLUMN written_out;
+                    "ALTER TABLE web_sessions DROP COLUMN label;
+                     ALTER TABLE messages DROP COLUMN written_out;
                      ALTER TABLE groups DROP COLUMN kicked;
                      DROP TABLE synced_pictures; DROP TABLE group_picture_sends;
                      ALTER TABLE groups DROP COLUMN picture_pending;

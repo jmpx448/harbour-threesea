@@ -1240,6 +1240,7 @@ fn stored_session(app: &App) -> i64 {
             self_hosted: false,
             persistent: false,
             client: "test".into(),
+            label: String::new(),
             created_at: 1,
             last_connection: None,
         })
@@ -1818,6 +1819,7 @@ fn stored_web_session(app: &App, browser: u8, host: &str, persistent: bool) -> i
             self_hosted: false,
             persistent,
             client: String::new(),
+            label: String::new(),
             created_at: 1,
             last_connection: None,
         })
@@ -2136,6 +2138,42 @@ fn web_removing_a_connected_session_reports_its_end() {
     };
     assert_eq!(event["state"], "stopped");
     assert_eq!(event["id"], id);
+}
+
+/// A browser's name is the user's: it stays when the browser reports what it is, a long one is
+/// cut at a character's edge, and an empty one gives the browser its own name back.
+#[test]
+fn web_rename_names_a_session_for_this_phone() {
+    let (_dir, app) = fixture();
+    let id = stored_web_session(&app, 1, WEB_HOST, true);
+    let label = |app: &App| app.web_sessions_json().unwrap()["sessions"][0]["label"].clone();
+    assert_eq!(label(&app), "");
+
+    app.web_rename(id, "  Office  ").unwrap();
+    assert_eq!(label(&app), "Office");
+    app.store
+        .set_web_session_connected(id, "firefox", 2)
+        .unwrap();
+    let session = app.store.web_session(id).unwrap().unwrap();
+    assert_eq!(session.label, "Office");
+    assert_eq!(session.client, "firefox");
+
+    app.web_rename(id, &"ü".repeat(40)).unwrap();
+    assert_eq!(label(&app), json!("ü".repeat(32)));
+
+    app.web_rename(id, " ").unwrap();
+    assert_eq!(label(&app), "");
+}
+
+#[test]
+fn web_rename_of_a_removed_session_says_so() {
+    let (_dir, mut app) = fixture();
+    let id = stored_web_session(&app, 1, WEB_HOST, true);
+    app.web_delete(id).unwrap();
+    assert!(matches!(
+        app.web_rename(id, "Office"),
+        Err(ApiError::WebSessionNotFound)
+    ));
 }
 
 /// A refused license leaves a stored pairing alone, but a session the browser never stored can't

@@ -221,6 +221,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_FILE_MESSAGES,
     // 45: reflected incoming messages waiting for their sender's contact
     crate::multidevice::MIGRATION_REFLECTED_WAITING,
+    // 46: the names the user gave Threema Web sessions
+    crate::web::MIGRATION_LABEL,
 ];
 
 /// Setting keys.

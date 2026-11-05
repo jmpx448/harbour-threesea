@@ -3037,6 +3037,7 @@ mod tests {
                      DROP INDEX pending_receivers_by_receiver;
                      DROP TABLE awaiting_reflection;
                      ALTER TABLE messages DROP COLUMN written_out;
+                     ALTER TABLE web_sessions DROP COLUMN label;
                      DROP TABLE picture_restored; DROP TABLE synced_pictures;
                      DROP TABLE group_picture_sends;
                      ALTER TABLE groups DROP COLUMN picture_pending;

@@ -53,7 +53,7 @@ fn no_connection() -> ApiError {
 
 /// A name the user typed: trimmed, and short enough for the protobuf fields it travels in
 /// (the label goes out in every D2M client-hello).
-fn trimmed_name(input: &str) -> String {
+pub(crate) fn trimmed_name(input: &str) -> String {
     let mut name = input.trim().to_owned();
     while name.len() > 64 {
         name.pop();

@@ -3,7 +3,7 @@
 //! (WebSocket, SaltyRTC responder, ARP connection layer), and the app's answers to the browser.
 //!
 //! Commands: `webSessions`, `webSetEnabled {enabled}`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
-//! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`, `webDeclineCertificate
+//! {session}`, `webDelete {session}`, `webRename {session, label}`, `webAcceptCertificate {session}`, `webDeclineCertificate
 //! {session}`, `webRemoveServer {host}`. Events: `webSession {id, state, error?}`
 //! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
 //! code), `webCertificateChanged {id, host}`.
@@ -281,8 +281,8 @@ impl App {
         self.web_sessions_json()
     }
 
-    /// `webSessions`: `{enabled, sessions: [{id, host, selfHosted, persistent, client, createdAt,
-    /// lastConnection, state}], servers: [host], certificates: [{id, host}]}` (`servers`: the
+    /// `webSessions`: `{enabled, sessions: [{id, host, selfHosted, persistent, client, label,
+    /// createdAt, lastConnection, state}], servers: [host], certificates: [{id, host}]}` (`servers`: the
     /// self-hosted ones allowed; `certificates`: new ones waiting for the user's word).
     pub(crate) fn web_sessions_json(&self) -> Result<serde_json::Value, ApiError> {
         let sessions: Vec<serde_json::Value> = self
@@ -352,6 +352,7 @@ impl App {
             self_hosted: qr.self_hosted,
             persistent: false,
             client: String::new(),
+            label: String::new(),
             created_at: crate::messages::now_ms(),
             last_connection: None,
         };
@@ -484,6 +485,16 @@ impl App {
         // Its task has no say any more, so its end is reported here.
         if running.is_some() {
             self.emit_web_state(id, "stopped", None);
+        }
+        Ok(json!({}))
+    }
+
+    /// `webRename {session, label}`: name a browser for this phone's list; empty, it goes by what
+    /// it says it is again. The browser doesn't hear of it.
+    pub(crate) fn web_rename(&self, id: i64, label: &str) -> Result<serde_json::Value, ApiError> {
+        let label = crate::app_multidevice::trimmed_name(label);
+        if !self.store.set_web_session_label(id, &label)? {
+            return Err(ApiError::WebSessionNotFound);
         }
         Ok(json!({}))
     }
