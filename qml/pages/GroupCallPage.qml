@@ -49,7 +49,13 @@ Page {
         pageStack.pop()
     }
 
-    onStatusChanged: closeIfOver()
+    // A moment later: going back in the middle of the status changing is a binding loop.
+    onStatusChanged: if (status === PageStatus.Active) closeLater.restart()
+    Timer {
+        id: closeLater
+        interval: 0
+        onTriggered: page.closeIfOver()
+    }
 
     Connections {
         target: groupCalls
