@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use crate::{
     app::{ApiError, App, StartConfig},
     connection::FromConnection,
+    detached::Lane,
     media::MediaStore,
     providers::CoreEvent,
 };
@@ -234,9 +235,18 @@ async fn run_until_quit(
     // Out here, as file work on a blocking thread still reports after a cut-off.
     let mut media_events = app.take_media_events();
     let mut file_work = app.take_file_work();
-    let work = run_loop(&mut app, &mut rx, &mut media_events, &mut file_work, &emit);
+    let mut detached = app.take_detached_work();
+    let work = run_loop(
+        &mut app,
+        &mut rx,
+        &mut media_events,
+        &mut file_work,
+        &mut detached,
+        &emit,
+    );
     if until_cut_off(work, quit).await {
         tracing::warn!("quitting: cut off what the core was doing");
+        app.drop_detached_work();
         let rest = async {
             run_queued_requests(&mut app, &mut rx, &emit).await;
             finish_running_file_work(&mut app, &mut file_work, &mut media_events, &emit).await;
@@ -255,6 +265,8 @@ async fn run_queued_requests(
     rx: &mut mpsc::UnboundedReceiver<CoreRequest>,
     emit: &Emit,
 ) {
+    // The command that was cut off may have been halfway: from here on all waits in place.
+    app.in_background.set(false);
     while let Ok(request) = rx.try_recv() {
         emit(app.handle_with(&request.json, request.attachments).await);
     }
@@ -551,6 +563,7 @@ fn wake_settled(app: &mut App, emit: &Emit) {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_maintenance(app: &mut App, emit: &Emit) {
     app.maintenance_ran_at = std::time::SystemTime::now();
     for event in app.maintenance().await {
@@ -561,12 +574,87 @@ pub(crate) async fn run_maintenance(app: &mut App, emit: &Emit) {
     app.start_update_check(false);
 }
 
+/// A round of maintenance beside the loop, unless the last one is still going.
+fn start_maintenance(app: &mut App) {
+    app.maintenance_ran_at = std::time::SystemTime::now();
+    if std::mem::replace(&mut app.detached.maintenance_running, true) {
+        return;
+    }
+    app.detached_quietly(
+        Lane::InTurn,
+        |app| async move { app.maintenance_away().await },
+        |app, round| {
+            app.detached.maintenance_running = false;
+            let events = app.finish_maintenance(round);
+            app.note_ui_events(&events);
+            app.start_update_check(false);
+        },
+    );
+}
+
+fn publish_feature_mask(app: &mut App) {
+    app.detached_quietly(
+        Lane::InTurn,
+        |app| async move {
+            if let Err(error) = app.publish_feature_mask().await {
+                tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
+            }
+        },
+        |_, ()| {},
+    );
+}
+
+/// What follows a command, whichever way its reply went out, and what it asked for.
+fn after_command(
+    app: &mut App,
+    media_events: &mut Option<mpsc::UnboundedReceiver<CoreEvent>>,
+    connection: &mut Option<mpsc::UnboundedReceiver<FromConnection>>,
+    tick: &mut tokio::time::Interval,
+    emit: &Emit,
+) {
+    for event in app.take_ui_events() {
+        emit(json!({ "event": event }).to_string());
+    }
+    settle_command(app, media_events, emit);
+    if app.imported_contacts_to_check() {
+        app.detached_quietly(
+            Lane::Free,
+            |app| async move { app.refresh_contacts(false).await.unwrap_or(false) },
+            |app, changed| {
+                if changed {
+                    app.note_ui_events(&["contactsChanged"]);
+                }
+            },
+        );
+    }
+    // An ID may just have been created/restored (or removed).
+    if let Some(started) = app.ensure_connection() {
+        *connection = Some(started);
+        publish_feature_mask(app);
+    }
+    if core::mem::take(&mut app.maintenance_overdue) {
+        start_maintenance(app);
+        tick.reset();
+    }
+}
+
+/// A command's or a round's work beside the loop is done: finish it like any command.
+async fn finish_detached_work(app: &mut App, finished: crate::detached::Finished, emit: &Emit) {
+    if let Some(reply) = app.finish_detached(finished) {
+        app.in_background.set(true);
+        let reply = app.reply(reply.request, reply.change, reply.outcome).await;
+        app.in_background.set(false);
+        emit(reply);
+    }
+}
+
 /// The core loop: commands (in order), connection events, hourly maintenance.
 async fn run_loop(
     app: &mut App,
     rx: &mut mpsc::UnboundedReceiver<CoreRequest>,
     media_events: &mut Option<mpsc::UnboundedReceiver<CoreEvent>>,
     file_work: &mut Option<mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>>,
+    detached: &mut Option<mpsc::UnboundedReceiver<crate::detached::Finished>>,
     emit: &Emit,
 ) {
     let mut tick = tokio::time::interval(crate::app::MAINTENANCE_INTERVAL);
@@ -593,25 +681,7 @@ async fn run_loop(
                 if let Some(reply) = app.handle_from_ui(&request.json, request.attachments).await {
                     emit(reply);
                 }
-                for event in app.take_ui_events() {
-                    emit(json!({ "event": event }).to_string());
-                }
-                settle_command(app, media_events, emit);
-                if app.refresh_imported_contacts().await {
-                    emit(json!({ "event": "contactsChanged" }).to_string());
-                    app.web_refresh();
-                }
-                // An ID may just have been created/restored (or removed).
-                if let Some(started) = app.ensure_connection() {
-                    connection = Some(started);
-                    if let Err(error) = app.publish_feature_mask().await {
-                        tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
-                    }
-                }
-                if core::mem::take(&mut app.maintenance_overdue) {
-                    run_maintenance(app, emit).await;
-                    tick.reset();
-                }
+                after_command(app, media_events, &mut connection, &mut tick, emit);
             }
             event = async {
                 match connection.as_mut() {
@@ -631,8 +701,12 @@ async fn run_loop(
                         // Online again: finish a restored backup's pending import right away
                         // (maintenance alone would retry only hourly).
                         if matches!(state, crate::connection::ConnectionState::Connected) {
-                            for event in app.on_connected().await {
-                                emit(json!({ "event": event }).to_string());
+                            if app.on_connected_here() {
+                                app.detached_quietly(
+                                    Lane::InTurn,
+                                    |app| async move { app.on_connected_away().await },
+                                    |app, events| app.note_ui_events(&events),
+                                );
                             }
                             app.web_refresh();
                         }
@@ -645,9 +719,7 @@ async fn run_loop(
                         emit(event.to_json(&app.store, app.unlocked.get()).to_string());
                         if matches!(*event, CoreEvent::MultiDeviceChanged) {
                             app.apply_multi_device();
-                            if let Err(error) = app.publish_feature_mask().await {
-                                tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
-                            }
+                            publish_feature_mask(app);
                         }
                     }
                     Some(FromConnection::OfflineReason(reason)) => {
@@ -671,6 +743,17 @@ async fn run_loop(
             } => {
                 if let Some(finished) = finished {
                     finish_file_work(app, finished, media_events, emit).await;
+                }
+            }
+            finished = async {
+                match detached.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(finished) = finished {
+                    finish_detached_work(app, finished, emit).await;
+                    after_command(app, media_events, &mut connection, &mut tick, emit);
                 }
             }
             event = async {
@@ -701,12 +784,26 @@ async fn run_loop(
                 }
             } => app.retry_failed_transfers(),
             () = app.transfers.ended(), if wake_settled_held => wake_settled(app, emit),
-            _ = tick.tick() => run_maintenance(app, emit).await,
+            _ = tick.tick() => start_maintenance(app),
         }
     }
     // Asked to stop: what was asked for before that still counts, as commands waiting in the queue
     // do. A file sent just before closing the window must not be lost.
     finish_running_file_work(app, file_work, media_events, emit).await;
+    app.drop_quiet_work();
+    while app.detached.replies_due > 0 {
+        let Some(finished) = (match detached.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }) else {
+            break;
+        };
+        finish_detached_work(app, finished, emit).await;
+        for event in app.take_ui_events() {
+            emit(json!({ "event": event }).to_string());
+        }
+        settle_command(app, media_events, emit);
+    }
 }
 
 async fn finish_running_file_work(
@@ -743,6 +840,107 @@ async fn finish_file_work(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the loop on `requests` until `until` says it has heard enough, at most a few seconds
+    /// (the requests' network waits don't end by themselves in these tests). What was said.
+    async fn loop_said(
+        app: &mut App,
+        requests: Vec<serde_json::Value>,
+        until: impl Fn(&[String]) -> bool,
+    ) -> Vec<String> {
+        let said = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let emit: Emit = {
+            let said = Arc::clone(&said);
+            Box::new(move |message| said.lock().unwrap().push(message))
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for request in requests {
+            tx.send(CoreRequest {
+                json: Zeroizing::new(request.to_string()),
+                attachments: Vec::new(),
+            })
+            .unwrap();
+        }
+        let mut media_events = app.take_media_events();
+        let mut file_work = app.take_file_work();
+        let mut detached = app.take_detached_work();
+        let heard = async {
+            while !until(&said.lock().unwrap()) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            () = run_loop(app, &mut rx, &mut media_events, &mut file_work, &mut detached, &emit) => {}
+            result = tokio::time::timeout(Duration::from_secs(5), heard) => {
+                assert!(result.is_ok(), "not heard in time: {:?}", said.lock().unwrap());
+            }
+        }
+        said.lock().unwrap().clone()
+    }
+
+    fn replied(said: &[String], request: u64) -> bool {
+        said.iter().any(|message| {
+            serde_json::from_str::<serde_json::Value>(message).is_ok_and(|m| m["reply"] == request)
+        })
+    }
+
+    /// What a stalled mobile link used to do: every reply waited for the request's time-out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_core_answers_while_a_request_of_another_command_stalls() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                crate::https::stall_requests();
+                let asked = Instant::now();
+                let said = loop_said(
+                    &mut app,
+                    vec![
+                        json!({"id": 1, "cmd": "checkLicense", "licenseKey": "ABCDE-12345"}),
+                        json!({"id": 2, "cmd": "status"}),
+                        json!({"id": 3, "cmd": "connectionState"}),
+                        json!({"id": 4, "cmd": "revocationStatus", "cached": true}),
+                    ],
+                    |said| replied(said, 2) && replied(said, 3) && replied(said, 4),
+                )
+                .await;
+                assert!(asked.elapsed() < Duration::from_secs(2));
+                assert!(!replied(&said, 1), "that one is still waiting: {said:?}");
+            })
+            .await;
+    }
+
+    /// The daily checks being due on a stalled link was what kept the start page spinning.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_round_of_maintenance_waits_beside_the_loop_and_only_one_at_a_time() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                app.store
+                    .set_identity(&crate::store::StoredIdentity {
+                        threema_id: "ABCD1234".into(),
+                        client_key: Zeroizing::new([9; 32]),
+                        server_group: "01".into(),
+                    })
+                    .unwrap();
+                app.store
+                    .set_setting(crate::store::keys::LICENSE_KEY, "ABCDE-12345")
+                    .unwrap();
+                crate::https::stall_requests();
+                let mut finished = app.take_detached_work().unwrap();
+                start_maintenance(&mut app);
+                assert!(app.detached.maintenance_running);
+                start_maintenance(&mut app);
+                let nothing =
+                    tokio::time::timeout(Duration::from_millis(50), finished.recv()).await;
+                assert!(nothing.is_err(), "it is waiting for the license check");
+                assert_eq!(app.connection_state.get(), "disconnected");
+                app.drop_quiet_work();
+                assert!(!app.detached.maintenance_running);
+            })
+            .await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_wake_up_stays_for_a_transfer_that_is_running() {

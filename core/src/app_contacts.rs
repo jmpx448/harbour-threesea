@@ -150,13 +150,17 @@ impl App {
     pub(crate) fn video_calls_setting(&self) -> Result<bool, ApiError> {
         Ok(self.store.setting(keys::VIDEO_CALLS)?.as_deref() != Some("0"))
     }
+}
 
+impl Shared {
     /// Group calls on (Android's group call policy; the feature mask keeps the bit either way,
     /// as on Android, so the setting only decides what this device does).
     pub(crate) fn group_calls_setting(&self) -> Result<bool, ApiError> {
         Ok(self.store.setting(keys::GROUP_CALLS)?.as_deref() != Some("0"))
     }
+}
 
+impl App {
     pub(crate) fn video_quality_setting(&self) -> Result<String, ApiError> {
         Ok(self
             .store
@@ -232,6 +236,8 @@ impl App {
     ///
     /// `{linkedDevicesRemain}`: linked devices could not be removed and keep the ID.
     pub(crate) async fn delete_all_data(&mut self) -> Result<Value, ApiError> {
+        // Whatever is under way for this ID ends here, and nothing it did is finished any more.
+        self.drop_detached_work();
         self.stop_backups().await;
         // Both while the connection can still tell the others.
         self.call_end_for_removal();
@@ -419,10 +425,12 @@ impl App {
             None => json!({}),
         })
     }
+}
 
+impl Shared {
     /// The exclusion list is part of the app settings too (`syncExcludedIds`, also in Safe).
     pub(crate) fn set_sync_excluded(
-        &mut self,
+        &self,
         identity: &str,
         excluded: bool,
     ) -> Result<Value, ApiError> {
@@ -441,11 +449,15 @@ impl App {
     pub(crate) fn sync_excluded_json(&self) -> Result<Value, ApiError> {
         Ok(json!({ "excluded": self.id_list_json(&self.app_settings()?.sync_excluded_ids) }))
     }
+}
 
+impl App {
     pub(crate) fn blocked_contacts_json(&self) -> Result<Value, ApiError> {
         Ok(json!({ "blocked": self.id_list_json(&self.app_settings()?.blocked_contacts) }))
     }
+}
 
+impl Shared {
     /// `[{identity, displayName}]` for a list of IDs.
     fn id_list_json(&self, ids: &[String]) -> Vec<Value> {
         ids.iter()
@@ -460,7 +472,9 @@ impl App {
             })
             .collect()
     }
+}
 
+impl App {
     pub(crate) fn set_chat_notifications(
         &mut self,
         identity: &str,
@@ -634,10 +648,12 @@ impl App {
             .send(crate::providers::CoreEvent::ContactsChanged);
         Ok(json!({}))
     }
+}
 
+impl Shared {
     /// Adding someone by hand undoes what deleting them put on the exclusion list. `true` if it
     /// did, for the other devices.
-    pub(crate) fn sync_included_again(&mut self, identity: &str) -> Result<bool, ApiError> {
+    pub(crate) fn sync_included_again(&self, identity: &str) -> Result<bool, ApiError> {
         let excluded = self
             .app_settings()?
             .sync_excluded_ids
@@ -648,9 +664,7 @@ impl App {
         }
         Ok(excluded)
     }
-}
 
-impl Shared {
     /// The directory says that `contact` has dropped forward secrecy: end what is left of the
     /// sessions, and say so in its chat (Android's `OnFSFeatureMaskDowngradedTask`).
     pub(crate) fn fs_support_lost(
@@ -1075,9 +1089,7 @@ impl Shared {
         );
         Ok(true)
     }
-}
 
-impl App {
     /// Ask up to `limit` of the contacts a restore left without a picture for one (Safe does not
     /// carry them), as far as there is reason to: a chat or a shared group, like Android's
     /// _Application Setup Steps_. The others stay marked, in case that changes. Called per round

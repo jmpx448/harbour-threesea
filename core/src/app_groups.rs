@@ -9,7 +9,7 @@ use libthreema::common::{GroupIdentity, ThreemaId};
 use serde_json::{Value, json};
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     connection::ToConnection,
     contacts,
     groups::{
@@ -87,7 +87,7 @@ async fn fetch_picture(
     media::decrypt_blob(&picture.key, MediaPart::File, &blob)
 }
 
-impl App {
+impl Shared {
     pub(crate) fn user(&self) -> Result<String, ApiError> {
         Ok(self
             .store
@@ -103,7 +103,9 @@ impl App {
             .flatten()
             .map_or_else(|| identity.to_owned(), |c| contacts::display_name(&c))
     }
+}
 
+impl Shared {
     pub(crate) fn group_json(&self, group: &Group) -> Result<Value, ApiError> {
         let user = self.user()?;
         let mut json = group.to_json(&user, |m| self.display_name_of(m));
@@ -131,7 +133,9 @@ impl App {
     pub(crate) fn group_title(&self, group: &Group) -> String {
         title(&group.name, &group.members, &|m| self.display_name_of(m))
     }
+}
 
+impl App {
     pub(crate) fn groups_json(&self) -> Result<Value, ApiError> {
         let mut list = Vec::new();
         for group in self.store.groups()? {
@@ -141,7 +145,9 @@ impl App {
         }
         Ok(json!({ "groups": list }))
     }
+}
 
+impl Shared {
     pub(crate) fn group_info(&self, key: &str) -> Result<Value, ApiError> {
         let group = self.store.group(key)?.ok_or(ApiError::GroupNotFound)?;
         let mut value = self.group_json(&group)?;
@@ -164,7 +170,9 @@ impl App {
         }
         Ok((group, user))
     }
+}
 
+impl App {
     /// Valid member identities: known contacts, without ourselves and duplicates.
     pub(crate) fn member_list(
         &self,
@@ -333,7 +341,9 @@ impl App {
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
+}
 
+impl Shared {
     /// Fetch a group's (new) picture into the media store; the UI reloads it via its version.
     pub(crate) fn download_group_picture(&self, key: String) {
         let https = self.https.clone();
@@ -443,22 +453,37 @@ impl App {
             });
         }
     }
+}
 
+impl App {
     /// `setGroupPicture` (creator): attachment 0 is the JPEG (prepared by the bridge); uploaded
     /// persistently, then sent to every member.
     pub(crate) async fn set_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
-        let (mut group, _) = self.own_group(key)?;
+        self.own_group(key)?;
         let data = std::mem::take(&mut self.attachments)
             .into_iter()
             .next()
             .filter(|data| !data.is_empty())
             .ok_or_else(|| ApiError::Internal("no picture".into()))?;
-        let picture = upload_group_picture(&self.https, &data)
+        let key = key.to_owned();
+        self.detached(crate::detached::Lane::InTurn, |app| async move {
+            app.upload_new_group_picture(&key, &data).await
+        })
+        .await
+    }
+}
+
+impl Shared {
+    /// The long part of [`Self::set_group_picture`].
+    async fn upload_new_group_picture(&self, key: &str, data: &[u8]) -> Result<Value, ApiError> {
+        let picture = upload_group_picture(&self.https, data)
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
         self.media
-            .write_picture(key, &data)
+            .write_picture(key, data)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // As it is by now: it may have changed during the upload.
+        let (mut group, _) = self.own_group(key)?;
         // Newer than what another device said of it, and everyone gets it now.
         self.store.cancel_synced_picture(key)?;
         self.store.forget_group_picture_sends(key)?;
@@ -472,9 +497,13 @@ impl App {
         group.picture_version = now_ms();
         self.store.store_new_group_picture(&group)?;
         self.tell_connection(ToConnection::SendPending);
+        // Locked during the upload: a private group's details stay in the core.
+        self.check_readable(key)?;
         self.group_info(key)
     }
+}
 
+impl App {
     /// `removeGroupPicture` (creator).
     pub(crate) fn remove_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
@@ -493,7 +522,9 @@ impl App {
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
+}
 
+impl Shared {
     /// [`resolve_members`] off the connection's path, for what the connection didn't ask itself:
     /// the retry on reconnect and in maintenance, and what a group sync named.
     pub(crate) fn fetch_members(&self, identities: Vec<String>) {
@@ -602,7 +633,7 @@ pub(crate) async fn resolve_members(
     }
 }
 
-impl App {
+impl Shared {
     /// Fetch a contact's (new) picture, whose descriptor `picture_downloads` keeps until this
     /// succeeds. Published only if it is still the newest state after the download: a set or
     /// delete that arrived meanwhile wins (the generation changed or the row is gone), and the
@@ -723,7 +754,9 @@ impl App {
             }
         }
     }
+}
 
+impl Shared {
     /// Members whose lookup failed, never got to run or waited for a rest to end.
     pub(crate) fn member_lookups_due(&self) -> Vec<String> {
         let mut due = self.store.outstanding_member_lookups().unwrap_or_default();
@@ -734,7 +767,9 @@ impl App {
         due.dedup();
         due
     }
+}
 
+impl App {
     /// `setProfilePicture`: our picture (attachment 0, a JPEG prepared by the bridge). Everyone
     /// gets it with our next message to them.
     /// `setProfilePicture`: attachments are the picture and (optionally) its Threema Safe copy.

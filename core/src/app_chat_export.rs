@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, Shared},
     app_messages::Conversation,
     contacts,
     media::MediaPart,
@@ -49,11 +49,11 @@ fn offset_text(offset_minutes: i64) -> String {
     format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
-impl App {
+impl Shared {
     /// `exportChat`: write the chat as a ZIP into `directory`; returns its path and what went
     /// in. `me` and `title_line` are the UI's texts (translated there).
     pub(crate) async fn export_chat(
-        &mut self,
+        &self,
         identity: &str,
         media: bool,
         directory: &str,
@@ -111,6 +111,8 @@ impl App {
             // ever holding a second copy of a long chat.
             let history = self.chat_history(&key)?;
             for message in history.iter().rev().flatten() {
+                // Locked meanwhile: a private chat is out of bounds again, also for this.
+                self.check_readable(&key)?;
                 // Status lines are the app talking to itself, as on Android.
                 if matches!(message.kind.as_str(), "status" | "deleted")
                     || message.kind.starts_with("call")

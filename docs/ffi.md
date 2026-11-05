@@ -36,6 +36,9 @@ Start config: `{"dataDir", "appVersion", "language", "country", "model", "osVers
 Request: `{"id": 7, "cmd": "<name>", ...args}` →
 reply `{"reply": 7, "ok": true, "result": {...}}` or
 `{"reply": 7, "ok": false, "error": {"kind": "<kind>", "message": "..."}}`.
+Replies carry their request's id and need not come in order: a command that waits for the network
+or a slow file runs beside the core's loop and replies when done, and the commands behind it are
+answered meanwhile (ADR 0028). A request that depends on an earlier one waits for its reply.
 
 The arguments sit in the same object as `id` and `cmd`, so **no argument may be called `id` or
 `cmd`**: the bridge would overwrite it with the request's own number and the core would refuse

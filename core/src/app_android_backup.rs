@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     android_backup::{self, Archive, ArchiveError},
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
 };
 
 impl From<ArchiveError> for ApiError {
@@ -24,14 +24,14 @@ impl From<ArchiveError> for ApiError {
     }
 }
 
-impl App {
+impl Shared {
     /// `androidBackupInspect {path, password}`: open the archive, check the format version
     /// and whose identity it belongs to, and count what it holds. Entirely local; nothing is
     /// imported, sent or changed. The sizes are the archive's declarations — estimates until
     /// each entry is read and authenticated by an import. Runs on a blocking thread (ZIP I/O
     /// and the ID backup's key derivation).
     pub(crate) async fn android_backup_inspect(
-        &mut self,
+        &self,
         path: String,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
@@ -240,25 +240,22 @@ fn load_metadata(
     })
 }
 
-impl App {
+impl Shared {
     /// `androidBackupImport {path, password, scope: "metadata"}`: merge the archive's
     /// contacts, groups, distribution lists, pictures and used nonces (Android's hashes, so
     /// messages Android already received are refused as replays) into the running identity,
     /// entirely offline and without any sending side effect — dedicated store writes only, no message
     /// is queued, no lookup made, nothing distributed (the contact refresh that follows when contacts
-    /// were added is a separate step, [`Self::refresh_imported_contacts`]). Existing local data wins:
+    /// were added is a separate step, [`App::imported_contacts_to_check`]). Existing local data wins:
     /// a contact whose stored key differs is a counted conflict and keeps its picture and chat as they
     /// are, pictures only fill empty slots, an existing group's membership and left state stay
     /// untouched. Running it again adds nothing. Message history is not part of this scope.
     pub(crate) async fn android_backup_import(
-        &mut self,
+        &self,
         path: String,
         password: Zeroizing<String>,
         scope: &str,
     ) -> Result<Value, ApiError> {
-        if scope == "history" {
-            return self.android_backup_import_history(path, password);
-        }
         if scope != "metadata" {
             return Err(ApiError::Internal(format!("unknown scope {scope}")));
         }
@@ -300,21 +297,21 @@ impl App {
         self.reflect_owed_pictures();
         Ok(summary)
     }
+}
 
+impl App {
     /// Right after an import that added contacts: the regular contact refresh, under the regular
     /// conditions (a valid license, the directory not resting). If it fails the next maintenance
-    /// tries again, the last refresh being forgotten. Returns whether something changed.
-    pub(crate) async fn refresh_imported_contacts(&mut self) -> bool {
-        std::mem::take(&mut self.imported_contacts_unchecked)
-            && self.license_valid().unwrap_or(false)
-            && self.refresh_contacts(false).await.unwrap_or(false)
+    /// tries again, the last refresh being forgotten. Whether one is due.
+    pub(crate) fn imported_contacts_to_check(&self) -> bool {
+        self.imported_contacts_unchecked.take() && self.license_valid().unwrap_or(false)
     }
 
     /// `scope: "history"`: messages, media and reactions as a background job on the core
     /// thread (heavy ZIP work on a blocking thread), so commands and live messages keep
     /// flowing; progress and the final summary arrive as `androidBackup…` events. One job at
     /// a time; the chat and contact lists reload from the bulk events it ends with.
-    fn android_backup_import_history(
+    pub(crate) fn android_backup_import_history(
         &mut self,
         path: String,
         password: Zeroizing<String>,
@@ -344,11 +341,13 @@ impl App {
         tokio::task::spawn_local(job.run());
         Ok(json!({ "started": true }))
     }
+}
 
+impl Shared {
     /// In one store step, with what the other devices are told: a failed import leaves nothing
     /// behind, so that importing again adds and tells everything. (Picture files stay; the next
     /// try writes them again.)
-    fn apply_android_metadata(&mut self, me: &str, data: Metadata) -> Result<Value, ApiError> {
+    fn apply_android_metadata(&self, me: &str, data: Metadata) -> Result<Value, ApiError> {
         let store = std::rc::Rc::clone(&self.store);
         let step = store.step()?;
         let summary = self.apply_android_metadata_rows(me, data)?;
@@ -358,7 +357,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn apply_android_metadata_rows(&mut self, me: &str, data: Metadata) -> Result<Value, ApiError> {
+    fn apply_android_metadata_rows(&self, me: &str, data: Metadata) -> Result<Value, ApiError> {
         use libthreema::{
             common::FeatureMask,
             model::contact::Contact,
@@ -459,7 +458,7 @@ impl App {
             // off for them, and a refresh from the last day would keep it so until tomorrow.
             self.store
                 .delete_setting(crate::store::keys::CONTACTS_REFRESHED_AT)?;
-            self.imported_contacts_unchecked = true;
+            self.imported_contacts_unchecked.set(true);
         }
         let contacts_summary = json!({
             "added": added, "existing": existing, "updated": updated,
@@ -725,7 +724,7 @@ mod tests {
     async fn inspects_the_fixture() {
         let dir = tempfile::tempdir().unwrap();
         // The fixture's identity: ABCD1234 with client key 0x07 * 32.
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let preview = app
             .android_backup_inspect(fixture(), Zeroizing::new("test-password".into()))
             .await
@@ -738,7 +737,7 @@ mod tests {
 
         // Same ID with another key: never merged.
         let other_dir = tempfile::tempdir().unwrap();
-        let mut other = app_with_identity(other_dir.path(), [8; 32]);
+        let other = app_with_identity(other_dir.path(), [8; 32]);
         let preview = other
             .android_backup_inspect(fixture(), Zeroizing::new("test-password".into()))
             .await
@@ -772,7 +771,7 @@ mod tests {
     async fn a_picture_that_cannot_be_written_is_counted() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let media = dir.path().join("media");
         std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o500)).unwrap();
         // Root writes anyway: nothing to see then.
@@ -802,12 +801,12 @@ mod tests {
         use libthreema::protobuf::d2d::{ContactSync, GroupSync, contact_sync, envelope::Content};
         use prost::Message as _;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let password = || Zeroizing::new("test-password".to_owned());
 
         // Nobody linked: nothing to tell.
         let other = tempfile::tempdir().unwrap();
-        let mut alone = app_with_identity(other.path(), [7; 32]);
+        let alone = app_with_identity(other.path(), [7; 32]);
         alone
             .android_backup_import(fixture(), password(), "metadata")
             .await
@@ -865,7 +864,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn an_import_that_cannot_tell_the_linked_devices_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let password = || Zeroizing::new("test-password".to_owned());
         app.store
             .set_multi_device(Some(&crate::multidevice::Properties::generate()))
@@ -908,7 +907,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn imports_metadata_offline() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let password = || Zeroizing::new("test-password".to_owned());
         let summary = app
             .android_backup_import(fixture(), password(), "metadata")
@@ -918,7 +917,7 @@ mod tests {
         assert_eq!(summary["contacts"]["keyConflicts"], 0);
         assert_eq!(summary["groups"]["added"], 2);
         // What the new contacts support is looked up next, not after the next day's refresh.
-        assert!(app.imported_contacts_unchecked);
+        assert!(app.imported_contacts_unchecked.get());
         assert!(
             app.store
                 .setting(crate::store::keys::CONTACTS_REFRESHED_AT)
@@ -927,8 +926,8 @@ mod tests {
         );
         // Without a license nothing goes to the directory, and the request isn't kept for later:
         // the forgotten refresh time has maintenance do it.
-        assert!(!app.refresh_imported_contacts().await);
-        assert!(!app.imported_contacts_unchecked);
+        assert!(!app.imported_contacts_to_check());
+        assert!(!app.imported_contacts_unchecked.get());
         app.store
             .set_setting(crate::store::keys::CONTACTS_REFRESHED_AT, "1")
             .unwrap();
@@ -1035,7 +1034,7 @@ mod tests {
             .unwrap();
         assert_eq!(again["contacts"]["added"], 0);
         assert_eq!(again["contacts"]["existing"], 3);
-        assert!(!app.imported_contacts_unchecked, "nobody new");
+        assert!(!app.imported_contacts_unchecked.get(), "nobody new");
         assert_eq!(
             app.store
                 .setting(crate::store::keys::CONTACTS_REFRESHED_AT)
@@ -1054,7 +1053,7 @@ mod tests {
 
         // A stored contact whose key differs is a conflict and stays untouched.
         let other_dir = tempfile::tempdir().unwrap();
-        let mut other = app_with_identity(other_dir.path(), [7; 32]);
+        let other = app_with_identity(other_dir.path(), [7; 32]);
         other
             .store
             .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
@@ -1090,7 +1089,7 @@ mod tests {
 
         // Another identity's backup is refused before any change.
         let foreign_dir = tempfile::tempdir().unwrap();
-        let mut foreign = app_with_identity(foreign_dir.path(), [8; 32]);
+        let foreign = app_with_identity(foreign_dir.path(), [8; 32]);
         let error = foreign
             .android_backup_import(fixture(), password(), "metadata")
             .await
@@ -1231,7 +1230,7 @@ mod history_tests {
     async fn a_backup_without_media_downloads_nothing_by_itself() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
         let body = format!(
@@ -1286,7 +1285,7 @@ mod history_tests {
     async fn a_stop_keeps_the_blob_keys_of_what_is_imported() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
         let mut messages = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"]);
@@ -1358,7 +1357,7 @@ mod history_tests {
     async fn a_deleted_message_gets_nothing_back_from_a_backup() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
         let api_id = "0123456789abcdef";
@@ -1412,7 +1411,7 @@ mod history_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn importing_again_leaves_reactions_as_they_are_here() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         app.android_backup_import(
             fixture(),
             Zeroizing::new("test-password".into()),
@@ -1496,7 +1495,7 @@ mod history_tests {
     async fn an_oversized_reaction_file_is_reported_in_the_summary() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
         let messages = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"])
@@ -1541,7 +1540,7 @@ mod history_tests {
     async fn left_out_chats_are_named_but_never_a_private_one() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id", "firstname"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17", "Open"])
             + &write_row(&["C0C0C0C0", &"bc".repeat(32), "18", "Hidden"]);
@@ -1602,7 +1601,7 @@ mod history_tests {
     async fn one_damaged_chat_leaves_the_rest_of_the_backup_alone() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"])
             + &write_row(&["C0C0C0C0", &"bc".repeat(32), "18"]);
@@ -1660,7 +1659,7 @@ mod history_tests {
         use crate::android_backup::csv::write_row;
         for name in ["nonces.csv", "nonces_d2d.csv"] {
             let dir = tempfile::tempdir().unwrap();
-            let mut app = app_with_identity(dir.path(), [7; 32]);
+            let app = app_with_identity(dir.path(), [7; 32]);
             let contacts = write_row(&["identity", "publickey", "identity_id"])
                 + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
             let row = write_row(&[&"ab".repeat(32)]);
@@ -1689,7 +1688,7 @@ mod history_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_store_error_ends_the_import_instead_of_dropping_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         app.android_backup_import(
             fixture(),
             Zeroizing::new("test-password".into()),
@@ -1735,7 +1734,7 @@ mod history_tests {
     async fn one_oversized_chat_leaves_the_rest_of_the_backup_alone() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"])
             + &write_row(&["C0C0C0C0", &"bc".repeat(32), "18"]);
@@ -1822,7 +1821,7 @@ mod history_tests {
     async fn outgoing_states_claim_no_more_than_the_backup_says() {
         use crate::{android_backup::csv::write_row, messages::OutgoingState};
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
         let cases = [
@@ -1877,7 +1876,7 @@ mod history_tests {
     async fn hints_at_files_that_were_moved_around() {
         use crate::android_backup::csv::write_row;
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         let contacts = write_row(&["identity", "publickey", "identity_id"])
             + &write_row(&["B0B0B0B0", &"aa".repeat(32), "17"])
             + &write_row(&["C0C0C0C0", &"bb".repeat(32), "18"])
@@ -1959,7 +1958,7 @@ mod history_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn imports_history_between_live_messages() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         // Metadata first (contacts/groups must exist), then a live message that is newer
         // than everything in the archive.
         app.android_backup_import(
@@ -2409,7 +2408,7 @@ mod export_tests {
 
     /// A fresh device with the same identity, after importing the backup at `path`.
     async fn restored(dir: &std::path::Path, path: &str) -> App {
-        let mut app = app_with_identity(dir, [7; 32]);
+        let app = app_with_identity(dir, [7; 32]);
         app.android_backup_import(
             path.to_owned(),
             Zeroizing::new("round-trip-pw".into()),
@@ -2566,7 +2565,7 @@ mod export_tests {
                 .unwrap()
                 .path();
 
-            let mut b = app_with_identity(dir_b.path(), [7; 32]);
+            let b = app_with_identity(dir_b.path(), [7; 32]);
             b.android_backup_import(
                 path.to_str().unwrap().to_owned(),
                 Zeroizing::new("round-trip-pw".into()),
@@ -2814,7 +2813,7 @@ mod export_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_backup_says_when_each_chat_last_changed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let app = app_with_identity(dir.path(), [7; 32]);
         app.android_backup_import(
             fixture(),
             Zeroizing::new("test-password".into()),
@@ -3070,7 +3069,7 @@ mod export_tests {
     async fn export_round_trips_through_the_importer() {
         // A: everything the fixture holds, plus one live message.
         let dir_a = tempfile::tempdir().unwrap();
-        let mut a = app_with_identity(dir_a.path(), [7; 32]);
+        let a = app_with_identity(dir_a.path(), [7; 32]);
         a.android_backup_import(
             fixture(),
             Zeroizing::new("test-password".into()),
@@ -3107,7 +3106,7 @@ mod export_tests {
 
         // B: a fresh device with the same identity restores A's file completely.
         let dir_b = tempfile::tempdir().unwrap();
-        let mut b = app_with_identity(dir_b.path(), [7; 32]);
+        let b = app_with_identity(dir_b.path(), [7; 32]);
         let preview = b
             .android_backup_inspect(path.clone(), Zeroizing::new("round-trip-pw".into()))
             .await

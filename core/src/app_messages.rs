@@ -84,7 +84,7 @@ const CONNECTION_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_se
 /// A page of the media gallery when the UI doesn't say how many it wants.
 const MEDIA_PAGE: u32 = 60;
 
-impl App {
+impl Shared {
     /// The conversation `identity` (a Threema ID or a group key) refers to, with its key.
     pub(crate) fn conversation(&self, identity: &str) -> Result<(String, Conversation), ApiError> {
         if crate::groups::parse_key(identity).is_some() {
@@ -104,7 +104,9 @@ impl App {
         let contact = self.store.contact(&id)?.ok_or(ApiError::ContactNotFound)?;
         Ok((id, Conversation::Contact(contact)))
     }
+}
 
+impl App {
     /// `chatMedia`: a page of the gallery with each message's kind, the active filter, where the
     /// next page starts (`next`, none at the end) and, on a first page, how many of each kind
     /// there are (the UI hides filters for kinds the chat doesn't have). A `limit` of 0: just that.
@@ -160,7 +162,9 @@ impl App {
         }
         Ok(reply)
     }
+}
 
+impl Shared {
     /// Reading a private chat needs the app unlocked (ADR 0009).
     pub(crate) fn check_readable(&self, conversation: &str) -> Result<(), ApiError> {
         if !self.unlocked.get() && self.store.is_private(conversation)? {
@@ -180,7 +184,9 @@ impl App {
         self.check_readable(&key)?;
         Ok((key, conversation))
     }
+}
 
+impl App {
     /// A chat that may be read now, also one without a conversation to write to (`None`): earlier
     /// versions removed a deleted contact's row and left its chat behind (ADR 0022).
     pub(crate) fn readable_chat(

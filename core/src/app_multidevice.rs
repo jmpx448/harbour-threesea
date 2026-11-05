@@ -71,9 +71,7 @@ impl Shared {
                 .zip(properties.as_ref().map(|p| p.mediator_device_id)),
         );
     }
-}
 
-impl App {
     /// A picture changed on another device: fetch it from the mirror (local scope, as Android's
     /// `ReflectedBlobDownloader`) and store it like a received one; or remove it.
     /// A picture another device changed, as `synced_pictures` keeps it: fetched and stored, and
@@ -471,8 +469,7 @@ impl Shared {
             link: Box::new(link),
             reply,
         });
-        // Not forever: the core handles nothing else meanwhile (deep audit 2026-10-27, P01).
-        // The connection answers within this limit; if it doesn't, all that is known is that
+        // Not forever: the connection answers within this limit; if it doesn't, all that is known is that
         // it may still be working on the join, so nothing is rolled back.
         let outcome = match timeout(JOIN_REPLY_LIMIT, answer).await {
             Err(_) => {
@@ -555,7 +552,9 @@ impl App {
         self.tell_connection(ToConnection::ReflectSync);
         Ok(())
     }
+}
 
+impl Shared {
     /// What a backup's import added: the other devices get it, the contacts first, as they drop a
     /// group naming someone they don't know. (Its messages stay here, as old history does.) A
     /// picture comes by itself (`reflect_owed_pictures`). Within the import's store step.
@@ -618,23 +617,52 @@ impl App {
         }
         Ok(())
     }
-}
 
-impl Shared {
-    /// After a command that changed something other devices keep too: reflect it.
+    /// After a command that changed something other devices keep too: reflect it. A picture may
+    /// need its upload first, and is noted until that has worked: what fails comes again with
+    /// `resume_picture_downloads`. In the core loop that upload doesn't hold up anything else.
     pub(crate) async fn reflect_change(&self, change: SyncChange, result: &Value) {
+        if !matches!(self.store.multi_device(), Ok(Some(_))) {
+            return;
+        }
+        let own_picture = matches!(change, SyncChange::Profile { picture: true });
+        let group_picture = match &change {
+            SyncChange::GroupPicture(key) => Some(key.clone()),
+            _ => None,
+        };
+        self.queue_reflection(change, result);
+        if !own_picture && group_picture.is_none() {
+            return;
+        }
+        let store = std::rc::Rc::clone(&self.store);
+        let https = self.https.clone();
+        let media = std::sync::Arc::clone(&self.media);
+        let connection = self.connection.borrow().clone();
+        let upload = async move {
+            let connection = connection.as_ref();
+            if own_picture {
+                reflect_own_picture(&store, &https, &media, connection).await;
+            }
+            if let Some(key) = group_picture {
+                reflect_group_picture(&store, &https, &media, &key, connection).await;
+            }
+        };
+        if self.in_background.get() {
+            tokio::task::spawn_local(upload);
+        } else {
+            upload.await;
+        }
+    }
+
+    /// The part of [`Self::reflect_change`] that takes no waiting, which is all of it unless a
+    /// picture is involved.
+    pub(crate) fn queue_reflection(&self, change: SyncChange, result: &Value) {
         use libthreema::protobuf::d2d::{
             SettingsSync, UserProfileSync, settings_sync, user_profile_sync,
         };
         if !matches!(self.store.multi_device(), Ok(Some(_))) {
             return;
         }
-        // A picture that is here needs the network first: see below.
-        let own_picture = matches!(change, SyncChange::Profile { picture: true });
-        let group_picture = match &change {
-            SyncChange::GroupPicture(key) => Some(key.clone()),
-            _ => None,
-        };
         let built = (|| -> Result<Vec<(Scope, Content)>, crate::store::StoreError> {
             Ok(match change {
                 SyncChange::NewContacts(identities) => {
@@ -823,16 +851,6 @@ impl Shared {
                 self.tell_connection(ToConnection::ReflectSync);
             }
             Err(error) => tracing::warn!(%error, "sync not reflected"),
-        }
-        // A picture may need its upload first, and is noted until that has worked: what fails comes
-        // again with `resume_picture_downloads`.
-        let connection = self.connection.borrow().clone();
-        let connection = connection.as_ref();
-        if own_picture {
-            reflect_own_picture(&self.store, &self.https, &self.media, connection).await;
-        }
-        if let Some(key) = group_picture {
-            reflect_group_picture(&self.store, &self.https, &self.media, &key, connection).await;
         }
     }
 }

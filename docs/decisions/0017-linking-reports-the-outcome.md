@@ -32,8 +32,8 @@ An earlier user report stands: a phone must never be trapped behind an unreachab
 
 ## Consequences
 
-- In the worst case the core's dispatcher waits about 11 minutes on a join (was: 200 s, too short
-  for the join). This is the known P01 limitation; the user is on the linking page meanwhile.
+- In the worst case the core waits about 11 minutes for a join's reply (was: 200 s, too short for
+  the join). That wait is beside the core loop (ADR 0028); the user is on the linking page meanwhile.
 - A new device registering after the group was removed forms a new group of its own with the keys
   it got. The phone cannot prevent that, and the error text says the computer received the ID.
 - Android retries a failed drop as a persistent task; we leave the retry to the user and to the

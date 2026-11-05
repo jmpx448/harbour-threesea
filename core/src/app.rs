@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::{
+    detached::Lane,
     directory::{self, ClientVersion, DirectoryError},
     https::HttpsClient,
     store::{Store, StoreError, StoredIdentity, keys},
@@ -1394,6 +1395,11 @@ pub struct Shared {
     pub(crate) unlocked: std::cell::Cell<bool>,
     /// The app's data directory (store, media, the in-app log).
     pub(crate) data_dir: PathBuf,
+    /// A data backup added contacts: what they support is unknown until the next refresh.
+    pub(crate) imported_contacts_unchecked: std::cell::Cell<bool>,
+    /// In the core loop, from the UI: what waits or takes long goes beside the loop. Others
+    /// asking the same (Threema Web) need the answer in place.
+    pub(crate) in_background: std::cell::Cell<bool>,
 }
 
 impl core::ops::Deref for App {
@@ -1423,11 +1429,14 @@ pub struct App {
     pub(crate) write_pass: Option<crate::app_media::WritePass>,
     /// Binary attachments of the request being handled (e.g. `sendFile`: file, thumbnail).
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
-    /// From the UI, in the core loop: `sendFile` and `saveFile` don't hold up the commands behind
-    /// them. Others asking the same (Threema Web) need the answer in place.
-    pub(crate) file_work_in_background: bool,
     /// The request being handled.
     pub(crate) current_request: u64,
+    /// What it changes for the other devices.
+    pub(crate) current_change: Option<crate::app_multidevice::SyncChange>,
+    /// Commands and maintenance waiting for the network beside the core loop.
+    pub(crate) detached: crate::detached::DetachedWork,
+    /// How many times we left a group call: a join that was under way is no use by now.
+    pub(crate) group_call_leaves: u64,
     /// The command handled went to a blocking thread: its reply comes later.
     pub(crate) reply_later: bool,
     /// How many of those are still to be finished.
@@ -1451,8 +1460,6 @@ pub struct App {
     pub(crate) web: crate::app_web::WebSessions,
     /// A running Android history import's cancel flag (set true when it ends).
     pub(crate) android_import: Option<std::rc::Rc<std::cell::Cell<bool>>>,
-    /// A data backup added contacts: what they support is unknown until the next refresh.
-    pub(crate) imported_contacts_unchecked: bool,
     /// A running Android-format export's done flag.
     pub(crate) android_export: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// Tells the running export to give up (the ID is being removed).
@@ -1525,6 +1532,8 @@ impl App {
             last_group_check: std::cell::Cell::default(),
             unlocked: std::cell::Cell::default(),
             data_dir: start.data_dir.clone(),
+            imported_contacts_unchecked: std::cell::Cell::new(false),
+            in_background: std::cell::Cell::new(false),
         };
         let app = Self {
             shared: std::rc::Rc::new(shared),
@@ -1536,8 +1545,10 @@ impl App {
             media_events_rx: Some(media_events_rx),
             write_pass: None,
             attachments: Vec::new(),
-            file_work_in_background: false,
             current_request: 0,
+            current_change: None,
+            detached: crate::detached::DetachedWork::default(),
+            group_call_leaves: 0,
             reply_later: false,
             file_work_running: 0,
             file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),
@@ -1552,7 +1563,6 @@ impl App {
             group_call: None,
             web: crate::app_web::WebSessions::default(),
             android_import: None,
-            imported_contacts_unchecked: false,
             android_export: None,
             android_export_cancel: Arc::default(),
             transfer_retry_at: None,
@@ -1698,16 +1708,17 @@ impl App {
         reply
     }
 
-    /// [`Self::handle_with`] for the UI's requests in the core loop. `None`: the command's heavy
-    /// part went to a blocking thread, and [`Self::finish_file_work`] replies when it is done.
+    /// [`Self::handle_with`] for the UI's requests in the core loop. `None`: the command's long
+    /// part went elsewhere, and the core loop replies when it is done
+    /// ([`Self::finish_file_work`], [`Self::finish_detached`]).
     pub(crate) async fn handle_from_ui(
         &mut self,
         request_json: &str,
         attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
     ) -> Option<String> {
-        self.file_work_in_background = true;
+        self.in_background.set(true);
         let reply = self.handle_with(request_json, attachments).await;
-        self.file_work_in_background = false;
+        self.in_background.set(false);
         (!std::mem::take(&mut self.reply_later)).then_some(reply)
     }
 
@@ -1726,9 +1737,10 @@ impl App {
                 .to_string();
             }
         };
-        let change = sync_change(&self.store, &request.command);
+        self.current_change = sync_change(&self.store, &request.command);
         self.current_request = request.id;
         let outcome = self.execute(request.command).await;
+        let change = self.current_change.take();
         if self.reply_later {
             return String::new();
         }
@@ -1778,47 +1790,92 @@ impl App {
     async fn execute(&mut self, command: Command) -> Result<Value, ApiError> {
         match command {
             Command::Status => self.status(),
-            Command::CheckLicense { license_key } => self.check_license(&license_key).await,
+            Command::CheckLicense { license_key } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.check_license(&license_key).await
+                })
+                .await
+            }
             Command::LicenseStatus => self.license_status(),
             Command::ForgetLicense => self.forget_license(),
             Command::SpamPotential { identity } => self.spam_potential(&identity),
             Command::DismissSpam { identity } => self.dismiss_spam(&identity),
             Command::ReportSpam { identity, block } => self.report_spam(&identity, block).await,
-            Command::CreateIdentity => self.create_identity().await,
+            Command::CreateIdentity => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.create_identity().await },
+                )
+                .await
+            }
             Command::RestoreIdentityBackup { backup, password } => {
-                self.restore_identity_backup(backup, password).await
+                self.detached(Lane::InTurn, |app| async move {
+                    app.restore_identity_backup(backup, password).await
+                })
+                .await
             }
             Command::ExportIdentityBackup { password, pin } => {
                 self.check_pin(pin)?;
-                self.export_identity_backup(password).await
+                self.detached(Lane::Free, |app| async move {
+                    app.export_identity_backup(password).await
+                })
+                .await
             }
             Command::SafeCheckPassword { password } => Ok(Self::safe_check_password(&password)),
             Command::SafeStatus => self.safe_status(),
             Command::SafeEnable { password, pin } => {
                 self.check_pin(pin)?;
-                self.safe_enable(password).await
+                self.detached(Lane::InTurn, |app| async move {
+                    app.safe_enable(password).await
+                })
+                .await
             }
-            Command::SafeBackupNow => self.safe_backup_now().await,
+            Command::SafeBackupNow => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.safe_backup_now().await },
+                )
+                .await
+            }
             Command::SafeDisable { pin } => {
                 self.check_pin(pin)?;
-                self.safe_disable().await
+                self.detached(Lane::InTurn, |app| async move { app.safe_disable().await })
+                    .await
             }
             Command::SafeRestore { identity, password } => {
-                self.safe_restore(&identity, password).await
+                self.detached(Lane::InTurn, |app| async move {
+                    app.safe_restore(&identity, password).await
+                })
+                .await
             }
             Command::SafeRetryImport => {
-                let events = self.try_pending_import().await;
-                self.note_ui_events(&events);
-                self.safe_status()
+                self.detached(Lane::InTurn, |app| async move {
+                    let events = app.try_pending_import().await;
+                    app.note_ui_events(&events);
+                    app.safe_status()
+                })
+                .await
             }
             Command::AndroidBackupInspect { path, password } => {
-                self.android_backup_inspect(path, password).await
+                self.detached(Lane::Free, |app| async move {
+                    app.android_backup_inspect(path, password).await
+                })
+                .await
             }
             Command::AndroidBackupImport {
                 path,
                 password,
                 scope,
-            } => self.android_backup_import(path, password, &scope).await,
+            } => {
+                if scope == "history" {
+                    self.android_backup_import_history(path, password)
+                } else {
+                    self.detached(Lane::InTurn, |app| async move {
+                        app.android_backup_import(path, password, &scope).await
+                    })
+                    .await
+                }
+            }
             Command::AndroidBackupCancel => {
                 if let Some(cancel) = &self.android_import {
                     cancel.set(true);
@@ -1847,13 +1904,16 @@ impl App {
             Command::Contacts => self.contacts_json(),
             Command::Contact { identity } => self.contact_json(&identity),
             Command::AddContact { identity } => {
-                let result = self.add_contact(&identity).await?;
-                let added = result["identity"].as_str().unwrap_or_default().to_owned();
-                if self.sync_included_again(&added)? {
-                    let change = crate::app_multidevice::SyncChange::Settings;
-                    self.reflect_change(change, &json!({})).await;
-                }
-                Ok(result)
+                self.detached(Lane::Free, |app| async move {
+                    let result = app.add_contact(&identity).await?;
+                    let added = result["identity"].as_str().unwrap_or_default().to_owned();
+                    if app.sync_included_again(&added)? {
+                        let change = crate::app_multidevice::SyncChange::Settings;
+                        app.reflect_change(change, &json!({})).await;
+                    }
+                    Ok(result)
+                })
+                .await
             }
             Command::UpdateContact {
                 identity,
@@ -1875,20 +1935,55 @@ impl App {
             Command::ClearContactPolicies => self.clear_contact_policies(),
             Command::Profile => {
                 // A pending e-mail link may have been confirmed meanwhile.
-                let _ = self.check_email_link().await;
-                self.profile_json()
+                if self.store.setting(keys::LINKED_EMAIL_PENDING)?.is_some() {
+                    self.detached(Lane::Free, |app| async move {
+                        let _ = app.check_email_link().await;
+                        app.profile_json()
+                    })
+                    .await
+                } else {
+                    self.profile_json()
+                }
             }
-            Command::RevocationStatus { cached } => self.revocation_status(cached).await,
-            Command::LinkEmail { email } => self.link_email(&email).await,
-            Command::LinkMobile { number } => self.link_mobile(&number).await,
+            Command::RevocationStatus { cached } => {
+                self.detached(Lane::Free, move |app| async move {
+                    app.revocation_status(cached).await
+                })
+                .await
+            }
+            Command::LinkEmail { email } => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.link_email(&email).await },
+                )
+                .await
+            }
+            Command::LinkMobile { number } => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.link_mobile(&number).await },
+                )
+                .await
+            }
             Command::NormalizeMobile { number } => Ok(json!({
                 "number": crate::address_book::international_phone(&number),
             })),
-            Command::VerifyMobile { code, from_link } => self.verify_mobile(&code, from_link).await,
-            Command::CallMobile => self.call_mobile().await,
+            Command::VerifyMobile { code, from_link } => {
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.verify_mobile(&code, from_link).await
+                })
+                .await
+            }
+            Command::CallMobile => {
+                self.detached(Lane::InTurn, |app| async move { app.call_mobile().await })
+                    .await
+            }
             Command::SetRevocationPassword { password, pin } => {
                 self.check_pin(pin)?;
-                self.set_revocation_password(&password).await
+                self.detached(Lane::InTurn, |app| async move {
+                    app.set_revocation_password(&password).await
+                })
+                .await
             }
             Command::SetNickname { nickname } => self.set_nickname(&nickname),
             Command::DeclineNickname => self.decline_nickname(),
@@ -2031,8 +2126,11 @@ impl App {
             }
             Command::SyncExcluded => self.sync_excluded_json(),
             Command::RefreshContacts => {
-                let changed = self.refresh_contacts(true).await?;
-                Ok(json!({ "changed": changed }))
+                self.detached(Lane::InTurn, |app| async move {
+                    let changed = app.refresh_contacts(true).await?;
+                    Ok(json!({ "changed": changed }))
+                })
+                .await
             }
             Command::ForwardMessage { message, identity } => {
                 // Boxed: all the commands' futures together must fit the stack.
@@ -2132,9 +2230,18 @@ impl App {
                 if automatic && self.store.directory_resting() {
                     return Err(ApiError::RateLimited);
                 }
-                self.match_address_book(entries).await
+                self.detached(Lane::InTurn, |app| async move {
+                    app.match_address_book(entries).await
+                })
+                .await
             }
-            Command::VerifyQrCode { text } => self.verify_qr_code(&text).await,
+            Command::VerifyQrCode { text } => {
+                self.detached(
+                    Lane::Free,
+                    |app| async move { app.verify_qr_code(&text).await },
+                )
+                .await
+            }
             Command::QrKind { text } => self.classify_qr(&text),
             Command::SetProfilePicture => self.set_profile_picture(),
             Command::RemoveProfilePicture => self.remove_profile_picture(),
@@ -2182,7 +2289,7 @@ impl App {
                 };
                 // Only this command: nothing else that ends in sending a file uses a pass.
                 let under_pass = self.take_write_pass(&file.identity);
-                if self.file_work_in_background {
+                if self.in_background.get() {
                     self.send_file_in_background(file, under_pass)
                 } else if under_pass {
                     Box::pin(self.send_file_under_pass(file)).await
@@ -2192,7 +2299,7 @@ impl App {
             }
             Command::RetryUpload { message } => self.retry_upload(message),
             Command::SaveFile { message, directory } => {
-                if self.file_work_in_background {
+                if self.in_background.get() {
                     self.save_file_in_background(message, directory)
                 } else {
                     Box::pin(self.save_file(message, directory)).await
@@ -2225,24 +2332,58 @@ impl App {
                 Ok(json!({}))
             }
             Command::MultiDevice => self.multi_device_json(),
-            Command::LinkedDevices => self.linked_devices_checked().await,
-            Command::DropDevices { ids } => self.drop_devices(&ids).await,
+            Command::LinkedDevices => {
+                self.detached(Lane::Free, |app| async move {
+                    app.linked_devices_checked().await
+                })
+                .await
+            }
+            Command::DropDevices { ids } => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.drop_devices(&ids).await },
+                )
+                .await
+            }
             Command::DeactivateMultiDevice { leave_locally } => {
-                self.deactivate_multi_device(leave_locally).await
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.deactivate_multi_device(leave_locally).await
+                })
+                .await
             }
             Command::StartLinking { code, pin } => {
                 self.check_pin(pin)?;
-                self.start_linking(&code).await
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.start_linking(&code).await },
+                )
+                .await
             }
-            Command::ConfirmLinking => self.confirm_linking().await,
+            Command::ConfirmLinking => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.confirm_linking().await },
+                )
+                .await
+            }
             Command::CancelLinking => {
-                let link = self.pending_link.take();
-                if let Some(link) = link {
-                    link.close().await;
-                }
-                Ok(json!({}))
+                // In turn: a page closing while the connection comes up asks this before there is
+                // anything to cancel.
+                self.detached(Lane::InTurn, |app| async move {
+                    let link = app.pending_link.take();
+                    if let Some(link) = link {
+                        link.close().await;
+                    }
+                    Ok(json!({}))
+                })
+                .await
             }
-            Command::CallTurnServers { identity } => self.call_turn_servers(&identity).await,
+            Command::CallTurnServers { identity } => {
+                self.detached(Lane::Free, |app| async move {
+                    app.call_turn_servers(&identity).await
+                })
+                .await
+            }
             Command::CallStart {
                 identity,
                 sdp,
@@ -2275,10 +2416,7 @@ impl App {
                 conversation,
                 fingerprint,
                 create,
-            } => {
-                self.group_call_join(&conversation, &fingerprint, create)
-                    .await
-            }
+            } => Box::pin(self.group_call_join(conversation, fingerprint, create)).await,
             Command::GroupCallChannel { data } => self.group_call_channel(&data),
             Command::GroupCallLeave => Ok(self.group_call_leave()),
             Command::GroupCallMute { muted } => Ok(self.group_call_mute(muted)),
@@ -2332,7 +2470,12 @@ impl App {
                     && self.store.multi_device()?.is_none(),
                 "multiDevice": self.store.multi_device()?.is_some(),
             })),
-            Command::SetForwardSecurity { on } => self.set_forward_security(on).await,
+            Command::SetForwardSecurity { on } => {
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.set_forward_security(on).await
+                })
+                .await
+            }
             Command::LogText => Ok(json!({
                 // A small tail: the page lays the whole text out at once.
                 "text": crate::runtime::log_text(&self.data_dir, 64 * 1024),
@@ -2403,8 +2546,11 @@ impl App {
                 me,
                 offset_minutes,
             } => {
-                self.export_chat(&identity, media, &directory, password, me, offset_minutes)
-                    .await
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.export_chat(&identity, media, &directory, password, me, offset_minutes)
+                        .await
+                })
+                .await
             }
             Command::StorageInfo => Ok(json!({
                 "mediaBytes": self.media.size(),
@@ -2492,7 +2638,38 @@ impl App {
     /// Ask the directory about the stored license again, at most daily (Android: whenever its
     /// main screen opens; we run for weeks, and many starts shouldn't mean many requests). Returns
     /// whether the license was refused just now.
+    #[cfg(test)]
     pub(crate) async fn recheck_license(&mut self) -> Result<bool, ApiError> {
+        let refused = self.shared.ask_about_license().await?;
+        if refused {
+            self.license_refused();
+        }
+        Ok(refused)
+    }
+
+    /// See [`Shared::note_license_answer`].
+    #[cfg(test)]
+    fn apply_license_answer(
+        &mut self,
+        answer: Result<directory::LicenseOk, DirectoryError>,
+    ) -> Result<bool, ApiError> {
+        let refused = self.shared.note_license_answer(answer)?;
+        if refused {
+            self.license_refused();
+        }
+        Ok(refused)
+    }
+
+    /// Nothing goes to Threema's servers from here on.
+    pub(crate) fn license_refused(&mut self) {
+        self.web_stop_all(crate::app_web::StopReason::Stop);
+        self.stop_connection();
+    }
+}
+
+impl Shared {
+    /// [`App::recheck_license`]'s work; what follows a refusal is up to the caller.
+    pub(crate) async fn ask_about_license(&self) -> Result<bool, ApiError> {
         let Some(license_key) = self.store.setting(keys::LICENSE_KEY)?.map(Zeroizing::new) else {
             return Ok(false);
         };
@@ -2508,13 +2685,14 @@ impl App {
         let device_id = self.device_id()?;
         let answer =
             directory::check_license(&self.https, &license_key, &device_id, &self.version).await;
-        self.apply_license_answer(answer)
+        self.note_license_answer(answer)
     }
 
     /// Only the directory's own "no" counts, like Android: being offline or a server having a bad
-    /// day must not cost anyone their messages. Those try again at the next maintenance.
-    fn apply_license_answer(
-        &mut self,
+    /// day must not cost anyone their messages. Those try again at the next maintenance. Whether
+    /// that "no" came.
+    fn note_license_answer(
+        &self,
         answer: Result<directory::LicenseOk, DirectoryError>,
     ) -> Result<bool, ApiError> {
         match answer {
@@ -2528,8 +2706,6 @@ impl App {
             Err(DirectoryError::Server(message)) => {
                 tracing::warn!("the directory refused the license");
                 self.store.set_setting(keys::LICENSE_REFUSED, &message)?;
-                self.web_stop_all(crate::app_web::StopReason::Stop);
-                self.stop_connection();
                 Ok(true)
             }
             Err(DirectoryError::RateLimited) => {
@@ -2543,9 +2719,7 @@ impl App {
             }
         }
     }
-}
 
-impl Shared {
     /// The error for the UI from a directory call that runs by itself: a 429 also starts the rest.
     pub(crate) fn directory_error(&self, error: DirectoryError) -> ApiError {
         if matches!(error, DirectoryError::RateLimited) {

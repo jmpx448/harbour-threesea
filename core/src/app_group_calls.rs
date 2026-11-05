@@ -24,7 +24,7 @@ use libthreema::protobuf::group_call::{
 use prost::Message as _;
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     chat_notifications::GROUP_CALL_STARTED,
     group_call_handshake::{Event, Known, Local, MediaKey, Peer, rekey},
     group_call_sdp::{Description, Extensions, Session},
@@ -697,7 +697,7 @@ fn to_sfu(content: participant_to_sfu::envelope::Content) -> Vec<u8> {
     envelope.encode_to_vec()
 }
 
-impl App {
+impl Shared {
     fn group_call_context(&self) -> Context {
         Context {
             store: Rc::clone(&self.store),
@@ -714,7 +714,9 @@ impl App {
     fn group_calls_wanted(&self) -> bool {
         self.calls_supported && self.group_calls_setting().unwrap_or(true)
     }
+}
 
+impl App {
     /// A `GroupCallStart` arrived in a group.
     pub(crate) fn on_group_call_start(
         &self,
@@ -774,7 +776,9 @@ impl App {
             context.announce_to(&conversation, &receivers).await;
         });
     }
+}
 
+impl Shared {
     /// `groupCallRefresh {conversation}`: peek the group's calls now (the chat shows a running
     /// call); answers with the `groupCall` event.
     pub(crate) fn group_call_refresh(&self, conversation: &str) -> Value {
@@ -788,13 +792,16 @@ impl App {
         });
         json!({})
     }
+}
+
+impl App {
     /// `groupCallJoin {conversation, fingerprint, create}`: join the group's running call, or
     /// with `create` start one if none runs (_Create or Join_, _Group Call Join Steps_):
     /// `{offer, candidates, participantId}` for the media engine, which answers the offer itself.
     pub(crate) async fn group_call_join(
         &mut self,
-        conversation: &str,
-        fingerprint: &str,
+        conversation: String,
+        fingerprint: String,
         create: bool,
     ) -> Result<Value, ApiError> {
         if !self.group_calls_wanted() {
@@ -804,35 +811,35 @@ impl App {
         let fingerprint = HEXLOWER
             .decode(fingerprint.to_ascii_lowercase().as_bytes())
             .map_err(|_| ApiError::Internal("invalid fingerprint".into()))?;
-        let context = self.group_call_context();
-        let (call, new) = match context.refresh(conversation).await {
-            Some((call, _, _)) => (call, false),
-            None if create => (self.new_group_call(&context, conversation).await?, true),
-            None => return Err(ApiError::GroupCallNotRunning),
-        };
-        let mut joined = None;
-        for refresh in [false, true] {
-            let credentials = context.credentials(refresh).await?;
-            match group_calls::join(
-                &self.https,
-                &call.sfu_base_url,
-                &credentials.sfu_token,
-                &call.call_id,
-                &fingerprint,
-            )
-            .await
-            .map_err(|error| ApiError::Network(error.to_string()))?
+        let leaves = self.group_call_leaves;
+        self.detached_then(
+            crate::detached::Lane::Free,
             {
-                Join::Joined(response) => {
-                    joined = Some(response);
-                    break;
+                let conversation = conversation.clone();
+                move |app| async move { app.join_at_sfu(&conversation, &fingerprint, create).await }
+            },
+            move |app, joined| {
+                let (call, new, response) = joined?;
+                // Left while the SFU took its time: the page has gone, and the SFU drops someone
+                // who never shows up.
+                if app.group_call_leaves != leaves {
+                    return Err(ApiError::GroupCallNotRunning);
                 }
-                Join::Unauthorized => continue,
-                Join::Full => return Err(ApiError::GroupCallFull),
-                Join::UnsupportedVersion => return Err(ApiError::GroupCallVersion),
-            }
-        }
-        let response = joined.ok_or_else(|| ApiError::Network("SFU token refused".into()))?;
+                Ok(app.joined_group_call(&conversation, call, new, &response, started))
+            },
+        )
+        .await
+    }
+
+    /// What this device takes from the SFU for a join.
+    fn joined_group_call(
+        &mut self,
+        conversation: &str,
+        call: RunningCall,
+        new: bool,
+        response: &libthreema::protobuf::group_call::sfu_http_response::Join,
+        started: i64,
+    ) -> Value {
         tracing::info!(
             participant = response.participant_id,
             features = response.supported_features,
@@ -888,11 +895,60 @@ impl App {
             started,
             alone_since: None,
         });
-        Ok(json!({
+        json!({
             "offer": offer,
             "candidates": candidates,
             "participantId": response.participant_id,
-        }))
+        })
+    }
+}
+
+impl Shared {
+    /// The network's part of [`App::group_call_join`]: the call, whether it is a new one, and what
+    /// the SFU said.
+    async fn join_at_sfu(
+        &self,
+        conversation: &str,
+        fingerprint: &[u8],
+        create: bool,
+    ) -> Result<
+        (
+            RunningCall,
+            bool,
+            libthreema::protobuf::group_call::sfu_http_response::Join,
+        ),
+        ApiError,
+    > {
+        let context = self.group_call_context();
+        let (call, new) = match context.refresh(conversation).await {
+            Some((call, _, _)) => (call, false),
+            None if create => (self.new_group_call(&context, conversation).await?, true),
+            None => return Err(ApiError::GroupCallNotRunning),
+        };
+        let mut joined = None;
+        for refresh in [false, true] {
+            let credentials = context.credentials(refresh).await?;
+            match group_calls::join(
+                &self.https,
+                &call.sfu_base_url,
+                &credentials.sfu_token,
+                &call.call_id,
+                fingerprint,
+            )
+            .await
+            .map_err(|error| ApiError::Network(error.to_string()))?
+            {
+                Join::Joined(response) => {
+                    joined = Some(response);
+                    break;
+                }
+                Join::Unauthorized => continue,
+                Join::Full => return Err(ApiError::GroupCallFull),
+                Join::UnsupportedVersion => return Err(ApiError::GroupCallVersion),
+            }
+        }
+        let response = joined.ok_or_else(|| ApiError::Network("SFU token refused".into()))?;
+        Ok((call, new, response))
     }
 
     /// A new call for the group (not sent yet): a random GCK on our SFU.
@@ -930,7 +986,9 @@ impl App {
             failed: 0,
         })
     }
+}
 
+impl App {
     /// Our new call runs: keep it and send `GroupCallStart` to the members that support group
     /// calls (through the outbox, like the other group messages).
     fn announce_group_call(&self, call: &RunningCall) -> Result<(), ApiError> {
@@ -1334,6 +1392,7 @@ impl App {
 
     /// `groupCallLeave`: we left (the media engine closed the connection).
     pub(crate) fn group_call_leave(&mut self) -> Value {
+        self.group_call_leaves += 1;
         crate::group_call_frames::reset([0; 32]);
         if let Some(call) = self.group_call.take() {
             self.group_call_refresh(&call.conversation);
@@ -1344,6 +1403,7 @@ impl App {
     /// The ID is being removed: the call's state and frame keys go, without the refresh a
     /// leave asks for (nothing is left to show it).
     pub(crate) fn group_call_forget(&mut self) {
+        self.group_call_leaves += 1;
         crate::group_call_frames::reset([0; 32]);
         self.group_call = None;
     }

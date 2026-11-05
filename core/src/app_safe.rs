@@ -807,26 +807,9 @@ impl Shared {
         events.dedup();
         events
     }
-}
 
-impl App {
-    /// The connection is up: try a pending Safe import right away — `maintenance` alone would
-    /// leave restored groups waiting up to an hour after a network failure — and pick up
-    /// picture recovery (kept downloads, restored contacts' requests in a bounded batch).
-    /// Rate-limited so flapping connections don't hammer the servers. Returns the UI events to
-    /// emit.
-    pub async fn on_connected(&mut self) -> Vec<&'static str> {
-        self.check_device_group();
-        self.retry_failed_transfers();
-        let now = tokio::time::Instant::now();
-        if self
-            .last_import_attempt
-            .get()
-            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60))
-        {
-            return Vec::new();
-        }
-        self.last_import_attempt.set(Some(now));
+    /// The network's part of [`App::on_connected`].
+    pub(crate) async fn on_connected_away(&self) -> Vec<&'static str> {
         let mut events = Vec::new();
         let pending = self
             .pending_import_counts()
@@ -840,9 +823,7 @@ impl App {
         self.request_restored_pictures(PICTURE_REQUEST_BATCH);
         events
     }
-}
 
-impl Shared {
     /// A restored device's _Application Setup Steps_ (Android `ApplicationSetupSteps.kt`), once
     /// the import is done and the connection is up: its groups and sessions are as old as the
     /// backup. Upstream's first step comes first here too: nothing is said about forward secrecy
@@ -956,7 +937,9 @@ impl Shared {
         self.tell_connection(crate::connection::ToConnection::SendPending);
         Ok(())
     }
+}
 
+impl Shared {
     /// Upstream's _solicited contacts_: the people in groups we are in and those we have a chat
     /// with, without revoked IDs. Blocked contacts aren't written to either.
     pub(crate) fn solicited_contacts(&self, me: &str) -> Result<Vec<String>, ApiError> {
@@ -1035,7 +1018,9 @@ impl Shared {
             settings: self.app_settings()?,
         })
     }
+}
 
+impl Shared {
     /// Upload if the policy says so (or `force`). Returns whether an upload happened. Failures
     /// are recorded in `SAFE_LAST_ERROR` and returned.
     async fn safe_upload(&self, force: bool) -> Result<bool, ApiError> {
@@ -1093,29 +1078,29 @@ impl Shared {
     }
 }
 
-impl App {
-    /// Periodic work on the core thread (called at start and then hourly): pending Safe contact
-    /// import and the automatic Safe backup. Returns the events to emit to the UI.
-    pub async fn maintenance(&mut self) -> Vec<&'static str> {
-        let mut events = Vec::new();
+impl Shared {
+    /// The part of periodic work that waits for the network, beside the core loop:
+    /// [`App::finish_maintenance`] does the rest.
+    pub(crate) async fn maintenance_away(&self) -> MaintenanceRound {
+        let mut round = MaintenanceRound::default();
         match self.store.identity() {
             Ok(Some(_)) => {}
-            _ => return events,
+            _ => return round,
         }
         // Refused, and nothing goes to Threema's servers until a key is accepted again.
         if !self.license_valid().unwrap_or(false) {
-            return events;
+            return round;
         }
-        match self.recheck_license().await {
+        match self.ask_about_license().await {
             Ok(false) => {}
             Ok(true) => {
-                events.push("licenseChanged");
-                return events;
+                round.refused = true;
+                return round;
             }
             Err(error) => tracing::warn!(kind = error.kind(), "license check failed"),
         }
         if !self.store.directory_resting() {
-            events.extend(self.try_pending_import().await);
+            round.events.extend(self.try_pending_import().await);
         }
         self.run_restore_setup().await;
         self.resume_picture_downloads();
@@ -1131,26 +1116,88 @@ impl App {
             Err(error) => tracing::warn!(%error, "expiring the group outbox failed"),
         }
         if self.check_email_link().await.unwrap_or(false) {
-            events.push("profileChanged");
+            round.events.push("profileChanged");
         }
         if self.refresh_contacts(false).await.unwrap_or(false) {
-            events.push("contactsChanged");
+            round.events.push("contactsChanged");
         }
         self.check_device_group();
         if let Err(error) = self.publish_feature_mask().await {
             tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
         }
-        self.android_export_scheduled();
-        if self.expire_messages() {
-            events.push("chatsChanged");
-        }
         let before = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();
         let uploaded = self.safe_upload(false).await.unwrap_or(false);
         let after = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();
         if uploaded || before != after {
-            events.push("safeChanged");
+            round.events.push("safeChanged");
         }
-        events
+        round.licensed = true;
+        round
+    }
+}
+
+/// How far a round of maintenance got beside the core loop.
+#[derive(Default)]
+pub(crate) struct MaintenanceRound {
+    events: Vec<&'static str>,
+    /// There is an ID with a license, and it wasn't refused during the round.
+    licensed: bool,
+    /// The directory refused the license just now.
+    refused: bool,
+}
+
+impl App {
+    /// The connection is up: try a pending Safe import right away — `maintenance` alone would
+    /// leave restored groups waiting up to an hour after a network failure — and pick up
+    /// picture recovery (kept downloads, restored contacts' requests in a bounded batch).
+    /// Rate-limited so flapping connections don't hammer the servers. Whether the part that can
+    /// wait for the network ([`Shared::on_connected_away`]) is to run now.
+    pub(crate) fn on_connected_here(&mut self) -> bool {
+        self.check_device_group();
+        self.retry_failed_transfers();
+        let now = tokio::time::Instant::now();
+        if self
+            .last_import_attempt
+            .get()
+            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60))
+        {
+            return false;
+        }
+        self.last_import_attempt.set(Some(now));
+        true
+    }
+
+    /// All of what follows connecting, in place. Returns the UI events to emit.
+    #[cfg(test)]
+    pub async fn on_connected(&mut self) -> Vec<&'static str> {
+        if self.on_connected_here() {
+            self.shared.on_connected_away().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The end of a round of maintenance, on the core loop. Returns the events to emit to the UI.
+    pub(crate) fn finish_maintenance(&mut self, mut round: MaintenanceRound) -> Vec<&'static str> {
+        if round.refused {
+            self.license_refused();
+            round.events.push("licenseChanged");
+        }
+        if round.licensed {
+            self.android_export_scheduled();
+            if self.expire_messages() {
+                round.events.push("chatsChanged");
+            }
+        }
+        round.events
+    }
+
+    /// Periodic work (a while after the start, then hourly): pending Safe contact import and the
+    /// automatic Safe backup, all in place. Returns the events to emit to the UI.
+    #[cfg(test)]
+    pub async fn maintenance(&mut self) -> Vec<&'static str> {
+        let round = self.shared.maintenance_away().await;
+        self.finish_maintenance(round)
     }
 }
 
