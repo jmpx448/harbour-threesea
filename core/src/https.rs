@@ -344,8 +344,10 @@ impl LimitedBody {
         if content_length.is_some_and(|length| length > limit as u64) {
             return Err(HttpsError::InvalidResponse(RESPONSE_TOO_LARGE.into()));
         }
+        // Told the size, it needn't grow by copying: a large blob would be there nearly twice.
+        let announced = content_length.map_or(0, |length| usize::try_from(length).unwrap_or(limit));
         Ok(Self {
-            bytes: Vec::new(),
+            bytes: Vec::with_capacity(announced),
             limit,
         })
     }
@@ -639,6 +641,16 @@ mod tests {
         assert!(!is_threema_url("not a url"));
         assert!(pins_for_host("threema.ch.evil.example").is_none());
         assert!(pins_for_host("example.org").is_none());
+    }
+
+    #[test]
+    fn a_response_of_a_known_size_needs_no_growing() {
+        let mut body = LimitedBody::new(Some(1000), 1000).unwrap();
+        assert!(body.bytes.capacity() >= 1000);
+        let room = body.bytes.as_ptr();
+        body.push(&[1; 400]).unwrap();
+        body.push(&[2; 600]).unwrap();
+        assert_eq!(body.bytes.as_ptr(), room, "it stayed where it was");
     }
 
     #[test]

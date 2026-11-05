@@ -20,7 +20,7 @@ use std::{
 
 use crypto_secretbox::{
     KeyInit as _, XSalsa20Poly1305,
-    aead::{Aead as _, AeadCore as _, OsRng},
+    aead::{Aead as _, AeadCore as _, AeadInPlace as _, OsRng},
 };
 use data_encoding::HEXLOWER;
 use libthreema::{
@@ -58,6 +58,55 @@ pub const MAX_PICTURE_DOWNLOAD: usize = 10 * 1024 * 1024;
 /// Contact and group pictures downloading at once; apart from the message media's own slots, so
 /// a stranger's pictures can't hold those up.
 pub static PICTURE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Files above this size have to wait for [`TRANSFER_MEMORY`]. Below it, the number of transfers
+/// running at once keeps them in bounds.
+const SMALL_TRANSFER: usize = MAX_PICTURE_DOWNLOAD;
+
+/// How many MiB large transfers may hold in memory together, each its blob or file once. One of the
+/// largest fits with room for a smaller one, so a big file on a slow link doesn't hold up all
+/// others, and two of them can't take the phone's memory together.
+const TRANSFER_MEMORY_MIB: u32 = 128;
+const MIB: usize = 1024 * 1024;
+static TRANSFER_MEMORY: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(TRANSFER_MEMORY_MIB as usize);
+
+/// Memory set aside for a transfer until it is dropped.
+pub struct TransferMemory {
+    _permit: Option<tokio::sync::SemaphorePermit<'static>>,
+}
+
+/// What `bytes` of a transfer take of [`TRANSFER_MEMORY`], in MiB. More than there is takes all of
+/// it, so that it still gets its turn.
+fn transfer_memory_mib(bytes: usize) -> u32 {
+    if bytes <= SMALL_TRANSFER {
+        return 0;
+    }
+    u32::try_from(bytes.div_ceil(MIB))
+        .unwrap_or(TRANSFER_MEMORY_MIB)
+        .min(TRANSFER_MEMORY_MIB)
+}
+
+/// Wait until a transfer of `bytes` fits in memory. Whoever needs a download slot as well waits for
+/// this first: holding a slot while waiting would keep the small ones out.
+pub async fn reserve_transfer_memory(bytes: usize) -> TransferMemory {
+    TransferMemory {
+        _permit: match transfer_memory_mib(bytes) {
+            0 => None,
+            // The semaphore is never closed.
+            mib => TRANSFER_MEMORY.acquire_many(mib).await.ok(),
+        },
+    }
+}
+
+/// Run `work` on a blocking thread: the core thread answers the connection and the UI meanwhile.
+pub async fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, MediaError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| MediaError::Io(std::io::Error::other(error)))
+}
 
 /// Wait for one of `slots`; `None` if the work isn't `wanted` any more by then (a newer picture
 /// came while it waited).
@@ -165,6 +214,37 @@ pub type PictureStamp = (u64, Option<std::time::SystemTime>);
 
 const MEDIA_MAGIC: &[u8; 4] = b"3SM1";
 const NONCE_LENGTH: usize = 24;
+const TAG_LENGTH: usize = 16;
+
+/// Names the temporary files apart: several writes run at once, on different threads.
+static NEXT_TEMPORARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A file encrypted and safely on the disk, with no message yet. Encrypting and syncing take long
+/// and happen on a blocking thread; [`Self::keep`] is a rename, for the core thread, right after it
+/// checked that the message still wants it. Dropped instead, the file goes.
+pub struct SealedFile {
+    temporary: PathBuf,
+}
+
+impl SealedFile {
+    /// Take its place as `part` of `message`.
+    pub fn keep(self, media: &MediaStore, message: i64, part: MediaPart) -> Result<(), MediaError> {
+        self.move_to(&media.path(message, part))
+    }
+
+    fn move_to(self, path: &Path) -> Result<(), MediaError> {
+        // Moved or not, nothing is left for the drop to do but remove what stayed.
+        std::fs::rename(&self.temporary, path)?;
+        Ok(())
+    }
+}
+
+impl Drop for SealedFile {
+    fn drop(&mut self) {
+        // A full disk would stay full by what a failed write left. After the move, nothing's there.
+        let _ = std::fs::remove_file(&self.temporary);
+    }
+}
 
 impl MediaStore {
     /// Media live in `<data_dir>/media`; the key is derived from the database key.
@@ -291,20 +371,34 @@ impl MediaStore {
             .cipher()
             .encrypt(&nonce, data)
             .map_err(|_| MediaError::Decrypt)?;
-        let temporary = path.with_extension("tmp");
-        let written = (|| {
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(MEDIA_MAGIC)?;
-            file.write_all(&nonce)?;
-            file.write_all(&ciphertext)?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, path)
-        })();
-        // A full disk would stay full by what the failed write left.
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+        self.write_sealed(&[nonce.as_slice(), &ciphertext])?
+            .move_to(path)
+    }
+
+    /// Encrypt `data` where it lies, so a large file isn't in memory twice, and put it on the disk.
+    /// For a blocking thread.
+    pub fn seal(&self, mut data: Zeroizing<Vec<u8>>) -> Result<SealedFile, MediaError> {
+        let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
+        let tag = self
+            .cipher()
+            .encrypt_in_place_detached(&nonce, b"", data.as_mut_slice())
+            .map_err(|_| MediaError::Decrypt)?;
+        self.write_sealed(&[nonce.as_slice(), tag.as_slice(), data.as_slice()])
+    }
+
+    fn write_sealed(&self, parts: &[&[u8]]) -> Result<SealedFile, MediaError> {
+        let number = NEXT_TEMPORARY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Not a message's name: while it is being written, no clean-up takes it for an orphan.
+        let sealed = SealedFile {
+            temporary: self.dir.join(format!("write-{number}.tmp")),
+        };
+        let mut file = std::fs::File::create(&sealed.temporary)?;
+        file.write_all(MEDIA_MAGIC)?;
+        for part in parts {
+            file.write_all(part)?;
         }
-        Ok(written?)
+        file.sync_all()?;
+        Ok(sealed)
     }
 
     /// The decrypted content, `None` if not (yet) on the device.
@@ -317,20 +411,29 @@ impl MediaStore {
     }
 
     fn read_from(&self, path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, MediaError> {
-        let stored = match std::fs::read(path) {
-            Ok(stored) => stored,
+        let mut stored = match std::fs::read(path) {
+            Ok(stored) => Zeroizing::new(stored),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let header = MEDIA_MAGIC.len() + NONCE_LENGTH;
-        if stored.len() < header || &stored[..MEDIA_MAGIC.len()] != MEDIA_MAGIC {
+        if stored.len() < header + TAG_LENGTH || &stored[..MEDIA_MAGIC.len()] != MEDIA_MAGIC {
             return Err(MediaError::Decrypt);
         }
-        let nonce = &stored[MEDIA_MAGIC.len()..header];
+        // Where it lies, so a large file isn't in memory twice. The buffer stays this large, and
+        // goes through the wipe whole.
+        let (head, body) = stored.split_at_mut(header);
+        let (tag, data) = body.split_at_mut(TAG_LENGTH);
         self.cipher()
-            .decrypt(nonce.into(), &stored[header..])
-            .map(|data| Some(Zeroizing::new(data)))
-            .map_err(|_| MediaError::Decrypt)
+            .decrypt_in_place_detached(
+                (&head[MEDIA_MAGIC.len()..]).into(),
+                b"",
+                data,
+                (&*tag).into(),
+            )
+            .map_err(|_| MediaError::Decrypt)?;
+        stored.drain(..header + TAG_LENGTH);
+        Ok(Some(stored))
     }
 
     pub fn has(&self, message: i64, part: MediaPart) -> bool {
@@ -411,6 +514,41 @@ pub fn encrypt_blob(key: &[u8; 32], part: MediaPart, data: &[u8]) -> Vec<u8> {
     XSalsa20Poly1305::new(key.into())
         .encrypt(part.nonce().into(), data)
         .expect("XSalsa20Poly1305 encryption cannot fail")
+}
+
+/// [`encrypt_blob`] where the data lies, for a large file: nothing is copied. For a blocking thread.
+pub fn encrypt_blob_in_place(key: &[u8; 32], part: MediaPart, data: Zeroizing<Vec<u8>>) -> Vec<u8> {
+    let mut data = with_room_for_tag(data);
+    XSalsa20Poly1305::new(key.into())
+        .encrypt_in_place(part.nonce().into(), b"", &mut *data)
+        .expect("XSalsa20Poly1305 encryption cannot fail");
+    // It is ciphertext now, nothing the wipe would have to protect.
+    std::mem::take(&mut *data)
+}
+
+/// Growing a vector may leave a copy of its content behind in freed memory: if it must grow, the
+/// content moves to a new one by hand, and the old one is wiped.
+fn with_room_for_tag(data: Zeroizing<Vec<u8>>) -> Zeroizing<Vec<u8>> {
+    if data.capacity() - data.len() >= TAG_LENGTH {
+        return data;
+    }
+    let mut roomy = Vec::with_capacity(data.len() + TAG_LENGTH);
+    roomy.extend_from_slice(&data);
+    Zeroizing::new(roomy)
+}
+
+/// [`decrypt_blob_with_nonce`] where the data lies, for a large file: nothing is copied, and it
+/// counts as secret as soon as it is plain. For a blocking thread.
+pub fn decrypt_blob_in_place(
+    key: &[u8; 32],
+    nonce: &[u8; 24],
+    blob: Vec<u8>,
+) -> Result<Zeroizing<Vec<u8>>, MediaError> {
+    let mut data = Zeroizing::new(blob);
+    XSalsa20Poly1305::new(key.into())
+        .decrypt_in_place(nonce.into(), b"", &mut *data)
+        .map_err(|_| MediaError::Decrypt)?;
+    Ok(data)
 }
 
 /// Decrypt a blob with a file message key.
@@ -716,6 +854,113 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn media_store() -> (tempfile::TempDir, MediaStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let media = MediaStore::open(dir.path(), &[3; 32]).unwrap();
+        (dir, media)
+    }
+
+    fn stored_names(dir: &tempfile::TempDir) -> Vec<String> {
+        std::fs::read_dir(dir.path().join("media"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_sealed_file_is_stored_like_any_other_once_it_is_kept() {
+        let (dir, media) = media_store();
+        let data = Zeroizing::new(b"a large video".to_vec());
+        let sealed = media.seal(data).unwrap();
+        assert!(!media.has(1, MediaPart::File), "not before it is kept");
+
+        sealed.keep(&media, 1, MediaPart::File).unwrap();
+        let read = media.read(1, MediaPart::File).unwrap().unwrap();
+        assert_eq!(read.as_slice(), b"a large video");
+        assert_eq!(stored_names(&dir), ["1.file"]);
+    }
+
+    /// Its message went while it was being encrypted: there must be nothing left of it.
+    #[test]
+    fn a_sealed_file_nobody_kept_leaves_nothing() {
+        let (dir, media) = media_store();
+        let sealed = media.seal(Zeroizing::new(b"content".to_vec())).unwrap();
+        assert_eq!(stored_names(&dir).len(), 1);
+        drop(sealed);
+        assert!(stored_names(&dir).is_empty());
+    }
+
+    /// The core thread looks for orphans while a blocking thread writes, and a message's two parts
+    /// can be on their way together.
+    #[test]
+    fn a_write_under_way_is_nobody_else_s() {
+        let (_dir, media) = media_store();
+        let first = media.seal(Zeroizing::new(b"file".to_vec())).unwrap();
+        let second = media.seal(Zeroizing::new(b"thumb".to_vec())).unwrap();
+        media.remove_orphans(|_| false);
+        first.keep(&media, 1, MediaPart::File).unwrap();
+        second.keep(&media, 1, MediaPart::Thumbnail).unwrap();
+        let read = |part| media.read(1, part).unwrap().unwrap().to_vec();
+        assert_eq!(read(MediaPart::File), b"file");
+        assert_eq!(read(MediaPart::Thumbnail), b"thumb");
+    }
+
+    #[test]
+    fn a_damaged_file_does_not_read() {
+        let (dir, media) = media_store();
+        media.write(1, MediaPart::File, b"content").unwrap();
+        let path = dir.path().join("media/1.file");
+        let mut stored = std::fs::read(&path).unwrap();
+        *stored.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &stored).unwrap();
+        assert!(matches!(
+            media.read(1, MediaPart::File),
+            Err(MediaError::Decrypt)
+        ));
+        // Too short to hold even the tag.
+        std::fs::write(&path, &stored[..MEDIA_MAGIC.len() + NONCE_LENGTH + 3]).unwrap();
+        assert!(matches!(
+            media.read(1, MediaPart::File),
+            Err(MediaError::Decrypt)
+        ));
+    }
+
+    #[test]
+    fn a_blob_in_place_is_the_same_blob() {
+        let key = [5; 32];
+        // No room left for the tag, and some.
+        let tight = {
+            let mut data = Vec::with_capacity(4);
+            data.extend_from_slice(b"data");
+            Zeroizing::new(data)
+        };
+        let roomy = {
+            let mut data = Vec::with_capacity(100);
+            data.extend_from_slice(b"data");
+            Zeroizing::new(data)
+        };
+        let expected = encrypt_blob(&key, MediaPart::File, b"data");
+        for data in [tight, roomy] {
+            assert_eq!(encrypt_blob_in_place(&key, MediaPart::File, data), expected);
+        }
+        let opened = decrypt_blob_in_place(&key, MediaPart::File.nonce(), expected.clone());
+        assert_eq!(opened.unwrap().as_slice(), b"data");
+        let wrong = decrypt_blob_in_place(&[6; 32], MediaPart::File.nonce(), expected);
+        assert!(matches!(wrong, Err(MediaError::Decrypt)));
+        let short = decrypt_blob_in_place(&key, MediaPart::File.nonce(), vec![1, 2]);
+        assert!(matches!(short, Err(MediaError::Decrypt)));
+    }
+
+    #[test]
+    fn large_transfers_share_a_budget_small_ones_stay_out_of_it() {
+        assert_eq!(transfer_memory_mib(0), 0);
+        assert_eq!(transfer_memory_mib(SMALL_TRANSFER), 0);
+        assert_eq!(transfer_memory_mib(SMALL_TRANSFER + 1), 11);
+        assert_eq!(transfer_memory_mib(MAX_FILE_DOWNLOAD), 101);
+        assert_eq!(transfer_memory_mib(usize::MAX), TRANSFER_MEMORY_MIB);
+        const { assert!(MAX_FILE_DOWNLOAD.div_ceil(MIB) <= TRANSFER_MEMORY_MIB as usize) };
+    }
+
     /// Twenty pictures in a row: two run at a time, and those superseded while waiting for a
     /// slot do nothing.
     #[tokio::test(flavor = "current_thread")]
@@ -832,7 +1077,7 @@ mod tests {
         // The last step of the write can't work: a directory is in the way.
         std::fs::create_dir(dir.path().join("media/1.file")).unwrap();
         assert!(media.write(1, MediaPart::File, b"picture").is_err());
-        assert!(!dir.path().join("media/1.tmp").exists());
+        assert_eq!(stored_names(&dir), ["1.file"], "only what was in the way");
     }
 
     #[test]
