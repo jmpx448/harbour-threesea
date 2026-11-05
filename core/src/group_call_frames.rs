@@ -124,8 +124,17 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 // resets the keys) can't take them away from one that is encrypting.
 #[cfg(test)]
 thread_local! {
-    static STATE: &'static Mutex<State> = Box::leak(Box::default());
+    static STATE: &'static Mutex<State> = {
+        let state: &'static Mutex<State> = Box::leak(Box::default());
+        TEST_STATES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(state);
+        state
+    };
 }
+
+/// Every test thread's keys, so that a leak checker (scripts/test-ffi-asan.sh) sees them as
+/// still in use rather than lost.
+#[cfg(test)]
+static TEST_STATES: Mutex<Vec<&'static Mutex<State>>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn state() -> std::sync::MutexGuard<'static, State> {
