@@ -160,6 +160,15 @@ pub(crate) mod fixture {
             chunk(b"EXIF", b"GPS here"),
         ])
     }
+
+    /// A still picture, with EXIF.
+    pub(crate) fn still() -> Vec<u8> {
+        file(&[
+            chunk(b"VP8X", &[0x08, 0, 0, 0, 63, 1, 0, 239, 0, 0]),
+            chunk(b"VP8 ", b"PICTURE"),
+            chunk(b"EXIF", b"GPS here"),
+        ])
+    }
 }
 
 #[cfg(test)]

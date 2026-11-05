@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::{
     app::App,
     app_web_data::receiver_type,
-    media::MediaPart,
+    media::{self, MediaPart},
     messages::Message,
     profile_pictures::{OWN_PICTURE, contact_picture_name},
     providers::CoreEvent,
@@ -128,7 +128,7 @@ pub(crate) fn web_file_name(message: &Message, body: &serde_json::Value) -> Stri
 /// The browser has one general text for a file that wasn't sent. This reason takes more, and it
 /// has no way to translate what we tell it, as with the status lines. It goes after the reply: the
 /// dialog the reply brings closes any that is open.
-fn video_not_sent_alert() -> Value {
+fn not_sent_alert(what: &str) -> Value {
     arp::message(
         "update",
         "alert",
@@ -138,9 +138,11 @@ fn video_not_sent_alert() -> Value {
         ])),
         Some(map(vec![(
             "message",
-            "This video wasn't sent, because its metadata, which can hold where and when it was \
-             taken, can't be removed. Send it as a file to send it as it is."
-                .into(),
+            format!(
+                "This {what} wasn't sent, because its metadata, which can hold where and when it \
+                 was taken, can't be removed. Send it as a file to send it as it is."
+            )
+            .into(),
         )])),
     )
 }
@@ -379,10 +381,10 @@ impl App {
     }
 
     /// `create/fileMessage`: send the browser's file like one picked on the phone: unless sent as
-    /// a file, what Android sends as media goes as media. JPEG and PNG get our thumbnail; the core
-    /// can't make one of the others, which the protocol leaves optional. A video leaves without
-    /// its metadata like any other (ADR 0025): there is nobody to ask here, so one that can't be
-    /// cleaned isn't sent, and an alert says why.
+    /// a file, what Android sends as media goes as media. JPEG and PNG are made anew with our
+    /// thumbnail; the core can't make one of the others, which the protocol leaves optional. All
+    /// leave without their metadata (ADR 0025) but a GIF: there is nobody to ask here, so what
+    /// can't be cleaned isn't sent, and an alert says why.
     async fn web_send_file(&mut self, incoming: &Incoming<'_>) -> Result<Value, Code> {
         let key = self
             .web_receiver_key(incoming.arg("id"))
@@ -401,26 +403,33 @@ impl App {
         let as_file = field(data, "sendAsFile")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let image = if as_file || !media_type.starts_with("image/") {
-            None
-        } else {
-            images::sent_image(bytes)
-        };
-        let media = image.is_some()
-            || (!as_file
-                && (matches!(media_type.as_str(), "image/gif" | "image/webp")
-                    || media_type.starts_with("video/")));
-        let size = image
-            .as_ref()
-            .map(|(width, height, _)| (*width, *height))
-            .or_else(|| {
-                (!as_file && media_type == "image/gif")
-                    .then(|| images::gif_size(bytes))
-                    .flatten()
-            });
         let mut attachments = vec![zeroize::Zeroizing::new(bytes.to_vec())];
-        if let Some((_, _, thumbnail)) = &image {
-            attachments.push(zeroize::Zeroizing::new(thumbnail.clone()));
+        let mut media_type = media_type;
+        let mut media = !as_file && media_type.starts_with("video/");
+        let mut size = None;
+        if !as_file && media_type.starts_with("image/") {
+            let mut picture = attachments.remove(0);
+            let claimed = media_type.clone();
+            let (picture, prepared) = media::off_thread(move || {
+                let prepared = images::sent_picture(&mut picture, &claimed);
+                (picture, prepared)
+            })
+            .await
+            .map_err(|_| "internalError")?;
+            attachments.push(picture);
+            match prepared {
+                Ok(Some(prepared)) => {
+                    media = true;
+                    media_type = prepared.media_type.to_owned();
+                    size = prepared.size;
+                    attachments.extend(prepared.thumbnail.map(zeroize::Zeroizing::new));
+                }
+                Ok(None) => {}
+                Err(images::PictureKeepsMetadata) => {
+                    self.web.alert_after_reply = Some(not_sent_alert("picture"));
+                    return Err("internalError");
+                }
+            }
         }
         let command = json!({
             "id": 0,
@@ -443,7 +452,7 @@ impl App {
                 Some("contactRevoked") => "invalidIdentity",
                 Some("messageTooLong") => "valueTooLong",
                 Some("videoKeepsMetadata") => {
-                    self.web.alert_after_reply = Some(video_not_sent_alert());
+                    self.web.alert_after_reply = Some(not_sent_alert("video"));
                     "internalError"
                 }
                 _ => "internalError",

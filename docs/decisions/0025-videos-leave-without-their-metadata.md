@@ -38,3 +38,8 @@ as media can't be forwarded; saving it and sending it as a file can. Forwarding 
 it as well: running it twice changes nothing, and a list's members get the same bytes. The codecs'
 own streams are not looked into, nor is an `mdat` outside any track's samples, nor sample entries'
 inner boxes (`avcC` and the like) beyond their vendor and encoder name fields.
+
+Pictures from Threema Web follow the same rule, as nothing prepares them on the way like the chat's
+FilePreparer: JPEG and PNG are made anew (`web/images.rs`), a WebP loses all but its picture and
+animation (`core/src/webp.rs`, a list of what stays too), and one that can't be read isn't sent. A
+GIF goes as it is, as on the phone and on Android.

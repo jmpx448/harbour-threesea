@@ -705,11 +705,51 @@ async fn web_sends_media_as_media() {
         .run_until(async {
             let gif = b"GIF89a\x40\x01\xf0\x00rest";
             let (video, _) = crate::mp4::fixture::video(640, 360, false);
+            let newest = |app: &App| {
+                let id = app
+                    .store
+                    .conversation_messages("BBBBBBBB", 1)
+                    .unwrap()
+                    .remove(0)
+                    .id;
+                app.media.read(id, MediaPart::File).unwrap().unwrap()
+            };
+            let contains = |data: &[u8], part: &[u8]| data.windows(part.len()).any(|w| w == part);
+            let secret = crate::web::images::fixture::SECRET;
+
+            // Made anew, upright, and with the file's own words left behind.
+            let jpeg = crate::web::images::fixture::jpeg_with_exif();
+            let body = web_send(&mut app, wire(&jpeg, "image/jpeg", false))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "media");
+            assert_eq!(body["mediaType"], "image/jpeg");
+            assert_eq!((&body["width"], &body["height"]), (&json!(10), &json!(20)));
+            assert_eq!(body["thumbnail"], true);
+            assert_eq!(body["name"], "image.jpg");
+            assert!(!contains(&newest(&app), secret));
+
+            let png = crate::web::images::fixture::png_with_text(true);
+            let body = web_send(&mut app, wire(&png, "image/png", false))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "media");
+            assert_eq!(body["mediaType"], "image/png");
+            assert!(!contains(&newest(&app), secret));
+
+            // As a file it is the user's, as it is.
+            let body = web_send(&mut app, wire(&jpeg, "image/jpeg", true))
+                .await
+                .unwrap();
+            assert_eq!(body["rendering"], "file");
+            assert_eq!(newest(&app).as_slice(), jpeg.as_slice());
+
             let body = web_send(&mut app, wire(gif, "image/gif", false))
                 .await
                 .unwrap();
             assert_eq!(body["rendering"], "media");
             assert_eq!(body["animated"], true);
+            assert!(!contains(&newest(&app), b"GPS here"));
             assert_eq!(body["width"], 320);
             assert_eq!(body["height"], 240);
             assert_eq!(body["thumbnail"], false);
@@ -775,6 +815,23 @@ async fn web_sends_media_as_media() {
                     .len(),
                 before
             );
+            // A picture that can't be read likewise, without the user having chosen a file.
+            let damaged = [&jpeg[..40], b"cut"].concat();
+            assert_eq!(
+                web_send(&mut app, wire(&damaged, "image/jpeg", false))
+                    .await
+                    .unwrap_err(),
+                "internalError"
+            );
+            assert!(app.web.alert_after_reply.take().is_some());
+            assert_eq!(
+                app.store
+                    .conversation_messages("BBBBBBBB", 100)
+                    .unwrap()
+                    .len(),
+                before
+            );
+
             let body = web_send(&mut app, wire(b"\x1aE\xdf\xa3 a webm", "video/webm", true))
                 .await
                 .unwrap();
