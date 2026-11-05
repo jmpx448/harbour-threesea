@@ -204,6 +204,17 @@ Page {
         backend.call("setPinned", { identity: identity, pinned: pinned }, function() { page.reload() })
     }
 
+    function setMuted(identity, muted) {
+        backend.call("setChatNotifications", {
+            identity: identity,
+            policy: muted ? "never" : null,
+            until: muted ? Date.now() + 8 * 3600000 : null
+        }, function(ok, result, kind, message) {
+            if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            page.reload()
+        })
+    }
+
     function movePinned(identity, offset) {
         backend.call("movePinned", { identity: identity, offset: offset }, function() { page.reload() })
     }
@@ -425,6 +436,16 @@ Page {
                                              function() { page.reload() })
                             }
                         }
+                    }
+                    MenuItem {
+                        // The quick choice for a chat that won't stop; the others are on its page.
+                        visible: model.distributionList !== true
+                        text: model.muted === true
+                              //% "Notifications on"
+                              ? qsTrId("threesea-me-notifications-back-on")
+                              //% "Notifications off for 8 hours"
+                              : qsTrId("threesea-me-notifications-off-8-hours")
+                        onClicked: page.setMuted(model.identity, model.muted !== true)
                     }
                     MenuItem {
                         visible: !page.privateList
