@@ -176,7 +176,14 @@ pub fn distribution_lists(table: &Table) -> (Vec<DistributionList>, usize) {
 
 /// `messagestae` names that mean an outgoing message never made it out: imported as failed,
 /// never into the sending queue (`RestoreService.setMessageState` + handoff rule).
-const UNSENT_STATES: [&str; 4] = ["PENDING", "SENDING", "SENDFAILED", "FS_KEY_MISMATCH"];
+const UNSENT_STATES: [&str; 6] = [
+    "PENDING",
+    "TRANSCODING",
+    "UPLOADING",
+    "SENDING",
+    "SENDFAILED",
+    "FS_KEY_MISMATCH",
+];
 
 /// One row of a `message_*`/`group_message_*`/`distribution_list_message_*` CSV, read like
 /// `RestoreService.fillMessageModel`.

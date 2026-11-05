@@ -984,6 +984,62 @@ mod history_tests {
         assert_eq!(keys.blob_id.unwrap().0, [1; 16]);
     }
 
+    /// Whatever hasn't left, or doesn't say how far it got, never shows as read by the recipient.
+    #[tokio::test(flavor = "current_thread")]
+    async fn outgoing_states_claim_no_more_than_the_backup_says() {
+        use crate::{android_backup::csv::write_row, messages::OutgoingState};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
+        let cases = [
+            ("TRANSCODING", OutgoingState::Failed),
+            ("UPLOADING", OutgoingState::Failed),
+            ("SENDING", OutgoingState::Failed),
+            ("SENT", OutgoingState::Sent),
+            ("DELIVERED", OutgoingState::Delivered),
+            ("READ", OutgoingState::Read),
+            ("CONSUMED", OutgoingState::Read),
+            ("", OutgoingState::Sent),
+            ("SOMETHING_NEW", OutgoingState::Sent),
+        ];
+        let mut messages = write_row(&[
+            "uid",
+            "identity",
+            "isoutbox",
+            "messagestae",
+            "type",
+            "body",
+            "posted_at",
+        ]);
+        for (index, (state, _)) in cases.iter().enumerate() {
+            let uid = format!("u-{index}");
+            let at = (1_700_000_000_000_i64 + i64::try_from(index).unwrap()).to_string();
+            messages.push_str(&write_row(&[
+                &uid, "B0B0B0B0", "1", state, "TEXT", state, &at,
+            ]));
+        }
+        let path = backup_with(
+            dir.path(),
+            &[("contacts.csv", contacts), ("message_17.csv", messages)],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["imported"], cases.len(), "{summary}");
+        assert_eq!(summary["unsent"], 3, "{summary}");
+        let page = app.store.conversation_messages("B0B0B0B0", 50).unwrap();
+        for (state, expected) in cases {
+            let row = page.iter().find(|m| m.body == state).unwrap();
+            assert_eq!(row.state, expected as i64, "{state:?}");
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn hints_at_files_that_were_moved_around() {
         use crate::android_backup::csv::write_row;

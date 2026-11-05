@@ -705,7 +705,10 @@ impl HistoryImport {
                             OutgoingState::Delivered as i64
                         }
                     }
-                    _ => OutgoingState::Read as i64,
+                    "READ" | "CONSUMED" => OutgoingState::Read as i64,
+                    // Empty on Android's status rows, or a name this format didn't know yet:
+                    // nothing says the recipient got it, only that it left.
+                    _ => OutgoingState::Sent as i64,
                 }
             }
         } else if message.read {
