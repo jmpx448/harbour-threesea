@@ -235,6 +235,7 @@ mod tests {
 
     /// Nothing is asked before the user agreed, nor in a build without the check; a stored
     /// release only counts while it is newer than this version.
+    #[cfg(not(feature = "store"))]
     #[tokio::test(flavor = "current_thread")]
     async fn checks_only_when_agreed() {
         let (_dir, app) = new_app(true);
@@ -290,5 +291,17 @@ mod tests {
             .handle(r#"{"id":1,"cmd":"setUpdateCheck","enabled":true}"#)
             .await;
         assert!(reply.contains("\"ok\":false"), "{reply}");
+    }
+
+    /// A store's build has no update check even when the bridge says it may (ADR 0014).
+    #[cfg(feature = "store")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stores_build_never_checks() {
+        let (_dir, mut app) = new_app(true);
+        app.store.set_setting(keys::UPDATE_CHECK, "1").unwrap();
+        assert_eq!(app.update_settings_json().unwrap()["available"], false);
+        assert!(!app.begin_update_check(true));
+        assert!(!app.start_update_check(true));
+        assert!(updates::latest().await.is_err());
     }
 }

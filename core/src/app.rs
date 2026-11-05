@@ -1621,7 +1621,8 @@ impl App {
             file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),
             file_work_done,
             file_work_done_rx: Some(file_work_done_rx),
-            update_check_built: start.update_check,
+            // A store's build has no update check, whatever the bridge says (ADR 0014).
+            update_check_built: start.update_check && cfg!(not(feature = "store")),
             update_check_running: std::rc::Rc::default(),
             update_check_manual: std::rc::Rc::default(),
             calls: crate::calls::Calls::default(),

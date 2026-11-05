@@ -55,7 +55,10 @@ export CARGO_HOME="${CARGO_HOME_OVERRIDE:-$ROOT/target/cargo-home}"
 cd "$ROOT"
 # The emulator build (and only that one) carries the made-up demo chats, `demoData`: no x86
 # device runs Sailfish OS, so this never reaches a phone. See core/src/demo.rs.
-case "$ARCH" in i486) FEATURES="--features demo" ;; *) FEATURES="" ;; esac
+case "$ARCH" in i486) FEATURES="demo" ;; *) FEATURES="" ;; esac
+# A store's build (STORE=1, scripts/sdk-build.sh) leaves the GitHub update check out (ADR 0014).
+if [ "${STORE:-0}" = 1 ]; then FEATURES="${FEATURES:+$FEATURES,}store"; fi
+[ -n "$FEATURES" ] && FEATURES="--features $FEATURES"
 # shellcheck disable=SC2086 # FEATURES is empty or one flag pair
 cargo build --locked --release --target "$TRIPLE" -p threesea-core $FEATURES
 echo "$ROOT/target/$TRIPLE/release/libthreesea_core.a"

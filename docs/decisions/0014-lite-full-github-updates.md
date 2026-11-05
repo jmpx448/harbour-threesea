@@ -27,8 +27,10 @@ store.
   - a newer version shows a notification once; Settings → Advanced lists it with a button to its
     release page (only pages of this repository's releases are accepted as links). Nothing is
     downloaded or installed: the user installs the RPM.
-- A store's build (`--with store` in the spec, `CONFIG+=store`) has no update check; the store
-  updates it.
+- A store's build (`STORE=1 scripts/sdk-build.sh`: `--with store` in the spec, `CONFIG+=store`
+  and the core's Cargo feature `store`) has no update check, not even GitHub's host name in the
+  binary, and no dialog asking for it; the store updates it. `scripts/check-package.sh --store`
+  checks such a package.
 
 **Consequences.** CLAUDE.md §7.6 names this the second exception to "no third-party endpoints"
 (after user-allowed self-hosted Threema Web servers, ADR 0013). Releases must be tagged

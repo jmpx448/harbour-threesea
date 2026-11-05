@@ -15,6 +15,9 @@ crate-type = ["staticlib", "lib"]
 # Made-up chats for the emulator (`demoData`, core/src/demo.rs). Switched on for i486 only
 # (scripts/build-core.sh); never in a build for a phone.
 demo = []
+# A build for a store, which brings its own updates (ADR 0014): no GitHub update check in the
+# binary (scripts/build-core.sh sets it for STORE=1).
+store = []
 
 [dependencies]
 # Voice-message fallback where the platform has no AAC: pure-Rust Opus/Ogg (BSD-3-Clause, no

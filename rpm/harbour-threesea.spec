@@ -98,6 +98,10 @@ meson install -C target/wap-build
 %install
 %qmake5_install
 strip %{buildroot}%{_bindir}/%{name}
+%if %{with store}
+# Asked once in builds for GitHub only; nothing opens it here (the core offers no update check).
+rm %{buildroot}%{_datadir}/%{name}/qml/pages/UpdateCheckDialog.qml
+%endif
 desktop-file-install --delete-original --dir %{buildroot}%{_datadir}/applications \
     %{buildroot}%{_datadir}/applications/*.desktop
 %if %{with full}
