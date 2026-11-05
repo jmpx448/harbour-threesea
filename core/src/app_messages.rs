@@ -748,6 +748,50 @@ impl App {
         }))
     }
 
+    /// The cover's unread total and who it names, as in `conversations_json`, without building
+    /// a list for it: it is asked for at each event that can change them, seen or not.
+    pub(crate) fn unread_summary_json(&self) -> Result<Value, ApiError> {
+        let archive = self.store.archived_chats()?;
+        let hidden = self.store.private_chats()?;
+        let mut unread_total = 0_i64;
+        let mut unread_chat: Option<String> = None;
+        for (chat, unread) in self.store.unread_chats()? {
+            if hidden.contains(&chat) || archive.contains(&chat) {
+                continue;
+            }
+            unread_total += unread;
+            unread_chat.get_or_insert(chat);
+        }
+        let unread_from = unread_chat.map(|key| self.chat_title(&key)).transpose()?;
+        Ok(json!({ "unreadTotal": unread_total, "unreadFrom": unread_from }))
+    }
+
+    /// A chat's name in the chat list.
+    fn chat_title(&self, key: &str) -> Result<String, ApiError> {
+        let display_name = |identity: &str| {
+            self.store
+                .contact(identity)
+                .ok()
+                .flatten()
+                .map_or_else(|| identity.to_owned(), |c| contacts::display_name(&c))
+        };
+        if let Some(group) = self.store.group(key)? {
+            return Ok(crate::app_groups::title(
+                &group.name,
+                &group.members,
+                &display_name,
+            ));
+        }
+        if let Some(list) = self.store.distribution_list(key)? {
+            return Ok(crate::app_groups::title(
+                &list.name,
+                &list.members,
+                &display_name,
+            ));
+        }
+        Ok(display_name(key))
+    }
+
     pub(crate) fn messages_json(
         &self,
         identity: &str,

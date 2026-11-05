@@ -281,6 +281,8 @@ pub enum Command {
         #[serde(default)]
         private: bool,
     },
+    /// What the cover shows, without the list: `{unreadTotal, unreadFrom}` as in `Conversations`.
+    UnreadSummary,
     /// `{lock: {keyboard, appLock, graceSecs} | null, unlocked, graceTimes}`
     /// (ADR 0009).
     LockStatus,
@@ -1801,6 +1803,7 @@ impl App {
             Command::Conversations { archived, private } => {
                 self.conversations_json(archived, private)
             }
+            Command::UnreadSummary => self.unread_summary_json(),
             Command::LockStatus => self.lock_status(),
             Command::SetLock {
                 enabled,
@@ -3610,6 +3613,51 @@ mod tests {
         });
     }
 
+    /// The cover's count on its own says what the chat list's reply says, and like it never
+    /// counts or names an archived or a private chat.
+    #[test]
+    fn unread_summary_says_what_the_chat_list_says() {
+        let (_dir, app) = app();
+        let same_as_the_list = |app: &App| {
+            let list = app.conversations_json(false, false).unwrap();
+            let summary = app.unread_summary_json().unwrap();
+            assert_eq!(summary["unreadTotal"], list["unreadTotal"]);
+            assert_eq!(summary["unreadFrom"], list["unreadFrom"]);
+            summary
+        };
+        assert_eq!(same_as_the_list(&app)["unreadTotal"], 0);
+        assert!(same_as_the_list(&app)["unreadFrom"].is_null());
+
+        let mut uid = 0;
+        for (at, id) in [(1, "AAAAAAAA"), (2, "BBBBBBBB"), (3, "CCCCCCCC")] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+            for _ in 0..2 {
+                uid += 1;
+                app.store
+                    .insert_incoming(id, uid, "text", "words", at)
+                    .unwrap();
+            }
+        }
+        let summary = same_as_the_list(&app);
+        assert_eq!(summary["unreadTotal"], 6);
+        assert_eq!(summary["unreadFrom"], "CCCCCCCC");
+
+        app.store.set_private("CCCCCCCC", true).unwrap();
+        let summary = same_as_the_list(&app);
+        assert_eq!(summary["unreadTotal"], 4);
+        assert_eq!(
+            summary["unreadFrom"], "BBBBBBBB",
+            "a private chat isn't named"
+        );
+
+        app.store.set_archived("BBBBBBBB", true).unwrap();
+        let summary = same_as_the_list(&app);
+        assert_eq!(summary["unreadTotal"], 2);
+        assert_eq!(summary["unreadFrom"], "AAAAAAAA", "nor an archived one");
+    }
+
     /// The emulator's demo data (feature `demo`): a chat list to work against, and gone again
     /// on demand.
     #[cfg(feature = "demo")]
@@ -3635,6 +3683,9 @@ mod tests {
         // Bruno's one, Carla's three, Farid's one and the group's two.
         assert_eq!(list["unreadTotal"], 7);
         assert_eq!(list["unreadFrom"], "Carla Mendes");
+        let summary = app.unread_summary_json().unwrap();
+        assert_eq!(summary["unreadTotal"], list["unreadTotal"]);
+        assert_eq!(summary["unreadFrom"], list["unreadFrom"]);
         assert_eq!(chats[0]["displayName"], "Ada Lindqvist", "pinned first");
 
         let long = app

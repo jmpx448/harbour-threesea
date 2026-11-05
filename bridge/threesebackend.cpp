@@ -89,7 +89,7 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     m_unreadTimer.setInterval(50);
     connect(&m_unreadTimer, &QTimer::timeout, this, [this]() {
         QJSValue none;
-        call(QStringLiteral("conversations"), QVariantMap(), none);
+        call(QStringLiteral("unreadSummary"), QVariantMap(), none);
     });
     connect(m_secrets, &SecretStore::keyReady, this, &ThreeseBackend::startCore);
     connect(m_secrets, &SecretStore::wrappedKeyReady, this, [this](QByteArray blob, bool keyboard) {
@@ -1283,7 +1283,12 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             m_connectionState = message.value(QStringLiteral("state")).toString();
             emit connectionStateChanged();
         }
-        if (name == QLatin1String("messageAdded") || name == QLatin1String("started")) {
+        // The cover's count and name, whether or not a chat list is looking (it only reloads when
+        // seen): what brings or takes unread chats, and what renames them.
+        if (name == QLatin1String("messageAdded") || name == QLatin1String("started")
+            || name == QLatin1String("contactsChanged") || name == QLatin1String("groupsChanged")
+            || name == QLatin1String("chatsChanged") || name == QLatin1String("privateChanged")
+            || name == QLatin1String("chatDeleted")) {
             refreshUnread();
         }
         emit coreEvent(name, message.toVariantMap());
@@ -1324,7 +1329,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             m_chatTones.clear();
         }
     }
-    // Conversation list replies (from any caller) keep the unread total and the name on the cover
+    // Conversation list and unreadSummary replies keep the unread total and the name on the cover
     // current. The core counts the chat list in every one of these lists, so the archive's and
     // the private chats' own replies don't change them.
     if (ok && result.contains(QStringLiteral("unreadTotal"))) {
