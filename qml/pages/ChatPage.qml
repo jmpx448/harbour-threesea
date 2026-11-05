@@ -225,6 +225,53 @@ Page {
     function bindPollNames(target, property, poll) {
         target[property] = Qt.binding(function() { return page.pollNames(poll) })
     }
+    // A poll's own page: its results once it is closed, else the page to vote on.
+    function openPoll(messageId, body) {
+        if (body.state === 1) {
+            var results = pageStack.push(Qt.resolvedUrl("PollResultsPage.qml"), { poll: body })
+            page.bindPollNames(results, "names", body)
+            return
+        }
+        var pollPage = pageStack.push(Qt.resolvedUrl("PollPage.qml"),
+                                      { messageId: messageId, conversation: page.identity, poll: body,
+                                        readOnly: page.readOnly })
+        page.bindPollNames(pollPage, "formerNames", body)
+        pollPage.changed.connect(function(message) { page.addMessage(message) })
+        pollPage.voteRequested.connect(function(choices) {
+            var ids = []
+            for (var i = 0; i < choices.length; ++i) ids.push(Number(choices[i]))
+            page.run("vote", { message: messageId, choices: ids })
+        })
+    }
+
+    function openPolls() {
+        pageStack.push(Qt.resolvedUrl("PollsPage.qml"),
+                       { chat: page, identity: page.identity,
+                         chatName: page.contact.displayName || page.identity })
+    }
+
+    // The chat's polls, for its menu and for the reminder under the header.
+    property int pollCount: 0
+    property int unansweredPolls: 0
+    property string unansweredQuestion
+    // Closed by its ✕: until another poll starts waiting.
+    property bool pollReminderDismissed: false
+    function refreshPolls() {
+        backend.call("polls", { identity: page.identity }, function(ok, result) {
+            if (!ok) return
+            if (result.unanswered > page.unansweredPolls) page.pollReminderDismissed = false
+            page.pollCount = result.polls.length
+            page.unansweredPolls = result.unanswered
+            page.unansweredQuestion = result.question || ""
+            page.pollsRefreshed(result.polls)
+        })
+    }
+    signal pollsRefreshed(var polls)
+    Timer {
+        id: pollsChanged
+        interval: 300
+        onTriggered: page.refreshPolls()
+    }
 
     // Nothing of the chat is shown until its messages came (a private chat needs the PIN).
     property bool shown: false
@@ -249,6 +296,7 @@ Page {
 
     function load() {
         loadContact()
+        refreshPolls()
         // This window replaces whatever is loaded, so a page that is still on its way must
         // not land in it (it would put old messages next to the newest ones): the generation
         // tells the stale replies apart, and nothing new starts until this one is here.
@@ -359,6 +407,9 @@ Page {
         // The load on its way brings everything so far. No id: a private chat's message while
         // they are hidden, its content left out by the core.
         if (!shown || message.id === undefined) return
+        if (message.kind === "poll" || message.kind === "pollClosed" || message.kind === "deleted") {
+            pollsChanged.restart()
+        }
         var at = messages.indexOfKey(message.id)
         if (at >= 0) {
             var changed = shownInQuote(messages.get(at), message)
@@ -1955,6 +2006,12 @@ Page {
                                             chatName: page.contact.displayName || page.identity })
             }
             MenuItem {
+                visible: !page.selecting && page.pollCount > 0
+                //% "Polls"
+                text: qsTrId("threesea-me-polls")
+                onClicked: page.openPolls()
+            }
+            MenuItem {
                 visible: !page.selecting && page.groupCallsOn && !page.groupCallRunning && !page.readOnly
                 enabled: groupCalls.state === "idle" && calls.state === "idle"
                 //% "Start group call"
@@ -2257,9 +2314,57 @@ Page {
             }
         }
 
+        // Polls still waiting for our vote, however far back they have scrolled.
+        BackgroundItem {
+            id: pollBanner
+            anchors.top: spamBanner.bottom
+            width: parent.width
+            height: visible ? Theme.itemSizeMedium : 0
+            visible: page.unansweredPolls > 0 && !page.readOnly && !page.pollReminderDismissed
+            onClicked: page.openPolls()
+
+            Rectangle {
+                anchors.fill: parent
+                color: Theme.rgba(Theme.highlightBackgroundColor, Theme.highlightBackgroundOpacity)
+            }
+            Column {
+                anchors {
+                    left: parent.left
+                    leftMargin: Theme.horizontalPageMargin
+                    right: pollDismiss.left
+                    rightMargin: Theme.paddingMedium
+                    verticalCenter: parent.verticalCenter
+                }
+                Label {
+                    width: parent.width
+                    truncationMode: TruncationMode.Fade
+                    color: Theme.highlightColor
+                    //% "%n poll(s) waiting for your vote"
+                    text: qsTrId("threesea-la-polls-waiting", page.unansweredPolls)
+                }
+                Label {
+                    width: parent.width
+                    truncationMode: TruncationMode.Fade
+                    font.pixelSize: Theme.fontSizeExtraSmall
+                    color: Theme.secondaryHighlightColor
+                    text: page.unansweredQuestion
+                }
+            }
+            IconButton {
+                id: pollDismiss
+                anchors {
+                    right: parent.right
+                    rightMargin: Theme.paddingSmall
+                    verticalCenter: parent.verticalCenter
+                }
+                icon.source: "image://theme/icon-m-clear"
+                onClicked: page.pollReminderDismissed = true
+            }
+        }
+
         Item {
             id: dayBand
-            anchors.top: spamBanner.bottom
+            anchors.top: pollBanner.bottom
             width: parent.width
             // Constant height: resizing the list while it lays out would loop through its spacer.
             height: stickyDate.height + Theme.paddingSmall
@@ -2790,25 +2895,7 @@ Page {
                                                    { message: messages.get(index) })
                 onForwardRequested: pageStack.push(Qt.resolvedUrl("SharePage.qml"),
                                                    { forwardMessage: model.id, text: Fmt.preview(messages.get(index)) })
-                onPollRequested: {
-                    var body = model.body
-                    if (body.state === 1) {
-                        var results = pageStack.push(Qt.resolvedUrl("PollResultsPage.qml"), { poll: body })
-                        page.bindPollNames(results, "names", body)
-                        return
-                    }
-                    var pollPage = pageStack.push(Qt.resolvedUrl("PollPage.qml"),
-                                                  { messageId: model.id, conversation: page.identity, poll: body,
-                                                    readOnly: page.readOnly })
-                    page.bindPollNames(pollPage, "formerNames", body)
-                    var messageId = model.id
-                    pollPage.changed.connect(function(message) { page.addMessage(message) })
-                    pollPage.voteRequested.connect(function(choices) {
-                        var ids = []
-                        for (var i = 0; i < choices.length; ++i) ids.push(Number(choices[i]))
-                        page.run("vote", { message: messageId, choices: ids })
-                    })
-                }
+                onPollRequested: page.openPoll(model.id, model.body)
                 // For everyone and for good, like on the poll's own page.
                 onClosePollRequested: {
                     var pollMessage = model.id

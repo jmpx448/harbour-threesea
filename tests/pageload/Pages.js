@@ -11,6 +11,7 @@ var table = {
     "pages/ImageViewerPage.qml": { identity: "ABCD1234", messageId: 5 },
     "pages/SafePasswordDialog.qml": { firstRun: true },
     "pages/MemberPickerDialog.qml": { askName: true, title: "New group", acceptText: "Create" },
+    "pages/PollsPage.qml": { identity: "ABCD1234", chatName: "Sam" },
     "pages/PollPage.qml": { messageId: 12, conversation: "ABCD1234",
                             poll: { id: 1, creator: "AAAAAAAA", description: "When?", multiple: false, announce: true,
                                     state: 0, choices: [{ id: 0, name: "Now" }, { id: 1, name: "Later" }],

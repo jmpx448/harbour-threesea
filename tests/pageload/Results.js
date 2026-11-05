@@ -87,6 +87,12 @@ var table = {
             row("d:1", "A list", { distributionList: true }),
         ] }
     },
+    polls: function() {
+        var closed = { id: 2, creator: "ABCD1234", description: "Where?", multiple: true, announce: false, state: 1,
+                       choices: poll.choices, votes: {} }
+        return { polls: [message(12, "poll", { body: poll }), message(10, "poll", { body: closed })],
+                 unanswered: 1, question: "When?" }
+    },
     messages: function(args) {
         // The window asked for, once: the pages go back for more while it fills the view.
         var all = args && (args.before !== undefined || args.after !== undefined) ? [] : messages()

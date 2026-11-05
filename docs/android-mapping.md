@@ -25,6 +25,7 @@ Upstream paths are relative to `third_party/threema-android`. "lt" = provided by
 | Forward secrecy (PFS) | `ch.threema.domain.fs`, `…csp.fs.ForwardSecurityMessageProcessor` | implemented by us in vendored lt `csp_e2e/fs/` (LIB-42) | lt `csp_e2e::fs` + `core::fs_store`, `core::connection` | ✅ 1:1 (versions 1.0–1.2); interop with Android verified |
 | Groups | `ch.threema.app.groupflows`, `…tasks` | absent (LIB-53) | `core::groups`, `core::app_groups` | ✅ |
 | Blob up/download | `ch.threema.domain.protocol.blob` | config + chunked crypto | `core::media`, `core::app_media` | ✅ |
+| A chat's polls and the reminder of open ones | `ComposeMessageFragment.java` (`menu_poll_show_all`), `OpenPollNoticeView` | — | `core::app_polls` (`polls`), `qml/pages/PollsPage.qml`, banner in `ChatPage.qml` | ✅ |
 | Background (Threema Push, persistent connection) | `ThreemaPushService.kt`, `PollingHelper.java` | — | `core::connection`, `BackgroundJob` in QML, systemd user unit (Full) | 🔨 battery use still to be measured on a phone |
 | Message details (times, id, file type/size) | `ch.threema.app.messagedetails` | — | `core::messages` (migration 17), `qml/pages/MessageDetailsPage.qml` | ✅ |
 | Voice player and its media session | `ch.threema.app.services.VoiceMessagePlayerService` (media3 `MediaSession`, audio focus) | — | `bridge/voiceplayer.cpp`, `qml/components/MediaSession.qml` (MPRIS instead of a media notification; closing the window stops it, unlike `onTaskRemoved`, by user report 2026-11-02) | ✅ |
