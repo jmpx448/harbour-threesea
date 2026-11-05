@@ -1441,11 +1441,43 @@ mod app_tests {
         assert_eq!(json["event"], "messageNotify");
         assert_eq!(json["notify"], true);
 
+        // Mentions only is about messages: a call mentions nobody and still notifies.
+        app.store
+            .set_chat_notifications(
+                &key,
+                Some((crate::chat_notifications::Policy::Mentioned, None)),
+            )
+            .unwrap();
+        assert_eq!(notify.to_json(&app.store, true)["notify"], true);
+
         // A muted group stays silent, the same as for its messages.
         app.store
             .set_chat_notifications(&key, Some((crate::chat_notifications::Policy::Never, None)))
             .unwrap();
         assert_eq!(notify.to_json(&app.store, true)["notify"], false);
+    }
+
+    /// The words of the status line in a message mean nothing: its notification isn't held back,
+    /// and it gets none where only a call or a mention would.
+    #[test]
+    fn a_message_saying_what_the_line_says_is_a_message() {
+        let (_dir, app, key) = app_with_group(false);
+        let mut message = app
+            .group_call_context()
+            .started_line(&key, "BBBBBBBB")
+            .unwrap();
+        message.kind = "text".into();
+        let added = CoreEvent::MessageAdded {
+            message: message.clone(),
+        };
+        assert_eq!(added.to_json(&app.store, true)["notify"], true);
+        app.store
+            .set_chat_notifications(
+                &key,
+                Some((crate::chat_notifications::Policy::Mentioned, None)),
+            )
+            .unwrap();
+        assert!(!app.store.should_notify(&message));
     }
 
     /// §7.8: a locked private group's call shows neither who started it nor who is in it, and it

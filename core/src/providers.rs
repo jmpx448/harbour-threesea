@@ -169,7 +169,7 @@ impl CoreEvent {
                     // forwarded message's notification may wait (`Notify` follows), and so does
                     // a group call's until a peek shows it runs.
                     "notify": store.should_notify(message)
-                        && !message.body.starts_with(crate::chat_notifications::GROUP_CALL_STARTED)
+                        && !crate::chat_notifications::is_group_call_started(message)
                         && !store.held_notifications.borrow().contains(&message.id),
                     // Private chat: notifications show neither sender nor text (ADR 0009).
                     "private": private,

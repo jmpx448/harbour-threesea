@@ -16,6 +16,11 @@ use crate::{
 /// How the status line of a group call someone else started begins (`…|their name`).
 pub(crate) const GROUP_CALL_STARTED: &str = "groupCallStarted|";
 
+/// That status line: a status, since anyone can write those words in a message.
+pub(crate) fn is_group_call_started(message: &Message) -> bool {
+    message.kind == "status" && message.body.starts_with(GROUP_CALL_STARTED)
+}
+
 /// Schema (store migration 12).
 pub(crate) const MIGRATION: &str = "
     CREATE TABLE chat_notifications (
@@ -186,14 +191,17 @@ impl Store {
         if message.outgoing
             || (message.kind == "status"
                 && !message.body.starts_with("call|missed|")
-                && !message.body.starts_with(GROUP_CALL_STARTED))
+                && !is_group_call_started(message))
         {
             return false;
         }
         match self.chat_notifications(&message.conversation) {
             Ok(None) | Err(_) => true,
             Ok(Some((Policy::Never, _))) => false,
-            Ok(Some((Policy::Mentioned, _))) => self.mentions_me(message),
+            // A call mentions nobody and is for everyone; like Android, only muting stops it.
+            Ok(Some((Policy::Mentioned, _))) => {
+                is_group_call_started(message) || self.mentions_me(message)
+            }
         }
     }
 
