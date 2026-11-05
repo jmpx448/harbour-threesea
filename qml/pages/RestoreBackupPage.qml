@@ -11,6 +11,22 @@ Page {
     backNavigation: !working
 
     property bool working: false
+    // A code was scanned: on to the password when back here.
+    property bool passwordNext: false
+    onStatusChanged: {
+        if (status === PageStatus.Active && passwordNext) {
+            passwordNext = false
+            passwordField.forceActiveFocus()
+        }
+    }
+
+    function scan() {
+        var scanner = pageStack.push(Qt.resolvedUrl("ScanQrPage.qml"), { idBackup: true })
+        scanner.idBackupScanned.connect(function(text) {
+            backupField.text = text
+            page.passwordNext = true
+        })
+    }
 
     function restore() {
         working = true
@@ -41,8 +57,15 @@ Page {
             }
 
             InfoLabel {
-                //% "Paste the ID backup (80 characters in groups of four, like XXXX-XXXX-…) and enter the password you chose when you created it. It brings your ID. Chats come from a Data backup, which Settings, Backup can import afterwards."
-                text: qsTrId("threesea-la-restore-intro-data-backup")
+                //% "Scan the QR code of the ID backup or paste its text (80 characters in groups of four, like XXXX-XXXX-…), and enter the password you chose when you created it. Threema for Android calls it an ID export. It brings your ID. Chats come from a Data backup, which Settings, Backup can import afterwards."
+                text: qsTrId("threesea-la-restore-intro-scan")
+            }
+
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                enabled: !page.working
+                text: qsTrId("threesea-he-scan-qr")
+                onClicked: page.scan()
             }
 
             TextArea {

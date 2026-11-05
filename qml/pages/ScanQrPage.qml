@@ -7,8 +7,8 @@ import "../components/Errors.js" as Errors
 
 // Scan a contact's QR code to verify them in person (and add them if new), or (deviceLink)
 // the code Threema for Desktop shows to link it, or (webPair) the code of Threema Web, or
-// (anyCode, from the contacts page) whichever it is, a link to a Threema ID too. Looks at the
-// camera a few times a second; a picture (e.g. a screenshot someone sent) works too.
+// (anyCode, from the contacts page) whichever it is, a link to a Threema ID too, or (idBackup) the
+// code of an ID backup, handed to the page below for its password. Looks at the camera a few times a second; a picture (e.g. a screenshot someone sent) works too.
 //
 // Everything goes one way: the core says what a code is (qrKind), refusal() says what this
 // scanner can't do with it, and what connects a browser or adds from a link asks first.
@@ -36,7 +36,11 @@ Page {
     // Threema for Desktop continues to the linking dialog, a link adds the contact.
     property bool anyCode
 
+    // Restoring: only an ID backup's code, which the page below takes.
+    property bool idBackup
+
     signal verified(var contact)
+    signal idBackupScanned(string text)
     signal webPaired()
 
     // A code refused or declined stays quiet while the camera still sees it: no notice twice a
@@ -87,6 +91,11 @@ Page {
 
     // Why this scanner won't go on with the code, or nothing.
     function refusal(code, fromPicture) {
+        if (idBackup) {
+            return code.kind === "idBackup" ? ""
+                    //% "This is not an ID backup. Scan the QR code of your ID backup."
+                    : qsTrId("threesea-la-qr-not-id-backup")
+        }
         var someones = code.kind === "contact" || code.kind === "link"
         if (webPair && code.kind !== "web") {
             return someones
@@ -106,6 +115,8 @@ Page {
             return qsTrId("threesea-la-qr-link-verify")
         }
         if (verifying && code.kind !== "contact") return Errors.text("qrInvalid")
+        //% "This is an ID backup. It restores an ID while the app is being set up."
+        if (code.kind === "idBackup") return qsTrId("threesea-la-qr-id-backup-elsewhere")
         if (code.error) return Errors.text(code.error)
         if (code.kind === "unknown") {
             return fromPicture
@@ -128,11 +139,18 @@ Page {
             if (!ok) code = { kind: "unknown" }
             var message = page.refusal(code, fromPicture)
             if (message) page.refuse(message, text, fromPicture)
+            else if (code.kind === "idBackup") page.takeIdBackup(text)
             else if (code.kind === "web") page.askWeb(code, text, fromPicture)
             else if (code.kind === "device") page.continueLinking(text)
             else if (code.kind === "link") page.askAddContact(code.identity, text, fromPicture)
             else page.verify(text, fromPicture)
         })
+    }
+
+    // Stays busy until the page has gone: the camera still sees the code.
+    function takeIdBackup(text) {
+        page.idBackupScanned(text)
+        closeWhenIdle.start()
     }
 
     function askWeb(code, text, fromPicture) {
@@ -303,7 +321,10 @@ Page {
             width: parent.width - 2 * Theme.horizontalPageMargin
             wrapMode: Text.Wrap
             horizontalAlignment: Text.AlignHCenter
-            text: page.deviceLink
+            text: page.idBackup
+                  //% "Point the camera at the QR code of your ID backup."
+                  ? qsTrId("threesea-la-scan-hint-id-backup")
+                  : page.deviceLink
                   //% "Point the camera at the QR code Threema for Desktop shows."
                   ? qsTrId("threesea-la-scan-hint-device")
                   : page.webPair
