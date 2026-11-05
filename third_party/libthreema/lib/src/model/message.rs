@@ -1384,6 +1384,24 @@ impl IncomingMessageBody {
         }
     }
 
+    /// Whether a message of this kind makes its sender a _direct_ contact upon reception.
+    ///
+    /// Needed by whoever applies a reflected message, as that doesn't pass the incoming message
+    /// task.
+    #[must_use]
+    pub const fn requires_direct_contact(&self) -> bool {
+        self.properties().requires_direct_contact
+    }
+
+    /// Whether a message of this kind is protected against replay by storing its nonce.
+    ///
+    /// Needed by whoever applies a reflected message, as that doesn't pass the incoming message
+    /// task.
+    #[must_use]
+    pub const fn has_replay_protection(&self) -> bool {
+        self.properties().replay_protection
+    }
+
     /// Determine whether the incoming message is exempt from blocking.
     fn is_exempt_from_blocking(&self) -> bool {
         match &self {
