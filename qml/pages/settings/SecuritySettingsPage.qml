@@ -83,7 +83,7 @@ Page {
                 enabled: !page.working
                 //% "Passphrase"
                 text: qsTrId("threesea-la-lock-passphrase")
-                //% "Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered."
+                //% "Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats."
                 description: qsTrId("threesea-la-data-passphrase-about")
                 onClicked: {
                     if (checked) page.askPassphrase(function() {

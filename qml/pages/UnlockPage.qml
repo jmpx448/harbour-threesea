@@ -76,7 +76,11 @@ Page {
         anchors.fill: parent
         keyboard: page.keyboard
         cancellable: page.cancellable
+        // By what the code is for: the keypad or the keyboard is only how it's entered.
         title: page.title.length > 0 ? page.title
+               : page.database || page.passphraseCheck
+                 //% "Enter the passphrase of your stored data"
+                 ? qsTrId("threesea-he-enter-data-passphrase")
                : page.keyboard
                  //% "Enter your passphrase"
                  ? qsTrId("threesea-he-enter-passphrase")
@@ -96,10 +100,8 @@ Page {
                     } else {
                         // The busy field gave up its focus, and the keyboard with it.
                         entry.focusField()
-                        entry.errorText = page.keyboard
-                                //% "Wrong passphrase"
-                                ? qsTrId("threesea-la-wrong-passphrase")
-                                : qsTrId("threesea-la-wrong-pin")
+                        //% "Wrong passphrase"
+                        entry.errorText = qsTrId("threesea-la-wrong-passphrase")
                     }
                 })
                 return

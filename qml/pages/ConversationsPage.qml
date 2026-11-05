@@ -54,7 +54,7 @@ Page {
             if (ok) {
                 page.reload()
             } else if (kind === "lockNeeded") {
-                //% "Private chats need an app lock. Set up a PIN in Settings, App lock."
+                //% "Private chats need an app lock. Set one up in Settings, Security, App lock."
                 Notices.show(qsTrId("threesea-la-private-needs-lock"), Notice.Long, Notice.Center)
             } else {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)

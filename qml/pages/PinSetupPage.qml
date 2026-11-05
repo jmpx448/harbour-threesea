@@ -31,13 +31,15 @@ Page {
         Component.onCompleted: keyboard = page.startKeyboard
         cancellable: true
         minimumLength: page.minimumLength
+        // The stored data's code is a passphrase, also in digits on the keypad.
+        readonly property bool passphrase: keyboard || page.minimumLength > 4
         title: page.first.length === 0
-               ? (keyboard
+               ? (passphrase
                   //% "Enter new passphrase"
                   ? qsTrId("threesea-he-new-passphrase")
                   //% "Enter new PIN"
                   : qsTrId("threesea-he-new-pin"))
-               : (keyboard
+               : (passphrase
                   //% "Enter the passphrase again"
                   ? qsTrId("threesea-he-repeat-passphrase")
                   //% "Enter the PIN again"
@@ -53,6 +55,9 @@ Page {
                          ? qsTrId("threesea-la-passphrase-hint").arg(page.minimumLength)
                          //% "At least 4 digits"
                          : qsTrId("threesea-la-pin-hint")
+        note: page.first.length === 0 && page.minimumLength > 4
+              //% "If you forget it, everything stored on this phone is lost."
+              ? qsTrId("threesea-la-data-passphrase-note") : ""
         onCanceled: pageStack.pop()
         onEntered: {
             if (page.first.length === 0) {

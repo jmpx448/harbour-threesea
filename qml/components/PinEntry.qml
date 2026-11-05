@@ -14,6 +14,8 @@ Item {
     property string title
     // Shown in place of the dots while nothing is entered (hints, "Wrong PIN").
     property string errorText
+    // A sentence under the title, for what the hint's single line has no room for.
+    property string note
     property int minimumLength: 4
     property bool keyboard: false
     property bool allowKeyboard: false
@@ -89,6 +91,21 @@ Item {
         text: root.title
         color: Theme.highlightColor
         font.pixelSize: Theme.fontSizeExtraLarge
+    }
+
+    Label {
+        visible: root.note.length > 0
+        anchors {
+            top: titleLabel.bottom
+            topMargin: Theme.paddingSmall
+        }
+        x: Theme.horizontalPageMargin
+        width: parent.width - 2 * x
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        text: root.note
+        color: Theme.secondaryHighlightColor
+        font.pixelSize: Theme.fontSizeSmall
     }
 
     // Passphrase on the keyboard.

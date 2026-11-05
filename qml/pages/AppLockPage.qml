@@ -145,7 +145,7 @@ Page {
                 checked: page.lock !== null && page.lock.appLock
                 //% "Lock the app"
                 text: qsTrId("threesea-la-lock-app")
-                //% "Ask whenever Threesea is opened. Private chats always ask."
+                //% "Ask when Threesea starts, and when you come back to it after the time you choose. Private chats always ask."
                 description: qsTrId("threesea-la-lock-app-description")
                 onClicked: {
                     var options = page.current()
