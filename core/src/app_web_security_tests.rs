@@ -773,6 +773,62 @@ async fn web_sends_media_as_media() {
         .await;
 }
 
+/// Asking again for a file whose download failed waits for the new try; the old failure isn't
+/// taken for its result.
+#[tokio::test(flavor = "current_thread")]
+async fn web_retry_of_a_failed_download_waits_for_its_result() {
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    let message = app
+        .store
+        .insert_incoming(
+            "BBBBBBBB",
+            1,
+            "file",
+            &json!({"fileState": crate::app_media::STATE_FAILED, "mediaType": "text/plain",
+                "name": "a.txt"})
+            .to_string(),
+            1,
+        )
+        .unwrap()
+        .unwrap();
+    app.store
+        .set_file_keys(
+            message.id,
+            &crate::media::FileKeys {
+                key: Zeroizing::new([1; 32]),
+                blob_id: Some(libthreema::common::BlobId([2; 16])),
+                thumbnail_blob_id: None,
+            },
+        )
+        .unwrap();
+    let wire = arp::message(
+        "request",
+        "blob",
+        Some(arp::map(vec![
+            ("type", "contact".into()),
+            ("id", "BBBBBBBB".into()),
+            ("messageId", message.id.to_string().into()),
+        ])),
+        None,
+    );
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let reply = app
+                .web_media_action(1, &Incoming::parse(&wire).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(reply.is_none(), "answered when the download is through");
+            // The refresh that follows every message from the browser, before the task has run.
+            app.web_blobs_changed();
+            assert!(rx.try_recv().is_err(), "no answer yet");
+            assert_eq!(app.web.pending_blobs.len(), 1);
+        })
+        .await;
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {
