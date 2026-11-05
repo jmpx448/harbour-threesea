@@ -140,8 +140,7 @@ CoverBackground {
         Label {
             // Who is waiting: the newest chat that still has something unread. "Hide content on
             // the cover" (Privacy) and the app lock show only the count.
-            visible: backend.unreadCount > 0 && backend.unreadFrom.length > 0 && !window.locked
-                     && window.appSettings.disableScreenshots !== true
+            visible: cover.namesChat
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             truncationMode: TruncationMode.Fade
@@ -153,22 +152,45 @@ CoverBackground {
 
     // From here: inside a CoverActionList `window` is its own property, not the app's window.
     readonly property bool appLocked: window.locked
+    readonly property bool actionsOn: backend.state === "ready" && !cover.inCall && !cover.appLocked
+    readonly property bool namesChat: backend.unreadCount > 0 && backend.unreadFrom.length > 0
+                                      && backend.unreadChat.length > 0 && !window.locked
+                                      && window.appSettings.disableScreenshots !== true
+
+    // New message: the contacts, attached to the chat list (swipe left there).
+    function newMessage() {
+        window.activate()
+        var chats = pageStack.find(function(page) { return page.objectName === "conversations" })
+        if (!chats) return
+        pageStack.pop(chats, PageStackAction.Immediate)
+        if (pageStack.nextPage(chats) === null) {
+            pageStack.pushAttached(Qt.resolvedUrl("../pages/ContactsPage.qml"))
+        }
+        pageStack.navigateForward(PageStackAction.Immediate)
+    }
+
+    function openWaitingChat() {
+        window.showChat(backend.unreadChat)
+    }
 
     CoverActionList {
-        enabled: backend.state === "ready" && !cover.inCall && !cover.appLocked
+        enabled: cover.actionsOn && !cover.namesChat
         CoverAction {
             iconSource: "image://theme/icon-cover-new"
-            // New message: the contacts, attached to the chat list (swipe left there).
-            onTriggered: {
-                window.activate()
-                var chats = pageStack.find(function(page) { return page.objectName === "conversations" })
-                if (!chats) return
-                pageStack.pop(chats, PageStackAction.Immediate)
-                if (pageStack.nextPage(chats) === null) {
-                    pageStack.pushAttached(Qt.resolvedUrl("../pages/ContactsPage.qml"))
-                }
-                pageStack.navigateForward(PageStackAction.Immediate)
-            }
+            onTriggered: cover.newMessage()
+        }
+    }
+
+    // With the name on the cover, also the way to that chat.
+    CoverActionList {
+        enabled: cover.actionsOn && cover.namesChat
+        CoverAction {
+            iconSource: "image://theme/icon-cover-new"
+            onTriggered: cover.newMessage()
+        }
+        CoverAction {
+            iconSource: "image://theme/icon-cover-message"
+            onTriggered: cover.openWaitingChat()
         }
     }
 }

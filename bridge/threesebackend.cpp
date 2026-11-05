@@ -1448,7 +1448,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             m_chatTones.clear();
         }
     }
-    // Conversation list and unreadSummary replies keep the unread total and the name on the cover
+    // Conversation list and unreadSummary replies keep the unread total and the chat on the cover
     // current. The core counts the chat list in every one of these lists, so the archive's and
     // the private chats' own replies don't change them.
     if (ok && result.contains(QStringLiteral("unreadTotal"))) {
@@ -1461,6 +1461,11 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         if (from != m_unreadFrom) {
             m_unreadFrom = from;
             emit unreadFromChanged();
+        }
+        const QString chat = result.value(QStringLiteral("unreadChat")).toString();
+        if (chat != m_unreadChat) {
+            m_unreadChat = chat;
+            emit unreadChatChanged();
         }
     }
     // Contact list replies feed the shared model. By request, not by the look of the reply: the

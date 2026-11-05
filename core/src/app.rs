@@ -282,7 +282,8 @@ pub enum Command {
         #[serde(default)]
         private: bool,
     },
-    /// What the cover shows, without the list: `{unreadTotal, unreadFrom}` as in `Conversations`.
+    /// What the cover shows, without the list: `{unreadTotal, unreadFrom, unreadChat}` as in
+    /// `Conversations`.
     UnreadSummary,
     /// `{lock: {keyboard, appLock, graceSecs} | null, unlocked, graceTimes}`
     /// (ADR 0009).
@@ -3964,6 +3965,7 @@ mod tests {
             let summary = app.unread_summary_json().unwrap();
             assert_eq!(summary["unreadTotal"], list["unreadTotal"]);
             assert_eq!(summary["unreadFrom"], list["unreadFrom"]);
+            assert_eq!(summary["unreadChat"], list["unreadChat"]);
             summary
         };
         assert_eq!(same_as_the_list(&app)["unreadTotal"], 0);
@@ -3984,6 +3986,10 @@ mod tests {
         let summary = same_as_the_list(&app);
         assert_eq!(summary["unreadTotal"], 6);
         assert_eq!(summary["unreadFrom"], "CCCCCCCC");
+        assert_eq!(
+            summary["unreadChat"], "CCCCCCCC",
+            "the cover opens the chat it names"
+        );
 
         app.store.set_private("CCCCCCCC", true).unwrap();
         let summary = same_as_the_list(&app);
@@ -5131,6 +5137,7 @@ mod tests {
         let list = app.conversations_json(false, false).unwrap();
         assert_eq!(list["unreadTotal"], 0);
         assert_eq!(list["unreadFrom"], Value::Null);
+        assert_eq!(list["unreadChat"], Value::Null);
     }
 
     #[test]

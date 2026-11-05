@@ -53,6 +53,7 @@ class ThreeseBackend : public QObject
     // Who the unread messages are waiting for an answer from: the name of the chat list's newest
     // unread chat, for the cover. Empty while nothing is unread.
     Q_PROPERTY(QString unreadFrom READ unreadFrom NOTIFY unreadFromChanged)
+    Q_PROPERTY(QString unreadChat READ unreadChat NOTIFY unreadChatChanged)
     // Keep the process (and the connection) alive when the window is closed.
     Q_PROPERTY(bool keepRunning READ keepRunning WRITE setKeepRunning NOTIFY keepRunningChanged)
     // How much goes to the system log, Qt and core alike: "warn" (default), "info", "debug".
@@ -138,6 +139,7 @@ public:
     QString connectionState() const { return m_connectionState; }
     int unreadCount() const { return m_unreadCount; }
     QString unreadFrom() const { return m_unreadFrom; }
+    QString unreadChat() const { return m_unreadChat; }
     bool keepRunning() const;
     QString logLevel() const;
     // Qt's (and QML's console) messages at the stored level; main() calls it before anything logs.
@@ -373,6 +375,7 @@ signals:
     void connectionStateChanged();
     void unreadCountChanged();
     void unreadFromChanged();
+    void unreadChatChanged();
     void keepRunningChanged();
     void logLevelChanged();
     void notificationSettingsChanged();
@@ -458,6 +461,7 @@ private:
     QString m_connectionState = QStringLiteral("disconnected");
     int m_unreadCount = 0;
     QString m_unreadFrom;
+    QString m_unreadChat;
     // The database key while the core runs (to encrypt it when key encryption is switched on);
     // memory only, wiped on exit.
     QByteArray m_dbKey;

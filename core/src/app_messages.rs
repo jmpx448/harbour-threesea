@@ -794,6 +794,7 @@ impl App {
             "privateCount": private_count,
             "unreadTotal": unread_total,
             "unreadFrom": unread_from,
+            "unreadChat": unread_chat,
         }))
     }
 
@@ -811,8 +812,15 @@ impl App {
             unread_total += unread;
             unread_chat.get_or_insert(chat);
         }
-        let unread_from = unread_chat.map(|key| self.chat_title(&key)).transpose()?;
-        Ok(json!({ "unreadTotal": unread_total, "unreadFrom": unread_from }))
+        let unread_from = unread_chat
+            .as_deref()
+            .map(|key| self.chat_title(key))
+            .transpose()?;
+        Ok(json!({
+            "unreadTotal": unread_total,
+            "unreadFrom": unread_from,
+            "unreadChat": unread_chat,
+        }))
     }
 
     /// A chat's name in the chat list.
