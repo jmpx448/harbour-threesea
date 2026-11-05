@@ -3480,7 +3480,9 @@ impl<'a> Session<'a> {
         self.setup
             .failing_items
             .forget(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
-        if brings_contact && let Err(error) = crate::reflected::apply_waiting(&store, &self.events)
+        if brings_contact
+            && let Err(error) =
+                crate::reflected::apply_waiting(&store, &self.setup.config, &self.events)
         {
             tracing::warn!(%error, "applying reflected messages that waited failed");
         }
@@ -3520,7 +3522,9 @@ impl<'a> Session<'a> {
 
     /// Apply the reflected messages that waited for a contact, now that one may be there.
     async fn apply_waiting_reflected(&mut self) -> Result<(), ConnectionError> {
-        if let Err(error) = crate::reflected::apply_waiting(&self.setup.store, &self.events) {
+        if let Err(error) =
+            crate::reflected::apply_waiting(&self.setup.store, &self.setup.config, &self.events)
+        {
             tracing::warn!(%error, "applying reflected messages that waited failed");
         }
         Box::pin(self.after_incoming()).await

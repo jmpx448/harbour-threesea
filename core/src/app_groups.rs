@@ -551,7 +551,7 @@ impl Shared {
                 let _ = events.send(CoreEvent::MessageAdded { message });
             }
             let waited = crate::providers::EventSink::default();
-            if let Err(error) = crate::reflected::apply_waiting(&store, &waited) {
+            if let Err(error) = crate::reflected::apply_waiting(&store, &config, &waited) {
                 tracing::warn!(%error, "applying reflected messages that waited failed");
             }
             for event in waited.take() {

@@ -230,9 +230,15 @@ fn waits_for_sender(
 }
 
 /// Apply what has waited for a sender who has a contact by now ([`waits_for_sender`]), each in a
-/// store step of its own. Who the directory has said doesn't exist or who has been blocked since
-/// takes it with them; for the rest the lookup stays owed.
-pub fn apply_waiting(store: &Rc<Store>, events: &EventSink) -> Result<(), StoreError> {
+/// store step of its own. What they'd be stopped for now (the block list, or "block unknown senders"
+/// for a stranger, as on a device that leads: ADR 0019) goes, contact or not, and no lookup is owed
+/// for it. Who the directory has said doesn't exist takes it with them; for the rest the lookup
+/// stays owed.
+pub fn apply_waiting(
+    store: &Rc<Store>,
+    config: &libthreema::common::config::Config,
+    events: &EventSink,
+) -> Result<(), StoreError> {
     let waiting = store.reflected_waiting()?;
     if waiting.is_empty() {
         return Ok(());
@@ -245,9 +251,15 @@ pub fn apply_waiting(store: &Rc<Store>, events: &EventSink) -> Result<(), StoreE
     };
     let mut owed = Vec::new();
     for (id, sender, message) in waiting {
+        if crate::providers::identity_blocked(store, config, &sender)? {
+            tracing::warn!("a reflected message's sender is blocked by now, message dropped");
+            store.reflected_done(id)?;
+            store.member_lookups_answered(&[sender.as_str()])?;
+            continue;
+        }
         if store.contact(&sender)?.is_none() {
-            if store.recently_invalid(&sender) || store.is_explicitly_blocked(&sender)? {
-                tracing::warn!("a reflected message's sender can't get a contact, message dropped");
+            if store.recently_invalid(&sender) {
+                tracing::warn!("a reflected message's sender doesn't exist, message dropped");
                 store.reflected_done(id)?;
             } else {
                 owed.push(sender);
@@ -1316,6 +1328,12 @@ mod tests {
         );
     }
 
+    fn test_config() -> libthreema::common::config::Config {
+        libthreema::common::config::Config::from(
+            libthreema::common::config::ConfigEnvironment::Production,
+        )
+    }
+
     fn stranger_text(message_id: u64, nonce: Vec<u8>) -> d2d::Envelope {
         reflected_incoming("C0C0C0C0", message_id, nonce, text_body())
     }
@@ -1349,7 +1367,7 @@ mod tests {
 
         // No contact yet: it stays, and a lookup no longer noted as owed is owed again.
         store.member_lookups_answered(&["C0C0C0C0"]).unwrap();
-        apply_waiting(&store, &events).unwrap();
+        apply_waiting(&store, &test_config(), &events).unwrap();
         assert_eq!(store.reflected_waiting().unwrap().len(), 1);
         assert_eq!(store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
 
@@ -1357,7 +1375,7 @@ mod tests {
         contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
         store.upsert_contact(&contact).unwrap();
         let events: EventSink = Rc::default();
-        apply_waiting(&store, &events).unwrap();
+        apply_waiting(&store, &test_config(), &events).unwrap();
         assert!(store.reflected_waiting().unwrap().is_empty());
         let stored = store.conversation_messages("C0C0C0C0", 5).unwrap();
         assert_eq!(stored.len(), 1);
@@ -1393,7 +1411,7 @@ mod tests {
         let events: EventSink = Rc::default();
         apply_sealed(&store, &stranger_text(1, vec![1; 24]), &events);
         store.note_invalid_ids(&["C0C0C0C0".to_owned()]);
-        apply_waiting(&store, &events).unwrap();
+        apply_waiting(&store, &test_config(), &events).unwrap();
         assert!(store.reflected_waiting().unwrap().is_empty());
     }
 
@@ -1419,7 +1437,7 @@ mod tests {
             )
             .unwrap();
         let events: EventSink = Rc::default();
-        apply_waiting(&store, &events).unwrap();
+        apply_waiting(&store, &test_config(), &events).unwrap();
         assert_eq!(store.reflected_waiting().unwrap().len(), 1);
         assert!(events.borrow().is_empty());
         assert!(
@@ -1602,5 +1620,79 @@ mod tests {
             .unwrap();
         apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
         assert_eq!(store.reflected_left_out().unwrap(), 0);
+    }
+
+    fn with_identity() -> (tempfile::TempDir, Rc<Store>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        (dir, store)
+    }
+
+    /// Blocked while it waited, and by now a direct contact, whom nothing else would stop: it goes,
+    /// with no message, no notification and no lookup left (ADR 0019).
+    #[test]
+    fn what_waited_from_someone_blocked_since_goes() {
+        let (_dir, store) = with_identity();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+        let mut contact = stranger();
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        store.upsert_contact(&contact).unwrap();
+        block(&store, "C0C0C0C0");
+        let events: EventSink = Rc::default();
+        apply_waiting(&store, &test_config(), &events).unwrap();
+        assert!(store.reflected_waiting().unwrap().is_empty());
+        assert!(
+            store
+                .conversation_messages("C0C0C0C0", 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.owed_member_lookups().unwrap().is_empty());
+        assert!(events.borrow().is_empty());
+    }
+
+    /// "Block unknown senders" switched on while a stranger's message waited: no new chat. A
+    /// direct contact isn't a stranger.
+    #[test]
+    fn what_waited_from_a_stranger_goes_under_block_unknown() {
+        let (_dir, store) = with_identity();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+        let mut contact = stranger();
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&contact).unwrap();
+        store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &json!({ "blockUnknown": true }).to_string(),
+            )
+            .unwrap();
+        apply_waiting(&store, &test_config(), &Rc::default()).unwrap();
+        assert!(store.reflected_waiting().unwrap().is_empty());
+        assert!(
+            store
+                .conversation_messages("C0C0C0C0", 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .contact("C0C0C0C0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level,
+            AcquaintanceLevel::GroupOrDeleted
+        );
+
+        contact.acquaintance_level = AcquaintanceLevel::Direct;
+        store.upsert_contact(&contact).unwrap();
+        apply_sealed(&store, &stranger_text(2, vec![2; 24]), &Rc::default());
+        assert_eq!(store.conversation_messages("C0C0C0C0", 5).unwrap().len(), 1);
     }
 }
