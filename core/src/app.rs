@@ -5521,3 +5521,7 @@ mod tests {
         assert_eq!(reply["error"]["kind"], "noLicense");
     }
 }
+
+#[cfg(test)]
+#[path = "app_command_table_tests.rs"]
+mod command_table_tests;
