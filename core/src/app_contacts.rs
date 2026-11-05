@@ -1203,35 +1203,76 @@ impl App {
                     .await?
                 }
             };
-        let (mut matched, mut added) = (0, 0);
         let claims = crate::address_book::claims(&found, &hashes, &entries);
-        for hit in self.claims_to_take(claims, &own.threema_id)? {
-            let entry = hit.entry;
-            let (mut contact, fresh) = match self.store.contact(&hit.identity)? {
-                Some(contact) => (contact, false),
-                None => {
-                    match self.add_contact(&hit.identity).await {
-                        Ok(_) => {}
-                        Err(ApiError::RateLimited) => return Err(ApiError::RateLimited),
-                        Err(_) => continue,
+        let claims = self.claims_to_take(claims, &own.threema_id)?;
+        // One request per hundred new people, not one per person: nothing else is dispatched
+        // meanwhile. What came before a failure is used, and the failure is said afterwards.
+        let mut missing = Vec::new();
+        for claim in &claims {
+            if self.store.contact(&claim.identity)?.is_none() {
+                missing.push(claim.identity.clone());
+            }
+        }
+        let mut looked_up = std::collections::HashMap::new();
+        let mut failure = None;
+        for chunk in missing.chunks(100) {
+            match contacts::lookup(&self.https, &self.config, chunk).await {
+                Ok(results) => looked_up.extend(results),
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let (matched, added) = self.take_claims(&claims, looked_up)?;
+        tracing::info!(matched, added, "address book matched");
+        match failure {
+            Some(error) => Err(self.directory_error(error)),
+            None => Ok(json!({ "matched": matched, "added": added })),
+        }
+    }
+
+    /// Makes contacts of the claims: the ones we have, and the new ones `looked_up` found. How
+    /// many matched and how many are new in the contact list.
+    fn take_claims(
+        &self,
+        claims: &[crate::address_book::Claim<'_>],
+        mut looked_up: std::collections::HashMap<String, Lookup>,
+    ) -> Result<(usize, usize), ApiError> {
+        let same_key = |contact: &libthreema::model::contact::Contact, key: &[u8; 32]| {
+            contacts::hex_bytes(&contact.public_key.to_string()).as_slice() == key
+        };
+        let (mut matched, mut added) = (0, 0);
+        for hit in claims {
+            let (contact, fresh) = match self.store.contact(&hit.identity)? {
+                Some(mut contact) => {
+                    if !same_key(&contact, &hit.public_key) {
+                        tracing::warn!("address book match with a different public key, skipped");
+                        if contacts::distrust_changed_key(&mut contact) {
+                            self.store.upsert_contact(&contact)?;
+                        }
+                        continue;
                     }
+                    (contact, false)
+                }
+                None => {
+                    // Revoked, refused or not asked about for now: only this one is skipped.
+                    let Some(Lookup::Found(contact)) = looked_up.remove(&hit.identity) else {
+                        continue;
+                    };
+                    let mut contact = *contact;
+                    if !same_key(&contact, &hit.public_key) {
+                        tracing::warn!("address book match with a different public key, skipped");
+                        continue;
+                    }
+                    contact.acquaintance_level = pc::AcquaintanceLevel::Direct;
+                    self.store.upsert_contact(&contact)?;
                     added += 1;
-                    let contact = self
-                        .store
-                        .contact(&hit.identity)?
-                        .ok_or(ApiError::ContactNotFound)?;
                     (contact, true)
                 }
             };
-            if contacts::hex_bytes(&contact.public_key.to_string()).as_slice() != hit.public_key {
-                tracing::warn!("address book match with a different public key, skipped");
-                if contacts::distrust_changed_key(&mut contact) {
-                    self.store.upsert_contact(&contact)?;
-                }
-                continue;
-            }
             matched += 1;
-            let change = self.take_from_address_book(contact, entry)?;
+            let change = self.take_from_address_book(contact, hit.entry)?;
             if change == AddressBookChange::Raised {
                 added += 1;
             }
@@ -1240,8 +1281,7 @@ impl App {
                 self.made_direct.borrow_mut().push(hit.identity.clone());
             }
         }
-        tracing::info!(matched, added, "address book matched");
-        Ok(json!({ "matched": matched, "added": added }))
+        Ok((matched, added))
     }
 
     /// Not the user themself, and not whoever they deleted or excluded: a deleted contact stays
@@ -1771,6 +1811,95 @@ mod contact_policy_tests {
         .await;
         assert!(excluded(&app).is_empty());
         assert_eq!(taken(&app), 1);
+    }
+
+    /// New people come from one lookup: a revoked ID or a wrong key costs only that one, and
+    /// someone the lookup didn't get to is left for the next sync.
+    #[tokio::test(flavor = "current_thread")]
+    async fn new_people_in_the_address_book_are_added_from_the_lookup() {
+        use libthreema::protobuf::d2d_sync::contact::{AcquaintanceLevel, VerificationLevel};
+
+        use crate::contacts::{Lookup, test_contact};
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let entry = crate::address_book::Entry {
+            first_name: "Anna".into(),
+            last_name: String::new(),
+            emails: Vec::new(),
+            phones: Vec::new(),
+        };
+        let key_of = |id: &str| -> [u8; 32] {
+            crate::contacts::hex_bytes(&test_contact(id).public_key.to_string())
+                .try_into()
+                .unwrap()
+        };
+        let claim = |id: &str, public_key| crate::address_book::Claim {
+            identity: id.into(),
+            public_key,
+            entry: &entry,
+        };
+        let claims = [
+            claim("AAAAAAAA", key_of("AAAAAAAA")),
+            claim("BBBBBBBB", key_of("BBBBBBBB")),
+            claim("CCCCCCCC", [0xee; 32]),
+            claim("DDDDDDDD", key_of("DDDDDDDD")),
+        ];
+        let looked_up = [
+            (
+                "AAAAAAAA",
+                Lookup::Found(Box::new(test_contact("AAAAAAAA"))),
+            ),
+            ("BBBBBBBB", Lookup::Invalid),
+            (
+                "CCCCCCCC",
+                Lookup::Found(Box::new(test_contact("CCCCCCCC"))),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, result)| (id.to_owned(), result))
+        .collect();
+        assert_eq!(app.take_claims(&claims, looked_up).unwrap(), (1, 1));
+
+        let added = app.store.contact("AAAAAAAA").unwrap().unwrap();
+        assert_eq!(added.acquaintance_level, AcquaintanceLevel::Direct);
+        assert_eq!(added.verification_level, VerificationLevel::ServerVerified);
+        assert_eq!(added.first_name.as_deref(), Some("Anna"));
+        for left_out in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"] {
+            assert!(app.store.contact(left_out).unwrap().is_none(), "{left_out}");
+        }
+        assert_eq!(*app.made_direct.borrow(), ["AAAAAAAA"]);
+
+        // Once they are contacts, no lookup is needed, and nothing is new.
+        let again = [claim("AAAAAAAA", key_of("AAAAAAAA"))];
+        let nothing = std::collections::HashMap::new();
+        assert_eq!(app.take_claims(&again, nothing).unwrap(), (1, 0));
+    }
+
+    /// A contact whose key isn't the one the directory has now: no more than one dot of trust.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stored_contact_with_another_key_is_not_taken_from_the_address_book() {
+        use libthreema::protobuf::d2d_sync::contact::VerificationLevel;
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.verification_level = VerificationLevel::ServerVerified;
+        app.store.upsert_contact(&contact).unwrap();
+        let entry = crate::address_book::Entry {
+            first_name: "Anna".into(),
+            last_name: String::new(),
+            emails: Vec::new(),
+            phones: Vec::new(),
+        };
+        let claims = [crate::address_book::Claim {
+            identity: "BBBBBBBB".into(),
+            public_key: [0xee; 32],
+            entry: &entry,
+        }];
+        let nothing = std::collections::HashMap::new();
+        assert_eq!(app.take_claims(&claims, nothing).unwrap(), (0, 0));
+        let stored = app.store.contact("BBBBBBBB").unwrap().unwrap();
+        assert_eq!(stored.verification_level, VerificationLevel::Unverified);
+        assert!(stored.first_name.is_none());
     }
 
     /// Someone out of the contact list who isn't excluded (a group member): back in it, and it

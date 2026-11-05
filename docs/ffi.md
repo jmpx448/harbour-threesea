@@ -205,7 +205,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `setVideoQuality` | `quality` (`auto`\|`low`\|`max`) | the settings JSON, which also has `videoCalls` (switched with `setSetting`; synced like Android's video policy, not in Threema Safe) and `videoQuality` |
 | `callCandidates` | `callId`, `candidates`: `[{candidate, sdpMid, sdpMLineIndex, ufrag}]` | `{}` |
 | `callState` | – | `{call: {identity, callId, phase (calling\|ringing\|incoming\|active), outgoing, video, startedAt, acceptedAt} \| null}` |
-| `matchAddressBook` | `entries`: `[{firstName, lastName, emails, phones}]`, `automatic?` (the hourly sync, which rests with the directory's rate limit: error `rateLimited`) | `{matched, added}`; hashed lookup (protocol-notes "Address book matching") |
+| `matchAddressBook` | `entries`: `[{firstName, lastName, emails, phones}]`, `automatic?` (the hourly sync, which rests with the directory's rate limit: error `rateLimited`) | `{matched, added}`; hashed lookup (protocol-notes "Address book matching"). A directory error while looking up new people comes as the command's error after the others were taken |
 | `addressBookCountry` | – | `{chosen (a region, "" = automatic), automaticCode (the calling code automatic stands for: the linked number's, else the locale's; "" if neither is listed), countries: [{region, code}]}` |
 | `setAddressBookCountry` | `country` (a region of the list, "" = automatic) | as `addressBookCountry`; local to this device |
 

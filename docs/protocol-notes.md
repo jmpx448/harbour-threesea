@@ -608,6 +608,9 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
   Nothing unhashed leaves the device.
 - Flow: `identity/match_token` (challenge response with the client key, token cached in the
   store and refreshed when the server rejects it), then `identity/match` with the hash lists.
+- New people are looked up together (`identity/fetch_bulk`, a hundred per request). If that fails or
+  the directory says too many requests, those found so far are kept and the command fails; the next
+  sync gets the rest.
 - Hits become contacts (verification level server-verified, acquired directly) named after the
   address book entry if they have no name yet. An ID claimed by different people's entries is left
   alone, as Android does (`AndroidContactMatcher`); entries with the same name count as one person.

@@ -1475,9 +1475,10 @@ ApplicationWindow {
             var checked = entries.length
             backend.call("matchAddressBook", { entries: entries, automatic: !manual }, function(ok, result, kind, message) {
                 addressBook.active = false
+                // Also after an error: who was found before it is in the list.
+                backend.refreshContacts()
                 if (ok) {
                     backend.addressBookSyncedAt = Date.now()
-                    backend.refreshContacts()
                     if (result.added > 0) {
                         //% "%n new contact(s) from your address book"
                         Notices.show(qsTrId("threesea-la-address-book-added", result.added), Notice.Short, Notice.Center)
