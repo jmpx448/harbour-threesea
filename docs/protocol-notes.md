@@ -603,7 +603,8 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
 - Hashes: HMAC-SHA256 with Android's fixed keys (`EMAIL_HMAC_KEY`, `MOBILENO_HMAC_KEY` in
   `APIConnector.java`). E-mail addresses are trimmed and lower-cased; for `gmail.com` /
   `googlemail.com` both domains are hashed. Phone numbers are normalised to E.164 without "+"
-  (`core/src/address_book.rs`: the device region's calling code for national numbers).
+  (`core/src/address_book.rs`). Numbers without a country code take the country from Settings →
+  Privacy; "Automatic" is the linked number's calling code, else the locale's (ADR 0016).
   Nothing unhashed leaves the device.
 - Flow: `identity/match_token` (challenge response with the client key, token cached in the
   store and refreshed when the server rejects it), then `identity/match` with the hash lists.

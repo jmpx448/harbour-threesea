@@ -744,6 +744,12 @@ pub enum Command {
     SetVideoQuality {
         quality: String,
     },
+    /// The country choice of address book numbers without a country code.
+    AddressBookCountry,
+    /// `country`: a region of the list, or empty for automatic.
+    SetAddressBookCountry {
+        country: String,
+    },
     GroupCallRefresh {
         conversation: String,
     },
@@ -2066,6 +2072,8 @@ impl App {
             Command::CallChannel { data } => self.call_channel(&data),
             Command::CallCapture { device, on } => self.call_capture(&device, on),
             Command::SetVideoQuality { quality } => self.set_video_quality(&quality),
+            Command::AddressBookCountry => self.address_book_country_json(),
+            Command::SetAddressBookCountry { country } => self.set_address_book_country(&country),
             Command::GroupCallRefresh { conversation } => {
                 Ok(self.group_call_refresh(&conversation))
             }

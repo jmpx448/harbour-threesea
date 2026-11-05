@@ -176,6 +176,19 @@ pub fn country_of(region: &str) -> Option<&'static Country> {
         .find(|country| country.region.eq_ignore_ascii_case(region))
 }
 
+/// The country that "Automatic" stands for: that of the linked number, else the locale's.
+pub fn automatic_country(linked: Option<&str>, locale: &str) -> Option<&'static Country> {
+    linked
+        .map(|number| {
+            number
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .and_then(|digits| country_calling(&digits))
+        .or_else(|| country_of(locale))
+}
+
 /// The country whose calling code an international number (digits only) starts with.
 fn country_calling(digits: &str) -> Option<&'static Country> {
     COUNTRIES
@@ -661,6 +674,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn automatic_goes_by_the_linked_number_then_the_locale() {
+        let region = |linked, locale| automatic_country(linked, locale).map(|c| c.region);
+        assert_eq!(region(Some("436641234567"), "DE"), Some("AT"));
+        assert_eq!(region(Some("+41791234567"), "DE"), Some("CH"));
+        assert_eq!(region(None, "de"), Some("DE"));
+        // A calling code we have no rules for: the locale's are the next best.
+        assert_eq!(region(Some("37061234567"), "DE"), Some("DE"));
+        assert_eq!(region(Some("37061234567"), "LT"), None);
+        assert_eq!(region(None, ""), None);
     }
 
     #[test]

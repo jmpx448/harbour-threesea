@@ -1107,6 +1107,57 @@ impl App {
 }
 
 impl App {
+    /// What "Automatic" stands for here.
+    fn automatic_address_book_country(
+        &self,
+    ) -> Result<Option<&'static crate::address_book::Country>, ApiError> {
+        let linked = self.store.setting(keys::LINKED_MOBILE)?;
+        Ok(crate::address_book::automatic_country(
+            linked.as_deref(),
+            &self.version.country,
+        ))
+    }
+
+    /// The country of numbers that don't say their own: the user's choice, else automatic. A
+    /// choice is checked when made, and a later version may list fewer countries.
+    fn address_book_region(&self) -> Result<&'static str, ApiError> {
+        let chosen = self
+            .store
+            .setting(keys::ADDRESS_BOOK_COUNTRY)?
+            .and_then(|region| crate::address_book::country_of(&region));
+        let country = match chosen {
+            Some(country) => Some(country),
+            None => self.automatic_address_book_country()?,
+        };
+        Ok(country.map_or("", |country| country.region))
+    }
+
+    /// `addressBookCountry`: what the setting offers and has.
+    pub(crate) fn address_book_country_json(&self) -> Result<Value, ApiError> {
+        let countries: Vec<Value> = crate::address_book::COUNTRIES
+            .iter()
+            .map(|country| json!({ "region": country.region, "code": country.code }))
+            .collect();
+        Ok(json!({
+            "chosen": self.store.setting(keys::ADDRESS_BOOK_COUNTRY)?.unwrap_or_default(),
+            "automaticCode": self.automatic_address_book_country()?.map_or("", |c| c.code),
+            "countries": countries,
+        }))
+    }
+
+    /// `setAddressBookCountry`: empty is automatic.
+    pub(crate) fn set_address_book_country(&mut self, region: &str) -> Result<Value, ApiError> {
+        if region.is_empty() {
+            self.store.delete_setting(keys::ADDRESS_BOOK_COUNTRY)?;
+        } else {
+            let country = crate::address_book::country_of(region)
+                .ok_or_else(|| ApiError::Internal("unknown country".into()))?;
+            self.store
+                .set_setting(keys::ADDRESS_BOOK_COUNTRY, country.region)?;
+        }
+        self.address_book_country_json()
+    }
+
     /// `matchAddressBook`: find address book entries on Threema (hashes only) and make them
     /// contacts, named as in the address book (unless the user named them), server verified.
     pub(crate) async fn match_address_book(
@@ -1115,7 +1166,8 @@ impl App {
     ) -> Result<Value, ApiError> {
         let own = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let client_key = ClientKey::from(*own.client_key);
-        let (emails, phones) = crate::address_book::hash_entries(&entries, &self.version.country);
+        let (emails, phones) =
+            crate::address_book::hash_entries(&entries, self.address_book_region()?);
         if emails.is_empty() && phones.is_empty() {
             return Ok(json!({ "matched": 0, "added": 0 }));
         }
@@ -1628,6 +1680,55 @@ mod contact_policy_tests {
             )
             .unwrap();
         assert_eq!(sessions, 1);
+    }
+
+    /// Numbers without a country code: the user's choice, else the linked number, else the locale.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_address_book_country_goes_by_choice_then_linked_number_then_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        // The tests' locale is Switzerland.
+        assert_eq!(app.address_book_region().unwrap(), "CH");
+        let reply = call(&mut app, json!({"cmd": "addressBookCountry"})).await;
+        assert_eq!(reply["result"]["chosen"], "");
+        assert_eq!(reply["result"]["automaticCode"], "41");
+        assert!(
+            reply["result"]["countries"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"region": "DE", "code": "49"}))
+        );
+
+        app.store
+            .set_setting(crate::store::keys::LINKED_MOBILE, "436641234567")
+            .unwrap();
+        assert_eq!(app.address_book_region().unwrap(), "AT");
+        let reply = call(&mut app, json!({"cmd": "addressBookCountry"})).await;
+        assert_eq!(reply["result"]["automaticCode"], "43");
+
+        let reply = call(
+            &mut app,
+            json!({"cmd": "setAddressBookCountry", "country": "IT"}),
+        )
+        .await;
+        assert_eq!(reply["result"]["chosen"], "IT");
+        assert_eq!(reply["result"]["automaticCode"], "43");
+        assert_eq!(app.address_book_region().unwrap(), "IT");
+
+        let reply = call(
+            &mut app,
+            json!({"cmd": "setAddressBookCountry", "country": "XX"}),
+        )
+        .await;
+        assert_eq!(reply["ok"], false);
+        assert_eq!(app.address_book_region().unwrap(), "IT");
+
+        call(
+            &mut app,
+            json!({"cmd": "setAddressBookCountry", "country": ""}),
+        )
+        .await;
+        assert_eq!(app.address_book_region().unwrap(), "AT");
     }
 
     /// The next match doesn't bring someone deleted back, and adding them by hand ends that.

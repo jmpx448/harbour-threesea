@@ -269,6 +269,8 @@ pub mod keys {
     /// Linked e-mail / mobile number (from `identity/fetch_priv`).
     pub const LINKED_EMAIL: &str = "linked_email";
     pub const LINKED_MOBILE: &str = "linked_mobile";
+    /// The region of address book numbers without a country code, if the user chose one.
+    pub const ADDRESS_BOOK_COUNTRY: &str = "address_book_country";
     /// "1" while a linked e-mail waits for its confirmation link.
     pub const LINKED_EMAIL_PENDING: &str = "linked_email_pending";
     /// A phone number waiting for its SMS code: the number (E.164 without `+`) and the

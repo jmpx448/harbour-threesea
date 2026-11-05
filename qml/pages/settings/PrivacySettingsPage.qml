@@ -61,6 +61,12 @@ Page {
                 }
             }
 
+            AddressBookCountryBox {
+                enabled: backend.addressBookSync
+                // The same numbers now count as others, so they are looked up at once.
+                onPicked: if (backend.addressBookSync) window.syncAddressBook(true)
+            }
+
             SettingsButton {
                 enabled: backend.addressBookSync
                 //% "Exclusion list"
