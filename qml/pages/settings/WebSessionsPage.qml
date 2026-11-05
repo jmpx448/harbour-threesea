@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import harbour.threesea 1.0
 import "../../components/Errors.js" as Errors
 import "../../components/Format.js" as Fmt
 
@@ -21,6 +22,21 @@ Page {
     // New certificates of those servers, waiting for the user's word.
     property var certificates: []
     property bool reviewing: false
+
+    // Keyed, so a reload keeps the rows, and a running remorse with them: state events are common
+    // while a browser connects.
+    JsonListModel {
+        id: sessionRows
+        keyField: "id"
+        roles: ["id", "state", "client", "host", "selfHosted", "lastConnection"]
+    }
+    onSessionsChanged: sessionRows.update(sessions)
+    JsonListModel {
+        id: serverRows
+        keyField: "host"
+        roles: ["host"]
+    }
+    onServersChanged: serverRows.update(servers.map(function(host) { return { host: host } }))
 
     function load(done) {
         backend.call("webSessions", {}, function(ok, result) {
@@ -134,7 +150,7 @@ Page {
     SilicaListView {
         id: list
         anchors.fill: parent
-        model: page.sessions
+        model: sessionRows
 
         PullDownMenu {
             visible: page.webOn
@@ -196,11 +212,11 @@ Page {
                 MenuItem {
                     //% "Remove"
                     text: qsTrId("threesea-me-web-remove")
-                    onClicked: page.removeSession(item, modelData.id)
+                    onClicked: page.removeSession(item, model.id)
                 }
             }
-            onClicked: backend.call(modelData.state === "stopped" ? "webStart" : "webStop",
-                                    { session: modelData.id }, function(ok, result, kind, message) {
+            onClicked: backend.call(model.state === "stopped" ? "webStart" : "webStop",
+                                    { session: model.id }, function(ok, result, kind, message) {
                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                 page.load()
             })
@@ -210,7 +226,7 @@ Page {
                 x: Theme.horizontalPageMargin
                 anchors.verticalCenter: parent.verticalCenter
                 source: "image://theme/icon-m-website"
-                highlighted: item.highlighted || modelData.state === "connected"
+                highlighted: item.highlighted || model.state === "connected"
             }
             Column {
                 anchors {
@@ -224,8 +240,8 @@ Page {
                     width: parent.width
                     truncationMode: TruncationMode.Fade
                     color: item.highlighted ? Theme.highlightColor : Theme.primaryColor
-                    text: modelData.client
-                          ? modelData.client.charAt(0).toUpperCase() + modelData.client.slice(1)
+                    text: model.client
+                          ? model.client.charAt(0).toUpperCase() + model.client.slice(1)
                           //% "Browser"
                           : qsTrId("threesea-la-web-browser")
                 }
@@ -234,7 +250,7 @@ Page {
                     truncationMode: TruncationMode.Fade
                     font.pixelSize: Theme.fontSizeExtraSmall
                     color: item.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
-                    text: page.stateText(modelData) + (modelData.selfHosted ? " · " + modelData.host : "")
+                    text: page.stateText(model) + (model.selfHosted ? " · " + model.host : "")
                 }
             }
         }
@@ -257,14 +273,14 @@ Page {
                 text: qsTrId("threesea-la-web-servers-description")
             }
             Repeater {
-                model: page.servers
+                model: serverRows
                 ListItem {
                     id: server
                     contentHeight: Theme.itemSizeSmall
                     menu: ContextMenu {
                         MenuItem {
                             text: qsTrId("threesea-me-web-remove")
-                            onClicked: page.removeServer(server, modelData)
+                            onClicked: page.removeServer(server, model.host)
                         }
                     }
                     Label {
@@ -273,7 +289,7 @@ Page {
                         anchors.verticalCenter: parent.verticalCenter
                         truncationMode: TruncationMode.Fade
                         color: server.highlighted ? Theme.highlightColor : Theme.primaryColor
-                        text: modelData
+                        text: model.host
                     }
                 }
             }

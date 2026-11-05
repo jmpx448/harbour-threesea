@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import harbour.threesea 1.0
 import "../../components/Errors.js" as Errors
 
 // Settings → Linked devices (multi-device, ADR 0011): this device and the linked ones (Threema
@@ -19,6 +20,14 @@ Page {
     // This device's label, as the other devices show it.
     property string label: ""
 
+
+    // Keyed, so a reload keeps the rows, and a running remorse with them.
+    JsonListModel {
+        id: deviceRows
+        keyField: "id"
+        roles: ["id", "current", "label", "alias", "platform", "platformDetails", "connectedSince", "lastDisconnectAt"]
+    }
+    onDevicesChanged: deviceRows.update(devices)
 
     function load() {
         backend.call("multiDevice", {}, function(ok, result) {
@@ -116,7 +125,7 @@ Page {
     SilicaListView {
         id: list
         anchors.fill: parent
-        model: page.devices
+        model: deviceRows
 
         PullDownMenu {
             MenuItem {
@@ -152,9 +161,9 @@ Page {
                 id: icon
                 x: Theme.horizontalPageMargin
                 anchors.verticalCenter: parent.verticalCenter
-                source: "image://theme/" + (modelData.platform === "desktop" || modelData.platform === "web"
-                                            ? "icon-m-computer" : modelData.current || modelData.platform === "android"
-                                                                  || modelData.platform === "ios"
+                source: "image://theme/" + (model.platform === "desktop" || model.platform === "web"
+                                            ? "icon-m-computer" : model.current || model.platform === "android"
+                                                                  || model.platform === "ios"
                                                                   ? "icon-m-phone" : "icon-m-device")
                         + (item.highlighted ? "?" + Theme.highlightColor : "")
             }
@@ -169,7 +178,7 @@ Page {
                 Label {
                     width: parent.width
                     truncationMode: TruncationMode.Fade
-                    text: modelData.alias || modelData.label || modelData.platformDetails
+                    text: model.alias || model.label || model.platformDetails
                           //% "Device"
                           || qsTrId("threesea-la-device")
                     color: item.highlighted ? Theme.highlightColor : Theme.primaryColor
@@ -179,16 +188,16 @@ Page {
                     truncationMode: TruncationMode.Fade
                     font.pixelSize: Theme.fontSizeExtraSmall
                     color: item.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
-                    text: modelData.current
+                    text: model.current
                           //% "This device"
                           ? qsTrId("threesea-la-this-device")
-                          : modelData.connectedSince
+                          : model.connectedSince
                             //% "Connected"
                             ? qsTrId("threesea-la-device-connected")
-                            : modelData.lastDisconnectAt
+                            : model.lastDisconnectAt
                               //% "Last active %1"
                               ? qsTrId("threesea-la-device-last-active").arg(
-                                    Format.formatDate(new Date(modelData.lastDisconnectAt), Formatter.TimepointRelative))
+                                    Format.formatDate(new Date(model.lastDisconnectAt), Formatter.TimepointRelative))
                               : ""
                 }
             }
@@ -199,13 +208,13 @@ Page {
                     MenuItem {
                         //% "Rename"
                         text: qsTrId("threesea-me-rename-device")
-                        onClicked: page.rename(modelData)
+                        onClicked: page.rename(deviceRows.get(model.index))
                     }
                     MenuItem {
-                        visible: !modelData.current
+                        visible: !model.current
                         //% "Remove"
                         text: qsTrId("threesea-me-remove-device")
-                        onClicked: page.remove(item, modelData.id)
+                        onClicked: page.remove(item, model.id)
                     }
                 }
             }

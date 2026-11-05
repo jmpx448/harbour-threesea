@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import Sailfish.Pickers 1.0
+import harbour.threesea 1.0
 import "../components"
 import "../components/Errors.js" as Errors
 
@@ -68,6 +69,14 @@ Page {
         return ids
     }
 
+    // Keyed, so a reload keeps the rows, and a running remorse with them.
+    JsonListModel {
+        id: members
+        keyField: "identity"
+        roles: ["identity", "displayName", "creator", "pictureVersion"]
+    }
+    onGroupChanged: members.update(group.members)
+
     Component.onCompleted: load()
 
     Connections {
@@ -93,7 +102,7 @@ Page {
     SilicaListView {
         id: listView
         anchors.fill: parent
-        model: page.group.members
+        model: members
 
         StayAtTop { target: listView }
 
@@ -240,21 +249,21 @@ Page {
         delegate: ListItem {
             id: item
             readonly property bool removable: page.group.isCreator === true && !page.group.left
-                                              && !modelData.creator
+                                              && !model.creator
             contentHeight: Theme.itemSizeSmall
-            onClicked: pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: modelData.identity })
+            onClicked: pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: model.identity })
 
             Thumbnail {
                 id: memberPicture
                 height: item.contentHeight
                 highlighted: item.highlighted || pressed
                 pressed: memberPictureArea.pressed && memberPictureArea.containsMouse
-                source: modelData.pictureVersion > 0
-                        ? "image://threesea/contact/" + modelData.identity + "?" + modelData.pictureVersion : ""
+                source: model.pictureVersion > 0
+                        ? "image://threesea/contact/" + model.identity + "?" + model.pictureVersion : ""
                 MouseArea {
                     id: memberPictureArea
                     anchors.fill: parent
-                    onClicked: pageStack.push(Qt.resolvedUrl("ContactPage.qml"), { identity: modelData.identity })
+                    onClicked: pageStack.push(Qt.resolvedUrl("ContactPage.qml"), { identity: model.identity })
                 }
             }
             Label {
@@ -265,10 +274,10 @@ Page {
                     rightMargin: removeButton.visible ? Theme.paddingMedium : Theme.horizontalPageMargin
                     verticalCenter: parent.verticalCenter
                 }
-                text: modelData.creator
+                text: model.creator
                       //% "%1 (creator)"
-                      ? qsTrId("threesea-la-member-creator").arg(modelData.displayName)
-                      : modelData.displayName
+                      ? qsTrId("threesea-la-member-creator").arg(model.displayName)
+                      : model.displayName
                 truncationMode: TruncationMode.Fade
                 color: item.highlighted ? Theme.highlightColor : Theme.primaryColor
             }
@@ -281,7 +290,7 @@ Page {
                     verticalCenter: parent.verticalCenter
                 }
                 icon.source: "image://theme/icon-m-clear"
-                onClicked: page.removeMember(item, modelData.identity, modelData.displayName)
+                onClicked: page.removeMember(item, model.identity, model.displayName)
             }
         }
 
