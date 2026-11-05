@@ -153,6 +153,11 @@ Page {
     Component.onCompleted: load()
 
     Connections {
+        target: window
+        onWebSessionsRemoved: page.load()
+    }
+
+    Connections {
         target: backend
         onCoreEvent: {
             if (name === "webSession") {
@@ -181,12 +186,7 @@ Page {
                 //% "Remove all browsers"
                 text: qsTrId("threesea-me-web-remove-all")
                 //% "Removing all browsers"
-                onClicked: Remorse.popupAction(page, qsTrId("threesea-la-web-removing-all"), function() {
-                    backend.call("webDeleteAll", {}, function(ok, result, kind, message) {
-                        if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                        page.load()
-                    })
-                })
+                onClicked: Remorse.popupAction(page, qsTrId("threesea-la-web-removing-all"), window.removeAllWebSessions)
             }
             MenuItem {
                 visible: page.webOn

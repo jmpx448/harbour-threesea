@@ -1045,6 +1045,15 @@ ApplicationWindow {
             if (!quitting) window.updateWebConnected()
         }
     }
+    // Here, not on the sessions page: leaving the page ends its remorse by carrying it out, and the
+    // answer comes when the page is gone. A failure must still be told.
+    signal webSessionsRemoved()
+    function removeAllWebSessions() {
+        backend.call("webDeleteAll", {}, function(ok, result, kind, message) {
+            if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            window.webSessionsRemoved()
+        })
+    }
     function updateWebConnected() {
         backend.call("webSessions", {}, function(ok, result) {
             // Not known, which doesn't mean nothing is connected.
