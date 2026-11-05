@@ -9,8 +9,8 @@ set -eu
 SFOS=${SFOS_VERSION:-5.1.0.11}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 docker run --rm -e SFOS="$SFOS" -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS" sh -euc '
-    W=$HOME/tr && mkdir -p $W && cp -a /src/qml /src/translations $W/ && cd $W
-    sb2 -t SailfishOS-$SFOS-i486 lupdate -noobsolete -locations none qml \
+    W=$HOME/tr && mkdir -p $W && cp -a /src/qml /src/bridge /src/translations $W/ && cd $W
+    sb2 -t SailfishOS-$SFOS-i486 lupdate -noobsolete -locations none qml bridge \
       -ts translations/harbour-threesea.ts translations/harbour-threesea-de.ts \
       translations/harbour-threesea-fr.ts >&2
     tar cf - translations' 2> >(grep -v "bus connection" >&2) | tar xf - -C "$ROOT"

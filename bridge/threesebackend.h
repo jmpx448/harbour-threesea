@@ -118,7 +118,9 @@ public:
     // `engine` is used to hand results to QML callbacks; it also becomes the parent.
     explicit ThreeseBackend(QJSEngine *engine);
     ~ThreeseBackend() override;
-    // The process ends: stops the core and waits for the worker tasks, a few seconds at most. If
+    // The process ends and the window goes next: what comes in from here is only kept track of.
+    void prepareToEnd();
+    // The process ends: sends what the closing pages handed over, stops the core and waits for the worker tasks, a few seconds at most. If
     // that says false something still runs against this object: leave with _exit, not through
     // the destructors.
     bool shutdown();
@@ -462,6 +464,12 @@ private:
     QString m_stateBeforeRemoval;
     // The old core has stopped: what it sent last is still queued, and is for nobody any more.
     bool m_discardCoreMessages = false;
+    // prepareToEnd() was called.
+    bool m_ending = false;
+    // Files on their way, which the core answers when it is done with them, and what the closing
+    // pages handed over: if the process ends before a good answer they are gone unseen.
+    QSet<quint64> m_mustArrive;
+    void tellWhatIsLost();
     // Requests from before the removal (a video still being prepared) stay out of the new ID.
     quint64 m_firstLiveId = 1;
     // Pending key work: what to do with the result.

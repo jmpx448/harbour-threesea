@@ -27,6 +27,7 @@
 #include "dbusinterface.h"
 #include "emojiimageprovider.h"
 #include "emojihighlighter.h"
+#include "endofprocess.h"
 #include "enterkeyfilter.h"
 #include "jsonlistmodel.h"
 #include "mediaimageprovider.h"
@@ -299,12 +300,12 @@ int main(int argc, char *argv[])
     }
     const int result = app->exec();
 
-    // The event loop has ended, so the window doesn't draw any more. The name stays until the
+    // The event loop has ended, so the window doesn't draw any more. The pages go first, as they
+    // hand the core what they still hold (bridge/endofprocess.h). The name stays until the
     // process is gone: nothing starts beside a core that is still stopping, and a start the bus
     // began while this one holds the launcher's lock would stay pending for minutes. A call in this
     // time gets no answer.
-    view->hide();
-    if (!backend->shutdown()) {
+    if (!endOfProcess(*view, *backend)) {
         // The core or a worker task is stuck and still reports to what the destructors would
         // free. The store takes this like any crash.
         qWarning("threesea: ending without waiting for the core");

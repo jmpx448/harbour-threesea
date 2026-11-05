@@ -3,6 +3,8 @@
 
 #include <QCoreApplication>
 #include <QBuffer>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDateTime>
 #include <QImage>
 #include <QImageReader>
@@ -28,6 +30,7 @@
 
 #include "contactlistmodel.h"
 #include "coreresult.h"
+#include "endofprocess.h"
 #include "filepreparer.h"
 #include "voicerecorder.h"
 #include "secretstore.h"
@@ -128,9 +131,18 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     }
 }
 
+void ThreeseBackend::prepareToEnd()
+{
+    m_ending = true;
+}
+
 bool ThreeseBackend::shutdown()
 {
     m_dbKey.fill('\0');
+    // What the closing pages handed over is on its way through a FilePreparer. A photo takes about
+    // a second; this and the rest stay under the 15 s after which the Full flavour's update kills
+    // the process.
+    deliverUnderWay(this, [this]() { return !m_filesPreparing.isEmpty(); }, 3000);
     bool clean = true;
     {
         QWriteLocker locker(&m_coreLock);
@@ -139,10 +151,35 @@ bool ThreeseBackend::shutdown()
             m_core = nullptr;
         }
     }
+    // Its last answers: they say what got there.
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
+    tellWhatIsLost();
     // Without the core lock: a task reading media would wait for it. Scrypt takes seconds, and a
     // task left running would report to this object, which goes with the engine. The application
     // would wait for these in its destructor as well, however long a video being scaled takes.
     return QThreadPool::globalInstance()->waitForDone(3000) && clean;
+}
+
+// The window has gone, so this says it itself. Its text has no words of the user's in it.
+void ThreeseBackend::tellWhatIsLost()
+{
+    if (m_mustArrive.isEmpty()) {
+        return;
+    }
+    qWarning("threesea: ended with %d files or drafts unfinished", m_mustArrive.size());
+    //% "Threesea ended before it was done"
+    const QString summary = qtTrId("threesea-la-ended-early");
+    //% "Your last files or draft did not reach the chat. Add them again there."
+    const QString body = qtTrId("threesea-la-ended-early-body");
+    QDBusMessage notify = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("/org/freedesktop/Notifications"),
+        QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("Notify"));
+    QVariantMap hints;
+    hints.insert(QStringLiteral("x-nemo-preview-summary"), summary);
+    hints.insert(QStringLiteral("x-nemo-preview-body"), body);
+    notify << QStringLiteral("Threesea") << 0u << QStringLiteral("harbour-threesea") << summary << body
+           << QStringList() << hints << -1;
+    QDBusConnection::sessionBus().call(notify, QDBus::Block, 1000);
 }
 
 ThreeseBackend::~ThreeseBackend()
@@ -353,6 +390,9 @@ void ThreeseBackend::checkPassphrase(const QString &passphrase, const QJSValue &
 
 void ThreeseBackend::onKeyWorkDone(quint64 id, const QByteArray &result)
 {
+    if (m_ending) {
+        return;
+    }
     auto work = m_keyWork.take(id);
     if (work) {
         work(result);
@@ -436,6 +476,10 @@ void ThreeseBackend::stopCore()
 
 void ThreeseBackend::finishDataRemoval()
 {
+    // The core's mark brings this back at the next start.
+    if (m_ending) {
+        return;
+    }
     // A new core that died on its start, when trying again.
     stopCore();
     m_discardCoreMessages = false;
@@ -447,6 +491,7 @@ void ThreeseBackend::finishDataRemoval()
 
     m_unreadTimer.stop();
     m_callbacks.clear();
+    m_mustArrive.clear();
     m_nativeCallbacks.clear();
     m_statusRequests.clear();
     m_contactRequests.clear();
@@ -553,8 +598,12 @@ void ThreeseBackend::retryStart()
 
 void ThreeseBackend::startAgain()
 {
+    if (m_ending) {
+        return;
+    }
     m_discardCoreMessages = false;
     m_callbacks.clear();
+    m_mustArrive.clear();
     m_nativeCallbacks.clear();
     m_statusRequests.clear();
     m_contactRequests.clear();
@@ -592,6 +641,9 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
                               const QJSValue &callback)
 {
     const quint64 id = m_nextId++;
+    if (m_core || m_ending) {
+        m_mustArrive.insert(id);
+    }
     // Picker results are file:// URLs.
     const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
     m_tempSources.insert(id, localPath);
@@ -797,6 +849,9 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
                                bool keepMetadata)
 {
     const quint64 id = m_nextId++;
+    if (m_core || m_ending) {
+        m_mustArrive.insert(id);
+    }
     const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
     m_tempSources.insert(id, localPath);
     if (!m_core) {
@@ -1007,6 +1062,11 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
         return;
     }
     if (!error.isEmpty()) {
+        // Whoever asked has gone; it stays among what is lost.
+        if (m_ending) {
+            return;
+        }
+        m_mustArrive.remove(id);
         // Nothing was sent, so nothing will answer and clean up after it.
         QJSValue answer;
         QJSValue callback = m_callbacks.take(id);
@@ -1084,6 +1144,9 @@ void ThreeseBackend::call(const QString &command, const QVariantMap &args, const
     }
     request.insert(QStringLiteral("id"), static_cast<double>(id));
     request.insert(QStringLiteral("cmd"), command);
+    if (m_ending && command == QLatin1String("setDraft")) {
+        m_mustArrive.insert(id);
+    }
     if (command == QLatin1String("status")) {
         m_statusRequests.insert(id);
     } else if (command == QLatin1String("contacts")) {
@@ -1275,6 +1338,15 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         return;
     }
     const QJsonObject message = QJsonDocument::fromJson(json).object();
+    if (m_ending) {
+        // Nobody is left to tell, and only whether it got there counts.
+        if (message.contains(QStringLiteral("reply")) && message.value(QStringLiteral("ok")).toBool()) {
+            const quint64 id = static_cast<quint64>(message.value(QStringLiteral("reply")).toDouble());
+            m_mustArrive.remove(id);
+            removeTempSources(id);
+        }
+        return;
+    }
 
     if (message.contains(QStringLiteral("event"))) {
         const QString name = message.value(QStringLiteral("event")).toString();
@@ -1318,6 +1390,7 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
     }
 
     const quint64 id = static_cast<quint64>(message.value(QStringLiteral("reply")).toDouble());
+    m_mustArrive.remove(id);
     const bool ok = message.value(QStringLiteral("ok")).toBool();
     const QJsonObject result = message.value(QStringLiteral("result")).toObject();
     const QJsonObject error = message.value(QStringLiteral("error")).toObject();

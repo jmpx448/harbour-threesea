@@ -36,6 +36,16 @@ those seconds gets no answer and takes another tap. Releasing the name first wou
 would begin an activation that the launcher's lock refuses, and hold it pending for up to two
 minutes. No lock file is needed in the data directory for this.
 
+The end goes in this order: window hidden, pages destroyed (a closing chat page hands the core its
+waiting files and its draft), files that are being prepared delivered for up to 3 s, core stopped
+(5.5 s at most), workers waited for (3 s at most). Waiting for the core's lock takes up to 2 s more, as
+a media read can hold it; without it the process leaves with the core running, as after a crash, once
+what must arrive has had 3 s more. So the end stays under the 15 s after which Full's update kills the
+process. File work on a blocking thread has the core's limit like any command: 4 s, then it gets no
+answer, and its thread is left to the end of the process, touching nothing of the bridge. What the
+pages handed over and files that were on their way without a good answer are said by a notification,
+the window being gone by then: the one notification published from C++.
+
 ## Consequences
 
 A Lite user with Keep running on stops receiving messages after an update until opening the app, and

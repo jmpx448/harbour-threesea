@@ -60,6 +60,7 @@ SOURCES += \
 HEADERS += \
     bridge/animatedimage.h \
     bridge/applifecycle.h \
+    bridge/endofprocess.h \
     bridge/gifdecoder.h \
     bridge/callmanager.h \
     bridge/callvideo.h \

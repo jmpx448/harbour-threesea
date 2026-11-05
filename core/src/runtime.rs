@@ -916,6 +916,44 @@ mod tests {
         );
     }
 
+    /// A closing chat page hands these over last thing, and the core stops right after.
+    #[test]
+    fn what_a_closing_page_hands_over_is_there_after_a_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+            app.store
+                .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+                .unwrap();
+        }
+        let (core, said) = started_core(dir.path());
+        core.send_with(
+            json!({"id": 1, "cmd": "sendFile", "identity": "ABCD1234", "rendering": "file",
+                   "mediaType": "text/plain", "name": "a.txt", "caption": ""})
+            .to_string(),
+            vec![vec![1_u8, 2, 3].into()],
+        );
+        core.send(
+            json!({"id": 2, "cmd": "setDraft", "identity": "ABCD1234", "text": "typed"})
+                .to_string(),
+        );
+        assert!(core.quit());
+        let oks: Vec<_> = said
+            .try_iter()
+            .filter(|message| message["ok"] == true)
+            .map(|message| message["reply"].clone())
+            .collect();
+        assert!(
+            oks.contains(&json!(1)) && oks.contains(&json!(2)),
+            "{oks:?}"
+        );
+
+        let app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+        assert_eq!(app.draft("ABCD1234").unwrap()["text"], "typed");
+        let messages = app.store.conversation_messages("ABCD1234", 10).unwrap();
+        assert_eq!(messages.len(), 1, "the file");
+    }
+
     #[test]
     fn a_quit_gives_up_on_a_core_that_does_not_end() {
         let dir = tempfile::tempdir().unwrap();

@@ -2,10 +2,17 @@
 // When the process ends by itself: a run nobody wants any more, and the package changing under it.
 // Exit 0: passed.
 #include "applifecycle.h"
+#include "endofprocess.h"
 #include "installcheck.h"
 
 #include <QFile>
+#include <QElapsedTimer>
 #include <QGuiApplication>
+#include <QPointer>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQuickView>
+#include <QRunnable>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
@@ -220,6 +227,122 @@ void testDoneAfterAnUpdate(const QString &dir)
     check(!told.windowAsked, "nobody asked for a window");
 }
 
+// Stands in for ThreeseBackend: what a closing page hands over reaches a core that may have stopped.
+class EndingBackend : public QObject
+{
+    Q_OBJECT
+
+public:
+    using QObject::QObject;
+    bool coreRunning = true;
+    bool ending = false;
+    int preparing = 0;
+    QStringList reachedCore;
+    QStringList lost;
+    bool neverPrepared = false;
+
+    Q_INVOKABLE void saveDraft() { give(QStringLiteral("draft")); }
+    // Like sendFile: prepared on a worker, then back here by a queued call, which needs delivering.
+    Q_INVOKABLE void sendFile(const QString &name)
+    {
+        ++preparing;
+        if (neverPrepared) {
+            return;
+        }
+        struct Prepare : QRunnable {
+            EndingBackend *to;
+            QString name;
+            void run() override { QMetaObject::invokeMethod(to, "prepared", Qt::QueuedConnection, Q_ARG(QString, name)); }
+        };
+        auto *prepare = new Prepare;
+        prepare->to = this;
+        prepare->name = name;
+        QThreadPool::globalInstance()->start(prepare);
+    }
+    void prepareToEnd() { ending = true; }
+    bool shutdown()
+    {
+        delivered = deliverUnderWay(this, [this]() { return preparing > 0; }, neverPrepared ? 50 : 3000);
+        coreRunning = false;
+        return true;
+    }
+    bool delivered = false;
+    bool engineChildAtPageEnd = false;
+
+signals:
+    void handedOver();
+
+public slots:
+    void prepared(const QString &name)
+    {
+        --preparing;
+        give(name);
+    }
+
+private:
+    void give(const QString &what)
+    {
+        (coreRunning ? reachedCore : lost).append(what);
+        emit handedOver();
+    }
+};
+
+const char closingPage[] = "import QtQuick 2.6\n"
+                           "Item {\n"
+                           "    Item { Component.onDestruction: { backend.sendFile('photo 2'); backend.sendFile('photo 3') } }\n"
+                           "    Component.onDestruction: backend.saveDraft()\n"
+                           "}\n";
+
+void loadClosingPage(QQuickView &view, EndingBackend &backend, const QString &dir)
+{
+    const QString path = dir + QStringLiteral("/ClosingPage.qml");
+    writeFile(path, closingPage);
+    view.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+    view.setSource(QUrl::fromLocalFile(path));
+    check(view.rootObject() != nullptr, "the page loaded");
+}
+
+void testEndOfProcess(const QString &dir)
+{
+    {
+        QQuickView view;
+        EndingBackend backend;
+        loadClosingPage(view, backend, dir);
+        check(endOfProcess(view, backend), "ends");
+        check(backend.lost.isEmpty(), "nothing came after the core had stopped");
+        check(backend.reachedCore.contains(QStringLiteral("draft")), "the draft reached the core");
+        check(backend.reachedCore.contains(QStringLiteral("photo 2")) && backend.reachedCore.contains(QStringLiteral("photo 3")),
+              "the files reached it too, with no event loop running");
+        check(backend.delivered, "and all were accounted for");
+    }
+    {
+        QQuickView view;
+        EndingBackend backend;
+        backend.neverPrepared = true;
+        loadClosingPage(view, backend, dir);
+        QElapsedTimer waited;
+        waited.start();
+        check(endOfProcess(view, backend), "a file that takes too long doesn't hold up the end");
+        check(waited.elapsed() < 2000, "for long");
+        check(!backend.delivered, "and it is known not to have arrived");
+    }
+    {
+        // Nobody tearing anything down, as for a second process that ends after loading: the page
+        // goes with the view, and what lives under the engine is still there for it.
+        EndingBackend backend;
+        {
+            QQuickView view;
+            auto *underEngine = new QObject(view.engine());
+            QPointer<QObject> stillThere(underEngine);
+            QObject::connect(&backend, &EndingBackend::handedOver, underEngine, [&backend, &stillThere]() {
+                backend.engineChildAtPageEnd = !stillThere.isNull();
+            });
+            loadClosingPage(view, backend, dir);
+        }
+        check(backend.engineChildAtPageEnd, "~QQuickView takes the page before the engine");
+    }
+}
+
 // Says each state as it comes, and ends with the removal, saying then what became of `binary`.
 int watch(const char *path, const char *binary)
 {
@@ -261,8 +384,11 @@ int main(int argc, char **argv)
     testNoWindow(dir.path());
     testAskedForTheWindow(dir.path());
     testDoneAfterAnUpdate(dir.path());
+    testEndOfProcess(dir.path());
     if (failures == 0) {
         std::printf("lifecycle: ok\n");
     }
     return failures == 0 ? 0 : 1;
 }
+
+#include "main.moc"

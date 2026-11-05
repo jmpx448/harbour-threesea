@@ -14,7 +14,7 @@ docker run --rm -i --privileged --pid=host -e SFOS="$SFOS" -v "$ROOT:/src:ro" "$
     T=SailfishOS-$SFOS-i486
     B=$HOME/build; mkdir -p $B/tests $B/bridge
     cp -r /src/tests/lifecycle $B/tests/
-    cp /src/bridge/applifecycle.* /src/bridge/installcheck.* $B/bridge/
+    cp /src/bridge/applifecycle.* /src/bridge/installcheck.* /src/bridge/endofprocess.h $B/bridge/
     cd $B/tests/lifecycle && sb2 -t $T qmake >/dev/null && sb2 -t $T make -s >/dev/null 2>&1 || sb2 -t $T make
     QT_QPA_PLATFORM=minimal sb2 -t $T ./lifecycle-test
 
