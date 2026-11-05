@@ -91,8 +91,11 @@ Page {
     }
 
     SilicaListView {
+        id: listView
         anchors.fill: parent
         model: page.group.members
+
+        StayAtTop { target: listView }
 
         PullDownMenu {
             MenuItem {

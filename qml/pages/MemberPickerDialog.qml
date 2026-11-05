@@ -38,6 +38,10 @@ Dialog {
         id: listView
         anchors.fill: parent
         model: backend.contacts
+        // Or the first row becomes the current item and takes the focus from the name field.
+        currentIndex: -1
+
+        StayAtTop { target: listView }
 
         header: Column {
             width: parent.width

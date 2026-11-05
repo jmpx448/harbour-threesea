@@ -68,8 +68,11 @@ Page {
     RemorsePopup { id: remorse }
 
     SilicaListView {
+        id: listView
         anchors.fill: parent
         model: page.list.members
+
+        StayAtTop { target: listView }
 
         PullDownMenu {
             MenuItem {
