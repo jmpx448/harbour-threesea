@@ -691,6 +691,14 @@ while they are hidden.
   paths, or `{name, data, type}` maps for text. Passes the Harbour validator. A shared file goes as
   picture or video by its type, by its bytes where its name doesn't say (`sharedFileKind`), so that
   it is cleaned like any other (ADR 0025).
+- Links are another matter: the Browser sends `{type: "text/x-url", linkTitle, status}` with the
+  address in `status` (`sailfish-components-webview`'s `WebShareAction.qml`). `ShareProvider` keeps
+  only `name`, `data` and `filePath`, skips such a resource and answers InvalidArgs; our QML never
+  hears of it. So `threesealink` has `Capabilities=text/x-url` and a `DBusAdaptor` at
+  `/share/threesealink` (no `service`: the name is ours already, bridge/main.cpp), and the first
+  method lists its text types instead of `text/*`, or links would be offered twice. Nested maps reach
+  QML unpacked, tried in the SDK (a probe with the map above answered over gdbus); a real Browser
+  share is for the phone.
 - Test without Gallery: `gdbus call --session --dest org.threesea.harbour-threesea --object-path
   /share/threesea --method org.sailfishos.share.share "{'resources': <['/path']>}"`.
 

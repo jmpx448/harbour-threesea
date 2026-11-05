@@ -38,6 +38,8 @@ const char *const environment[] = {
     // No D-Bus session: Nemo.Notifications, Nemo.DBus, Nemo.KeepAlive, Amber.Mpris.
     "D-Bus",
     "bus connection",
+    "dbus-daemon autolaunch",
+    "Failed to register object",
     // No media service without a device or a GStreamer plugin behind it.
     "defaultServiceProvider::requestService",
     "Focus mode selection is not supported",

@@ -4,6 +4,7 @@ import Sailfish.Silica 1.0
 import Nemo.Notifications 1.0
 import Nemo.KeepAlive 1.2
 import Sailfish.Share 1.0
+import Nemo.DBus 2.0
 import "pages"
 import "components"
 import "components/Format.js" as Fmt
@@ -800,8 +801,13 @@ ApplicationWindow {
             var chat = window.pendingChat
             window.pendingChat = ""
             if (chat.length > 0 && backend.state === "ready") window.showChat(chat)
-            if (backend.state === "ready") window.showShare()
-            else window.pendingShare = null
+            if (backend.state === "ready") {
+                window.showShare()
+            } else if (window.pendingShare !== null) {
+                window.pendingShare = null
+                //% "Set up Threesea first, then share this again"
+                Notices.show(qsTrId("threesea-la-share-before-setup"), Notice.Long, Notice.Center)
+            }
             // showUpdate() asks again for later if it still can't.
             if (window.pendingUpdate && backend.state === "ready") {
                 window.pendingUpdate = false
@@ -1900,12 +1906,27 @@ ApplicationWindow {
     }
 
     // Shared from other apps ("Share" → Threesea): pick the chat, then it opens with the content
-    // ready to send (one file as attachment, text in the input; several files are sent at once).
+    // ready to send (files as attachments, text in the input).
+    function receiveShare(files, text) {
+        if (files.length === 0 && text.length === 0) {
+            //% "What was shared holds nothing to send"
+            Notices.show(qsTrId("threesea-la-share-empty"), Notice.Long, Notice.Center)
+        } else {
+            // Until the share page can open: showShare asks again once it can.
+            window.pendingShare = { files: files, text: text }
+            window.sayAfterCall()
+            if (backend.state === "ready" && shownState === "ready") window.showShare()
+        }
+        // Started for this share: the window isn't shown yet (bridge/main.cpp).
+        dbus.activate()
+    }
     ShareProvider {
         method: "threesea"
         // The D-Bus name is ours already (bridge/main.cpp).
         registerName: false
-        capabilities: ["image/*", "video/*", "audio/*", "text/*", "application/*"]
+        capabilities: ["image/*", "video/*", "audio/*", "text/plain", "text/vcard", "text/x-vcard", "text/calendar",
+                       "text/x-vcalendar", "text/x-vnote", "text/html", "text/csv", "text/markdown", "text/xml",
+                       "application/*"]
         onTriggered: {
             var files = []
             var text = ""
@@ -1922,12 +1943,23 @@ ApplicationWindow {
                     text += (text.length > 0 ? "\n" : "") + resource.data
                 }
             }
-            if (files.length === 0 && text.length === 0) return
-            window.pendingShare = { files: files, text: text }
-            window.sayAfterCall()
-            if (backend.state === "ready" && shownState === "ready") window.showShare()
-            // Started for this share: the window isn't shown yet (bridge/main.cpp).
-            dbus.activate()
+            window.receiveShare(files, text)
+        }
+    }
+    // A link from the Browser: `{type: "text/x-url", linkTitle, status}`, with the address in
+    // `status`. ShareProvider only keeps a resource's name and data, and answers such a one with an
+    // error before anything here hears of it.
+    DBusAdaptor {
+        path: "/share/threesealink"
+        iface: "org.sailfishos.share"
+        function share(config) {
+            var links = []
+            var resources = config.resources || []
+            for (var i = 0; i < resources.length; ++i) {
+                var link = resources[i].status || resources[i].data
+                if (link) links.push(link)
+            }
+            window.receiveShare([], links.join("\n"))
         }
     }
 

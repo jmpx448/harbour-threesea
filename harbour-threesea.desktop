@@ -14,12 +14,19 @@ X-Maemo-Method=org.threesea.harbourthreesea.activate
 # libcontentaction calls activate(as) with the URL.
 MimeType=x-scheme-handler/threema;x-url-handler/threema.id;x-url-handler/go.threema.ch;
 # "Share" from other apps (Sailfish.Share's app share methods): D-Bus object /share/threesea.
-X-Share-Methods=threesea
+# Links (Browser) come as maps Sailfish.Share's ShareProvider rejects, hence a method of their own:
+# /share/threesealink. So that they don't land on the first one, that names its text types.
+X-Share-Methods=threesea;threesealink
 
 [X-Share Method threesea]
 Description=Send in a chat
-Capabilities=image/*;video/*;audio/*;text/*;application/*
+Capabilities=image/*;video/*;audio/*;text/plain;text/vcard;text/x-vcard;text/calendar;text/x-vcalendar;text/x-vnote;text/html;text/csv;text/markdown;text/xml;application/*
 SupportsMultipleFiles=true
+
+[X-Share Method threesealink]
+Description=Send in a chat
+Capabilities=text/x-url
+SupportsMultipleFiles=false
 
 [X-Sailjail]
 # The Full flavour appends Sensors (voice messages at the ear; not Harbour-allowed, spec).
