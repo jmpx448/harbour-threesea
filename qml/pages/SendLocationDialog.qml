@@ -57,8 +57,9 @@ Dialog {
 
     PositionSource {
         id: positionSource
-        active: dialog.picking
-                || (!dialog.place && (dialog.status === PageStatus.Active || dialog.status === PageStatus.Activating))
+        // Not behind the app lock: the place list can stay open under the unlock page.
+        active: !window.locked && (dialog.picking
+                || (!dialog.place && (dialog.status === PageStatus.Active || dialog.status === PageStatus.Activating)))
         updateInterval: 1000
         onPositionChanged: {
             var coordinate = position.coordinate

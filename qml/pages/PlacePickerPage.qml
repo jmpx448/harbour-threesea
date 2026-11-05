@@ -37,12 +37,12 @@ Page {
 
     // Not while asking, or after a failure until the user tries again.
     function askNearby() {
-        if (query.length === 0 && !waiting && !failed && centerRank() > nearbyRank) ask()
+        if (!window.locked && query.length === 0 && !waiting && !failed && centerRank() > nearbyRank) ask()
     }
 
     // One answer counts, the one to the latest question.
     function ask() {
-        if (!center) return
+        if (!center || window.locked) return
         var args = { latitude: center.latitude, longitude: center.longitude }
         if (query.length > 0) args.query = query
         var rank = centerRank()
@@ -90,6 +90,11 @@ Page {
     function choose(place) {
         positioning.choosePlace(place)
         pageStack.pop()
+    }
+
+    Connections {
+        target: window
+        onLockedChanged: page.askNearby()
     }
 
     SilicaListView {
