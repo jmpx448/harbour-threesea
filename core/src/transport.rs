@@ -158,6 +158,16 @@ pub struct MediatorLogin {
 impl Mediator {
     /// Connect and run the D2M handshake (server-hello, client-hello, server-info).
     pub async fn connect(config: &Config, login: MediatorLogin) -> Result<Self, TransportError> {
+        let (d2m, url) = Self::protocol(config, login)?;
+        let socket = Datagrams::connect(&url).await?;
+        Self::handshake(socket, d2m).await
+    }
+
+    /// libthreema's state machine for this device, and the mediator's URL.
+    fn protocol(
+        config: &Config,
+        login: MediatorLogin,
+    ) -> Result<(D2mProtocol, String), TransportError> {
         let multi_device = config
             .multi_device
             .as_ref()
@@ -178,7 +188,11 @@ impl Mediator {
             client_info: login.client_info,
             device_label: Some(login.device_label.clone()),
         });
-        let socket = Datagrams::connect(&url).await?;
+        Ok((d2m, url))
+    }
+
+    /// The handshake over a connected socket.
+    async fn handshake(socket: Datagrams, d2m: D2mProtocol) -> Result<Self, TransportError> {
         let mut mediator = Self {
             socket,
             d2m,
@@ -283,5 +297,134 @@ mod tests {
         let mut read = [0_u8; 5];
         peer.read_exact(&mut read).await.unwrap();
         assert_eq!(&read, b"frame");
+    }
+
+    /// A D2M datagram: its type, three reserved bytes, the body.
+    fn datagram(kind: u8, body: &[u8]) -> Vec<u8> {
+        [&[kind, 0, 0, 0][..], body].concat()
+    }
+
+    /// The mediator's half of the handshake, as a stand-in on this machine.
+    async fn mediator_side(mut socket: Datagrams) -> Datagrams {
+        use libthreema::protobuf::d2m::{ClientHello, ServerHello, ServerInfo};
+        use prost::Message as _;
+        // The X25519 base point: a key that is no low-order point.
+        let mut esk = vec![0_u8; 32];
+        esk[0] = 9;
+        let hello = ServerHello {
+            version: 0,
+            esk,
+            challenge: vec![7; 32],
+        };
+        socket
+            .send(datagram(0x10, &hello.encode_to_vec()))
+            .await
+            .unwrap();
+        let answer = socket.receive().await.unwrap();
+        assert_eq!(answer[0], 0x11, "a client hello");
+        let answer = ClientHello::decode(&answer[4..]).unwrap();
+        assert_eq!(answer.device_id, 42);
+        assert_eq!(
+            answer.expected_device_slot_state,
+            DeviceSlotState::New as i32
+        );
+        assert_eq!(
+            answer.response.len(),
+            24 + 32 + 16,
+            "the challenge, encrypted"
+        );
+        let info = ServerInfo {
+            current_time: u64::try_from(crate::messages::now_ms()).unwrap(),
+            max_device_slots: 4,
+            device_slot_state: DeviceSlotState::New as i32,
+            encrypted_shared_device_data: Vec::new(),
+            reflection_queue_length: 0,
+        };
+        socket
+            .send(datagram(0x12, &info.encode_to_vec()))
+            .await
+            .unwrap();
+        socket
+    }
+
+    /// Through the mediator, CSP and the mediator's own payloads go both ways.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_mediator_carries_both_ways() {
+        let (ours, theirs) = crate::websocket::loopback().await;
+        let login = MediatorLogin {
+            device_group_key: libthreema::common::keys::DeviceGroupKey::from([5; 32]),
+            device_id: 42,
+            registered: false,
+            server_group: libthreema::common::ChatServerGroup(1),
+            device_label: "Phone".into(),
+            client_info: ClientInfo::Libthreema,
+        };
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let (d2m, url) = Mediator::protocol(&config, login).unwrap();
+        assert!(crate::https::is_threema_url(&url), "{url}");
+
+        let (mediator, mut theirs) =
+            tokio::join!(Mediator::handshake(ours, d2m), mediator_side(theirs));
+        let mediator = mediator.unwrap();
+        assert_eq!(mediator.server_info.as_ref().unwrap().max_device_slots, 4);
+        let mut transport = Transport::Mediator(Box::new(mediator));
+        assert!(transport.is_mediator());
+        let mut buffer = vec![0; 1024];
+
+        theirs
+            .send(datagram(0x00, b"from the chat server"))
+            .await
+            .unwrap();
+        let Inbound::Csp(bytes) = transport.read(&mut buffer).await.unwrap() else {
+            panic!("not CSP");
+        };
+        assert_eq!(bytes, b"from the chat server");
+        transport.write_csp(b"to the chat server").await.unwrap();
+        assert_eq!(
+            theirs.receive().await.unwrap(),
+            datagram(0x00, b"to the chat server")
+        );
+
+        theirs.send(datagram(0x20, &[])).await.unwrap();
+        assert!(matches!(
+            transport.read(&mut buffer).await.unwrap(),
+            Inbound::D2m(D2mIncoming::ReflectionQueueDry)
+        ));
+        transport
+            .send_d2m(D2mOutgoing::GetDevicesInfo)
+            .await
+            .unwrap();
+        assert_eq!(theirs.receive().await.unwrap()[0], 0x30);
+    }
+
+    /// Straight to the chat server: CSP both ways, no mediator payloads, and its end noticed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_direct_connection_carries_csp_both_ways() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let mut transport = Transport::Direct(stream);
+        assert!(!transport.is_mediator());
+        assert!(matches!(
+            transport.send_d2m(D2mOutgoing::GetDevicesInfo).await,
+            Err(TransportError::D2m(_))
+        ));
+        peer.write_all(b"server").await.unwrap();
+        let mut buffer = vec![0; 6];
+        let mut got = Vec::new();
+        while got.len() < 6 {
+            let Inbound::Csp(bytes) = transport.read(&mut buffer).await.unwrap() else {
+                panic!("not CSP");
+            };
+            got.extend(bytes);
+        }
+        assert_eq!(got, b"server");
+        drop(peer);
+        assert!(matches!(
+            transport.read(&mut buffer).await,
+            Err(TransportError::Closed)
+        ));
     }
 }
