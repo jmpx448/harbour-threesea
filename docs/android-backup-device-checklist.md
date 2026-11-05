@@ -80,6 +80,8 @@ device as the main one.
 4. After the restore, check on Android:
    - Your ID and nickname; contacts with their names and verification levels; groups with
      members; distribution lists.
+   - The chat list holds the 1:1 chats, without a new message having arrived, and groups and lists
+     sort by their newest message (the file's last update).
    - A few chats: texts in order, photos/videos/files open, voice messages play, quotes,
      stars, reactions, a poll with its votes.
    - Group and contact pictures.

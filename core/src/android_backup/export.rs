@@ -521,6 +521,15 @@ impl Export {
             Zeroizing::new(identity_backup.as_bytes().to_vec())
         );
 
+        // Android lists a restored chat only with a last update, and only recalculates it below
+        // format 22; groups and lists sort by it. As in Threema Safe: the chat's newest message.
+        let last_updates = crate::join::last_updates(&self.store)?;
+        let last_update = |chat: &str| {
+            last_updates
+                .get(chat)
+                .map_or_else(String::new, ToString::to_string)
+        };
+
         // Contacts (the identity doubles as the archive alias).
         let contacts = self.store.contacts()?;
         let mut rows = write_row(&[
@@ -555,7 +564,7 @@ impl Export {
                 contact.first_name.as_deref().unwrap_or(""),
                 contact.last_name.as_deref().unwrap_or(""),
                 contact.nickname.as_deref().unwrap_or(""),
-                "",
+                &last_update(&identity),
                 if contact.acquaintance_level == pc::AcquaintanceLevel::GroupOrDeleted {
                     "1"
                 } else {
@@ -597,7 +606,7 @@ impl Export {
                 &group.identity.creator_identity.to_string(),
                 &group.name,
                 &group.created_at.to_string(),
-                "",
+                &last_update(&group.key),
                 &members.join(";"),
                 if archived.contains(&group.key) {
                     "1"
@@ -633,7 +642,7 @@ impl Export {
                 &id.cast_signed().to_string(),
                 &list.name,
                 &list.created_at.to_string(),
-                "",
+                &last_update(&list.key),
                 &list.members.join(";"),
                 if archived.contains(&list.key) {
                     "1"

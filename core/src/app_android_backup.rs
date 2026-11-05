@@ -2653,6 +2653,79 @@ mod export_tests {
         assert!(done["summary"]["chats"].as_u64().unwrap() >= 1);
     }
 
+    /// Android lists a restored contact's chat only with a last update, and doesn't work it out
+    /// itself at this format version; groups and lists sort by it. A contact without a chat has
+    /// none, or its empty chat would show.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_backup_says_when_each_chat_last_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        app.android_backup_import(
+            fixture(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        run_import(&app).await;
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("E0E0E0E0"))
+            .unwrap();
+        let list = app.store.distribution_lists().unwrap().remove(0).key;
+        let group = "g:B0B0B0B0:0102030405060708";
+        for (chat, id) in [
+            ("B0B0B0B0", 0xAAAA),
+            (group, 0xBBBB),
+            (list.as_str(), 0xCCCC),
+        ] {
+            app.store
+                .insert_incoming(chat, id, "text", "new", 1_900_000_000_000)
+                .unwrap();
+        }
+        let expected = crate::join::last_updates(&app.store).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let done = run_export(&app, out.path(), 0).await;
+        let path = std::path::PathBuf::from(done["path"].as_str().unwrap());
+        let mut archive = crate::android_backup::Archive::open(&path, "round-trip-pw").unwrap();
+
+        let contacts = archive.read_table("contacts.csv", 1 << 20).unwrap();
+        let row = |table: &crate::android_backup::csv::Table, column: &str, value: &str| {
+            table
+                .rows
+                .iter()
+                .find(|row| table.get(row, column) == Some(value))
+                .unwrap()
+                .clone()
+        };
+        let bob = row(&contacts, "identity", "B0B0B0B0");
+        assert_eq!(
+            contacts.get_ms(&bob, "last_update").map(i64::cast_unsigned),
+            expected.get("B0B0B0B0").copied()
+        );
+        let no_chat = row(&contacts, "identity", "E0E0E0E0");
+        assert_eq!(contacts.get_ms(&no_chat, "last_update"), None);
+
+        let groups = archive.read_table("groups.csv", 1 << 20).unwrap();
+        let in_group = row(&groups, "group_uid", group);
+        assert_eq!(
+            groups
+                .get_ms(&in_group, "last_update")
+                .map(i64::cast_unsigned),
+            expected.get(group).copied()
+        );
+
+        let lists = archive
+            .read_table("distribution_list.csv", 1 << 20)
+            .unwrap();
+        assert_eq!(
+            lists
+                .get_ms(&lists.rows[0], "last_update")
+                .map(i64::cast_unsigned),
+            expected.get(&list).copied()
+        );
+    }
+
     /// Too little room for what the last backup took: nothing is even started, and the older
     /// backup stays. The first backup has nothing to go by, so it starts.
     #[tokio::test(flavor = "current_thread")]
