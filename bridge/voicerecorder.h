@@ -3,9 +3,11 @@
 #define VOICERECORDER_H
 
 #include <QAudioInput>
+#include <QAudioOutput>
 #include <QAudioRecorder>
 #include <QBuffer>
 #include <QElapsedTimer>
+#include <QMediaPlayer>
 #include <QObject>
 #include <QTimer>
 
@@ -20,14 +22,25 @@
 // way (the length limit, the platform taking the microphone, the app being left, which stops the
 // capture at once) waits as `held`, a plain file like a running one, until the owner's tap, the
 // app lock or the window's closing.
+//
+// A running recording can pause and go on. A held one can be listened to before it goes: the
+// platform's MP4 is only playable once it is finished, so listening means stopping, and what was
+// held can't go on being recorded. The platform may not manage to pause (gst-droid is only known
+// from the phone): then the recording stops and is held, which keeps what was said.
 class VoiceRecorder : public QObject
 {
     Q_OBJECT
     // Recording is possible at all (AAC or the Opus fallback).
     Q_PROPERTY(bool available READ available CONSTANT)
     Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
-    // Stopped by itself and kept: its owner offers to send or discard it.
+    // Running, but not taking anything in at the moment.
+    Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)
+    // Stopped and kept: its owner offers to send or discard it.
     Q_PROPERTY(bool held READ held NOTIFY heldChanged)
+    // The held recording is sounding.
+    Q_PROPERTY(bool previewing READ previewing NOTIFY previewingChanged)
+    // Milliseconds into the held recording.
+    Q_PROPERTY(int previewPosition READ previewPosition NOTIFY previewPositionChanged)
     // Who started the running or held recording; null if there is none.
     Q_PROPERTY(QObject *owner READ owner NOTIFY ownerChanged)
     // Milliseconds recorded so far.
@@ -39,7 +52,10 @@ public:
 
     bool available() const { return !m_codec.isEmpty() || m_pcmAvailable; }
     bool recording() const { return m_recording; }
+    bool paused() const { return m_paused; }
     bool held() const { return m_held; }
+    bool previewing() const { return m_previewing; }
+    int previewPosition() const;
     QObject *owner() const { return m_owner; }
     int duration() const;
 
@@ -49,25 +65,38 @@ public:
     Q_INVOKABLE void stop();
     // Stop if running and throw the recording away, held or not.
     Q_INVOKABLE void cancel();
+    Q_INVOKABLE void pause();
+    Q_INVOKABLE void resume();
+    // Stop and keep it, for listening. Under a second there is nothing to keep.
+    Q_INVOKABLE void hold();
+    // Listen to the held recording, from where it stands; at its end it goes back to the start.
+    Q_INVOKABLE void startPreview();
+    Q_INVOKABLE void pausePreview();
+    Q_INVOKABLE void seekPreview(int position);
 
     // The finished or held recording (removed from here and from the disk). `pcm`: raw PCM for Opus.
     QByteArray takeRecording(bool *pcm);
 
 signals:
     void recordingChanged();
+    void pausedChanged();
     void heldChanged();
+    void previewingChanged();
+    void previewPositionChanged();
     void ownerChanged();
     void durationChanged();
     void finished(int duration);
     // Something nobody cancelled is gone: the platform left nothing usable to hold.
     void discarded();
     void failed(const QString &error);
+    // The recording can't be listened to; it is still there to send.
+    void previewFailed();
 
 private:
     friend class VoiceRecorderTest;
 
-    // Why the recording stops; ByItself: nobody here asked for it.
-    enum class Stop { ByItself, Send, Limit, Discard };
+    // Why the recording stops; ByItself: nobody here asked for it. Hold: to wait for an answer.
+    enum class Stop { ByItself, Send, Hold, Discard };
 
     bool usePlatform() const { return !m_codec.isEmpty(); }
     void finish(Stop how);
@@ -75,7 +104,13 @@ private:
     void fail(const QString &error);
     // Removes what was recorded and ends the recording's time with its owner.
     void clear();
+    void setPaused(bool paused);
     void setHeld(bool held);
+    void setPreviewing(bool previewing);
+    // Nothing sounds and nothing holds on to what was recorded.
+    void endPreview();
+    void previewEnded();
+    int recordedMs() const;
     void setOwner(QObject *owner);
     QString outputPath() const;
 
@@ -88,7 +123,17 @@ private:
     QByteArray m_pcm;
     QBuffer m_pcmBuffer;
     bool m_recording = false;
+    bool m_paused = false;
+    // What was recorded before the running stretch.
+    qint64 m_recordedBefore = 0;
+    QTimer m_pauseWait;
     bool m_held = false;
+    bool m_previewing = false;
+    // Only for the platform's file: the core's fallback has PCM in memory, for the output.
+    QMediaPlayer *m_previewPlayer = nullptr;
+    QAudioOutput *m_previewOutput = nullptr;
+    QBuffer m_previewBuffer;
+    qint64 m_previewFrom = 0;
     Stop m_stop = Stop::ByItself;
     QObject *m_owner = nullptr;
     QMetaObject::Connection m_ownerGone;

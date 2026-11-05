@@ -16,6 +16,9 @@ namespace {
 const int MaxDurationMs = 15 * 60 * 1000;
 // Shorter is a slip of the finger.
 const int MinDurationMs = 1000;
+// How long the platform may take to pause before it counts as not being able to.
+const int PauseWaitMs = 1000;
+const int PcmBytesPerMs = 48000 * 2 / 1000;
 
 // GStreamer names AAC "audio/mpeg, mpegversion=(int)4"; other backends say "aac".
 // The Opus fallback's input: what the core expects (voice.rs).
@@ -81,11 +84,19 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     connect(&m_tick, &QTimer::timeout, this, [this]() {
         emit durationChanged();
         if (m_stop == Stop::ByItself && duration() >= m_maxDuration) {
-            finish(Stop::Limit);
+            finish(Stop::Hold);
         }
     });
+    m_pauseWait.setSingleShot(true);
+    m_pauseWait.setInterval(PauseWaitMs);
+    connect(&m_pauseWait, &QTimer::timeout, this, [this]() {
+        qWarning() << "voice recorder: the platform did not pause, holding the recording";
+        finish(Stop::Hold);
+    });
     connect(m_recorder, &QMediaRecorder::stateChanged, this, [this](QMediaRecorder::State state) {
-        if (state == QMediaRecorder::StoppedState && m_recording) {
+        if (state == QMediaRecorder::PausedState) {
+            m_pauseWait.stop();
+        } else if (state == QMediaRecorder::StoppedState && m_recording) {
             stopped();
         }
     });
@@ -95,9 +106,13 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     // the power key or a call may have been what took the app away, so it waits like at the
     // limit. (What a tap already sent goes on.)
     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
-        if (state != Qt::ApplicationActive && m_recording && m_stop == Stop::ByItself) {
-            finish(Stop::Limit);
+        if (state == Qt::ApplicationActive) {
+            return;
         }
+        if (m_recording && m_stop == Stop::ByItself) {
+            finish(Stop::Hold);
+        }
+        pausePreview();
     });
 }
 
@@ -105,10 +120,12 @@ void VoiceRecorder::stopped()
 {
     const Stop how = m_stop;
     if (how == Stop::ByItself) {
-        m_finalDuration = static_cast<int>(m_clock.elapsed());
+        m_finalDuration = recordedMs();
     }
     m_recording = false;
     m_tick.stop();
+    m_pauseWait.stop();
+    setPaused(false);
     m_pcmBuffer.close();
     emit recordingChanged();
     emit durationChanged();
@@ -133,6 +150,8 @@ void VoiceRecorder::fail(const QString &error)
     const bool wasRecording = m_recording;
     m_recording = false;
     m_tick.stop();
+    m_pauseWait.stop();
+    setPaused(false);
     if (wasRecording) {
         emit recordingChanged();
     }
@@ -142,12 +161,21 @@ void VoiceRecorder::fail(const QString &error)
 
 void VoiceRecorder::clear()
 {
+    endPreview();
     m_haveRecording = false;
     QFile::remove(outputPath());
     m_pcm.fill('\0');
     m_pcm.clear();
     setHeld(false);
     setOwner(nullptr);
+}
+
+void VoiceRecorder::setPaused(bool paused)
+{
+    if (m_paused != paused) {
+        m_paused = paused;
+        emit pausedChanged();
+    }
 }
 
 void VoiceRecorder::setHeld(bool held)
@@ -182,6 +210,7 @@ QByteArray VoiceRecorder::takeRecording(bool *pcm)
     if (!m_haveRecording) {
         return data;
     }
+    endPreview();
     m_haveRecording = false;
     if (usePlatform()) {
         QFile file(outputPath());
@@ -202,6 +231,7 @@ QByteArray VoiceRecorder::takeRecording(bool *pcm)
 VoiceRecorder::~VoiceRecorder()
 {
     disconnect(m_ownerGone);
+    endPreview();
     m_recorder->stop();
     if (m_input) {
         m_input->stop();
@@ -212,7 +242,12 @@ VoiceRecorder::~VoiceRecorder()
 
 int VoiceRecorder::duration() const
 {
-    return m_recording ? static_cast<int>(m_clock.elapsed()) : m_finalDuration;
+    return m_recording && m_stop == Stop::ByItself ? recordedMs() : m_finalDuration;
+}
+
+int VoiceRecorder::recordedMs() const
+{
+    return static_cast<int>(m_recordedBefore + (m_paused ? 0 : m_clock.elapsed()));
 }
 
 QString VoiceRecorder::outputPath() const
@@ -228,6 +263,7 @@ void VoiceRecorder::start(QObject *owner)
     m_stop = Stop::ByItself;
     m_haveRecording = false;
     m_finalDuration = 0;
+    m_recordedBefore = 0;
     setOwner(owner);
     if (!usePlatform()) {
         m_pcm.clear();
@@ -298,7 +334,7 @@ void VoiceRecorder::finish(Stop how)
         return;
     }
     if (m_stop == Stop::ByItself) {
-        m_finalDuration = static_cast<int>(m_clock.elapsed());
+        m_finalDuration = recordedMs();
     }
     m_stop = how;
     // What it ends as follows once the recording is complete (stateChanged).
@@ -310,4 +346,190 @@ void VoiceRecorder::finish(Stop how)
             stopped();
         }
     }
+}
+
+void VoiceRecorder::pause()
+{
+    if (!m_recording || m_paused || m_stop != Stop::ByItself) {
+        return;
+    }
+    m_recordedBefore += m_clock.elapsed();
+    setPaused(true);
+    emit durationChanged();
+    if (usePlatform()) {
+        m_recorder->pause();
+        // Until it has, what it still takes in is a bit more than the time says.
+        m_pauseWait.start();
+    } else if (m_input) {
+        m_input->suspend();
+    }
+}
+
+void VoiceRecorder::resume()
+{
+    if (!m_recording || !m_paused || m_stop != Stop::ByItself) {
+        return;
+    }
+    m_pauseWait.stop();
+    m_clock.start();
+    setPaused(false);
+    if (usePlatform()) {
+        m_recorder->record();
+    } else if (m_input) {
+        m_input->resume();
+    }
+}
+
+void VoiceRecorder::hold()
+{
+    finish(Stop::Hold);
+}
+
+void VoiceRecorder::setPreviewing(bool previewing)
+{
+    if (m_previewing != previewing) {
+        m_previewing = previewing;
+        emit previewingChanged();
+    }
+}
+
+int VoiceRecorder::previewPosition() const
+{
+    if (m_previewPlayer) {
+        return static_cast<int>(m_previewPlayer->position());
+    }
+    if (m_previewOutput) {
+        return static_cast<int>(m_previewFrom + m_previewOutput->processedUSecs() / 1000);
+    }
+    return static_cast<int>(m_previewFrom);
+}
+
+void VoiceRecorder::startPreview()
+{
+    if (!m_held || !m_haveRecording || m_previewing) {
+        return;
+    }
+    setPreviewing(true);
+    if (usePlatform()) {
+        if (!m_previewPlayer) {
+            m_previewPlayer = new QMediaPlayer(this);
+            m_previewPlayer->setNotifyInterval(100);
+            connect(m_previewPlayer, &QMediaPlayer::positionChanged, this, &VoiceRecorder::previewPositionChanged);
+            connect(m_previewPlayer, &QMediaPlayer::stateChanged, this, [this](QMediaPlayer::State state) {
+                // Sailfish's resource policy resumes what it paused; only the user starts the sound here.
+                if (state == QMediaPlayer::PlayingState && !m_previewing && m_previewPlayer) {
+                    QMetaObject::invokeMethod(m_previewPlayer, "pause", Qt::QueuedConnection);
+                } else if (state != QMediaPlayer::PlayingState) {
+                    setPreviewing(false);
+                }
+            });
+            connect(m_previewPlayer, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus status) {
+                if (status == QMediaPlayer::EndOfMedia) {
+                    previewEnded();
+                }
+            });
+            connect(m_previewPlayer, static_cast<void (QMediaPlayer::*)(QMediaPlayer::Error)>(&QMediaPlayer::error), this,
+                    [this](QMediaPlayer::Error error) {
+                        qWarning() << "voice recorder: listening failed, code" << static_cast<int>(error);
+                        endPreview();
+                        emit previewFailed();
+                    });
+            m_previewPlayer->setMedia(QUrl::fromLocalFile(outputPath()));
+        }
+        m_previewPlayer->play();
+        return;
+    }
+    if (m_previewOutput && m_previewOutput->state() == QAudio::SuspendedState) {
+        m_previewOutput->resume();
+        return;
+    }
+    delete m_previewOutput;
+    m_previewOutput = new QAudioOutput(pcmFormat(), this);
+    m_previewOutput->setNotifyInterval(100);
+    connect(m_previewOutput, &QAudioOutput::notify, this, &VoiceRecorder::previewPositionChanged);
+    connect(m_previewOutput, &QAudioOutput::stateChanged, this, [this](QAudio::State state) {
+        // Idle: everything has been played. Stopped with an error: nothing will be.
+        if (state == QAudio::IdleState) {
+            previewEnded();
+        } else if (state == QAudio::StoppedState && m_previewing && m_previewOutput
+                   && m_previewOutput->error() != QAudio::NoError) {
+            qWarning() << "voice recorder: listening failed, code" << static_cast<int>(m_previewOutput->error());
+            endPreview();
+            emit previewFailed();
+        }
+    });
+    m_previewBuffer.close();
+    m_previewBuffer.setBuffer(&m_pcm);
+    m_previewBuffer.open(QIODevice::ReadOnly);
+    m_previewBuffer.seek(m_previewFrom * PcmBytesPerMs);
+    m_previewOutput->start(&m_previewBuffer);
+    if (m_previewOutput->error() != QAudio::NoError) {
+        qWarning() << "voice recorder: listening failed, code" << static_cast<int>(m_previewOutput->error());
+        endPreview();
+        emit previewFailed();
+    }
+}
+
+void VoiceRecorder::pausePreview()
+{
+    if (!m_previewing) {
+        return;
+    }
+    setPreviewing(false);
+    if (m_previewPlayer) {
+        m_previewPlayer->pause();
+    } else if (m_previewOutput) {
+        m_previewOutput->suspend();
+    }
+}
+
+void VoiceRecorder::seekPreview(int position)
+{
+    if (!m_held) {
+        return;
+    }
+    const qint64 to = qBound(0, position, m_finalDuration);
+    if (m_previewPlayer) {
+        m_previewPlayer->setPosition(to);
+    } else {
+        // The output has its own data ahead of the buffer's position: from there anew.
+        const bool wasPlaying = m_previewing;
+        endPreview();
+        m_previewFrom = to;
+        if (wasPlaying) {
+            startPreview();
+        }
+    }
+    emit previewPositionChanged();
+}
+
+void VoiceRecorder::previewEnded()
+{
+    endPreview();
+}
+
+void VoiceRecorder::endPreview()
+{
+    setPreviewing(false);
+    m_previewFrom = 0;
+    if (m_previewPlayer) {
+        QMediaPlayer *player = m_previewPlayer;
+        m_previewPlayer = nullptr;
+        player->disconnect(this);
+        player->stop();
+        // Lets go of the file, which is about to be sent or removed.
+        player->setMedia(QMediaContent());
+        player->deleteLater();
+    }
+    if (m_previewOutput) {
+        QAudioOutput *output = m_previewOutput;
+        m_previewOutput = nullptr;
+        output->disconnect(this);
+        output->stop();
+        output->deleteLater();
+    }
+    m_previewBuffer.close();
+    // Away from the recording, which it only reads.
+    m_previewBuffer.setBuffer(nullptr);
+    emit previewPositionChanged();
 }

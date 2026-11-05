@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // What ends a voice recording, without a microphone: only a tap sends. The length limit and
 // leaving the app stop it and hold it for an answer, and what's under a second or thrown away is
-// gone from memory. Exit 0: passed.
+// gone from memory. Pausing doesn't count as time and ends the same ways; listening never gets in
+// the way of what happens to the recording. Exit 0: passed.
 #include "voicerecorder.h"
 
 #include <QElapsedTimer>
@@ -170,6 +171,128 @@ void leavingAfterASlipLeavesNothing()
     setActive(true);
 }
 
+void aPauseIsntRecordedTime()
+{
+    Run run;
+    run.test.limitAfter(1800);
+    run.test.startWithWords(&run.owner);
+    waitFor(600);
+    run.recorder.pause();
+    check(run.recorder.paused() && run.recorder.recording(), "pause: still its recording");
+    const int atPause = run.recorder.duration();
+    check(atPause >= 500 && atPause < 1000, "pause: the time so far");
+    // Longer than the limit, which only counts what is recorded.
+    waitFor(1500);
+    check(run.recorder.duration() == atPause, "pause: the time stands");
+    check(run.recorder.recording() && !run.recorder.held(), "pause: the limit isn't reached");
+    run.recorder.resume();
+    check(!run.recorder.paused(), "resume: going on");
+    waitFor(500);
+    check(run.recorder.duration() >= atPause + 400 && run.recorder.duration() < atPause + 900, "resume: the time goes on");
+    bool pcm = false;
+    QByteArray taken;
+    int sentDuration = 0;
+    QObject::connect(&run.recorder, &VoiceRecorder::finished, [&](int duration) {
+        sentDuration = duration;
+        taken = run.recorder.takeRecording(&pcm);
+    });
+    run.recorder.stop();
+    check(taken == "words", "resume: all of it goes");
+    check(sentDuration >= atPause + 400 && sentDuration < atPause + 900, "resume: without the pause's time");
+    check(!run.recorder.paused(), "resume: over");
+}
+
+void aPausedOneEndsLikeARunningOne()
+{
+    {
+        Run run;
+        run.test.startWithWords(&run.owner);
+        waitFor(1100);
+        run.recorder.pause();
+        bool pcm = false;
+        QByteArray taken;
+        QObject::connect(&run.recorder, &VoiceRecorder::finished, [&]() { taken = run.recorder.takeRecording(&pcm); });
+        run.recorder.stop();
+        check(run.finished == 1 && taken == "words", "paused: a tap sends");
+    }
+    {
+        Run run;
+        run.test.startWithWords(&run.owner);
+        waitFor(1100);
+        run.recorder.pause();
+        run.recorder.cancel();
+        check(!run.recorder.owner() && !run.recorder.paused() && run.test.wordsGone(), "paused: discarded");
+        check(run.finished == 0, "paused: discarding sends nothing");
+    }
+    {
+        Run run;
+        run.test.startWithWords(&run.owner);
+        waitFor(1100);
+        run.recorder.pause();
+        setActive(false);
+        check(!run.recorder.recording() && run.recorder.held(), "paused, then away: the microphone is free, it is held");
+        check(!run.recorder.paused(), "paused, then away: no longer paused");
+        setActive(true);
+        check(run.recorder.held(), "paused, away and back: waits");
+        run.recorder.resume();
+        check(!run.recorder.recording() && run.recorder.held(), "held: can't go on recording");
+    }
+}
+
+void listeningAsksForAHeldOne()
+{
+    Run run;
+    run.recorder.startPreview();
+    check(!run.recorder.previewing(), "listen: nothing recorded");
+    run.test.startWithWords(&run.owner);
+    waitFor(1100);
+    run.recorder.startPreview();
+    check(!run.recorder.previewing(), "listen: not while it records");
+    run.recorder.hold();
+    check(run.recorder.held() && run.finished == 0, "hold: held, not sent");
+    check(run.recorder.owner() == &run.owner, "hold: still its owner's");
+    bool pcm = false;
+    check(run.recorder.takeRecording(&pcm) == "words", "hold: the words are there");
+
+    // Under a second: nothing to listen to.
+    Run slip;
+    slip.test.startWithWords(&slip.owner);
+    slip.recorder.hold();
+    check(!slip.recorder.held() && !slip.recorder.owner() && slip.test.wordsGone(), "hold: a slip leaves nothing");
+    check(slip.discarded == 0, "hold: a slip isn't reported");
+}
+
+// The SDK has no sound: whether it sounds is for a device; here, that what goes on doesn't depend
+// on it, and that listening doesn't touch the words.
+void listeningLeavesTheWordsAlone()
+{
+    {
+        Run run;
+        run.test.startWithWords(&run.owner);
+        waitFor(1100);
+        run.recorder.hold();
+        run.recorder.startPreview();
+        run.recorder.seekPreview(500);
+        run.recorder.pausePreview();
+        check(run.recorder.held() && !run.recorder.previewing(), "listen: still held after pausing");
+        check(!run.test.wordsGone(), "listen: the words are still there");
+        bool pcm = false;
+        run.recorder.startPreview();
+        check(run.recorder.takeRecording(&pcm) == "words", "listen: all of it can be sent");
+        check(!run.recorder.previewing() && !run.recorder.held(), "listen: over once taken");
+    }
+    {
+        Run run;
+        run.test.startWithWords(&run.owner);
+        waitFor(1100);
+        run.recorder.hold();
+        run.recorder.startPreview();
+        run.recorder.cancel();
+        check(!run.recorder.previewing() && run.test.wordsGone(), "listen: discarding ends it, nothing kept");
+        check(run.recorder.previewPosition() == 0, "listen: back at the start");
+    }
+}
+
 void itGoesWithItsOwner()
 {
     Run run;
@@ -196,6 +319,10 @@ int main(int argc, char **argv)
     aHeldOneStaysWhenLeaving();
     leavingStopsAndHolds();
     leavingAfterASlipLeavesNothing();
+    aPauseIsntRecordedTime();
+    aPausedOneEndsLikeARunningOne();
+    listeningAsksForAHeldOne();
+    listeningLeavesTheWordsAlone();
     itGoesWithItsOwner();
     if (failures) {
         std::printf("voice recorder: %d failed\n", failures);

@@ -1355,12 +1355,41 @@ Page {
     }
 
     // Voice messages: the send button records while the input is empty (Threema), a second tap
-    // sends; the recording bar's ✕ throws it away. The recorder is the app's, the recording this
+    // sends; the recording bar pauses it and goes on, stops it to listen first, and its ✕ throws it
+    // away. The recorder is the app's, the recording this
     // page's: the bar and the button, and sending it, are for the chat it was started in.
     readonly property bool recordingHere: voiceRecorder.owner === page
     readonly property bool canRecord: voiceRecorder.available && !voiceRecorder.owner && !window.anyCallRunning
                                       && !attachment && !quoting && editingMessageId === ""
                                       && inputField && inputField.text.trim().length === 0
+    // Paused, then "listen": listening starts once it has stopped.
+    property bool listenWhenHeld: false
+    onRecordingHereChanged: if (!recordingHere) listenWhenHeld = false
+    function listenToRecording() {
+        voicePlayer.stop()
+        if (voiceRecorder.held) {
+            if (voiceRecorder.previewing) voiceRecorder.pausePreview()
+            else voiceRecorder.startPreview()
+        } else {
+            listenWhenHeld = true
+            voiceRecorder.hold()
+        }
+    }
+    // Longer ones go with the usual moment to change one's mind (Android asks from 10 seconds on).
+    // Meanwhile a running one takes nothing in.
+    function discardRecording() {
+        if (voiceRecorder.duration < 10000) {
+            voiceRecorder.cancel()
+            return
+        }
+        voiceRecorder.pause()
+        voiceRecorder.pausePreview()
+        //% "Discarding recording"
+        recordingRemorse.execute(qsTrId("threesea-la-discarding-recording"), function() {
+            if (page.recordingHere) voiceRecorder.cancel()
+        })
+    }
+    RemorsePopup { id: recordingRemorse }
     // A recording went, or stopped and waits, while nobody was looking: said when the app is back.
     property bool recordingDiscarded
     property bool recordingHeldAway
@@ -1415,7 +1444,7 @@ Page {
         property: "enabled"
         value: page.status === PageStatus.Active && Qt.application.state === Qt.ApplicationActive
                && page.shown && backend.earToPlay && voicePlayer.earpieceAvailable
-               && (voicePlayer.messageId >= 0 || page.firstUnheardVoice >= 0)
+               && (voicePlayer.messageId >= 0 || page.firstUnheardVoice >= 0) && !page.recordingHere
         when: page.status === PageStatus.Active
     }
     Connections {
@@ -1452,7 +1481,11 @@ Page {
     property int voiceQueueNext: -1
     Connections {
         target: voicePlayer
-        onPlayingChanged: if (voicePlayer.playing) page.voicePausedAtEar = false
+        onPlayingChanged: {
+            if (!voicePlayer.playing) return
+            page.voicePausedAtEar = false
+            voiceRecorder.pausePreview()
+        }
         // Another message was started by hand during the chime: that one goes first.
         onMessageIdChanged: {
             if (voicePlayer.messageId >= 0) page.voiceQueueNext = -1
@@ -1515,9 +1548,20 @@ Page {
         onFinished: if (page.recordingHere) page.sendRecording(duration)
         onHeldChanged: {
             if (voiceRecorder.held && page.recordingHere) {
-                if (Qt.application.state === Qt.ApplicationActive) page.sayRecordingHeld()
-                else page.recordingHeldAway = true
+                if (page.listenWhenHeld) {
+                    page.listenWhenHeld = false
+                    voiceRecorder.startPreview()
+                } else if (Qt.application.state === Qt.ApplicationActive) {
+                    page.sayRecordingHeld()
+                } else {
+                    page.recordingHeldAway = true
+                }
             }
+        }
+        onPreviewFailed: {
+            if (!page.recordingHere) return
+            //% "This recording could not be played. It can still be sent."
+            Notices.show(qsTrId("threesea-la-recording-not-playable"), Notice.Long, Notice.Center)
         }
         onDiscarded: {
             if (page.recordingHere) page.recordingWentUnasked()
@@ -1573,6 +1617,7 @@ Page {
         Qt.inputMethod.commit()
         if (sendingText) return
         if (recordingHere) {
+            recordingRemorse.cancel()
             if (voiceRecorder.held) sendRecording(voiceRecorder.duration)
             else voiceRecorder.stop()
             return
@@ -2602,25 +2647,69 @@ Page {
                     anchors.fill: input
                     z: 1
                     Label {
+                        id: recordingTime
                         anchors {
                             left: parent.left
                             leftMargin: Theme.horizontalPageMargin
                             verticalCenter: parent.verticalCenter
                         }
-                        text: (voiceRecorder.held
-                               //% "Recorded %1"
-                               ? qsTrId("threesea-la-recorded")
-                               //% "Recording %1"
-                               : qsTrId("threesea-la-recording")).arg(Fmt.duration(voiceRecorder.duration / 1000))
+                        text: voiceRecorder.held
+                              ? Fmt.duration((voiceRecorder.previewing || voiceRecorder.previewPosition > 0
+                                              ? voiceRecorder.previewPosition : voiceRecorder.duration) / 1000)
+                              : (voiceRecorder.paused
+                                 //% "Paused %1"
+                                 ? qsTrId("threesea-la-recording-paused")
+                                 //% "Recording %1"
+                                 : qsTrId("threesea-la-recording")).arg(Fmt.duration(voiceRecorder.duration / 1000))
                         color: Theme.highlightColor
                     }
-                    IconButton {
+                    // Listening: where it stands, like a voice message's bubble.
+                    Slider {
+                        id: recordingSlider
+                        visible: voiceRecorder.held
+                        anchors {
+                            left: recordingTime.right
+                            right: recordingButtons.left
+                            verticalCenter: parent.verticalCenter
+                        }
+                        leftMargin: Theme.paddingMedium
+                        rightMargin: Theme.paddingMedium
+                        minimumValue: 0
+                        maximumValue: Math.max(1, voiceRecorder.duration)
+                        onReleased: voiceRecorder.seekPreview(value)
+                    }
+                    Binding {
+                        target: recordingSlider
+                        property: "value"
+                        value: voiceRecorder.previewPosition
+                        when: !recordingSlider.pressed
+                    }
+                    Row {
+                        id: recordingButtons
                         anchors {
                             right: parent.right
                             verticalCenter: parent.verticalCenter
                         }
-                        icon.source: "image://theme/icon-m-clear"
-                        onClicked: voiceRecorder.cancel()
+                        IconButton {
+                            visible: voiceRecorder.recording && !voiceRecorder.paused
+                            icon.source: "image://theme/icon-m-pause"
+                            onClicked: voiceRecorder.pause()
+                        }
+                        IconButton {
+                            visible: voiceRecorder.recording && voiceRecorder.paused
+                            icon.source: "image://theme/icon-m-mic"
+                            onClicked: voiceRecorder.resume()
+                        }
+                        IconButton {
+                            visible: voiceRecorder.held || voiceRecorder.paused
+                            icon.source: voiceRecorder.previewing ? "image://theme/icon-m-pause"
+                                                                  : "image://theme/icon-m-play"
+                            onClicked: page.listenToRecording()
+                        }
+                        IconButton {
+                            icon.source: "image://theme/icon-m-clear"
+                            onClicked: page.discardRecording()
+                        }
                     }
                 }
 

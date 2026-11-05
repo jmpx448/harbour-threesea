@@ -733,3 +733,23 @@ network to 3G if it can, or find a weak signal, and use a video that takes more 
    - Expect: the warning sign for up to a minute, then it goes out by itself.
 7. Do the same as in 5 while pictures come in.
    - Expect: they arrive by themselves a little after the connection is back, no tap needed.
+
+## Recording: pause, listen, discard
+
+1. In a chat with an empty input, tap the microphone and speak; tap the pause button after a few
+   seconds; wait; tap the microphone in the bar and speak again. Tap send.
+   - Expect: the time stands still during the pause, and the message plays both parts without the
+     pause and without a glitch at the join.
+   - If gst-droid can't pause, the log says `the platform did not pause` and the recording stops
+     and waits, with the notice "Recording stopped. Send it or discard it."; then please report it:
+     the pause button would need to go. A message that sends but doesn't play at the join is
+     worth reporting too.
+2. Record, pause, tap play.
+   - Expect: the bar shows the slider; it plays through the loudspeaker what was said; pause,
+     dragging and playing to the end and again work; send then sends all of it.
+3. Tap a voice message's play button while listening.
+   - Expect: listening pauses; the message plays.
+4. Discard a recording over 10 seconds with the ✕: a remorse timer appears and recording pauses;
+   cancel it, and send what is there. One under 10 seconds goes at once.
+5. While listening, press the power key.
+   - Expect: it stops sounding; the recording still waits when the app is back.
