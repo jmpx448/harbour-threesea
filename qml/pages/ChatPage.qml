@@ -1348,7 +1348,7 @@ Page {
             draftSaver.restart()
             return ""
         }
-        if (kind === "videoKeepsMetadata") {
+        if (kind === "videoKeepsMetadata" || kind === "pictureKeepsMetadata") {
             // Its caption stays on its way, in the stored draft, until the user has answered.
             if (file.caption.length > 0) window.captionSent(identity, file.caption)
             metadataQuestions = metadataQuestions.concat([file])
@@ -1385,7 +1385,7 @@ Page {
         if (editing) beforeEdit.text = kept
         else setInput(kept)
     }
-    // Videos whose metadata can't be taken out, for the user to decide about one at a time
+    // Videos and pictures whose metadata can't be taken out, for the user to decide about one at a time
     // (ADR 0025). It waits for the chat to be what is showing.
     property var metadataQuestions: []
     property bool askingAboutMetadata
@@ -1404,6 +1404,8 @@ Page {
             metadataQuestions = metadataQuestions.slice(1)
             if (send) {
                 file.keepMetadata = true
+                // A picture goes as a plain file for that; a video says so itself.
+                if (!file.video) file.photo = false
                 sendQueue = [file].concat(sendQueue)
                 if (!sendingQueue) sendNext()
             } else {
@@ -1417,7 +1419,7 @@ Page {
         }
         askingAboutMetadata = true
         var dialog = pageStack.push(Qt.resolvedUrl("VideoMetadataDialog.qml"),
-                                    { name: file.name || file.path.split("/").pop() })
+                                    { name: file.name || file.path.split("/").pop(), video: file.video === true })
         dialog.accepted.connect(function() { answer(true) })
         dialog.rejected.connect(function() { answer(false) })
         // Taken off the stack by something else (the app lock): no answer, so not sent.
@@ -1943,7 +1945,8 @@ Page {
             var unanswered = metadataQuestions[q]
             backend.removeCapture(unanswered.path)
             if (unanswered.caption.length > 0) window.captionNotOnItsWay(identity, unanswered.caption)
-            Notices.show(Errors.text("videoKeepsMetadata"), Notice.Long, Notice.Center)
+            Notices.show(Errors.text(unanswered.video ? "videoKeepsMetadata" : "fileKeepsMetadata"),
+                         Notice.Long, Notice.Center)
         }
         stopTyping()
         // Going back to this same chat further down, that one is the open one already.

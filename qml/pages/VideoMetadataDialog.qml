@@ -2,11 +2,12 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 
-// A video whose metadata the core can't take out: sent as it is, or not at all (ADR 0025).
+// A video or picture whose metadata can't be taken out: sent as it is, or not at all (ADR 0025).
 Dialog {
     allowedOrientations: Orientation.All
 
     property string name
+    property bool video: true
 
     SilicaFlickable {
         anchors.fill: parent
@@ -30,8 +31,11 @@ Dialog {
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSizeLarge
                 color: Theme.highlightColor
-                //% "This video keeps what its file says about it"
-                text: qsTrId("threesea-la-video-keeps-metadata")
+                text: video
+                      //% "This video keeps what its file says about it"
+                      ? qsTrId("threesea-la-video-keeps-metadata")
+                      //% "This picture keeps what its file says about it"
+                      : qsTrId("threesea-la-picture-keeps-metadata")
             }
 
             Label {
@@ -39,8 +43,11 @@ Dialog {
                 width: parent.width - 2 * x
                 wrapMode: Text.Wrap
                 color: Theme.highlightColor
-                //% "Threesea can't remove the metadata of this file. It can hold where and when the video was made and on what device, and the recipient gets all of it, along with the file's name: %1. Sent as it is, it goes out as a plain file."
-                text: qsTrId("threesea-la-video-keeps-metadata-description").arg(name)
+                text: (video
+                       //% "Threesea can't remove the metadata of this file. It can hold where and when the video was made and on what device, and the recipient gets all of it, along with the file's name: %1. Sent as it is, it goes out as a plain file."
+                       ? qsTrId("threesea-la-video-keeps-metadata-description")
+                       //% "Threesea can't remove the metadata of this file. It can hold where and when the picture was made and on what device, and the recipient gets all of it, along with the file's name: %1. Sent as it is, it goes out as a plain file."
+                       : qsTrId("threesea-la-picture-keeps-metadata-description")).arg(name)
             }
         }
     }

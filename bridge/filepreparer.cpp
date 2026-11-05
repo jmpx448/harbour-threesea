@@ -108,7 +108,8 @@ void FilePreparer::run()
         emit prepared(request, QByteArray(), QByteArray(), QStringLiteral("not a file"));
         return;
     }
-    const QString mediaType = QMimeDatabase().mimeTypeForFile(info).name();
+    const bool asMedia = request.value(QStringLiteral("rendering")).toString() == QLatin1String("media");
+    const QString mediaType = asMedia ? mediaTypeOf(info) : QMimeDatabase().mimeTypeForFile(info).name();
     request.insert(QStringLiteral("name"), info.fileName());
     request.insert(QStringLiteral("mediaType"), mediaType);
 
@@ -116,8 +117,7 @@ void FilePreparer::run()
     // where Settings → Media & storage → Video size asks for it and the phone can. Also without a
     // thumbnail (the thumbnailer failed, or took too long): the core still has to see them, to
     // take out their metadata, as it doesn't for files.
-    if (mediaType.startsWith(QLatin1String("video/"))
-            && request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")) {
+    if (mediaType.startsWith(QLatin1String("video/")) && asMedia) {
         // The frame is only the thumbnail, a square whatever the video is: the core takes the
         // size it announces from the file it sends.
         QString path = m_path;
@@ -143,24 +143,23 @@ void FilePreparer::run()
         return;
     }
 
-    // GIFs as media (Android's animated images): sent unchanged, the first frame as thumbnail.
-    if (mediaType == QLatin1String("image/gif")
-            && request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")) {
+    // GIFs as media (Android's animated images): their frames unchanged (the core takes out the
+    // rest), the first frame as thumbnail.
+    if (mediaType == QLatin1String("image/gif") && asMedia) {
         QImageReader reader(m_path);
         const QImage first = reader.read();
-        if (!first.isNull()) {
-            request.insert(QStringLiteral("path"), m_path);
-            request.insert(QStringLiteral("width"), first.width());
-            request.insert(QStringLiteral("height"), first.height());
-            emit prepared(request, QByteArray(), encode(jpegThumbnail(first), "JPEG", 80), QString());
+        if (first.isNull()) {
+            emit prepared(request, QByteArray(), QByteArray(), pictureKeepsMetadata());
             return;
         }
+        request.insert(QStringLiteral("path"), m_path);
+        request.insert(QStringLiteral("width"), first.width());
+        request.insert(QStringLiteral("height"), first.height());
+        emit prepared(request, QByteArray(), encode(jpegThumbnail(first), "JPEG", 80), QString());
+        return;
     }
 
-    const bool photo = request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")
-                       && (mediaType == QLatin1String("image/jpeg") || mediaType == QLatin1String("image/png")
-                           || mediaType == QLatin1String("image/webp") || mediaType == QLatin1String("image/bmp"));
-    if (!photo) {
+    if (!asMedia || !isPicture(mediaType)) {
         // Sent as it is.
         request.insert(QStringLiteral("rendering"), QStringLiteral("file"));
         request.insert(QStringLiteral("path"), m_path);
@@ -172,10 +171,34 @@ void FilePreparer::run()
     reader.setAutoTransform(true); // apply the EXIF rotation before EXIF is dropped
     const QImage image = reader.read();
     if (image.isNull()) {
-        emit prepared(request, QByteArray(), QByteArray(), reader.errorString());
+        emit prepared(request, QByteArray(), QByteArray(), pictureKeepsMetadata());
         return;
     }
     preparePicture(image, request);
+}
+
+QString FilePreparer::mediaTypeOf(const QFileInfo &file)
+{
+    const QMimeDatabase types;
+    const auto visual = [](const QString &type) {
+        return type.startsWith(QLatin1String("image/")) || type.startsWith(QLatin1String("video/"));
+    };
+    const QString named = types.mimeTypeForFile(file).name();
+    if (visual(named)) {
+        return named;
+    }
+    const QString read = types.mimeTypeForFile(file, QMimeDatabase::MatchContent).name();
+    return visual(read) ? read : named;
+}
+
+bool FilePreparer::isPicture(const QString &mediaType)
+{
+    return mediaType.startsWith(QLatin1String("image/")) && mediaType != QLatin1String("image/svg+xml");
+}
+
+QString FilePreparer::pictureKeepsMetadata()
+{
+    return QStringLiteral("pictureKeepsMetadata");
 }
 
 void FilePreparer::preparePicture(const QImage &picture, QVariantMap request)

@@ -688,7 +688,9 @@ while they are hidden.
   SupportsMultipleFiles); the share UI calls `org.sailfishos.share.share(a{sv})` on
   `<OrganizationName>.<ApplicationName>` (our D-Bus name) at `/share/threesea`, which a QML
   `ShareProvider { method: "threesea"; registerName: false }` implements. Resources are file
-  paths, or `{name, data, type}` maps for text. Passes the Harbour validator.
+  paths, or `{name, data, type}` maps for text. Passes the Harbour validator. A shared file goes as
+  picture or video by its type, by its bytes where its name doesn't say (`sharedFileKind`), so that
+  it is cleaned like any other (ADR 0025).
 - Test without Gallery: `gdbus call --session --dest org.threesea.harbour-threesea --object-path
   /share/threesea --method org.sailfishos.share.share "{'resources': <['/path']>}"`.
 

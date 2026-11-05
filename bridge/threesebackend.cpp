@@ -693,6 +693,15 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
 }
 
 
+QString ThreeseBackend::sharedFileKind(const QString &path) const
+{
+    const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    const QString type = FilePreparer::mediaTypeOf(QFileInfo(local));
+    return FilePreparer::isPicture(type) ? QStringLiteral("picture")
+         : type.startsWith(QLatin1String("video/")) ? QStringLiteral("video")
+         : QStringLiteral("file");
+}
+
 QString ThreeseBackend::captureFile(const QString &extension) const
 {
     QDir().mkpath(captureDir());
@@ -1185,7 +1194,8 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
         QJSValue answer;
         QJSValue callback = m_callbacks.take(id);
         if (callback.isCallable()) {
-            answer = callback.call(QJSValueList() << false << QJSValue() << QStringLiteral("internal") << error);
+            const QString kind = error == FilePreparer::pictureKeepsMetadata() ? error : QStringLiteral("internal");
+            answer = callback.call(QJSValueList() << false << QJSValue() << kind << error);
         }
         removeTempSources(id, answer);
         return;

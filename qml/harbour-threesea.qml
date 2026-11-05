@@ -557,7 +557,8 @@ ApplicationWindow {
                 return kept
             }
             if (ok) return undefined
-            Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            Notices.show(Errors.text(kind === "pictureKeepsMetadata" ? "fileKeepsMetadata" : kind, message),
+                         Notice.Long, Notice.Center)
             // The chat, opened again meanwhile, left the caption alone until now.
             var open = pageStack.find(function(page) { return page.identity === identity && page.loadDraft })
             if (file.caption && open) open.loadDraft()
@@ -1912,9 +1913,11 @@ ApplicationWindow {
                 var resource = resources[i]
                 var path = resource.filePath || ""
                 if (path.length > 0) {
+                    // A picture or video goes as one whatever it is called, as nothing but that
+                    // takes out what its file says about it.
+                    var kind = backend.sharedFileKind(path)
                     files.push({ path: path, name: path.split("/").pop(),
-                                 photo: /\.(jpe?g|png|webp|bmp)$/i.test(path),
-                                 video: /\.(mp4|m4v|mov|3gp|webm|mkv|avi|mpe?g)$/i.test(path) })
+                                 photo: kind === "picture", video: kind === "video" })
                 } else if (resource.data) {
                     text += (text.length > 0 ? "\n" : "") + resource.data
                 }

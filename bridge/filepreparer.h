@@ -3,6 +3,7 @@
 #define FILEPREPARER_H
 
 #include <QByteArray>
+#include <QFileInfo>
 #include <QImage>
 #include <QObject>
 #include <QRunnable>
@@ -15,7 +16,8 @@
 // 2048 px, JPEG; PNG if they have transparency) which also drops their EXIF data (GPS!) and text
 // (PhotoEdit::withoutMetadata), and get a 512 px JPEG thumbnail. Videos larger than the setting asks for are scaled down where the
 // phone can do it (Full flavour, VideoTranscoder); the core drops their metadata when it reads
-// them. Other files are only described (the core reads them itself).
+// them. Other files are only described (the core reads them itself). A picture sent as media that
+// can't be read and made anew isn't sent: `prepared` says PictureKeepsMetadata, for the chat to ask.
 class FilePreparer : public QObject, public QRunnable
 {
     Q_OBJECT
@@ -28,6 +30,14 @@ public:
     FilePreparer(std::function<QImage()> picture, const QVariantMap &request);
     // A video: its first frame (from the thumbnailer) becomes the thumbnail, if there is one.
     void setVideoFrame(const QImage &frame) { m_videoFrame = frame; }
+    // What a file really is, for what is about to be sent as media: by its name, and where that
+    // says neither picture nor video, by its first bytes.
+    static QString mediaTypeOf(const QFileInfo &file);
+    // Whether that is a picture, which has to be made anew to lose what its file says about it. An
+    // SVG is a document, and goes as one.
+    static bool isPicture(const QString &mediaType);
+    // The error of `prepared` for such a picture that couldn't be, also the core's error kind.
+    static QString pictureKeepsMetadata();
     void run() override;
 
 signals:

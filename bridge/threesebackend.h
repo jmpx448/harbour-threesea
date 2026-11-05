@@ -311,6 +311,9 @@ public:
     Q_INVOKABLE void sendVideo(const QString &identity, const QString &path, const QVariant &frame,
                                double seconds, const QString &caption, const QJSValue &callback,
                                bool keepMetadata = false);
+    // What a file shared from another app goes as: "picture" (sendFile as a photo, which leaves
+    // nothing of what its file says about it), "video" (sendVideo) or "file".
+    Q_INVOKABLE QString sharedFileKind(const QString &path) const;
     Q_INVOKABLE void sendFile(const QString &identity, const QString &path, bool asPhoto,
                               const QString &caption, const QJSValue &callback = QJSValue());
     // Send the voice recorder's finished recording (AAC, or PCM that the core encodes as Opus).
