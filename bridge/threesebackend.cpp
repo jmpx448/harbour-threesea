@@ -513,6 +513,7 @@ void ThreeseBackend::finishDataRemoval()
     m_identity.clear();
     m_unreadCount = 0;
     m_unreadFrom.clear();
+    m_unreadChat.clear();
     m_connectionState = QStringLiteral("disconnected");
     m_contacts->update(QVariantList());
     m_dbKey.fill('\0');
@@ -543,6 +544,7 @@ void ThreeseBackend::finishDataRemoval()
 
     emit unreadCountChanged();
     emit unreadFromChanged();
+    emit unreadChatChanged();
     emit connectionStateChanged();
     emit keepRunningChanged();
     emit logLevelChanged();
