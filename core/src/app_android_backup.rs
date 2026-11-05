@@ -363,10 +363,16 @@ impl Shared {
         data: Metadata,
     ) -> Result<Value, ApiError> {
         let nonces = self.add_android_nonces(&data).await?;
+        let store = std::rc::Rc::clone(&self.store);
+        let step = store.step()?;
         self.store_adopted_identity(threema_id, client_key, private)?;
         // Android's backup holds no nickname for us, as an ID backup doesn't.
         self.store
             .set_setting(crate::store::keys::NICKNAME_UNANSWERED, "ask")?;
+        // Killed from here on, the next start has an ID and few chats, and nothing else to say why.
+        self.store
+            .set_setting(crate::store::keys::DATA_IMPORT_UNFINISHED, "1")?;
+        step.commit()?;
         tracing::info!("identity restored from a Data backup");
         let imported = self
             .finish_android_metadata(threema_id, data, nonces)
@@ -868,12 +874,53 @@ mod tests {
         assert_eq!(app.profile_json().unwrap()["askNickname"], true);
         assert_eq!(app.safe_status().unwrap()["askSetup"], false);
 
+        // Until the history is in, the chat list says so; it holds nothing of the file.
+        let unfinished = |app: &App| app.profile_json().unwrap()["dataImportUnfinished"].clone();
+        assert_eq!(unfinished(&app), true);
+        assert_eq!(
+            app.store
+                .setting(crate::store::keys::DATA_IMPORT_UNFINISHED)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+
         // From here it is an import like any other: of this ID, and nothing new in it.
         let again = app
-            .android_backup_import(fixture(), password, "metadata")
+            .android_backup_import(fixture(), password.clone(), "metadata")
             .await
             .unwrap();
         assert_eq!(again["contacts"]["added"], 0, "{again}");
+        assert_eq!(unfinished(&app), true, "only the history ends it");
+
+        let history = |cancelled: bool| crate::android_backup::import::HistoryImport {
+            store: std::rc::Rc::clone(&app.store),
+            media: std::sync::Arc::clone(&app.media),
+            events: tokio::sync::mpsc::unbounded_channel().0,
+            cancel: std::rc::Rc::new(std::cell::Cell::new(cancelled)),
+            me: threema_id.clone(),
+            own_public_key: client_key.public_key().to_string(),
+            path: fixture().into(),
+            password: password.clone(),
+        };
+        // Stopped: there is still more to import.
+        history(true).run().await;
+        assert_eq!(unfinished(&app), true);
+        history(false).run().await;
+        assert_eq!(unfinished(&app), false);
+    }
+
+    #[test]
+    fn the_hint_of_an_unfinished_import_can_be_dismissed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        assert_eq!(app.profile_json().unwrap()["dataImportUnfinished"], false);
+        app.store
+            .set_setting(crate::store::keys::DATA_IMPORT_UNFINISHED, "1")
+            .unwrap();
+        assert_eq!(app.profile_json().unwrap()["dataImportUnfinished"], true);
+        let profile = app.dismiss_data_import_hint().unwrap();
+        assert_eq!(profile["dataImportUnfinished"], false);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -916,6 +916,7 @@ impl Shared {
         Ok(json!({
             "identity": identity.threema_id,
             "nickname": self.store.setting(keys::NICKNAME)?,
+            "dataImportUnfinished": self.store.setting(keys::DATA_IMPORT_UNFINISHED)?.is_some(),
             "askNickname": self.store.setting(keys::NICKNAME)?.is_none()
                 && self.store.setting(keys::NICKNAME_UNANSWERED)?.as_deref() == Some("ask"),
             "publicKey": public_key.to_string(),
@@ -953,6 +954,12 @@ impl App {
         }
         // The nickname rides along in the metadata of every message we send
         // (connection.rs), so contacts see it with the next one.
+        self.profile_json()
+    }
+
+    /// `dismissDataImportHint`: the user is done with the backup's unfinished import.
+    pub(crate) fn dismiss_data_import_hint(&mut self) -> Result<Value, ApiError> {
+        self.store.delete_setting(keys::DATA_IMPORT_UNFINISHED)?;
         self.profile_json()
     }
 

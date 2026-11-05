@@ -98,7 +98,7 @@ var table = {
     draft: { text: "", quote: null },
     spamPotential: { potential: true },
     lockStatus: { lock: null, unlocked: true, graceTimes: [] },
-    profile: { identity: "AAAAAAAA", nickname: "me", publicKey: "00", pictureVersion: 0, pictureShare: "everyone",
+    profile: { identity: "AAAAAAAA", nickname: "me", dataImportUnfinished: true, publicKey: "00", pictureVersion: 0, pictureShare: "everyone",
                pictureRecipients: [], linkedEmail: "", linkedEmailPending: false, linkedMobile: "",
                linkedMobilePending: "" },
     settings: { readReceipts: true, sendTyping: true, blockUnknown: false, threemaCalls: true, groupCalls: true,

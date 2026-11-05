@@ -274,6 +274,11 @@ impl HistoryImport {
                     cancelled = summary.cancelled,
                     "Android history import finished"
                 );
+                if !summary.cancelled {
+                    let _ = self
+                        .store
+                        .delete_setting(crate::store::keys::DATA_IMPORT_UNFINISHED);
+                }
                 // The lists rebuild from scratch: an import is a bulk change, not a stream of
                 // messageAdded events.
                 self.emit(json!({ "event": "chatsChanged" }));

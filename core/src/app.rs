@@ -148,6 +148,7 @@ pub enum Command {
     /// Try the rest of a restored backup's import (contacts, groups, lists) now.
     SafeRetryImport,
     SafeDeclineSetup,
+    DismissDataImportHint,
     SafeSearchId {
         #[serde(default)]
         phone: String,
@@ -1872,6 +1873,7 @@ impl App {
                 .await
             }
             Command::SafeDeclineSetup => self.safe_decline_setup(),
+            Command::DismissDataImportHint => self.dismiss_data_import_hint(),
             Command::SafeSearchId { phone, email } => {
                 self.detached(Lane::InTurn, |app| async move {
                     app.safe_search_id(&phone, &email).await

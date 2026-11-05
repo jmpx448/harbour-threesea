@@ -252,6 +252,13 @@ Page {
             })
         })
     }
+    // A restore from a Data backup was cut short: the rest of the import is waiting for the user.
+    property bool dataImportUnfinished: false
+    function checkDataImport() {
+        backend.call("profile", {}, function(ok, profile) {
+            if (ok) dataImportUnfinished = profile.dataImportUnfinished === true
+        })
+    }
     function firstRunFree() {
         return status === PageStatus.Active && !window.stackHeld && !pageStack.busy
                 && window.pendingDataImport === null
@@ -277,6 +284,7 @@ Page {
             if (wasActive) reload()
             wasActive = true
             if (mainList && !firstRunDone) firstRunSteps()
+            if (mainList) checkDataImport()
             // Contacts are attached: swipe left (forward indicator top right), like Jolla apps.
             if (mainList && pageStack.nextPage(page) === null) pageStack.pushAttached(Qt.resolvedUrl("ContactsPage.qml"))
         }
@@ -398,6 +406,40 @@ Page {
                 horizontalAlignment: Text.AlignRight
                 font.pixelSize: Theme.fontSizeExtraSmall
                 color: Theme.secondaryHighlightColor
+            }
+
+            BackgroundItem {
+                id: dataImportHint
+                width: parent.width
+                visible: page.mainList && page.dataImportUnfinished && window.pendingDataImport === null
+                height: visible ? Math.max(hintText.implicitHeight + 2 * Theme.paddingMedium, Theme.itemSizeSmall) : 0
+                onClicked: window.pushWithPin(Qt.resolvedUrl("DataBackupPage.qml"))
+
+                Label {
+                    id: hintText
+                    x: Theme.horizontalPageMargin
+                    width: hintDismiss.x - x - Theme.paddingMedium
+                    anchors.verticalCenter: parent.verticalCenter
+                    wrapMode: Text.Wrap
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.highlightColor
+                    //% "Your Data backup isn't fully imported yet. Tap to import it again; it continues where it stopped."
+                    text: qsTrId("threesea-la-data-import-unfinished")
+                }
+
+                IconButton {
+                    id: hintDismiss
+                    anchors {
+                        right: parent.right
+                        rightMargin: Theme.paddingMedium
+                        verticalCenter: parent.verticalCenter
+                    }
+                    icon.source: "image://theme/icon-m-clear"
+                    onClicked: {
+                        page.dataImportUnfinished = false
+                        backend.call("dismissDataImportHint", {})
+                    }
+                }
             }
         }
 
