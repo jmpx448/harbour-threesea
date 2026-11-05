@@ -17,28 +17,40 @@ pub const PREVIEW_MAX: u32 = 50;
 pub const AVATAR_LOW_MAX: u32 = 48;
 pub const AVATAR_HIGH_MAX: u32 = 512;
 pub const SENT_THUMBNAIL_MAX: u32 = 512;
-/// A picture sent as media: Android's and our FilePreparer's default.
+/// A picture sent as media: Android's and our FilePreparer's default (Settings → Image size).
 pub const SENT_MAX: u32 = 1600;
 
-/// Pictures larger than this are not decoded (memory on a phone).
+/// Pictures larger than this are not decoded (memory on a phone), nor any that take more memory
+/// than an ordinary picture of that size: a 16-bit one has half of it.
 const MAX_PIXELS: u64 = 40_000_000;
+const MAX_DECODED_BYTES: u64 = MAX_PIXELS * 4;
 
-fn decode(bytes: &[u8]) -> Option<DynamicImage> {
+/// A JPEG's or PNG's decoder, if decoding it fits the limits; only its head has been read.
+fn decoder(bytes: &[u8]) -> Option<impl ImageDecoder + use<'_>> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
     if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
         return None;
     }
-    let (width, height) = reader.into_dimensions().ok()?;
-    if u64::from(width) * u64::from(height) > MAX_PIXELS {
-        return None;
-    }
-    let mut decoder = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_decoder()
-        .ok()?;
+    let decoder = reader.into_decoder().ok()?;
+    let (width, height) = decoder.dimensions();
+    (u64::from(width) * u64::from(height) <= MAX_PIXELS
+        && decoder.total_bytes() <= MAX_DECODED_BYTES)
+        .then_some(decoder)
+}
+
+/// What decoding and turning a picture takes at most, from its head alone: a few KB of PNG can be
+/// 160 MB of pixels. To be had (`media::reserve_memory_within`) before decoding it.
+#[must_use]
+pub fn decoding_memory(bytes: &[u8]) -> usize {
+    decoder(bytes).map_or(0, |decoder| {
+        usize::try_from(decoder.total_bytes().saturating_mul(2)).unwrap_or(usize::MAX)
+    })
+}
+
+fn decode(bytes: &[u8]) -> Option<DynamicImage> {
+    let mut decoder = decoder(bytes)?;
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     let mut image = DynamicImage::from_decoder(decoder).ok()?;
     image.apply_orientation(orientation);
@@ -110,17 +122,21 @@ pub struct PictureKeepsMetadata;
 
 /// Makes a picture sent as media (`claimed` its media type) fit to leave, in place: what a file
 /// says about itself stays behind. JPEG and PNG are made anew like FilePreparer's: upright, at most
-/// `SENT_MAX`, JPEG 85 or PNG if transparent, with our 512 px thumbnail. A WebP loses all but its
+/// `max` (none: as large as they are), JPEG 85 or PNG if transparent, with our 512 px thumbnail. A WebP loses all but its
 /// picture and animation. A GIF goes as it is, as on the phone and on Android. `None`: another kind
 /// of file, whose bytes are untouched. Takes long, for a blocking thread.
 pub fn sent_picture(
     data: &mut Zeroizing<Vec<u8>>,
     claimed: &str,
+    max: Option<u32>,
 ) -> Result<Option<SentPicture>, PictureKeepsMetadata> {
     match image::guess_format(data).ok() {
         Some(ImageFormat::Jpeg | ImageFormat::Png) => {
             let image = decode(data).ok_or(PictureKeepsMetadata)?;
-            let shown = fit(&image, SENT_MAX);
+            let shown = match max {
+                Some(max) => fit(&image, max),
+                None => image.clone(),
+            };
             let transparent = shown.color().has_alpha();
             let encoded = if transparent {
                 let mut out = Vec::new();
@@ -271,7 +287,9 @@ mod tests {
         let source = jpeg_with_exif();
         assert!(contains(&source, SECRET));
         let mut data = Zeroizing::new(source);
-        let sent = sent_picture(&mut data, "image/jpeg").unwrap().unwrap();
+        let sent = sent_picture(&mut data, "image/jpeg", Some(SENT_MAX))
+            .unwrap()
+            .unwrap();
         assert!(!contains(&data, SECRET));
         assert!(!contains(&data, b"Exif"));
         assert_eq!(sent.media_type, "image/jpeg");
@@ -287,7 +305,9 @@ mod tests {
         for (transparent, media_type) in [(true, "image/png"), (false, "image/jpeg")] {
             let mut data = Zeroizing::new(png_with_text(transparent));
             assert!(contains(&data, SECRET));
-            let sent = sent_picture(&mut data, "image/png").unwrap().unwrap();
+            let sent = sent_picture(&mut data, "image/png", Some(SENT_MAX))
+                .unwrap()
+                .unwrap();
             assert!(!contains(&data, SECRET));
             assert_eq!(sent.media_type, media_type);
             assert_eq!(sent.size, Some((20, 10)));
@@ -298,16 +318,55 @@ mod tests {
     #[test]
     fn a_large_picture_is_scaled() {
         let mut data = Zeroizing::new(png(2000, 1000));
-        let sent = sent_picture(&mut data, "image/png").unwrap().unwrap();
+        let sent = sent_picture(&mut data, "image/png", Some(SENT_MAX))
+            .unwrap()
+            .unwrap();
         assert_eq!(sent.size, Some((1600, 800)));
         let thumbnail = decode(&sent.thumbnail.unwrap()).unwrap();
         assert_eq!(thumbnail.width(), SENT_THUMBNAIL_MAX);
     }
 
     #[test]
+    fn asked_to_keep_the_size_it_does() {
+        let mut data = Zeroizing::new(png(2000, 1000));
+        let sent = sent_picture(&mut data, "image/png", None).unwrap().unwrap();
+        assert_eq!(sent.size, Some((2000, 1000)));
+        assert_eq!(decode(&data).unwrap().width(), 2000);
+    }
+
+    /// A PNG of this size and these bits, of a head alone.
+    fn png_head(side: u32, bits: u8) -> Vec<u8> {
+        let mut header = [0; 13];
+        header[..4].copy_from_slice(&side.to_be_bytes());
+        header[4..8].copy_from_slice(&side.to_be_bytes());
+        header[8] = bits;
+        header[9] = 6; // RGBA
+        [
+            b"\x89PNG\r\n\x1a\n".as_slice(),
+            &png_chunk(b"IHDR", &header),
+            &png_chunk(b"IDAT", b""),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn what_decoding_takes_is_known_before_it_starts() {
+        assert_eq!(decoding_memory(&png_head(1000, 8)), 8_000_000);
+        assert_eq!(decoding_memory(&png_head(1000, 16)), 16_000_000);
+        assert_eq!(decoding_memory(&png_head(6000, 8)), 288_000_000);
+        // Over the limits: nothing to reserve, as it isn't decoded.
+        assert_eq!(decoding_memory(&png_head(7000, 8)), 0);
+        assert_eq!(decoding_memory(&png_head(5000, 16)), 0, "25 MP of 16 bits");
+        assert!(decode(&png_head(5000, 16)).is_none());
+        assert_eq!(decoding_memory(b"no picture"), 0);
+    }
+
+    #[test]
     fn a_webp_loses_its_metadata_and_a_gif_goes_as_it_is() {
         let mut data = Zeroizing::new(crate::webp::fixture::still());
-        let sent = sent_picture(&mut data, "image/webp").unwrap().unwrap();
+        let sent = sent_picture(&mut data, "image/webp", Some(SENT_MAX))
+            .unwrap()
+            .unwrap();
         assert!(!contains(&data, b"GPS here"));
         assert_eq!(sent.media_type, "image/webp");
         assert_eq!(sent.size, Some((320, 240)));
@@ -315,7 +374,9 @@ mod tests {
 
         let gif = b"GIF89a\x40\x01\xf0\x00rest";
         let mut data = Zeroizing::new(gif.to_vec());
-        let sent = sent_picture(&mut data, "image/gif").unwrap().unwrap();
+        let sent = sent_picture(&mut data, "image/gif", Some(SENT_MAX))
+            .unwrap()
+            .unwrap();
         assert_eq!(data.as_slice(), gif);
         assert_eq!(sent.size, Some((320, 240)));
     }
@@ -332,6 +393,7 @@ mod tests {
             b"\x89PNG\r\n\x1a\n".as_slice(),
             &png_chunk(b"IHDR", &header),
             &png_chunk(b"tEXt", &[b"Comment\0", SECRET].concat()),
+            &png_chunk(b"IDAT", b""),
         ]
         .concat();
         let damaged = [&jpeg_with_exif()[..40], b"cut"].concat();
@@ -346,12 +408,18 @@ mod tests {
             ("no GIF", b"text".to_vec(), "image/gif"),
         ] {
             let mut data = Zeroizing::new(source.clone());
-            assert!(sent_picture(&mut data, claimed).is_err(), "{why}: not sent");
+            assert!(
+                sent_picture(&mut data, claimed, None).is_err(),
+                "{why}: not sent"
+            );
             assert_eq!(*data, source, "{why}");
         }
         // Another kind of file altogether.
         let mut data = Zeroizing::new(b"II*\0 a tiff".to_vec());
-        assert!(matches!(sent_picture(&mut data, "image/tiff"), Ok(None)));
+        assert!(matches!(
+            sent_picture(&mut data, "image/tiff", None),
+            Ok(None)
+        ));
     }
 
     #[test]

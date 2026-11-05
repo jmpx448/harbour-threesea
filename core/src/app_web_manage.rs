@@ -83,20 +83,30 @@ impl App {
         let _ = self.media_events.send(event);
     }
 
-    /// A picture from the browser, made into our JPEG (512 px); done before anything changes, so
-    /// that one that can't be read refuses the request as a whole.
-    fn web_picture(data: Option<&Value>) -> Result<Picture, Code> {
+    /// A picture from the browser, made into our JPEG (512 px) on a blocking thread; done before
+    /// anything changes, so that one that can't be read refuses the request as a whole.
+    async fn web_picture(data: Option<&Value>) -> Result<Picture, Code> {
         let Some(avatar) = data.and_then(|data| field(data, "avatar")) else {
             return Ok(Picture::Unchanged);
         };
         if avatar.is_nil() {
             return Ok(Picture::Removed);
         }
-        avatar
-            .as_slice()
-            .and_then(|bytes| images::scaled_jpeg(bytes, images::AVATAR_HIGH_MAX, 85))
-            .map(Picture::New)
-            .ok_or("invalidAvatar")
+        let bytes = avatar.as_slice().ok_or("invalidAvatar")?.to_vec();
+        let memory = crate::media::reserve_memory_within(
+            images::decoding_memory(&bytes),
+            crate::media::COMMAND_MEMORY_WAIT,
+        )
+        .await;
+        crate::media::off_thread(move || {
+            let _memory = memory;
+            images::scaled_jpeg(&bytes, images::AVATAR_HIGH_MAX, 85)
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(Picture::New)
+        .ok_or("invalidAvatar")
     }
 
     /// Run `set` (`setGroupPicture`, `setProfilePicture`) or `remove` for what `web_picture` found.
@@ -239,7 +249,7 @@ impl App {
                 {
                     Ok(group) => {
                         let key = group["key"].as_str().unwrap_or_default().to_owned();
-                        let picture = Self::web_picture(data).unwrap_or(Picture::Unchanged);
+                        let picture = Self::web_picture(data).await.unwrap_or(Picture::Unchanged);
                         let _ = self
                             .web_apply_picture(
                                 picture,
@@ -272,7 +282,7 @@ impl App {
                 {
                     return Some(Err("valueTooLong"));
                 }
-                let picture = match Self::web_picture(data) {
+                let picture = match Self::web_picture(data).await {
                     Ok(picture) => picture,
                     Err(code) => return Some(Err(code)),
                 };
@@ -436,7 +446,7 @@ impl App {
                 Ok(confirm())
             }
             ("update", "profile") => {
-                let picture = match Self::web_picture(data) {
+                let picture = match Self::web_picture(data).await {
                     Ok(picture) => picture,
                     Err(code) => return Some(Err(code)),
                 };

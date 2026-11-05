@@ -2286,7 +2286,7 @@ impl App {
                     let mut data = media.read(id, MediaPart::File)?;
                     let picture = match &mut data {
                         Some(data) if clean_picture => Some(
-                            crate::web::images::sent_picture(data, &claimed)
+                            crate::web::images::sent_picture(data, &claimed, None)
                                 .ok()
                                 .flatten(),
                         ),

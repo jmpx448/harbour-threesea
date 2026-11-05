@@ -410,8 +410,14 @@ impl App {
         if !as_file && media_type.starts_with("image/") {
             let mut picture = attachments.remove(0);
             let claimed = media_type.clone();
+            let memory = media::reserve_memory_within(
+                images::decoding_memory(&picture),
+                media::COMMAND_MEMORY_WAIT,
+            )
+            .await;
             let (picture, prepared) = media::off_thread(move || {
-                let prepared = images::sent_picture(&mut picture, &claimed);
+                let _memory = memory;
+                let prepared = images::sent_picture(&mut picture, &claimed, Some(images::SENT_MAX));
                 (picture, prepared)
             })
             .await

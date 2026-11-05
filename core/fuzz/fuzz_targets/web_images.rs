@@ -4,5 +4,5 @@
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let _ = threesea_core::web::images::thumbnail_info(data);
     let mut picture = zeroize::Zeroizing::new(data.to_vec());
-    let _ = threesea_core::web::images::sent_picture(&mut picture, "image/jpeg");
+    let _ = threesea_core::web::images::sent_picture(&mut picture, "image/jpeg", Some(1600));
 });
