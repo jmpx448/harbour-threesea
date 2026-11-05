@@ -11,6 +11,8 @@ Dialog {
     property string quality: ""   // tooShort | tooLong | weak | ok, from the core
     // Asked of a new ID (the chat list): going on without Threema Safe takes a choice of its own.
     property bool firstRun: false
+    // Threema Safe is on already, and this replaces its password.
+    property bool changing: false
     readonly property bool skip: firstRun && skipSwitch.checked
 
     canAccept: skip || ((quality === "ok" || quality === "weak") && repeatField.text === passwordField.text)
@@ -35,13 +37,19 @@ Dialog {
                 acceptText: dialog.skip
                             //% "Continue"
                             ? qsTrId("threesea-he-continue")
-                            //% "Enable"
-                            : qsTrId("threesea-he-enable")
+                            : dialog.changing
+                              //% "Change"
+                              ? qsTrId("threesea-he-change")
+                              //% "Enable"
+                              : qsTrId("threesea-he-enable")
             }
 
             InfoLabel {
+                text: dialog.changing
+                      //% "Choose a new password for Threema Safe. A new backup replaces the one made with the old password. Only your password (at least 8 characters) unlocks it: if you forget it, the backup cannot be recovered."
+                      ? qsTrId("threesea-la-safe-password-change-intro")
                 //% "Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, updated when something changes. For your chats, use Data backup. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered."
-                text: qsTrId("threesea-la-safe-password-intro-changes")
+                      : qsTrId("threesea-la-safe-password-intro-changes")
             }
 
             PasswordField {

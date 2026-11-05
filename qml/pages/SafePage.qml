@@ -58,8 +58,8 @@ Page {
         })
     }
 
-    function askPassword() {
-        var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"))
+    function askPassword(changing) {
+        var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"), { changing: changing === true })
         dialog.accepted.connect(function() { page.run("safeEnable", { password: dialog.password, pin: page.pin }) })
     }
 
@@ -84,7 +84,7 @@ Page {
                 //% "Change password"
                 text: qsTrId("threesea-me-safe-change-password")
                 enabled: !page.working
-                onClicked: page.askPassword()
+                onClicked: page.askPassword(true)
             }
             MenuItem {
                 visible: page.pendingImports > 0
