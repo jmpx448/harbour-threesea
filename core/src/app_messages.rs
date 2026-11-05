@@ -1057,34 +1057,64 @@ impl App {
     /// Mark a conversation read; sends read receipts if enabled (globally or per contact).
     pub(crate) fn mark_read(&mut self, identity: &str) -> Result<Value, ApiError> {
         let (id, conversation) = self.readable_chat(identity)?;
+        let step = self.store.step()?;
         let read = self.store.mark_conversation_read(&id)?;
-        // Also when read elsewhere than in the app's chat (Threema Web, a notification's action):
-        // the UI takes its notification away and recounts.
+        self.queue_read_reports(&id, conversation.as_ref(), &read)?;
+        step.commit()?;
         if !read.is_empty() {
+            // Also when read elsewhere than in the app's chat (Threema Web, a notification's
+            // action): the UI takes its notification away and recounts.
             let _ = self.media_events.send(crate::providers::CoreEvent::Call(
                 json!({ "event": "conversationRead", "identity": id }),
             ));
+            self.tell_connection(ToConnection::SendPending);
+        }
+        Ok(json!({ "read": read.len() }))
+    }
+
+    /// In the step that marks them read, as reading again finds nothing left to report: for the
+    /// other devices that these were read, in every chat, and for a contact the read receipt if
+    /// the policy allows one. They go out at the next chance, and leave the outbox once sent.
+    fn queue_read_reports(
+        &self,
+        chat: &str,
+        conversation: Option<&Conversation>,
+        read: &[u64],
+    ) -> Result<(), ApiError> {
+        if read.is_empty() {
+            return Ok(());
+        }
+        let queue = |kind: &str| -> Result<(), ApiError> {
+            for bundle in read.chunks(reactions::READ_REPORT_IDS_MAX) {
+                self.store.outbox_add(
+                    chat,
+                    MessageId::random().0,
+                    kind,
+                    &reactions::read_report_body(bundle),
+                )?;
+            }
+            Ok(())
+        };
+        if self.store.multi_device()?.is_some() {
+            queue(reactions::OUTBOX_READ_UPDATE)?;
         }
         // Groups have no read receipts (lists have nothing incoming); no contact, no way to send.
         if !matches!(conversation, Some(Conversation::Contact(_))) {
-            return Ok(json!({ "read": read.len() }));
+            return Ok(());
         }
         let send = match self
             .store
-            .contact(&id)?
+            .contact(chat)?
             .and_then(|c| c.read_receipt_policy_override)
         {
             Some(libthreema::protobuf::d2d_sync::ReadReceiptPolicy::SendReadReceipt) => true,
             Some(libthreema::protobuf::d2d_sync::ReadReceiptPolicy::DontSendReadReceipt) => false,
             None => self.app_settings()?.read_receipts,
         };
-        if send && !read.is_empty() {
-            self.tell_connection(ToConnection::ReadReceipts {
-                identity: id,
-                message_ids: read.clone(),
-            });
+        if send {
+            queue(reactions::OUTBOX_READ_RECEIPT)?;
         }
-        Ok(json!({ "read": read.len() }))
+        Ok(())
     }
 
     /// Tell the contact we are (not) typing, if enabled globally or for the contact.
@@ -1559,6 +1589,111 @@ mod tests {
         contact.feature_mask = FeatureMask(features);
         app.store.upsert_contact(&contact).unwrap();
         app
+    }
+
+    fn unread_from_peer(app: &App, count: u64) {
+        for id in 1..=count {
+            app.store
+                .insert_incoming(PEER, id, "text", "hi", 1)
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    /// What the outbox holds for a chat: kind and the number of message IDs per entry.
+    fn read_reports(app: &App, chat: &str) -> Vec<(String, usize)> {
+        app.store
+            .outbox()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.conversation == chat)
+            .map(|entry| {
+                let ids = reactions::read_report_ids(&entry.body).len();
+                (entry.kind, ids)
+            })
+            .collect()
+    }
+
+    /// Reading a chat a second time finds nothing, so the report waits in the store from the
+    /// first; none is left to the channel to the connection. In bundles the protocol allows.
+    #[test]
+    fn reading_a_chat_queues_its_read_receipts_in_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        unread_from_peer(&app, 876);
+        assert_eq!(app.mark_read(PEER).unwrap()["read"], 876);
+        let receipts = [
+            (reactions::OUTBOX_READ_RECEIPT.to_owned(), 875),
+            (reactions::OUTBOX_READ_RECEIPT.to_owned(), 1),
+        ];
+        assert_eq!(read_reports(&app, PEER), receipts);
+        assert_eq!(app.mark_read(PEER).unwrap()["read"], 0);
+        assert_eq!(read_reports(&app, PEER), receipts);
+    }
+
+    /// With read receipts off, the contact hears nothing and the other devices still do; with a
+    /// receipt they hear of it the same way. Without other devices it is nobody's business.
+    #[test]
+    fn read_updates_go_to_the_other_devices_with_or_without_a_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let update = (reactions::OUTBOX_READ_UPDATE.to_owned(), 1);
+        let receipt = (reactions::OUTBOX_READ_RECEIPT.to_owned(), 1);
+
+        let mut contact = test_contact(PEER);
+        contact.read_receipt_policy_override =
+            Some(libthreema::protobuf::d2d_sync::ReadReceiptPolicy::DontSendReadReceipt);
+        app.store.upsert_contact(&contact).unwrap();
+        unread_from_peer(&app, 1);
+        app.mark_read(PEER).unwrap();
+        assert!(read_reports(&app, PEER).is_empty());
+
+        app.store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        app.store
+            .insert_incoming(PEER, 2, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+        app.mark_read(PEER).unwrap();
+        assert_eq!(read_reports(&app, PEER), std::slice::from_ref(&update));
+        app.store.outbox_clear(PEER).unwrap();
+
+        contact.read_receipt_policy_override = None;
+        app.store.upsert_contact(&contact).unwrap();
+        app.store
+            .insert_incoming(PEER, 3, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+        app.mark_read(PEER).unwrap();
+        assert_eq!(read_reports(&app, PEER), [update, receipt]);
+    }
+
+    /// A group sends no read receipts; the other devices hear of what was read in it.
+    #[test]
+    fn reading_a_group_is_told_to_the_other_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let key = notes_group(&app);
+        let unread = |app: &App, id| {
+            app.store
+                .insert_incoming_group(&key, PEER, id, "text", "hi", 1)
+                .unwrap()
+                .unwrap();
+        };
+        unread(&app, 1);
+        app.mark_read(&key).unwrap();
+        assert!(read_reports(&app, &key).is_empty());
+
+        app.store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        unread(&app, 2);
+        app.mark_read(&key).unwrap();
+        assert_eq!(
+            read_reports(&app, &key),
+            [(reactions::OUTBOX_READ_UPDATE.to_owned(), 1)]
+        );
     }
 
     fn notes_group(app: &App) -> String {

@@ -139,6 +139,11 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   in the nonce table, send, and mark the message "sent" on the server's message-ack. Delivery and
   read receipts are delivery-receipt messages handled by libthreema and surfaced through
   `add_or_update_incoming_message`.
+- What a read has to tell others is queued in the outbox in the step that marks the messages read
+  (reading again finds nothing): read receipts in bundles of 875 IDs, removed on the server's ack;
+  with linked devices also a read update (`d2d.IncomingMessageUpdate`) for every chat, receipt or
+  not, removed on the mediator's ack. The spec would reflect the outgoing receipt where one goes
+  out; the update says the same to the other devices and also covers a contact blocked meanwhile.
 - Our nickname goes in the metadata of messages that distribute the profile. Three answers:
   a name; an empty string, which makes the receiver drop the name it knows (Android's
   `setNicknameFromRemote("")`); or nothing, which leaves it alone. An ID backup holds no nickname,

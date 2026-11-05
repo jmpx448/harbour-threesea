@@ -91,6 +91,9 @@ const ECHO_LAST_LOOK: Duration = Duration::from_secs(1);
 const NOTIFY_GRACE: Duration = Duration::from_secs(8);
 /// Typing indicators older than this when the connection gets to them are not sent.
 const TYPING_MAX_AGE: Duration = Duration::from_secs(5);
+/// Message IDs in one reflected read update: under the 7000 bytes the protocol wants of a message,
+/// for the longer entries, a group's.
+const READ_UPDATE_IDS_MAX: usize = 128;
 /// How often one contact's feature mask is looked up because of what it sent: anyone can send
 /// any number of Rejects, and each of a burst would ask the directory the same.
 const FS_MASK_CHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -178,13 +181,8 @@ impl ConnectionState {
 
 /// From the app to the connection.
 pub enum ToConnection {
-    /// A message was queued in the store (state pending): send it if connected.
+    /// A message or an outbox entry was queued in the store: send it if connected.
     SendPending,
-    /// Send read receipts for these incoming message ids of a conversation.
-    ReadReceipts {
-        identity: String,
-        message_ids: Vec<u64>,
-    },
     /// Send a typing indicator (ephemeral: dropped by the server if the contact is offline).
     Typing {
         identity: String,
@@ -1247,7 +1245,15 @@ async fn wait_for_next_attempt(
                     let reason = DeviceGroupError::NotConnected.to_string();
                     let _ = reply.send(JoinOutcome::FailedBeforeHandover(reason));
                 }
-                Some(_) => {}, // queued in the store, sent after connecting
+                // What this announces is in the store and goes out after connecting.
+                Some(ToConnection::SendPending) => {}
+                // Only worth anything now.
+                Some(
+                    ToConnection::Typing { .. }
+                    | ToConnection::Flush(_)
+                    | ToConnection::FsControl { .. }
+                    | ToConnection::CallSignal { .. },
+                ) => {}
             },
         }
     }
@@ -2118,6 +2124,16 @@ impl<'a> Session<'a> {
         &mut self,
         entry: reactions::OutboxEntry,
     ) -> Result<(), ConnectionError> {
+        if entry.kind == reactions::OUTBOX_READ_UPDATE {
+            let message_ids = reactions::read_report_ids(&entry.body);
+            self.reflect_read(&entry.conversation, &message_ids, entry.created_at)
+                .await?;
+            self.setup
+                .store
+                .outbox_remove(&entry.conversation, entry.message_id)
+                .map_err(storage_error)?;
+            return Ok(());
+        }
         if let Some(group) = crate::groups::parse_key(&entry.conversation) {
             let Some(body) = outbox_group_body(&entry) else {
                 tracing::warn!(kind = entry.kind, "dropping unsendable group outbox entry");
@@ -2155,8 +2171,11 @@ impl<'a> Session<'a> {
             Some(body)
                 if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))? =>
             {
-                // A delivery receipt says nothing the other devices go by.
-                if entry.kind != reactions::OUTBOX_DELIVERY_RECEIPT {
+                // A delivery receipt says nothing the other devices go by, and of what was read
+                // they hear through `OUTBOX_READ_UPDATE`, receipt or not.
+                if entry.kind != reactions::OUTBOX_DELIVERY_RECEIPT
+                    && entry.kind != reactions::OUTBOX_READ_RECEIPT
+                {
                     self.reflect_outgoing(
                         &entry.conversation,
                         entry.message_id,
@@ -2433,36 +2452,6 @@ impl<'a> Session<'a> {
                 Ok(None)
             }
         }
-    }
-
-    async fn send_read_receipt(
-        &mut self,
-        receiver: &str,
-        message_ids: Vec<u64>,
-    ) -> Result<(), ConnectionError> {
-        if message_ids.is_empty() {
-            return Ok(());
-        }
-        self.reflect_read(receiver, &message_ids).await?;
-        let body = ContactMessageBody::DeliveryReceipt(DeliveryReceiptMessage {
-            receipt_type: DeliveryReceiptType::Read,
-            message_ids: message_ids.into_iter().map(MessageId).collect(),
-        });
-        let created_at = crate::messages::now_ms();
-        for payload in self
-            .encode(
-                receiver,
-                MessageId::random().0,
-                created_at,
-                Outgoing::Contact(body),
-            )
-            .await?
-            .unwrap_or_default()
-        {
-            self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
-                .await?;
-        }
-        Ok(())
     }
 
     async fn send_typing(
@@ -3166,35 +3155,31 @@ impl<'a> Session<'a> {
         .await
     }
 
-    /// Messages read here: read on the other devices too.
+    /// Messages read here (at `read_at`): read on the other devices too. Removed from the queue
+    /// by the caller once the mediator has them; repeating it does no harm.
     async fn reflect_read(
         &mut self,
         conversation: &str,
         message_ids: &[u64],
+        read_at: i64,
     ) -> Result<(), ConnectionError> {
-        use libthreema::protobuf::d2d::{
-            IncomingMessageUpdate,
-            envelope::Content,
-            incoming_message_update::{Read, Update, update},
-        };
-        if self.multi_device.is_none() || message_ids.is_empty() {
+        use libthreema::protobuf::d2d::envelope::Content;
+        if self.multi_device.is_none() {
             return Ok(());
         }
         let Some(conversation_id) = d2d_conversation(conversation) else {
             return Ok(());
         };
-        let at = u64::try_from(crate::messages::now_ms()).unwrap_or_default();
-        self.reflect(Content::IncomingMessageUpdate(IncomingMessageUpdate {
-            updates: message_ids
-                .iter()
-                .map(|&message_id| Update {
-                    conversation: Some(conversation_id.clone()),
-                    message_id,
-                    update: Some(update::Update::Read(Read { at })),
-                })
-                .collect(),
-        }))
-        .await
+        let at = u64::try_from(read_at).unwrap_or_default();
+        for bundle in message_ids.chunks(READ_UPDATE_IDS_MAX) {
+            self.reflect(Content::IncomingMessageUpdate(read_update(
+                &conversation_id,
+                bundle,
+                at,
+            )))
+            .await?;
+        }
+        Ok(())
     }
 
     /// Another device's reflection: apply it, then acknowledge (also when it can't be used, or the
@@ -3683,9 +3668,6 @@ impl<'a> Session<'a> {
                 message = rx.recv() => match message {
                     None => return Err(ConnectionError::Stopped),
                     Some(ToConnection::SendPending) => self.send_pending().await?,
-                    Some(ToConnection::ReadReceipts { identity, message_ids }) => {
-                        self.send_read_receipt(&identity, message_ids).await?;
-                    },
                     // Queued while disconnected: stale by now, the contact's timer has expired anyway.
                     Some(ToConnection::Typing { identity, typing, at }) => if at.elapsed() < TYPING_MAX_AGE {
                         self.send_typing(&identity, typing).await?;
@@ -4125,6 +4107,28 @@ fn body_for_receiver(
     body.clone()
 }
 
+/// A chat's messages read at `at`, for the other devices.
+fn read_update(
+    conversation: &libthreema::protobuf::d2d::ConversationId,
+    message_ids: &[u64],
+    at: u64,
+) -> libthreema::protobuf::d2d::IncomingMessageUpdate {
+    use libthreema::protobuf::d2d::{
+        IncomingMessageUpdate,
+        incoming_message_update::{Read, Update, update},
+    };
+    IncomingMessageUpdate {
+        updates: message_ids
+            .iter()
+            .map(|&message_id| Update {
+                conversation: Some(conversation.clone()),
+                message_id,
+                update: Some(update::Update::Read(Read { at })),
+            })
+            .collect(),
+    }
+}
+
 /// The group variant of a message body (what can be sent to groups at all).
 fn to_group_body(body: ContactMessageBody) -> Option<GroupMessageBody> {
     Some(match body {
@@ -4255,6 +4259,15 @@ fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
             DeliveryReceiptMessage {
                 receipt_type: DeliveryReceiptType::Received,
                 message_ids: vec![message_id],
+            },
+        )),
+        reactions::OUTBOX_READ_RECEIPT => Some(ContactMessageBody::DeliveryReceipt(
+            DeliveryReceiptMessage {
+                receipt_type: DeliveryReceiptType::Read,
+                message_ids: reactions::read_report_ids(&entry.body)
+                    .into_iter()
+                    .map(MessageId)
+                    .collect(),
             },
         )),
         crate::profile_pictures::OUTBOX_REQUEST_PICTURE => Some(
@@ -4982,6 +4995,101 @@ mod sync_order_tests {
 
     fn text() -> Outgoing {
         Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    /// What the server's ack does.
+    async fn ack(session: &mut Session<'_>, receiver: &str, id: u64) {
+        session
+            .handle_instruction(CspProtocolInstruction {
+                state_update: None,
+                outgoing_frame: None,
+                incoming_payload: Some(IncomingPayload::MessageAck(MessageAck {
+                    sender_identity: receiver.parse().unwrap(),
+                    id: MessageId(id),
+                })),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Read in a tunnel, or during a backoff: the receipt is in the store, and stays there until
+    /// the server has it, however many connections that takes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_receipt_stays_in_the_store_until_the_server_has_it() {
+        let (_dir, mut app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        store
+            .insert_incoming(CREATOR, 1, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+        app.mark_read(CREATOR).unwrap();
+        let queued = store.outbox().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, reactions::OUTBOX_READ_RECEIPT);
+        assert_eq!(reactions::read_report_ids(&queued[0].body), [1]);
+        let receipt = queued[0].message_id;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Sending fails: this session has no working connection.
+        let mut lost = session(&setup, &tx).await;
+        assert!(lost.send_pending().await.is_err());
+        drop(lost);
+        assert_eq!(store.outbox().unwrap().len(), 1);
+
+        let mut next = session(&setup, &tx).await;
+        ack(&mut next, CREATOR, receipt).await;
+        assert!(store.outbox().unwrap().is_empty());
+    }
+
+    /// A queued read receipt goes out as one, with its message IDs.
+    #[test]
+    fn a_read_receipt_is_of_type_read_and_names_its_messages() {
+        let entry = reactions::OutboxEntry {
+            id: 1,
+            conversation: CREATOR.into(),
+            message_id: 1,
+            created_at: 1,
+            kind: reactions::OUTBOX_READ_RECEIPT.into(),
+            body: reactions::read_report_body(&[7, u64::MAX]),
+        };
+        let Some(ContactMessageBody::DeliveryReceipt(receipt)) = outbox_body(&entry) else {
+            panic!("not a delivery receipt");
+        };
+        assert!(matches!(receipt.receipt_type, DeliveryReceiptType::Read));
+        assert_eq!(receipt.message_ids, [MessageId(7), MessageId(u64::MAX)]);
+    }
+
+    /// Without other devices (any more) a read update has nowhere to go, and nothing waits for it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_update_leaves_the_outbox_without_a_message_to_anyone() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        store
+            .outbox_add(
+                CREATOR,
+                1,
+                reactions::OUTBOX_READ_UPDATE,
+                &reactions::read_report_body(&[9]),
+            )
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        session.send_pending().await.unwrap();
+        assert!(session.awaiting_ack.is_empty());
+        assert!(store.outbox().unwrap().is_empty());
+    }
+
+    /// The longest update there can be, for a group, stays under what the protocol wants of a
+    /// message.
+    #[test]
+    fn a_read_update_stays_small() {
+        use prost::Message as _;
+        let conversation = d2d_conversation("g:USER0001:ffffffffffffffff").unwrap();
+        let ids = vec![u64::MAX; READ_UPDATE_IDS_MAX];
+        let update = super::read_update(&conversation, &ids, u64::MAX);
+        assert!(update.encoded_len() < 7000, "{}", update.encoded_len());
     }
 
     /// In a mixed group the thumbs reach a member on an old client as what they understand; what

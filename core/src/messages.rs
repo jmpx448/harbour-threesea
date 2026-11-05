@@ -1191,6 +1191,9 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a chat's incoming messages read; the protocol IDs of those that weren't. The second
+    /// time there are none, so what the others have to hear of it is queued with this
+    /// ([`crate::reactions::OUTBOX_READ_RECEIPT`]).
     pub fn mark_conversation_read(&self, conversation: &str) -> Result<Vec<u64>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT message_id FROM messages WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",

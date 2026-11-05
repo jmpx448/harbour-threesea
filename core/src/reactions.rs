@@ -4,7 +4,7 @@
 
 use libthreema::model::message::LegacyReactionType;
 use rusqlite::{OptionalExtension as _, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     messages::{Message, now_ms},
@@ -70,6 +70,30 @@ pub const OUTBOX_EDIT: &str = "edit";
 pub const OUTBOX_DELETE: &str = "delete";
 /// A delivery receipt for a received message: `{messageId}` (hex).
 pub const OUTBOX_DELIVERY_RECEIPT: &str = "deliveryReceipt";
+/// A read receipt to a contact: `{messageIds}` (hex), at most [`READ_REPORT_IDS_MAX`] of them.
+pub const OUTBOX_READ_RECEIPT: &str = "readReceipt";
+/// Messages read here, for the other devices of the group: `{messageIds}` (hex). Goes to the
+/// mediator alone, nothing to the chat server, in 1:1 chats and groups alike.
+pub const OUTBOX_READ_UPDATE: &str = "readUpdate";
+/// Message IDs in one read report: the protocol's bundle for `delivery-receipt` (8 bytes each,
+/// divided by at most 7000 bytes).
+pub const READ_REPORT_IDS_MAX: usize = 875;
+
+/// The outbox body of a read report.
+pub fn read_report_body(message_ids: &[u64]) -> Value {
+    let ids: Vec<String> = message_ids.iter().map(|id| format!("{id:016x}")).collect();
+    json!({ "messageIds": ids })
+}
+
+/// The message IDs of a read report's outbox body.
+pub fn read_report_ids(body: &Value) -> Vec<u64> {
+    body["messageIds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| u64::from_str_radix(id.as_str()?, 16).ok())
+        .collect()
+}
 
 /// The _Legacy Reaction Mapping Steps_: thumbs up/down (any skin tone) map to the
 /// acknowledge/decline delivery receipts that peers without `REACTION_SUPPORT` understand.
