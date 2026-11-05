@@ -61,6 +61,12 @@ fn is_loop_count(block: &[u8]) -> bool {
         && block[18] == 0
 }
 
+/// A graphic control block and nothing else: one sub-block of four bytes (flags, delay,
+/// transparent colour). More sub-blocks would be room for anything.
+fn is_graphic_control(block: &[u8]) -> bool {
+    block.len() == 2 + 1 + 4 + 1 && block[2] == 4 && block[7] == 0
+}
+
 /// The parts of the file that stay, in order. Touches nothing.
 fn kept_parts(bytes: &[u8]) -> Result<Vec<(usize, usize)>, NotCleanable> {
     if !is_gif(bytes) || bytes.len() < HEADER {
@@ -101,7 +107,11 @@ fn kept_parts(bytes: &[u8]) -> Result<Vec<(usize, usize)>, NotCleanable> {
                 let label = *bytes.get(at + 1).ok_or(NotCleanable)?;
                 at = past_sub_blocks(bytes, at + 2)?;
                 match label {
-                    GRAPHIC_CONTROL => control = Some((start, at)),
+                    GRAPHIC_CONTROL if is_graphic_control(&bytes[start..at]) => {
+                        control = Some((start, at));
+                    }
+                    // One with more in it goes, and its frame shows as decoders show one without.
+                    GRAPHIC_CONTROL => control = None,
                     APPLICATION if is_loop_count(&bytes[start..at]) => kept.push((start, at)),
                     PLAIN_TEXT => control = None,
                     _ => {}
@@ -234,6 +244,22 @@ mod tests {
         let once = cleaned(&file).unwrap();
         assert_eq!(once, file);
         assert_eq!(cleaned(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn a_control_block_with_more_in_it_goes() {
+        let mut file = fixture::clean();
+        let at = file
+            .windows(fixture::CONTROL.len())
+            .position(|part| part == fixture::CONTROL)
+            .unwrap();
+        // A second sub-block after the four bytes of the first.
+        file.splice(at + 7..at + 7, *b"\x08GPS here");
+        let out = cleaned(&file).unwrap();
+        assert!(!out.windows(8).any(|part| part == b"GPS here"));
+        let mut expected = fixture::clean();
+        expected.drain(at..at + fixture::CONTROL.len());
+        assert_eq!(out, expected);
     }
 
     #[test]
