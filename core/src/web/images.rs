@@ -123,7 +123,7 @@ pub struct PictureKeepsMetadata;
 /// Makes a picture sent as media (`claimed` its media type) fit to leave, in place: what a file
 /// says about itself stays behind. JPEG and PNG are made anew like FilePreparer's: upright, at most
 /// `max` (none: as large as they are), JPEG 85 or PNG if transparent, with our 512 px thumbnail. A WebP loses all but its
-/// picture and animation. A GIF goes as it is, as on the phone and on Android. `None`: another kind
+/// picture and animation. A GIF is left to `prepare_file`, where every GIF passes (`gif.rs`). `None`: another kind
 /// of file, whose bytes are untouched. Takes long, for a blocking thread.
 pub fn sent_picture(
     data: &mut Zeroizing<Vec<u8>>,
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn a_webp_loses_its_metadata_and_a_gif_goes_as_it_is() {
+    fn a_webp_loses_its_metadata_and_a_gif_is_left_for_later() {
         let mut data = Zeroizing::new(crate::webp::fixture::still());
         let sent = sent_picture(&mut data, "image/webp", Some(SENT_MAX))
             .unwrap()

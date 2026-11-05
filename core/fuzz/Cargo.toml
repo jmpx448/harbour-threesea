@@ -170,6 +170,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gif_clean"
+path = "fuzz_targets/gif_clean.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "webp_clean"
 path = "fuzz_targets/webp_clean.rs"
 test = false

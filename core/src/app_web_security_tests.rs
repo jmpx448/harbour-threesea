@@ -732,7 +732,7 @@ async fn web_sends_media_as_media() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let gif = b"GIF89a\x40\x01\xf0\x00rest";
+            let gif = crate::gif::fixture::with_metadata();
             let (video, _) = crate::mp4::fixture::video(640, 360, false);
             let newest = |app: &App| {
                 let id = app
@@ -793,14 +793,14 @@ async fn web_sends_media_as_media() {
             assert_eq!(body["rendering"], "file");
             assert_eq!(newest(&app).as_slice(), jpeg.as_slice());
 
-            let body = web_send(&mut app, wire(gif, "image/gif", false))
+            let body = web_send(&mut app, wire(&gif, "image/gif", false))
                 .await
                 .unwrap();
             assert_eq!(body["rendering"], "media");
             assert_eq!(body["animated"], true);
             assert!(!contains(&newest(&app), b"GPS here"));
-            assert_eq!(body["width"], 320);
-            assert_eq!(body["height"], 240);
+            assert_eq!(body["width"], 1);
+            assert_eq!(body["height"], 1);
             assert_eq!(body["thumbnail"], false);
             assert_eq!(
                 body["name"], "image.gif",

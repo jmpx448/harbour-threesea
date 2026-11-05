@@ -1112,8 +1112,8 @@ pub(crate) struct PreparedFile {
 }
 
 /// Everything about a file to send that takes long, and needs no store: for a blocking thread.
-/// Reads it if it didn't come along, makes a voice recording Opus, takes a video's metadata off,
-/// and encrypts it. Nothing is left behind if this or the rest fails.
+/// Reads it if it didn't come along, makes a voice recording Opus, takes a video's or a GIF's
+/// metadata off, and encrypts it. Nothing is left behind if this or the rest fails.
 fn prepare_file(
     media: &MediaStore,
     mut file: OutgoingFile,
@@ -1164,6 +1164,14 @@ fn prepare_file(
             }
             Err(crate::mp4::NotCleanable) => return Err(ApiError::VideoKeepsMetadata),
         }
+    }
+    // A GIF shown as a picture goes without what its file says about itself too, by its bytes,
+    // whichever way it came: from this phone, a favourite, a forward or the browser.
+    if file.rendering != "file" && crate::gif::is_gif(&data) {
+        let (width, height) =
+            crate::gif::clean(&mut data).map_err(|_| ApiError::PictureKeepsMetadata)?;
+        file.width = Some(width);
+        file.height = Some(height);
     }
     if data.len() > media::MAX_BLOB_SIZE {
         return Err(ApiError::FileTooLarge);
@@ -3853,10 +3861,10 @@ mod tests {
         let id = received(&app, 3, "image/jpeg", "file", &jpeg);
         let body = forward(&mut app, id).await.unwrap();
         assert_eq!(bytes(&body), jpeg);
-        let gif = b"GIF89a\x40\x01\xf0\x00rest";
-        let id = received(&app, 4, "image/gif", "media", gif);
+        let gif = crate::gif::fixture::with_metadata();
+        let id = received(&app, 4, "image/gif", "media", &gif);
         let body = forward(&mut app, id).await.unwrap();
-        assert_eq!(bytes(&body), gif);
+        assert_eq!(bytes(&body), crate::gif::fixture::clean());
 
         // What can't be read isn't passed on.
         let damaged = [&jpeg[..40], b"cut"].concat();
@@ -3891,7 +3899,7 @@ mod tests {
         assert_eq!(body["width"], 2000);
 
         // A thumbnail of the sender's, for what stays as it is, is made anew or left behind.
-        let id = received(&app, 11, "image/gif", "media", gif);
+        let id = received(&app, 11, "image/gif", "media", &gif);
         app.media.write(id, MediaPart::Thumbnail, &jpeg).unwrap();
         let body = forward(&mut app, id).await.unwrap();
         assert_eq!(body["thumbnail"], true);
@@ -3903,7 +3911,7 @@ mod tests {
             .id;
         let made = app.media.read(copy, MediaPart::Thumbnail).unwrap().unwrap();
         assert!(!contains(&made, secret));
-        let id = received(&app, 12, "image/gif", "media", gif);
+        let id = received(&app, 12, "image/gif", "media", &gif);
         app.media
             .write(id, MediaPart::Thumbnail, b"no picture, GPS-SECRET")
             .unwrap();

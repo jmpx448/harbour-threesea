@@ -43,6 +43,7 @@ pub mod distribution_lists;
 pub mod ffi;
 pub mod file_types;
 pub mod fs_store;
+pub mod gif;
 pub mod gifs;
 pub mod group_call_frames;
 pub mod group_call_handshake;
