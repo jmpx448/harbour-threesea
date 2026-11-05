@@ -135,6 +135,37 @@ impl Datagrams {
     }
 }
 
+/// Both ends of a WebSocket over the loopback address, without TLS: a stand-in for a server's
+/// relay or mediator in tests. Nothing else is reached.
+#[cfg(test)]
+pub(crate) async fn loopback() -> (Datagrams, Datagrams) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(MAX_MESSAGE);
+    config.max_frame_size = Some(MAX_MESSAGE);
+    let (ours, theirs) = tokio::join!(
+        async {
+            let socket = TcpStream::connect(address).await.unwrap();
+            tokio_tungstenite::client_async_with_config(
+                format!("ws://{address}/"),
+                MaybeTlsStream::Plain(socket),
+                Some(config),
+            )
+            .await
+            .unwrap()
+            .0
+        },
+        async {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async_with_config(MaybeTlsStream::Plain(socket), Some(config))
+                .await
+                .unwrap()
+        },
+    );
+    (Datagrams { stream: ours }, Datagrams { stream: theirs })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +188,18 @@ mod tests {
             target("wss://[2001:db8::1]:8443/"),
             Some(("2001:db8::1".to_owned(), 8443))
         );
+    }
+
+    /// Not even a connection attempt to a host that isn't Threema's (a port nobody listens on:
+    /// an attempt would end in "refused" instead).
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_threema_hosts_are_connected_to() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let url = format!("wss://{closed}/");
+        let result = Datagrams::connect(&url).await;
+        assert!(matches!(result, Err(WebSocketError::NotThreema)));
     }
 }
