@@ -33,6 +33,8 @@ function messages() {
         message(3, "text", { text: "with a reaction, starred and edited", starred: true, editedAt: 1700000000000,
                              reactions: [{ emoji: "👍", identity: "AAAAAAAA", mine: true }] }),
         message(4, "text", { text: "a quote", quoteId: "0000000000001002" }),
+        message(40, "text", { text: "*bold* _italic_ and https://example.com" }),
+        message(41, "text", { text: "~struck through~ and https://example.com" }),
         message(5, "file", { body: file("image/jpeg", "image") }),
         message(6, "file", { body: file("image/gif", "image") }),
         message(7, "file", { body: file("video/mp4", "media") }),

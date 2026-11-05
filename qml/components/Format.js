@@ -238,15 +238,147 @@ function highlightMatch(text, query, color) {
     return html + escapeHtml(text.substring(position))
 }
 
+// ---- Threema's text formatting: *bold*, _italic_, ~strikethrough~ (Android's MarkupParser, whose
+// test cases are in tests/format). The stored text keeps its marks, whatever shows it. ----
+
+// Cheap check before the real work: the same mark twice on a line.
+function mayHaveMarkup(text) {
+    return /([*_~])[^\n]*\1/.test(text || "")
+}
+
+var markupBoundary = /[ \t\n\x0B\f\r.,!?¡¿‽⸮;:&(){}\[\]⟨⟩‹›«»'"‘’“”*~\-_…⋯᠁]/
+var markupUrlChar = /[a-zA-Z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]/
+var markupLetter = /[a-zA-Z]/
+// Stands for what isn't text of its own: a link with everything in it, a mention. A word's part,
+// for the marks around it.
+var markupObject = "\uFFFC"
+var markupEntities = { "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": "\"", "&#39;": "'", "&apos;": "'" }
+var markupTags = { "*": "b", "_": "i", "~": "s" }
+
+// Is a URL starting at `i`? Letters, then "://". Only the first of the letters needs to look.
+function markupUrlStart(chars, i) {
+    if (!markupLetter.test(chars[i]) || (i > 0 && markupLetter.test(chars[i - 1]))) return false
+    var end = i
+    while (end < chars.length && markupLetter.test(chars[end])) ++end
+    return chars[end] === ":" && chars[end + 1] === "/" && chars[end + 2] === "/"
+}
+
+// The marks that format something in `chars` (one string per unit: the character it shows as):
+// [{open, close, mark}] as indices. Spans don't overlap: each lies within another or apart from it.
+function markupSpans(chars) {
+    var tokens = []
+    var inUrl = false
+    var i
+    function text() {
+        if (tokens.length === 0 || tokens[tokens.length - 1].mark) tokens.push({ mark: "" })
+    }
+    function boundary(at) {
+        return at < 0 || at >= chars.length || markupBoundary.test(chars[at])
+    }
+    for (i = 0; i < chars.length; ++i) {
+        var c = chars[i]
+        if (!inUrl) inUrl = markupUrlStart(chars, i)
+        if (inUrl) {
+            if (i + 1 >= chars.length || !markupUrlChar.test(chars[i + 1])) inUrl = false
+            text()
+        } else if (markupTags[c] && (boundary(i - 1) || boundary(i + 1))) {
+            tokens.push({ mark: c, at: i })
+        } else if (c === "\n") {
+            tokens.push({ mark: "\n" })
+        } else {
+            text()
+        }
+    }
+
+    // A mark looks for its partner on the stack; what lies between counts as text, also marks of
+    // other kinds. After a line's end nothing looks further back than the line.
+    var spans = []
+    var stack = []
+    var present = {}
+    for (i = 0; i < tokens.length; ++i) {
+        var token = tokens[i]
+        if (token.mark === "") {
+            stack.push(token)
+        } else if (token.mark === "\n") {
+            present = {}
+        } else if (!present[token.mark]) {
+            stack.push(token)
+            present[token.mark] = true
+        } else {
+            var inner = 0
+            while (true) {
+                var top = stack.pop()
+                if (!top) return []
+                if (top.mark === token.mark) {
+                    if (inner > 0) spans.push({ open: top.at, close: token.at, mark: token.mark })
+                    stack.push({ mark: "" })
+                    present[token.mark] = false
+                    break
+                }
+                ++inner
+                if (top.mark) present[top.mark] = false
+            }
+        }
+    }
+    return spans
+}
+
+// The units' sources, with `tag(mark, closing)` in place of the marks that format.
+function markupRender(units, chars, tag) {
+    var spans = markupSpans(chars)
+    if (spans.length === 0) return units.join("")
+    var replaced = {}
+    for (var i = 0; i < spans.length; ++i) {
+        replaced[spans[i].open] = tag(spans[i].mark, false)
+        replaced[spans[i].close] = tag(spans[i].mark, true)
+    }
+    var out = ""
+    for (var u = 0; u < units.length; ++u) out += replaced[u] !== undefined ? replaced[u] : units[u]
+    return out
+}
+
+// The marks in LinkedLabel's linkified, escaped text as StyledText. Links and mention tags stay
+// whole; an entity counts as the character it is.
+function markMarkup(html) {
+    if (!mayHaveMarkup(html)) return html
+    var units = html.match(/<a\b[^>]*>[\s\S]*?<\/a>|<[^>]*>|&[a-zA-Z0-9#]+;|@\[[0-9A-Z*@]{8}\]|[\s\S]/g) || []
+    var chars = units.map(function(unit) {
+        if (unit.length === 1) return unit
+        if (unit.charAt(0) === "&") return markupEntities[unit] || markupObject
+        return /^<br\b/.test(unit) ? "\n" : markupObject
+    })
+    return markupRender(units, chars, function(mark, closing) {
+        return "<" + (closing ? "/" : "") + markupTags[mark] + ">"
+    })
+}
+
+// StyledText has no strikethrough in Qt 5.6 (tests/format), so a text with it is rich text.
+function needsRichText(html) {
+    return html.indexOf("<s>") >= 0
+}
+
+// Rich text takes no linkColor: links say it themselves.
+function colourLinks(html, color) {
+    return html.replace(/<a /g, "<a style=\"color:" + color + "\" ")
+}
+
+// Plain `text` as it reads without its formatting marks: previews, notifications.
+function stripMarkup(text) {
+    if (!mayHaveMarkup(text)) return text || ""
+    var units = text.match(/@\[[0-9A-Z*@]{8}\]|[\s\S]/g) || []
+    var chars = units.map(function(unit) { return unit.length === 1 ? unit : markupObject })
+    return markupRender(units, chars, function() { return "" })
+}
+
 function preview(message) {
     if (!message) return ""
-    if (message.kind === "text") return withMentions(message.text, message.mentions).replace(/\s+/g, " ")
+    if (message.kind === "text") return withMentions(stripMarkup(message.text), message.mentions).replace(/\s+/g, " ")
     if (message.kind === "status") return status(message.body)
     //% "Location"
     if (message.kind === "location") return (message.body && message.body.name) || qsTrId("threesea-la-location")
     if (message.kind === "file") {
         var file = message.body || {}
-        if (file.caption) return withMentions(file.caption, message.mentions).replace(/\s+/g, " ")
+        if (file.caption) return withMentions(stripMarkup(file.caption), message.mentions).replace(/\s+/g, " ")
         //% "Voice message"
         if (String(file.mediaType).indexOf("audio/") === 0 && file.rendering !== "file") return qsTrId("threesea-la-voice-message")
         //% "Photo"

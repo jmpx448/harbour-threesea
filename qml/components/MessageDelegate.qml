@@ -86,11 +86,11 @@ ListItem {
     // The core sends `mentions` only when the text (or caption) has @[ID] tags.
     readonly property bool hasMentions: !!model.mentions && (model.kind === "text" || isFile)
     readonly property Item chatView: ListView.view
-    // Shown as StyledText (mentionLabel): mentions, or Threema's emoji pictures (Settings →
-    // Appearance → Emoji style); otherwise the plain LinkedLabel.
-    readonly property bool richText: hasMentions
-                                     || (backend.threemaEmoji && Fmt.mayHaveEmoji(model.kind === "text" ? model.text
-                                                                                    : isFile ? model.body.caption : ""))
+    readonly property string ownText: (model.kind === "text" ? model.text : isFile ? model.body.caption : "") || ""
+    // Shown as StyledText (mentionLabel): mentions, *formatting*, or Threema's emoji pictures
+    // (Settings → Appearance → Emoji style); otherwise the plain LinkedLabel.
+    readonly property bool richText: hasMentions || Fmt.mayHaveMarkup(ownText)
+                                     || (backend.threemaEmoji && Fmt.mayHaveEmoji(ownText))
 
     readonly property bool isDeleted: model.kind === "deleted"
     readonly property bool isEdited: (model.kind === "text" || isFile) && !!model.editedAt
@@ -507,8 +507,8 @@ ListItem {
             LinkedLabel {
                 id: textLabel
                 y: content.fileHeight
-                // With mentions or emoji pictures this only finds the links; mentionLabel shows
-                // the result.
+                // With mentions, formatting or emoji pictures this only finds the links;
+                // mentionLabel shows the result.
                 visible: content.hasText && !content.rich
                 width: Math.min(implicitWidth, item.maxTextWidth)
                 plainText: item.richText ? (model.kind === "text" ? model.text : model.body.caption || "")
@@ -538,8 +538,8 @@ ListItem {
                 onLinkActivated: item.selectionMode ? item.selectToggled() : window.openLink(link, true)
             }
 
-            // Mentions in bold, in the ambience's highlight colour, to catch the eye; emoji as
-            // pictures, a bit larger than the text like Threema's.
+            // Mentions in bold, in the ambience's highlight colour, to catch the eye; the sender's
+            // formatting; emoji as pictures, a bit larger than the text like Threema's.
             Loader {
                 id: mentionLoader
                 y: content.fileHeight
@@ -551,11 +551,14 @@ ListItem {
                 Text {
                     visible: content.hasText
                     width: message.maxTextWidth
-                    text: !message.richText ? ""
-                          : Fmt.markEmoji(message.hasMentions ? Fmt.markMentions(textLabel.text, model.mentions, Theme.highlightColor)
-                                                           : textLabel.text,
-                                          textLabel.emojiSize)
-                    textFormat: Text.StyledText
+                    text: {
+                        if (!message.richText) return ""
+                        var html = Fmt.markMarkup(textLabel.text)
+                        if (message.hasMentions) html = Fmt.markMentions(html, model.mentions, Theme.highlightColor)
+                        if (Fmt.needsRichText(html)) html = Fmt.colourLinks(html, textLabel.linkColor)
+                        return backend.threemaEmoji ? Fmt.markEmoji(html, textLabel.emojiSize) : html
+                    }
+                    textFormat: Fmt.needsRichText(text) ? Text.RichText : Text.StyledText
                     wrapMode: Text.Wrap
                     font: textLabel.font
                     color: textLabel.color
