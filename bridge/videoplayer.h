@@ -52,6 +52,9 @@ signals:
     void failed(const QString &error);
 
 private:
+    void load();
+    void reloadAfterEnd();
+
     const ThreeseBackend *m_backend;
     QMediaPlayer *m_player;
     QByteArray m_data;
@@ -59,6 +62,9 @@ private:
     int m_messageId = -1;
     // Only the user starts the playback (VoicePlayer has the same, and says why).
     bool m_wantPlaying = false;
+    // It played to its end, and a stream can't be played or moved in after that: it is loaded
+    // again at once, or when somebody wants something from it first.
+    bool m_reloadDue = false;
 };
 
 #endif // VIDEOPLAYER_H

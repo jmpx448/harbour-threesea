@@ -260,6 +260,11 @@ software, so it cannot say how this feels on a phone.
      the emulator did, so this is the one thing that could only be checked here.
 2. Put the app aside while the video plays.
    - Expect: it pauses; coming back, the play button carries on.
+   Then, in the same video:
+   - Drag the slider somewhere and let go. Expect: the picture goes there, and the handle keeps
+     following the playback afterwards.
+   - Watch it to the end. Expect: the first frame (or at least a working page) with 0:00, and play
+     plays it again. At the end, drag the slider back instead. Expect: playing starts from there.
 3. Play a voice message, then lock the phone and wake the screen.
    - Expect: on the lock screen "Voice message", the chat's name, "Threesea" and a pause button that
      works. (The controls are on the lock screen only; Sailfish offers no position slider there.)
