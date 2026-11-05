@@ -143,21 +143,32 @@ bool ThreeseBackend::shutdown()
     // a second; this and the rest stay under the 15 s after which the Full flavour's update kills
     // the process.
     deliverUnderWay(this, [this]() { return !m_filesPreparing.isEmpty(); }, 3000);
-    bool clean = true;
-    {
-        QWriteLocker locker(&m_coreLock);
-        if (m_core) {
-            clean = threesea_core_quit(m_core);
-            m_core = nullptr;
-        }
+    // A reader of a large media file holds this until it has gone through the whole file, which is
+    // outside every limit of the stop. Not having it means leaving with the core still running,
+    // which the store takes like any crash.
+    if (!m_coreLock.tryLockForWrite(2000)) {
+        qWarning("threesea: a media read holds up the end");
+        // The core goes on until the process ends, so what it has been given can still get there.
+        deliverUnderWay(this, [this]() { return !m_mustArrive.isEmpty(); }, 3000);
+        tellWhatIsLost();
+        return false;
     }
+    bool clean = true;
+    if (m_core) {
+        clean = threesea_core_quit(m_core);
+        m_core = nullptr;
+    }
+    m_coreLock.unlock();
     // Its last answers: they say what got there.
     QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     tellWhatIsLost();
     // Without the core lock: a task reading media would wait for it. Scrypt takes seconds, and a
     // task left running would report to this object, which goes with the engine. The application
     // would wait for these in its destructor as well, however long a video being scaled takes.
-    return QThreadPool::globalInstance()->waitForDone(3000) && clean;
+    const bool workersDone = QThreadPool::globalInstance()->waitForDone(2000);
+    // A read still on its turn finds no core now and ends at once.
+    const bool readsDone = m_mediaReads.waitForDone(1000);
+    return workersDone && readsDone && clean;
 }
 
 // The window has gone, so this says it itself. Its text has no words of the user's in it.
