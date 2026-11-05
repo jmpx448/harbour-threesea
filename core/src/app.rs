@@ -552,6 +552,9 @@ pub enum Command {
     ForwardMessage {
         message: i64,
         identity: String,
+        /// What a file goes with instead of its own caption; empty for none.
+        #[serde(default)]
+        caption: Option<String>,
     },
     /// The unsent text of a chat's input (empty: none), with its mentions as `@[ID]` and the
     /// message it quotes (message id, hex), kept like Android's drafts; returned as `draft` and
@@ -604,6 +607,9 @@ pub enum Command {
     ForwardMessages {
         messages: Vec<i64>,
         identity: String,
+        /// As for `ForwardMessage`, for each of them.
+        #[serde(default)]
+        caption: Option<String>,
     },
     /// A chat's notifications: `policy` `never` (muted; until `until` ms if set) or
     /// `mentioned` (groups), none for on. Returns `{policy, until}`.
@@ -2235,9 +2241,13 @@ impl App {
                 })
                 .await
             }
-            Command::ForwardMessage { message, identity } => {
+            Command::ForwardMessage {
+                message,
+                identity,
+                caption,
+            } => {
                 // Boxed: all the commands' futures together must fit the stack.
-                Box::pin(self.forward_message(message, &identity)).await
+                Box::pin(self.forward_message(message, &identity, caption)).await
             }
             Command::SetDraft {
                 identity,
@@ -2297,11 +2307,16 @@ impl App {
             Command::StarredMessages { identity } => {
                 self.starred_messages_json(identity.as_deref())
             }
-            Command::ForwardMessages { messages, identity } => {
+            Command::ForwardMessages {
+                messages,
+                identity,
+                caption,
+            } => {
                 let (mut forwarded, mut failed) = (0, 0);
                 let mut errors: Vec<&str> = Vec::new();
                 for message in messages {
-                    match Box::pin(self.forward_message(message, &identity)).await {
+                    match Box::pin(self.forward_message(message, &identity, caption.clone())).await
+                    {
                         Ok(_) => forwarded += 1,
                         Err(error) => {
                             tracing::warn!(%error, "forwarding failed");

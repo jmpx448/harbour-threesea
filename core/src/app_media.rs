@@ -1725,7 +1725,7 @@ impl App {
         if let Conversation::List(list) = &conversation {
             for member in self.list_receivers(list)? {
                 // What the list got has been made fit to leave; each member gets the same.
-                let forwarded = Box::pin(self.copy_message(message.id, &member, false)).await;
+                let forwarded = Box::pin(self.copy_message(message.id, &member, false, None)).await;
                 if let Err(error) = forwarded {
                     tracing::warn!(%error, "sending a list's file to a member failed");
                 }
@@ -2373,12 +2373,14 @@ impl App {
     /// `forwardMessage`: send a text or file message again, to another chat (Android's
     /// "Forward"). Quotes are dropped (the quoted message is not in that chat); files are
     /// uploaded again with a new key, since blobs are deleted once downloaded.
+    /// `caption`: what a file goes with instead of its own; empty for none.
     pub(crate) async fn forward_message(
         &mut self,
         id: i64,
         identity: &str,
+        caption: Option<String>,
     ) -> Result<Value, ApiError> {
-        self.copy_message(id, identity, true).await
+        self.copy_message(id, identity, true, caption).await
     }
 
     /// `forwardMessage`, and a list's copy for a member. `clean`: a picture is made fit to leave
@@ -2390,6 +2392,7 @@ impl App {
         id: i64,
         identity: &str,
         clean: bool,
+        caption: Option<String>,
     ) -> Result<Value, ApiError> {
         let message = self
             .store
@@ -2491,7 +2494,7 @@ impl App {
                             media_type: picture
                                 .as_ref()
                                 .map_or(media_type, |picture| picture.media_type.to_owned()),
-                            caption: text("caption"),
+                            caption: caption.or_else(|| text("caption")),
                             rendering: text("rendering").unwrap_or_else(|| "file".into()),
                             width: picture
                                 .as_ref()
@@ -3907,7 +3910,7 @@ mod tests {
             .write(received.id, MediaPart::File, b"\x1aE\xdf\xa3")
             .unwrap();
         assert!(matches!(
-            in_own_set(app.forward_message(received.id, "CCCCCCCC")).await,
+            in_own_set(app.forward_message(received.id, "CCCCCCCC", None)).await,
             Err(ApiError::VideoKeepsMetadata)
         ));
     }
@@ -3944,7 +3947,9 @@ mod tests {
         };
         let forward = async |app: &mut App, id: i64| -> Result<Value, ApiError> {
             let local = tokio::task::LocalSet::new();
-            let sent = local.run_until(app.forward_message(id, "CCCCCCCC")).await?;
+            let sent = local
+                .run_until(app.forward_message(id, "CCCCCCCC", None))
+                .await?;
             let id = sent["id"].as_i64().unwrap();
             let body = app.store.message(id).unwrap().unwrap().body;
             let mut body: Value = serde_json::from_str(&body).unwrap();
@@ -4056,7 +4061,7 @@ mod tests {
             .create_distribution_list("Crew", vec!["CCCCCCCC".into()])
             .unwrap();
         let id = received(&app, 14, "image/jpeg", "media", &jpeg);
-        let sent = in_own_set(app.forward_message(id, &list.key))
+        let sent = in_own_set(app.forward_message(id, &list.key, None))
             .await
             .unwrap();
         let list_copy = sent["id"].as_i64().unwrap();
@@ -4075,6 +4080,64 @@ mod tests {
                 .unwrap()
                 .as_slice(),
             of_the_list.as_slice()
+        );
+    }
+
+    /// The user can change or take away a file's caption when forwarding it; a text stays itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_forward_can_change_or_drop_the_caption() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let body = json!({"rendering": "file", "mediaType": "application/pdf", "name": "a.pdf",
+                          "size": 4, "caption": "the first words", "fileState": STATE_LOCAL});
+        let file = app
+            .store
+            .insert_incoming("BBBBBBBB", 1, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media.write(file, MediaPart::File, b"%PDF").unwrap();
+        let text = app
+            .store
+            .insert_incoming("BBBBBBBB", 2, "text", "only words", 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut forward = async |extra: Value| -> Value {
+            let mut request = json!({"id": 1, "cmd": "forwardMessages", "identity": "CCCCCCCC",
+                                     "messages": [file]});
+            for (key, value) in extra.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let reply: Value =
+                serde_json::from_str(&in_own_set(app.handle(&request.to_string())).await).unwrap();
+            assert_eq!(reply["result"]["forwarded"], 1, "{reply}");
+            let newest = app.store.conversation_messages("CCCCCCCC", 1).unwrap();
+            serde_json::from_str(&newest[0].body).unwrap_or(newest[0].body.clone().into())
+        };
+        assert_eq!(forward(json!({})).await["caption"], "the first words");
+        assert_eq!(
+            forward(json!({"caption": "my words"})).await["caption"],
+            "my words"
+        );
+        assert_eq!(
+            forward(json!({"caption": ""})).await["caption"],
+            Value::Null
+        );
+        assert_eq!(
+            forward(json!({"messages": [text], "caption": "my words"})).await,
+            Value::from("only words")
         );
     }
 
@@ -4194,7 +4257,7 @@ mod tests {
 
         let source = app.store.conversation_messages("BBBBBBBB", 1).unwrap()[0].id;
         archive(&app, "EEEEEEEE");
-        in_own_set(app.forward_message(source, "EEEEEEEE"))
+        in_own_set(app.forward_message(source, "EEEEEEEE", None))
             .await
             .unwrap();
         assert!(back(&app, "EEEEEEEE"), "forward");
