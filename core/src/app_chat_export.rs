@@ -18,7 +18,7 @@ use crate::{
     app_messages::Conversation,
     contacts,
     media::MediaPart,
-    messages::{Message, media_kind, split_quote},
+    messages::{Message, split_quote},
 };
 
 /// Messages read from the store at a time (the whole chat is never in memory at once).
@@ -193,8 +193,8 @@ impl Shared {
                                     line.push_str(&format!("<{in_file}>"));
                                 }
                             }
-                            // Not included, but say what it was.
-                            None => line.push_str(&format!("<{}>", media_kind(&message.body))),
+                            // Not included, but say what it was: by its name, like Android.
+                            None => line.push_str(&format!("<{name}>")),
                         }
                     }
                     _ => continue,
@@ -395,6 +395,27 @@ mod tests {
         until_part_file(&mut export, out.path()).await;
         drop(export);
         assert_eq!(part_files(out.path()), 0);
+    }
+
+    /// Media left out are named by their file, not by a word of ours in English.
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_left_out_are_named_by_their_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let body = serde_json::json!({ "name": "holiday.jpg", "mediaType": "image/jpeg" });
+        app.store
+            .insert_incoming("ABCD1234", 2, "file", &body.to_string(), 2)
+            .unwrap();
+        let directory = out.path().to_str().unwrap().to_owned();
+        let result = app
+            .export_chat("ABCD1234", false, &directory, None, None, None)
+            .await
+            .unwrap();
+        let file = std::fs::File::open(result["path"].as_str().unwrap()).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let text = std::io::read_to_string(zip.by_name("messages.txt").unwrap()).unwrap();
+        assert!(text.contains("<holiday.jpg>"), "{text}");
     }
 
     #[tokio::test(flavor = "current_thread")]
