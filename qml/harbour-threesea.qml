@@ -270,6 +270,10 @@ ApplicationWindow {
             if (Qt.application.state === Qt.ApplicationActive && window.captureDiscardedUnsaid) {
                 window.sayCaptureDiscarded()
             }
+            // Timers stood still while the device slept: "connected" may be an old story by now.
+            if (Qt.application.state === Qt.ApplicationActive && backend.state === "ready") {
+                backend.call("wake")
+            }
             window.lockedNotification()
             window.startFailedNotification()
             // The group may have become private during the call.
@@ -672,6 +676,16 @@ ApplicationWindow {
         if (wakeLimit.running) {
             wakeLimit.stop()
             wakeJob.finished()
+        }
+    }
+    // The screen may be off, and the login needs the device up. begin() triggers the job, if it is
+    // enabled and not running already (checked against the SDK's plugin); without Keep running
+    // there is no job to hold the device with.
+    function wakeOnNetworkChange() {
+        if (wakeJob.enabled && !wakeJob.running) {
+            wakeJob.begin()
+        } else {
+            backend.call("wake")
         }
     }
 
@@ -1603,6 +1617,7 @@ ApplicationWindow {
             //% "The ID was not removed: %1"
             Notices.show(qsTrId("threesea-la-delete-data-failed").arg(Errors.text(kind, message)), Notice.Long, Notice.Center)
         }
+        onNetworkChangedSettled: window.wakeOnNetworkChange()
         onCoreEvent: {
             // `notify`: the chat's own notification setting (muted, mentions only) allows it.
             if (name === "messageAdded" && !data.message.outgoing && data.notify !== false) {

@@ -16,6 +16,7 @@ class QJsonObject;
 #include <QReadWriteLock>
 #include <QRunnable>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantMap>
@@ -358,6 +359,8 @@ public:
 signals:
     void stateChanged();
     void coreEvent(const QString &name, const QVariantMap &data);
+    // The networks in use have changed and calmed down: the window wakes the connection.
+    void networkChangedSettled();
     void connectionStateChanged();
     void unreadCountChanged();
     void unreadFromChanged();
@@ -440,6 +443,9 @@ private:
     QByteArray m_dbKey;
     QByteArray m_wrappedKey;
     class QNetworkConfigurationManager *m_network = nullptr;
+    // The networks in use: a change wakes the connection, once things have calmed down.
+    QStringList m_activeNetworks;
+    QTimer m_networkWakeTimer;
     bool m_unlockedAtStart = false;
     // Removing the ID: from the request until the new core runs. Status replies don't count then.
     bool m_removingData = false;

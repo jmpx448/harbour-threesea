@@ -102,6 +102,13 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     m_network = new QNetworkConfigurationManager(this);
     connect(m_network, &QNetworkConfigurationManager::configurationChanged, this, &ThreeseBackend::reportNetwork);
     connect(m_network, &QNetworkConfigurationManager::onlineStateChanged, this, &ThreeseBackend::reportNetwork);
+    m_networkWakeTimer.setSingleShot(true);
+    m_networkWakeTimer.setInterval(2000);
+    connect(&m_networkWakeTimer, &QTimer::timeout, this, [this]() {
+        if (m_state == QLatin1String("ready")) {
+            emit networkChangedSettled();
+        }
+    });
     connect(m_secrets, &SecretStore::failed, this, &ThreeseBackend::fail);
     // The core's own mark: killed after it began to wipe, before the bridge heard of it.
     const int removalMark = threesea_data_removal_mark(dataDir().toUtf8().constData());
@@ -272,11 +279,21 @@ void ThreeseBackend::setKeyEncryption(bool encrypt, const QString &passphrase, b
 void ThreeseBackend::reportNetwork()
 {
     bool unmetered = false;
+    QStringList active;
     for (const QNetworkConfiguration &config : m_network->allConfigurations(QNetworkConfiguration::Active)) {
+        active.append(config.identifier());
         const auto bearer = config.bearerType();
         if (bearer == QNetworkConfiguration::BearerWLAN || bearer == QNetworkConfiguration::BearerEthernet) {
             unmetered = true;
         }
+    }
+    // A socket on the old network hangs without a word, and a wait for the next attempt goes on
+    // although the network is back. Only what is in use counts: a Wi-Fi scan's findings are
+    // changes too. Together with the core's echo this tells within seconds.
+    active.sort();
+    if (active != m_activeNetworks) {
+        m_activeNetworks = active;
+        m_networkWakeTimer.start();
     }
     if (m_state != QLatin1String("ready")) {
         return;

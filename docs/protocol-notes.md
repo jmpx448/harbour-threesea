@@ -128,7 +128,8 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   meets the limit again (the waiting message repeats the lookup every time). A close that says not
   to come back by ourselves (`can_reconnect` false, mediator 41xx) means ten minutes by the clock:
   only "Connect now" ends that early, not the timer, a network change or returning to the app.
-  A wake-up shortens an echo already out to 15 s; the device stays up until
+  Wake-ups: every five minutes (Keep running), 2 s after the networks in use change, and on
+  returning to the app. A wake-up shortens an echo already out to 15 s; the device stays up until
   something was received and 2 s went by without more (after a new login: until
   `queue-send-complete` and, on the mediator, `reflection-queue-dry`, like Android's
   `BaseServerConnection`), or the attempt failed, and until transfers running have ended, for at
