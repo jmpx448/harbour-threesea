@@ -34,6 +34,7 @@
 #include "coreresult.h"
 #include "endofprocess.h"
 #include "filepreparer.h"
+#include "filetype.h"
 #include "peerimage.h"
 #include "photoedit.h"
 #include "voicerecorder.h"
@@ -543,7 +544,7 @@ void ThreeseBackend::finishDataRemoval()
     }
     loadBubbleSettings();
     applyQtLogLevel();
-    QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+    updateQuitOnClose();
 
     // Captures, a voice recording: all this app keeps there is plain files of the ID.
     QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively();
@@ -616,7 +617,7 @@ void ThreeseBackend::retryStart()
     m_errorKind.clear();
     m_errorText.clear();
     m_state = QStringLiteral("starting");
-    QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+    updateQuitOnClose();
     emit stateChanged();
     // After everything the old core has posted.
     QMetaObject::invokeMethod(this, "startAgain", Qt::QueuedConnection);
@@ -696,10 +697,12 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
 QString ThreeseBackend::sharedFileKind(const QString &path) const
 {
     const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
-    const QString type = FilePreparer::mediaTypeOf(QFileInfo(local));
-    return FilePreparer::isPicture(type) ? QStringLiteral("picture")
-         : type.startsWith(QLatin1String("video/")) ? QStringLiteral("video")
-         : QStringLiteral("file");
+    if (FileType::isInside(local, dataDir())
+            || FileType::isInside(local, QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+            || FileType::isInside(local, QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation))) {
+        return QStringLiteral("own");
+    }
+    return FileType::sharedKind(FileType::mediaTypeOf(QFileInfo(local)));
 }
 
 QString ThreeseBackend::captureFile(const QString &extension) const
@@ -1444,8 +1447,19 @@ void ThreeseBackend::setKeepRunning(bool keep)
         return;
     }
     QSettings().setValue(QStringLiteral("keepRunning"), keep);
-    QGuiApplication::setQuitOnLastWindowClosed(!keep);
+    updateQuitOnClose();
     emit keepRunningChanged();
+}
+
+void ThreeseBackend::setSendingInTurn(bool sending)
+{
+    m_sendingInTurn = sending;
+    updateQuitOnClose();
+}
+
+void ThreeseBackend::updateQuitOnClose()
+{
+    QGuiApplication::setQuitOnLastWindowClosed(!keepRunning() && !m_sendingInTurn);
 }
 
 QObject *ThreeseBackend::contacts() const

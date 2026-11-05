@@ -1909,12 +1909,17 @@ ApplicationWindow {
         method: "threesea"
         // The D-Bus name is ours already (bridge/main.cpp).
         registerName: false
+        // As in the .desktop file.
         capabilities: ["image/*", "video/*", "audio/*", "text/plain", "text/vcard", "text/x-vcard", "text/calendar",
-                       "text/x-vcalendar", "text/x-vnote", "text/html", "text/csv", "text/markdown", "text/xml",
-                       "application/*"]
+                       "text/x-vcalendar", "text/x-vnote", "text/html", "text/csv", "text/markdown", "text/xml", "text/rtf",
+                       "text/x-log", "text/x-markdown", "text/css", "text/javascript", "text/tab-separated-values", "text/x-csrc", "text/x-chdr",
+                       "text/x-c++src", "text/x-c++hdr", "text/x-python", "text/x-java", "text/x-rust", "text/x-qml", "text/x-tex",
+                       "text/x-patch", "text/x-sql", "text/x-go", "text/x-makefile", "text/x-cmake", "text/x-perl", "text/x-php",
+                       "text/x-ruby", "text/x-csharp", "text/x-kotlin", "application/*"]
         onTriggered: {
             var files = []
             var text = ""
+            var own = false
             for (var i = 0; i < resources.length; ++i) {
                 var resource = resources[i]
                 var path = resource.filePath || ""
@@ -1922,13 +1927,20 @@ ApplicationWindow {
                     // A picture or video goes as one whatever it is called, as nothing but that
                     // takes out what its file says about it.
                     var kind = backend.sharedFileKind(path)
+                    if (kind === "own") {
+                        own = true
+                        continue
+                    }
                     files.push({ path: path, name: path.split("/").pop(),
                                  photo: kind === "picture", video: kind === "video" })
                 } else if (resource.data) {
                     text += (text.length > 0 ? "\n" : "") + resource.data
                 }
             }
-            window.receiveShare(files, text)
+            //% "Files of Threesea's own were left out of what was shared"
+            if (own) Notices.show(qsTrId("threesea-la-share-own-files"), Notice.Long, Notice.Center)
+            if (!own || files.length > 0 || text.length > 0) window.receiveShare(files, text)
+            else dbus.activate()
         }
     }
     // A link from the Browser: `{type: "text/x-url", linkTitle, status}`, with the address in

@@ -44,10 +44,10 @@ Pictures from Threema Web follow the same rule, as nothing prepares them on the 
 FilePreparer: JPEG and PNG are made anew (`web/images.rs`), a WebP keeps only its picture or animation
 (`core/src/webp.rs`, a list of what stays too), and one that can't be read isn't sent. A GIF goes as it
 is, as on the phone and on Android. A picture sent as media from this phone, picked or shared from
-another app, is made anew by the bridge, whatever its file is called (`FilePreparer::mediaTypeOf`
-looks at the bytes where the name says neither picture nor video). One Qt can't read, such as HEIC
-without a plugin, is refused (`pictureKeepsMetadata`) and asks like a video, sent as it is going out
-as a plain file. A file picked "as a file" stays the user's file, and an SVG goes as a document. A picture forwarded as media goes through the same, ours too, since
+another app, is made anew by the bridge, whatever its file is called (`FileType::mediaTypeOf`
+looks at the bytes where the name gives only a generic type). One Qt can't read, such as HEIC without
+a plugin, or an SVG, which nothing here makes anew, is refused (`pictureKeepsMetadata`) and asks like a
+video, sent as it is going out as a plain file. A file picked "as a file" stays the user's file. A picture forwarded as media goes through the same, ours too, since
 one may have come from a linked device, at its own size as on Android, and is refused
 (`pictureKeepsMetadata`) if it can't: whichever its label says, what the bytes are decides. That costs
 one JPEG generation per forward, not per list member, whose copies are the list's. A thumbnail forwarded

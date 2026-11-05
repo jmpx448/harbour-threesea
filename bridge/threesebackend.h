@@ -312,8 +312,12 @@ public:
                                double seconds, const QString &caption, const QJSValue &callback,
                                bool keepMetadata = false);
     // What a file shared from another app goes as: "picture" (sendFile as a photo, which leaves
-    // nothing of what its file says about it), "video" (sendVideo) or "file".
+    // nothing of what its file says about it), "video" (sendVideo) or "file". "own": one of this
+    // app's own files, which another app has no business naming, and which doesn't go at all.
     Q_INVOKABLE QString sharedFileKind(const QString &path) const;
+    // Closing the window doesn't end the process while this is on: what SendInTurn.qml has yet to
+    // send is in no list the end could tell about.
+    Q_INVOKABLE void setSendingInTurn(bool sending);
     Q_INVOKABLE void sendFile(const QString &identity, const QString &path, bool asPhoto,
                               const QString &caption, const QJSValue &callback = QJSValue());
     // Send the voice recorder's finished recording (AAC, or PCM that the core encodes as Opus).
@@ -501,6 +505,8 @@ private:
     bool m_removingData = false;
     // The window was told (once: a repeat after a failure has nothing new to say).
     bool m_dataRemovedSent = false;
+    bool m_sendingInTurn = false;
+    void updateQuitOnClose();
     QString m_stateBeforeRemoval;
     // The old core has stopped: what it sent last is still queued, and is for nobody any more.
     bool m_discardCoreMessages = false;

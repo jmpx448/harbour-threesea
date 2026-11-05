@@ -3,7 +3,6 @@
 #define FILEPREPARER_H
 
 #include <QByteArray>
-#include <QFileInfo>
 #include <QImage>
 #include <QObject>
 #include <QRunnable>
@@ -30,12 +29,6 @@ public:
     FilePreparer(std::function<QImage()> picture, const QVariantMap &request);
     // A video: its first frame (from the thumbnailer) becomes the thumbnail, if there is one.
     void setVideoFrame(const QImage &frame) { m_videoFrame = frame; }
-    // What a file really is, for what is about to be sent as media: by its name, and where that
-    // says neither picture nor video, by its first bytes.
-    static QString mediaTypeOf(const QFileInfo &file);
-    // Whether that is a picture, which has to be made anew to lose what its file says about it. An
-    // SVG is a document, and goes as one.
-    static bool isPicture(const QString &mediaType);
     // The error of `prepared` for such a picture that couldn't be, also the core's error kind.
     static QString pictureKeepsMetadata();
     void run() override;

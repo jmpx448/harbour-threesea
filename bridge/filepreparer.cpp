@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QSettings>
 
+#include "filetype.h"
 #include "photoedit.h"
 
 #ifdef THREESEA_FULL
@@ -109,7 +110,7 @@ void FilePreparer::run()
         return;
     }
     const bool asMedia = request.value(QStringLiteral("rendering")).toString() == QLatin1String("media");
-    const QString mediaType = asMedia ? mediaTypeOf(info) : QMimeDatabase().mimeTypeForFile(info).name();
+    const QString mediaType = asMedia ? FileType::mediaTypeOf(info) : QMimeDatabase().mimeTypeForFile(info).name();
     request.insert(QStringLiteral("name"), info.fileName());
     request.insert(QStringLiteral("mediaType"), mediaType);
 
@@ -159,7 +160,13 @@ void FilePreparer::run()
         return;
     }
 
-    if (!asMedia || !isPicture(mediaType)) {
+    // A drawing has text inside it, and a raster of it would no longer be what was chosen.
+    if (asMedia && mediaType == QLatin1String("image/svg+xml")) {
+        emit prepared(request, QByteArray(), QByteArray(), pictureKeepsMetadata());
+        return;
+    }
+
+    if (!asMedia || !FileType::isPicture(mediaType)) {
         // Sent as it is.
         request.insert(QStringLiteral("rendering"), QStringLiteral("file"));
         request.insert(QStringLiteral("path"), m_path);
@@ -175,25 +182,6 @@ void FilePreparer::run()
         return;
     }
     preparePicture(image, request);
-}
-
-QString FilePreparer::mediaTypeOf(const QFileInfo &file)
-{
-    const QMimeDatabase types;
-    const auto visual = [](const QString &type) {
-        return type.startsWith(QLatin1String("image/")) || type.startsWith(QLatin1String("video/"));
-    };
-    const QString named = types.mimeTypeForFile(file).name();
-    if (visual(named)) {
-        return named;
-    }
-    const QString read = types.mimeTypeForFile(file, QMimeDatabase::MatchContent).name();
-    return visual(read) ? read : named;
-}
-
-bool FilePreparer::isPicture(const QString &mediaType)
-{
-    return mediaType.startsWith(QLatin1String("image/")) && mediaType != QLatin1String("image/svg+xml");
 }
 
 QString FilePreparer::pictureKeepsMetadata()

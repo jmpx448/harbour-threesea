@@ -74,6 +74,7 @@ HEADERS += \
     bridge/enterkeyfilter.h \
     bridge/emojihighlighter.h \
     bridge/filepreparer.h \
+    bridge/filetype.h \
     bridge/mediareader.h \
     bridge/installcheck.h \
     bridge/jsonlistmodel.h \

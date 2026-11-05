@@ -20,7 +20,7 @@ X-Share-Methods=threesea;threesealink
 
 [X-Share Method threesea]
 Description=Send in a chat
-Capabilities=image/*;video/*;audio/*;text/plain;text/vcard;text/x-vcard;text/calendar;text/x-vcalendar;text/x-vnote;text/html;text/csv;text/markdown;text/xml;application/*
+Capabilities=image/*;video/*;audio/*;text/plain;text/vcard;text/x-vcard;text/calendar;text/x-vcalendar;text/x-vnote;text/html;text/csv;text/markdown;text/xml;text/rtf;text/x-log;text/x-markdown;text/css;text/javascript;text/tab-separated-values;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-python;text/x-java;text/x-rust;text/x-qml;text/x-tex;text/x-patch;text/x-sql;text/x-go;text/x-makefile;text/x-cmake;text/x-perl;text/x-php;text/x-ruby;text/x-csharp;text/x-kotlin;application/*
 SupportsMultipleFiles=true
 
 [X-Share Method threesealink]

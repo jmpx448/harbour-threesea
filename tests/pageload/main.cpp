@@ -39,7 +39,7 @@ const char *const environment[] = {
     "D-Bus",
     "bus connection",
     "dbus-daemon autolaunch",
-    "Failed to register object",
+    "Failed to register object /share/threesealink",
     // No media service without a device or a GStreamer plugin behind it.
     "defaultServiceProvider::requestService",
     "Focus mode selection is not supported",

@@ -690,13 +690,17 @@ while they are hidden.
   `ShareProvider { method: "threesea"; registerName: false }` implements. Resources are file
   paths, or `{name, data, type}` maps for text. Passes the Harbour validator. A shared file goes as
   picture or video by its type, by its bytes where its name doesn't say (`sharedFileKind`), so that
-  it is cleaned like any other (ADR 0025).
+  it is cleaned like any other (ADR 0025); a name that says sound is believed, an .m4a being an MP4
+  inside. A path in the app's own data, cache or settings folders is refused: another app can name
+  them, and what is sent from the capture folder is deleted afterwards.
 - Links are another matter: the Browser sends `{type: "text/x-url", linkTitle, status}` with the
   address in `status` (`sailfish-components-webview`'s `WebShareAction.qml`). `ShareProvider` keeps
   only `name`, `data` and `filePath`, skips such a resource and answers InvalidArgs; our QML never
   hears of it. So `threesealink` has `Capabilities=text/x-url` and a `DBusAdaptor` at
   `/share/threesealink` (no `service`: the name is ours already, bridge/main.cpp), and the first
-  method lists its text types instead of `text/*`, or links would be offered twice. Nested maps reach
+  method lists its text types instead of `text/*`, or links would be offered twice. A capability can't
+  say "text but not links", so a text type not on the list (a rarer source language, say) isn't offered
+  for a file: the share sheet leaves Threesea out for it, and the chat's file picker still sends it. Nested maps reach
   QML unpacked, tried in the SDK (a probe with the map above answered over gdbus); a real Browser
   share is for the phone.
 - Test without Gallery: `gdbus call --session --dest org.threesea.harbour-threesea --object-path
