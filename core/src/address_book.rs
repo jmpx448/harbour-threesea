@@ -976,11 +976,65 @@ mod tests {
     }
 
     #[test]
-    fn hmac_is_sha256_with_threemas_key() {
-        // 32-byte HMAC-SHA256, base64 (44 chars), stable.
-        let hash = phone_hash("41791234567");
-        assert_eq!(hash.len(), 44);
-        assert_eq!(hash, phone_hash("41791234567"));
-        assert_ne!(hash, hmac(&EMAIL_HMAC_KEY, "41791234567"));
+    fn hashes_match_threemas_known_answers() {
+        // Computed apart from this code: HMAC-SHA256 in Python, with the keys read from
+        // APIConnector.java, over the forms Android hashes (E.164 without `+`, lower case).
+        assert_eq!(
+            phone_hash("41791234567"),
+            "rTmPTX6+Y8ZVCkhsxuB/m6oJvZ2LPYy52b4QbTWn/bw="
+        );
+        assert_eq!(
+            email_hashes("someone@example.com"),
+            ["4tG8ltI2fLRbCWz7vDH5IZUwEpR7DZiRgR1G6OAE8pw="]
+        );
+        assert_eq!(
+            email_hashes("  Someone@GMAIL.com "),
+            [
+                "Sg4HmaX5cCVXcgyaBiZsftfRlm8+4PEtO4YPNlksbCo=",
+                "IsyV7M95mfUxVnlklXUq4LrUNj5KYgGu9LLoRBMCGlQ=",
+            ]
+        );
+    }
+
+    /// From an address book entry to what goes to the directory: a number written nationally or
+    /// internationally and an address, each hashed as Android does, each pointing at its entry.
+    #[test]
+    fn an_entry_is_hashed_as_android_hashes_it() {
+        let entries = [
+            entry("Erika", &["0151 12345678"], &["Someone@Example.com"]),
+            entry("Max", &["+49 151 1234 5678", "(202) 555-0123"], &[]),
+        ];
+        let hashes = hash_entries(&entries, "DE");
+        let indexes = |found: Option<&Vec<usize>>| found.cloned().unwrap_or_default();
+        assert_eq!(
+            indexes(
+                hashes
+                    .phones
+                    .get("r2LUWTdC5OLOKQHhD6u4pnPdilEmI0qzEIqoGCuIPoY=")
+            ),
+            [0, 1]
+        );
+        assert_eq!(
+            indexes(
+                hashes
+                    .emails
+                    .get("4tG8ltI2fLRbCWz7vDH5IZUwEpR7DZiRgR1G6OAE8pw=")
+            ),
+            [0]
+        );
+        // Written without its country, a number counts as one of the region's.
+        assert!(
+            !hashes
+                .phones
+                .contains_key("7oDbpYIfGhEO4p4WEjpkl5aBNBFZ4vEoernanls8XC8=")
+        );
+        assert_eq!(hashes.phones.len(), 2);
+        assert_eq!(hashes.emails.len(), 1);
+        let american = hash_entries(&[entry("Max", &["(202) 555-0123"], &[])], "US");
+        assert!(
+            american
+                .phones
+                .contains_key("7oDbpYIfGhEO4p4WEjpkl5aBNBFZ4vEoernanls8XC8=")
+        );
     }
 }
