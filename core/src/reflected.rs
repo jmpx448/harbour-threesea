@@ -302,8 +302,12 @@ pub fn apply(
             }
             // Someone deleted here, or known from a group, writes while another device leads: what
             // the incoming message task does there. That device tells the others itself.
-            if body.requires_direct_contact()
+            // Not someone on the block list (ADR 0019), and not for a group-setup, the one group
+            // message that would: a reflected one changes nothing here, a group sync does that.
+            if matches!(body, IncomingMessageBody::Contact(_))
+                && body.requires_direct_contact()
                 && contact.acquaintance_level != AcquaintanceLevel::Direct
+                && !store.is_explicitly_blocked(sender.as_str())?
             {
                 contact.acquaintance_level = AcquaintanceLevel::Direct;
                 store.upsert_contact(&contact)?;
@@ -1139,5 +1143,129 @@ mod tests {
             store.picture_distribution("B0B0B0B0", false).unwrap(),
             Distribution::None
         ));
+    }
+
+    /// A reflected message as the given group body.
+    fn reflected_group_incoming(
+        sender: &str,
+        message_id: u64,
+        group: libthreema::common::GroupIdentity,
+        body: GroupMessageBody,
+    ) -> d2d::Envelope {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingGroupMessageBody, OutgoingMessageBody},
+        };
+        let (message_type, data) =
+            encode_message_body(&OutgoingMessageBody::Group(OutgoingGroupMessageBody {
+                group_identity: group,
+                body,
+            }));
+        d2d::Envelope {
+            content: Some(envelope::Content::IncomingMessage(d2d::IncomingMessage {
+                sender_identity: sender.into(),
+                message_id,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body: data,
+                nonce: Vec::new(),
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn block(store: &Store, identity: &str) {
+        store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &json!({ "blockedContacts": [identity] }).to_string(),
+            )
+            .unwrap();
+    }
+
+    /// Someone blocked and deleted stays out of the contact list, whatever another device reflects
+    /// (ADR 0019): a group-setup, which is exempt from blocking, or a text sent before the block
+    /// reached the other device.
+    #[test]
+    fn a_blocked_contact_deleted_here_does_not_come_back() {
+        use libthreema::model::message::GroupSetupMessage;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let mut contact = crate::contacts::test_contact("B0B0B0B0");
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&contact).unwrap();
+        block(&store, "B0B0B0B0");
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let events: EventSink = Rc::default();
+        let level = || {
+            store
+                .contact("B0B0B0B0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level
+        };
+        let group = libthreema::common::GroupIdentity {
+            group_id: 9,
+            creator_identity: "B0B0B0B0".parse().unwrap(),
+        };
+        let setup = reflected_group_incoming(
+            "B0B0B0B0",
+            1,
+            group,
+            GroupMessageBody::Setup(GroupSetupMessage {
+                members: vec![user],
+            }),
+        );
+        apply(&store, user, setup, &events).unwrap();
+        assert_eq!(level(), AcquaintanceLevel::GroupOrDeleted);
+
+        let text = reflected_incoming("B0B0B0B0", 2, Vec::new(), text_body());
+        apply(&store, user, text, &events).unwrap();
+        assert_eq!(level(), AcquaintanceLevel::GroupOrDeleted);
+        assert!(
+            store
+                .conversation_messages("B0B0B0B0", 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, CoreEvent::ContactsChanged))
+        );
+    }
+
+    /// A reflected group-setup leaves an unblocked contact's level too: the group sync decides.
+    #[test]
+    fn a_reflected_group_setup_makes_nobody_a_contact() {
+        use libthreema::model::message::GroupSetupMessage;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let mut contact = crate::contacts::test_contact("B0B0B0B0");
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&contact).unwrap();
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let group = libthreema::common::GroupIdentity {
+            group_id: 9,
+            creator_identity: "B0B0B0B0".parse().unwrap(),
+        };
+        let setup = reflected_group_incoming(
+            "B0B0B0B0",
+            1,
+            group,
+            GroupMessageBody::Setup(GroupSetupMessage {
+                members: vec![user],
+            }),
+        );
+        apply(&store, user, setup, &Rc::default()).unwrap();
+        assert_eq!(
+            store
+                .contact("B0B0B0B0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level,
+            AcquaintanceLevel::GroupOrDeleted
+        );
     }
 }
