@@ -90,7 +90,7 @@ Page {
                           //% "Highest quality"
                           qsTrId("threesea-la-video-quality-max")]
                 choice: Math.max(0, ["auto", "low", "max"].indexOf(window.appSettings.videoQuality))
-                //% "Both sides use the lower of their two settings. Relayed calls use Standard at most."
+                //% "Both sides use the lower of their two settings. Calls that go only through a relay (Always relay calls, or with an unverified contact) use Standard at most."
                 description: qsTrId("threesea-la-video-quality-description")
                 onChosen: backend.call("setVideoQuality", { quality: ["auto", "low", "max"][index] },
                                        function(ok, result) { if (ok) window.appSettings = result })
