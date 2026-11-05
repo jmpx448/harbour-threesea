@@ -196,18 +196,28 @@ function geoUri(location) {
     return "geo:" + location.latitude + "," + location.longitude
 }
 
+// What of a long one-line `text` to show for a match of `query`, in a space of `limit` characters:
+// from a little before the match if it would be too far along. Cut before anything is drawn, as
+// Qt can't elide text with pictures in it (`previewLine`), and so that the cut keeps the match.
+function matchWindow(text, query, limit) {
+    if (!query) return text
+    var first = text.toLowerCase().indexOf(query.toLowerCase())
+    if (first <= 60 && first + query.length + 8 <= limit) return text
+    var start = first - Math.min(40, Math.floor(limit / 3))
+    if (first < 0 || start <= 0) return text
+    // Not in the middle of an emoji's two units.
+    var unit = text.charCodeAt(start)
+    if (unit >= 0xdc00 && unit <= 0xdfff) ++start
+    return "\u2026" + text.substring(start)
+}
+
 // Plain `text` as StyledText with each (case-insensitive) occurrence of `query` in `color`,
-// everything HTML-escaped. Around the first match only a window is kept for long texts.
+// everything HTML-escaped.
 function highlightMatch(text, query, color) {
     text = text || ""
     if (!query) return escapeHtml(text)
     var lower = text.toLowerCase()
     var needle = query.toLowerCase()
-    var first = lower.indexOf(needle)
-    if (first > 60) {
-        text = "\u2026" + text.substring(first - 40)
-        lower = text.toLowerCase()
-    }
     var html = ""
     var position = 0
     var index

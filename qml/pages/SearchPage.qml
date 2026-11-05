@@ -169,17 +169,28 @@ Page {
                     }
                 }
                 Label {
+                    id: matchLabel
                     width: parent.width
+                    // About as many characters as the lines hold, as in the chat list's preview.
+                    readonly property int limit: Math.max(24, Math.round(
+                        width / (font.pixelSize * 0.47)) * maximumLineCount)
                     // The matching text (caption, file or place name…), mentions as names.
-                    text: Fmt.highlightMatch((modelData.snippet ? Fmt.withMentions(modelData.snippet, modelData.mentions)
-                                                                 : Fmt.preview(modelData))
-                                             .replace(/\s+/g, " "), page.query, Theme.highlightColor)
+                    readonly property string one: (modelData.snippet ? Fmt.withMentions(modelData.snippet, modelData.mentions)
+                                                                     : Fmt.preview(modelData))
+                                                  .replace(/\s+/g, " ")
+                    readonly property string plain: Fmt.previewLine(Fmt.matchWindow(one, page.query, limit), limit)
+                    // Threema's emoji pictures (Settings → Appearance), as in the chat they open.
+                    readonly property bool pictures: backend.threemaEmoji && Fmt.mayHaveEmoji(plain)
+                    readonly property string marked: Fmt.highlightMatch(plain, page.query, Theme.highlightColor)
+                    text: pictures ? Fmt.markEmoji(marked, Math.round(font.pixelSize * 1.2)) : marked
                     textFormat: Text.StyledText
                     font.pixelSize: Theme.fontSizeSmall
                     color: item.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
                     wrapMode: Text.Wrap
                     maximumLineCount: 3
-                    elide: Text.ElideRight
+                    // Qt puts the pictures a line away from their place when it elides.
+                    elide: pictures ? Text.ElideNone : Text.ElideRight
+                    clip: true
                 }
             }
         }
