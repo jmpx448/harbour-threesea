@@ -330,9 +330,9 @@ impl App {
             ("lastName", &contact.last_name),
             ("publicNickname", &contact.nickname),
         ] {
-            if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
-                fields.push((name, value.into()));
-            }
+            // Empty and not left out: an update only adds to what the browser has, so a name taken
+            // away would stay there, and saving its edit form would bring it back.
+            fields.push((name, value.as_deref().unwrap_or_default().into()));
         }
         map(fields)
     }

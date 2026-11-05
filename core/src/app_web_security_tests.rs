@@ -2250,3 +2250,32 @@ async fn maintenance_brings_the_browsers_up_to_date() {
         [("BBBBBBBB".to_owned(), vec![message.id.to_string()])]
     );
 }
+
+/// The browser adds an update to what it has: a name taken away has to arrive as empty.
+#[test]
+fn a_name_taken_away_reaches_the_browser_as_empty() {
+    let (_dir, mut app) = fixture();
+    let named = |first: Option<&str>, nickname: Option<&str>| {
+        let mut contact = crate::contacts::test_contact("BBBBBBBB");
+        contact.first_name = first.map(str::to_owned);
+        contact.nickname = nickname.map(str::to_owned);
+        contact
+    };
+    app.store
+        .upsert_contact(&named(Some("Ann"), Some("Annie")))
+        .unwrap();
+    let mut rx = subscribed_browser(&mut app);
+
+    app.store.upsert_contact(&named(None, None)).unwrap();
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let data = saltyrtc::field(&sent[0], "data").unwrap();
+    for name in ["firstName", "lastName", "publicNickname"] {
+        assert_eq!(
+            saltyrtc::field(data, name),
+            Some(&Value::from("")),
+            "{name}"
+        );
+    }
+}
