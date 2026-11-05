@@ -43,7 +43,7 @@ Page {
                 page.imported = result
                 page.importHistory()
             } else {
-                page.finish(null, Errors.text(kind, message))
+                page.finish(null, Errors.text(kind, message), kind)
             }
         })
     }
@@ -53,15 +53,16 @@ Page {
         backend.call("androidBackupImport",
                      { path: filePath, password: password, scope: "history" },
                      function(ok, result, kind, message) {
-            if (!ok) page.finish(null, Errors.text(kind, message))
+            if (!ok) page.finish(null, Errors.text(kind, message), kind)
         })
     }
 
-    function finish(summary, error) {
+    function finish(summary, error, errorKind) {
         phase = "done"
         password = ""
         resultTimer.summary = summary
         resultTimer.error = error || ""
+        resultTimer.errorKind = errorKind || ""
         resultTimer.start()
     }
 
@@ -71,6 +72,7 @@ Page {
         id: resultTimer
         property var summary: null
         property string error
+        property string errorKind
         interval: 100
         repeat: true
         onTriggered: {
@@ -80,7 +82,8 @@ Page {
             pageStack.replace(Qt.resolvedUrl("DataBackupResultPage.qml"), {
                 "imported": page.imported,
                 "summary": summary,
-                "error": error
+                "error": error,
+                "errorKind": errorKind
             })
         }
     }
@@ -99,8 +102,8 @@ Page {
                     page.mediaShare = 0
                 }
             } else if (name === "androidBackupDone") {
-                if (data.ok) page.finish(data.summary, "")
-                else page.finish(null, Errors.text(data.kind, ""))
+                if (data.ok) page.finish(data.summary, "", "")
+                else page.finish(null, Errors.text(data.kind, ""), data.kind)
             }
         }
     }

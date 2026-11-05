@@ -13,6 +13,12 @@ Page {
     property var imported: null
     property var summary: null
     property string error
+    property string errorKind
+
+    // What can pass: room on the phone, a store that answers again. A file that is refused stays
+    // refused, however often it is imported.
+    readonly property bool errorCanPass: ["diskFull", "storeUnreadable", "store", "internal"]
+                                         .indexOf(errorKind) >= 0
 
     readonly property bool stopped: !!summary && summary.cancelled === true
 
@@ -102,7 +108,7 @@ Page {
             }
 
             Label {
-                visible: page.error.length > 0
+                visible: page.errorCanPass
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * x
                 wrapMode: Text.Wrap
