@@ -397,6 +397,114 @@ async fn web_edits_a_contact_named_by_identity() {
     );
 }
 
+/// A name too long gets the code the browser has words for, on every way it can come, and a
+/// request refused for it changes nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn web_names_too_long_are_value_too_long() {
+    let (_dir, mut app) = fixture();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            // Fits the browser's 256 UTF-16 units, not Threema's 256 bytes.
+            let long = "😀".repeat(100);
+            let members: Value = Value::Array(vec!["BBBBBBBB".into()]);
+            let data =
+                |name: &str| arp::map(vec![("name", name.into()), ("members", members.clone())]);
+            for sub_type in ["group", "distributionList"] {
+                let wire = arp::message("create", sub_type, None, Some(data(&long)));
+                assert_eq!(
+                    app.web_manage(&Incoming::parse(&wire).unwrap())
+                        .await
+                        .unwrap()
+                        .unwrap_err(),
+                    "valueTooLong",
+                    "create/{sub_type}"
+                );
+            }
+
+            let group = app
+                .web_command(json!({"cmd": "createGroup", "name": "Crew",
+                    "members": ["BBBBBBBB"]}))
+                .await
+                .unwrap();
+            let group = group["key"].as_str().unwrap().to_owned();
+            let list = app
+                .web_command(json!({"cmd": "createDistributionList", "name": "Crew",
+                    "members": ["BBBBBBBB"]}))
+                .await
+                .unwrap();
+            let list = list["key"].as_str().unwrap().to_owned();
+            for (sub_type, key) in [("group", &group), ("distributionList", &list)] {
+                let wire = arp::message(
+                    "update",
+                    sub_type,
+                    Some(arp::map(vec![("id", key.as_str().into())])),
+                    Some(arp::map(vec![
+                        ("name", long.as_str().into()),
+                        ("members", Value::Array(vec!["CCCCCCCC".into()])),
+                    ])),
+                );
+                assert_eq!(
+                    app.web_manage(&Incoming::parse(&wire).unwrap())
+                        .await
+                        .unwrap()
+                        .unwrap_err(),
+                    "valueTooLong",
+                    "update/{sub_type}"
+                );
+            }
+            let group = app.store.group(&group).unwrap().unwrap();
+            assert_eq!(group.name, "Crew");
+            assert_eq!(group.members, ["BBBBBBBB"], "nothing else changed either");
+
+            // A nickname a byte over Threema's limit is refused, not cut.
+            let update = |nickname: &str| {
+                arp::message(
+                    "update",
+                    "profile",
+                    None,
+                    Some(arp::map(vec![("publicNickname", nickname.into())])),
+                )
+            };
+            let wire = update(&"ä".repeat(17));
+            assert_eq!(
+                app.web_manage(&Incoming::parse(&wire).unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                "valueTooLong"
+            );
+            assert_eq!(
+                app.store.setting(crate::store::keys::NICKNAME).unwrap(),
+                None
+            );
+            let wire = update(&"ä".repeat(16));
+            app.web_manage(&Incoming::parse(&wire).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                app.store.setting(crate::store::keys::NICKNAME).unwrap(),
+                Some("ä".repeat(16))
+            );
+
+            let wire = arp::message(
+                "update",
+                "profile",
+                None,
+                Some(arp::map(vec![("avatar", Value::Binary(vec![1, 2, 3]))])),
+            );
+            assert_eq!(
+                app.web_manage(&Incoming::parse(&wire).unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                "invalidAvatar"
+            );
+        })
+        .await;
+}
+
 /// S02: a browser can't manage a private group (nor rename, leave or sync it).
 #[tokio::test(flavor = "current_thread")]
 async fn web_cannot_manage_private_group() {

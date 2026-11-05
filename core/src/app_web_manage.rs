@@ -23,6 +23,19 @@ type Code = &'static str;
 /// Threema's limit for a contact's first and last name, in bytes.
 const CONTACT_NAME_BYTES_MAX: usize = 256;
 
+/// Threema's limit for our nickname, in bytes. The browser counts UTF-16 units and would keep
+/// showing a nickname that `setNickname` cuts.
+const NICKNAME_BYTES_MAX: usize = 32;
+
+/// The browser's code for a failed command that takes a name: a name too long has its own.
+fn name_error(kind: &str, otherwise: Code) -> Code {
+    if kind == "messageTooLong" {
+        "valueTooLong"
+    } else {
+        otherwise
+    }
+}
+
 /// The contact an `update/contact` is about: threema-web and Android name it `identity`.
 fn contact_arg<'a>(incoming: &Incoming<'a>) -> Option<&'a str> {
     incoming.arg("identity").or_else(|| incoming.arg("id"))
@@ -84,7 +97,7 @@ impl App {
         let jpeg = avatar
             .as_slice()
             .and_then(|bytes| images::scaled_jpeg(bytes, images::AVATAR_HIGH_MAX, 85))
-            .ok_or("badRequest")?;
+            .ok_or("invalidAvatar")?;
         let mut set = set;
         set["id"] = json!(0);
         let reply: serde_json::Value = serde_json::from_str(
@@ -226,17 +239,20 @@ impl App {
                             )])),
                         ))
                     }
-                    Err(kind) => Err(if kind == "groupNameTooLong" {
-                        "valueTooLong"
-                    } else {
-                        "badRequest"
-                    }),
+                    Err(kind) => Err(name_error(&kind, "badRequest")),
                 }
             }
             ("update", "group") => {
                 let Some(key) = incoming.arg("id").map(str::to_owned) else {
                     return Some(Err("invalidGroup"));
                 };
+                // Before anything changes: a name too long leaves the members as they were.
+                if optional(data, "name")
+                    .flatten()
+                    .is_some_and(|name| Self::check_name(name).is_err())
+                {
+                    return Some(Err("valueTooLong"));
+                }
                 if let Some(members) = members(data) {
                     if members.is_empty() {
                         return Some(Err("noMembers"));
@@ -352,7 +368,7 @@ impl App {
                             )])),
                         ))
                     }
-                    Err(_) => Err("badRequest"),
+                    Err(kind) => Err(name_error(&kind, "badRequest")),
                 }
             }
             ("update", "distributionList") => {
@@ -364,12 +380,11 @@ impl App {
                     return Some(Err("noMembers"));
                 }
                 let name = optional(data, "name").map(|name| name.unwrap_or_default().to_owned());
-                if self
+                if let Err(kind) = self
                     .web_command(json!({"cmd": "updateDistributionList", "key": key, "name": name, "members": members}))
                     .await
-                    .is_err()
                 {
-                    return Some(Err("invalidDistributionList"));
+                    return Some(Err(name_error(&kind, "invalidDistributionList")));
                 }
                 self.web_receivers_changed("distributionList");
                 Ok(arp::message(
@@ -400,6 +415,9 @@ impl App {
             ("update", "profile") => {
                 if let Some(nickname) = optional(data, "publicNickname") {
                     let nickname = nickname.unwrap_or_default();
+                    if nickname.trim().len() > NICKNAME_BYTES_MAX {
+                        return Some(Err("valueTooLong"));
+                    }
                     if self
                         .web_command(json!({"cmd": "setNickname", "nickname": nickname}))
                         .await
