@@ -1903,6 +1903,70 @@ mod tests {
         assert_eq!(read_reports(&app, PEER), receipts);
     }
 
+    /// What a chat lists of its polls and what its reminder counts: an open poll until we voted,
+    /// never one someone deleted, and nothing of a hidden private chat.
+    #[test]
+    fn a_chats_polls_list_and_what_waits_for_our_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), u64::MAX);
+        let choices = ["A".to_owned(), "B".to_owned()];
+        assert_eq!(app.polls_json(PEER).unwrap()["unanswered"], 0);
+        assert_eq!(app.polls_json(PEER).unwrap()["question"], Value::Null);
+
+        let mine = app
+            .create_poll(PEER, "Mine?", &choices, false, false)
+            .unwrap();
+        let mine = mine["id"].as_i64().unwrap();
+        let older = app
+            .create_poll(PEER, "Older?", &choices, false, false)
+            .unwrap();
+        let older = older["id"].as_i64().unwrap();
+        let newest = app
+            .create_poll(PEER, "Newest?", &choices, false, false)
+            .unwrap();
+        let newest = newest["id"].as_i64().unwrap();
+        let listed = app.polls_json(PEER).unwrap();
+        assert_eq!(listed["unanswered"], 3);
+        assert_eq!(listed["question"], "Newest?");
+        assert_eq!(listed["polls"][0]["id"], newest);
+        assert_eq!(listed["polls"][0]["body"]["description"], "Newest?");
+
+        // Voted: no longer waiting. A vote taken back again waits.
+        app.vote(newest, &[0]).unwrap();
+        let listed = app.polls_json(PEER).unwrap();
+        assert_eq!(listed["unanswered"], 2);
+        assert_eq!(listed["question"], "Older?");
+        app.vote(newest, &[]).unwrap();
+        assert_eq!(app.polls_json(PEER).unwrap()["unanswered"], 3);
+        app.vote(newest, &[1]).unwrap();
+
+        // Closed: not waiting, and listed after the open ones.
+        app.close_poll(mine).unwrap();
+        let listed = app.polls_json(PEER).unwrap();
+        assert_eq!(listed["unanswered"], 1);
+        let ids: Vec<i64> = listed["polls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|poll| poll["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [newest, older, mine]);
+
+        // Deleted: gone from the list.
+        app.store.mark_deleted(older, 1).unwrap();
+        let listed = app.polls_json(PEER).unwrap();
+        assert_eq!(listed["unanswered"], 0);
+        assert_eq!(listed["polls"].as_array().unwrap().len(), 2);
+
+        // Another chat's are not this chat's.
+        app.store.upsert_contact(&test_contact("BCDE2345")).unwrap();
+        assert_eq!(app.polls_json("BCDE2345").unwrap()["polls"], json!([]));
+
+        // A hidden private chat says nothing at all.
+        app.store.set_private(PEER, true).unwrap();
+        assert!(matches!(app.polls_json(PEER), Err(ApiError::Locked)));
+    }
+
     /// Results that can't be sent leave the poll open, for everyone alike, and the user is told.
     #[test]
     fn a_poll_whose_results_are_too_long_stays_open() {

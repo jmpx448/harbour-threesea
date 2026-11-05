@@ -54,6 +54,19 @@ fn state(message: &Message) -> Value {
     serde_json::from_str(&message.body).unwrap_or(Value::Null)
 }
 
+fn is_closed(poll: &Message) -> bool {
+    state(poll)["state"] == 1
+}
+
+/// Whether a poll still waits for `identity`'s vote: open, and nothing chosen.
+pub fn awaits_vote(poll: &Message, identity: &str) -> bool {
+    let state = state(poll);
+    state["state"] != 1
+        && state["votes"][identity]
+            .as_array()
+            .is_none_or(|chosen| chosen.is_empty())
+}
+
 /// A new poll's UI state; checks the protocol's limits.
 pub fn new_poll(
     poll_id: u64,
@@ -234,6 +247,24 @@ impl Store {
             Some(id) => self.message(id)?.filter(|message| message.kind == "poll"),
             None => None,
         })
+    }
+
+    /// The polls of a chat: the open ones first, then the closed, each newest first.
+    pub fn conversation_polls(&self, conversation: &str) -> Result<Vec<Message>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM messages WHERE kind = 'poll' AND id IN
+                 (SELECT message FROM polls WHERE conversation = ?1)
+             ORDER BY sort_key DESC, id DESC",
+        )?;
+        let ids = statement
+            .query_map([conversation], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut polls = Vec::with_capacity(ids.len());
+        for id in ids {
+            polls.extend(self.message(id)?);
+        }
+        polls.sort_by_key(is_closed);
+        Ok(polls)
     }
 
     pub fn register_poll(

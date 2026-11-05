@@ -653,6 +653,10 @@ pub enum Command {
     ClosePoll {
         message: i64,
     },
+    /// The polls of a conversation.
+    Polls {
+        identity: String,
+    },
     /// Set our group's picture (attachment 0: JPEG).
     SetGroupPicture {
         key: String,
@@ -2330,6 +2334,7 @@ impl App {
             } => self.create_poll(&identity, &description, &choices, multiple, announce),
             Command::Vote { message, choices } => self.vote(message, &choices),
             Command::ClosePoll { message } => self.close_poll(message),
+            Command::Polls { identity } => self.polls_json(&identity),
             Command::RemoveGroupPicture { key } => {
                 // In turn: behind a new picture still on its way up, or that one would win.
                 self.detached(

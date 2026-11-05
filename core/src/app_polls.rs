@@ -44,6 +44,25 @@ impl App {
         Ok((key, conversation, message.id, state))
     }
 
+    /// `polls`: a chat's polls, and how many of them wait for our vote with the newest one's
+    /// question (the chat's reminder).
+    pub(crate) fn polls_json(&self, identity: &str) -> Result<Value, ApiError> {
+        let (key, _) = self.readable_chat(identity)?;
+        let me = self.own_identity()?;
+        let polls = self.store.conversation_polls(&key)?;
+        let mut waiting = polls.iter().filter(|poll| polls::awaits_vote(poll, &me));
+        let newest = waiting.next();
+        let question = newest
+            .and_then(|poll| serde_json::from_str::<Value>(&poll.body).ok())
+            .map(|state| state["description"].clone());
+        let unanswered = usize::from(newest.is_some()) + waiting.count();
+        Ok(json!({
+            "polls": self.store.messages_json(&polls),
+            "unanswered": unanswered,
+            "question": question,
+        }))
+    }
+
     /// `createPoll`.
     pub(crate) fn create_poll(
         &mut self,
