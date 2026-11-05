@@ -4588,7 +4588,7 @@ fn outbox_sent_as_of(entry: &reactions::OutboxEntry) -> i64 {
 }
 
 /// The body of a group outbox entry (control messages, or a reaction/edit/deletion).
-fn outbox_group_body(entry: &reactions::OutboxEntry) -> Option<GroupMessageBody> {
+pub(crate) fn outbox_group_body(entry: &reactions::OutboxEntry) -> Option<GroupMessageBody> {
     use crate::groups::{
         OUTBOX_GROUP_DELETE_PICTURE, OUTBOX_GROUP_LEAVE, OUTBOX_GROUP_NAME, OUTBOX_GROUP_SETUP,
         OUTBOX_GROUP_SYNC_REQUEST,

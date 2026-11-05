@@ -11,6 +11,8 @@ pub mod app;
 pub mod app_android_backup;
 pub mod app_calls;
 pub mod app_chat_export;
+#[cfg(test)]
+mod app_command_tests;
 pub mod app_contacts;
 pub mod app_group_calls;
 pub mod app_groups;
