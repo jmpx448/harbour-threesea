@@ -574,6 +574,39 @@ pub(crate) async fn run_maintenance(app: &mut App, emit: &Emit) {
     app.start_update_check(false);
 }
 
+/// How long after the start the first round of maintenance comes. Not at once, as all it asks for
+/// competes with what the UI wants first; not much later, as the Lite flavour may not run for long.
+const FIRST_MAINTENANCE_AFTER: Duration = Duration::from_secs(10);
+/// How long the start's clean-up waits for the UI's first question.
+const FIRST_REQUEST_WAIT: Duration = Duration::from_secs(1);
+
+/// The UI's first `status` is what ends the start page, and it needs nothing of what the start
+/// cleans up in the store and the media, which reads through all file messages. That first, then.
+/// Anything else may depend on the clean-up: it comes back to be handled after it. Nothing else
+/// runs here, so nothing can start a download for the clean-up to undo.
+async fn answer_first_status(
+    app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<CoreRequest>,
+    emit: &Emit,
+) -> Option<CoreRequest> {
+    #[derive(serde::Deserialize)]
+    struct Named<'a> {
+        cmd: &'a str,
+    }
+    let first = tokio::time::timeout(FIRST_REQUEST_WAIT, rx.recv())
+        .await
+        .ok()??;
+    let is_status =
+        serde_json::from_str::<Named<'_>>(&first.json).is_ok_and(|request| request.cmd == "status");
+    if !is_status {
+        return Some(first);
+    }
+    if let Some(reply) = app.handle_from_ui(&first.json, first.attachments).await {
+        emit(reply);
+    }
+    None
+}
+
 /// A round of maintenance beside the loop, unless the last one is still going.
 fn start_maintenance(app: &mut App) {
     app.maintenance_ran_at = std::time::SystemTime::now();
@@ -657,22 +690,33 @@ async fn run_loop(
     detached: &mut Option<mpsc::UnboundedReceiver<crate::detached::Finished>>,
     emit: &Emit,
 ) {
-    let mut tick = tokio::time::interval(crate::app::MAINTENANCE_INTERVAL);
+    let mut tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + FIRST_MAINTENANCE_AFTER,
+        crate::app::MAINTENANCE_INTERVAL,
+    );
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     if let Err(error) = crate::sync::reflect_group_contacts_once(&app.store) {
         tracing::warn!(%error, "group contacts not queued for the other devices");
     }
     let mut connection: Option<mpsc::UnboundedReceiver<FromConnection>> = app.ensure_connection();
     let mut web_events = app.take_web_events();
+    // Locked at start: the private chats' media stay hidden from the UI's readers.
+    app.update_media_gate();
+    let mut held_back = answer_first_status(app, rx, emit).await;
     app.resume_media();
     // Downloads of contact and group pictures that never finished (kept descriptors).
     app.resume_picture_downloads();
     // Group calls kept from the last run may have ended meanwhile.
     app.refresh_stored_group_calls();
-    // Locked at start: the private chats' media stay hidden from the UI's readers.
-    app.update_media_gate();
     loop {
         forget_stopped_connection(app, &mut connection, emit);
+        if let Some(request) = held_back.take() {
+            if let Some(reply) = app.handle_from_ui(&request.json, request.attachments).await {
+                emit(reply);
+            }
+            after_command(app, media_events, &mut connection, &mut tick, emit);
+            continue;
+        }
         let transfer_retry_at = app.transfer_retry_at;
         let wake_settled_held = app.wake_settled_held;
         tokio::select! {
@@ -906,6 +950,49 @@ mod tests {
                 .await;
                 assert!(asked.elapsed() < Duration::from_secs(2));
                 assert!(!replied(&said, 1), "that one is still waiting: {said:?}");
+            })
+            .await;
+    }
+
+    fn request(json: serde_json::Value) -> CoreRequest {
+        CoreRequest {
+            json: Zeroizing::new(json.to_string()),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A download marked as under way when the process ended is what the start's clean-up resets.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_first_status_is_answered_before_the_clean_up_and_others_after_it() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                let said = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let emit: Emit = {
+                    let said = Arc::clone(&said);
+                    Box::new(move |message| said.lock().unwrap().push(message))
+                };
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tx.send(request(json!({"id": 1, "cmd": "status"}))).unwrap();
+                let held = answer_first_status(&mut app, &mut rx, &emit).await;
+                assert!(held.is_none());
+                assert!(replied(&said.lock().unwrap(), 1));
+
+                tx.send(request(json!({"id": 2, "cmd": "connectionState"})))
+                    .unwrap();
+                let held = answer_first_status(&mut app, &mut rx, &emit).await;
+                assert!(held.is_some(), "it comes back for after the clean-up");
+                assert!(!replied(&said.lock().unwrap(), 2));
+
+                // A UI that doesn't ask holds up nothing for long.
+                let asked = Instant::now();
+                assert!(
+                    answer_first_status(&mut app, &mut rx, &emit)
+                        .await
+                        .is_none()
+                );
+                assert!(asked.elapsed() < FIRST_REQUEST_WAIT * 2);
             })
             .await;
     }

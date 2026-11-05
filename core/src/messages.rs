@@ -283,6 +283,11 @@ pub struct Message {
     pub written_out: bool,
 }
 
+/// Resetting what was loading takes no read of the whole table, which the start's clean-up does
+/// twice.
+pub(crate) const MIGRATION_FILE_MESSAGES: &str =
+    "CREATE INDEX IF NOT EXISTS messages_files ON messages (id) WHERE kind = 'file';";
+
 /// Whether the sender asked for no delivery receipts (flag `0x80`, Threema Gateway's): the read
 /// receipt stays away too.
 pub(crate) const MIGRATION_NO_RECEIPTS: &str = "

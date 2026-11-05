@@ -217,6 +217,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_NO_RECEIPTS,
     // 43: indexes for what is looked for often and is rarely there
     crate::messages::MIGRATION_LOOKUP_INDEXES,
+    // 44: the start's clean-up of file messages without reading all messages
+    crate::messages::MIGRATION_FILE_MESSAGES,
 ];
 
 /// Setting keys.

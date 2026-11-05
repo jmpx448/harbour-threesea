@@ -2357,6 +2357,33 @@ impl App {
 mod tests {
     use super::*;
 
+    /// The start's clean-up finds file messages by their index; a chat's own go by the chat.
+    #[test]
+    fn file_messages_are_found_without_reading_all_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut statement = store
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap();
+            rows.map(Result::unwrap).collect::<Vec<_>>().join(" ")
+        };
+        // `reset_loading_media`; the others have narrower indexes of their own.
+        let reset = "UPDATE messages SET body = json_set(body, '$.fileState', 0)
+             WHERE kind = 'file' AND json_extract(body, '$.fileState') = 1";
+        assert!(plan(reset).contains("messages_files"), "{}", plan(reset));
+        let in_a_chat = "SELECT id FROM messages WHERE conversation = 'x' AND kind = 'file'";
+        assert!(
+            !plan(in_a_chat).contains("messages_files"),
+            "{}",
+            plan(in_a_chat)
+        );
+    }
+
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let app = App::new(
