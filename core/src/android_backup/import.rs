@@ -161,6 +161,8 @@ pub struct Summary {
     pub media_failed: usize,
     pub reactions: usize,
     pub reactions_unmatched: usize,
+    /// Reaction files over the memory bound or damaged: unread, the import is done without them.
+    pub reaction_files_left_out: usize,
     /// Poll messages imported with their poll (also counted in `imported`).
     pub polls: usize,
     /// Rows whose `uid` another chat of the same kind in this archive already holds. Android's
@@ -427,8 +429,14 @@ impl HistoryImport {
             summary.chats += 1;
         }
 
-        if !summary.cancelled {
+        // Once per archive: reactions removed or changed here since stay so when it's imported
+        // again (the rows themselves never come twice either).
+        let reactions_done = format!("android_import_reactions_done:{source}");
+        if !summary.cancelled && self.store.setting(&reactions_done)?.is_none() {
             archive = self.import_reactions(archive, &index, &mut summary).await?;
+            if !summary.cancelled {
+                self.store.set_setting(&reactions_done, "1")?;
+            }
         }
         drop(archive);
         // Partially written media without a committed row are removed like other orphans.
@@ -967,7 +975,7 @@ impl HistoryImport {
                 String::new()
             };
             if crate::groups::parse_key(_key).is_none() {
-                self.store.set_reaction(row, &sender, emoji, true, at)?;
+                self.store.add_imported_reaction(row, &sender, emoji, at)?;
             }
         }
         for (member, state) in &message.group_states {
@@ -981,7 +989,7 @@ impl HistoryImport {
                 } else {
                     member.as_str()
                 };
-                self.store.set_reaction(row, sender, emoji, true, at)?;
+                self.store.add_imported_reaction(row, sender, emoji, at)?;
             }
         }
         Ok(())
@@ -1002,16 +1010,29 @@ impl HistoryImport {
                 continue;
             }
             let name = entry.to_owned();
-            let (returned, reactions, invalid) = tokio::task::spawn_blocking(
-                move || -> Result<(Archive, Vec<records::Reaction>, usize), ArchiveError> {
-                    let table = archive.read_table(&name, MAX_TABLE_BYTES)?;
-                    let (reactions, invalid) = records::reactions(&table, group);
-                    Ok((archive, reactions, invalid))
-                },
-            )
+            let (returned, parsed) = tokio::task::spawn_blocking(move || {
+                let parsed = archive
+                    .read_table(&name, MAX_TABLE_BYTES)
+                    .map(|table| records::reactions(&table, group));
+                (archive, parsed)
+            })
             .await
-            .map_err(|e| crate::app::ApiError::Internal(e.to_string()))??;
+            .map_err(|e| crate::app::ApiError::Internal(e.to_string()))?;
             archive = returned;
+            let (reactions, invalid) = match parsed {
+                Ok(parsed) => parsed,
+                // After all the chats: it must not cost the summary of what arrived.
+                Err(
+                    ArchiveError::TooLarge
+                    | ArchiveError::Corrupt(_)
+                    | ArchiveError::Invalid(_)
+                    | ArchiveError::WrongPassword,
+                ) => {
+                    summary.reaction_files_left_out += 1;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             summary.invalid_rows += invalid;
             for chunk in reactions.chunks(BATCH) {
                 if self.cancel.get() {
@@ -1064,21 +1085,15 @@ impl HistoryImport {
                             } else {
                                 reaction.sender.as_str()
                             };
-                            // No answer: not an emoji, so nothing was stored.
-                            if self
-                                .store
-                                .set_reaction(
-                                    row,
-                                    sender,
-                                    &reaction.emoji,
-                                    true,
-                                    reaction.reacted_at,
-                                )?
-                                .is_some()
-                            {
-                                summary.reactions += 1;
-                            } else {
+                            if !crate::reactions::is_emoji(&reaction.emoji) {
                                 summary.reactions_unmatched += 1;
+                            } else if self.store.add_imported_reaction(
+                                row,
+                                sender,
+                                &reaction.emoji,
+                                reaction.reacted_at,
+                            )? {
+                                summary.reactions += 1;
                             }
                         }
                         None => summary.reactions_unmatched += 1,

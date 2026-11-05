@@ -1263,6 +1263,134 @@ mod history_tests {
         assert!(app.store.file_keys(deleted.id).unwrap().is_none());
     }
 
+    /// Reactions come once per backup and never change one that is there: importing again doesn't
+    /// bring back what was removed here, nor touch the message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn importing_again_leaves_reactions_as_they_are_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        app.android_backup_import(
+            fixture(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let first = run_import(&app).await;
+        assert_eq!(first["reactions"], 2, "{first}");
+
+        let row_id = |conversation: &str, api: &str| {
+            let id = crate::android_backup::records::parse_api_id(api).unwrap();
+            app.store
+                .message_by_id(conversation, false, id)
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        let contact_row = row_id("B0B0B0B0", "0123456789abcdef");
+        let reactions = |row: i64| -> i64 {
+            app.store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM reactions WHERE message = ?1",
+                    [row],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let updated = |row: i64| -> i64 {
+            app.store
+                .conn
+                .query_row(
+                    "SELECT updated_at FROM messages WHERE id = ?1",
+                    [row],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(reactions(contact_row), 1);
+        assert_eq!(
+            updated(contact_row),
+            1_700_000_002_000,
+            "the backup's time, not now"
+        );
+        app.store
+            .conn
+            .execute("DELETE FROM reactions WHERE message = ?1", [contact_row])
+            .unwrap();
+
+        let again = run_import(&app).await;
+        assert_eq!(again["imported"], 0, "{again}");
+        assert_eq!(again["reactions"], 0, "{again}");
+        assert_eq!(reactions(contact_row), 0, "removed here, stays removed");
+
+        // Another archive doesn't overwrite one that is there.
+        let added = app
+            .store
+            .add_imported_reaction(contact_row, "B0B0B0B0", "\u{1F44D}", 5)
+            .unwrap();
+        assert!(added);
+        let added = app
+            .store
+            .add_imported_reaction(contact_row, "B0B0B0B0", "\u{1F44D}", 9)
+            .unwrap();
+        assert!(!added);
+        let at: i64 = app
+            .store
+            .conn
+            .query_row(
+                "SELECT reacted_at FROM reactions WHERE message = ?1",
+                [contact_row],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at, 5);
+    }
+
+    /// A reaction file that can't be read must not lose the summary after all the chats are in.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_oversized_reaction_file_is_reported_in_the_summary() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"]);
+        let messages = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"])
+            + &write_row(&["u-1", "B0B0B0B0", "0", "TEXT", "hello", "1700000000000"]);
+        let row = write_row(&[
+            "B0B0B0B0",
+            "0123456789abcdef",
+            "B0B0B0B0",
+            "\u{1F44D}",
+            "1700000000002",
+        ]);
+        let reactions = write_row(&[
+            "identity",
+            "api_message_id",
+            "sender_identity",
+            "emoji_sequence",
+            "reacted_at",
+        ]) + &row.repeat((2 << 20) / row.len());
+        let path = backup_with(
+            dir.path(),
+            &[
+                ("contacts.csv", contacts),
+                ("message_17.csv", messages),
+                ("contact_reactions.csv", reactions),
+            ],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["imported"], 1, "{summary}");
+        assert_eq!(summary["reactionFilesLeftOut"], 1, "{summary}");
+    }
+
     /// The result page names what was left out, with one exception: a private chat. It is hidden
     /// by the core, and that page shows whether or not private chats are open.
     #[tokio::test(flavor = "current_thread")]

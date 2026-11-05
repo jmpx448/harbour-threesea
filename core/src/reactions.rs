@@ -204,6 +204,26 @@ impl Store {
         self.touch(message)
     }
 
+    /// A reaction from a backup: added if it isn't there, one already there stays as it is, and the
+    /// message isn't touched. Returns whether it was added; what isn't an emoji isn't.
+    pub fn add_imported_reaction(
+        &self,
+        message: i64,
+        sender: &str,
+        emoji: &str,
+        reacted_at: i64,
+    ) -> Result<bool, StoreError> {
+        if !is_emoji(emoji) {
+            tracing::debug!("reaction that isn't an emoji dropped");
+            return Ok(false);
+        }
+        Ok(self.conn.execute(
+            "INSERT OR IGNORE INTO reactions (message, sender, emoji, reacted_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![message, sender, emoji, reacted_at],
+        )? > 0)
+    }
+
     /// A legacy reaction replaces all reactions of the sender on the message.
     pub fn replace_reactions(
         &self,

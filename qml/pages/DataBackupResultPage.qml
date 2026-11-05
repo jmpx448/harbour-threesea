@@ -47,11 +47,13 @@ Page {
     readonly property int localAvatars: imported ? imported.pictures.localAvatarsNotImported : 0
     readonly property int collisions: summary ? summary.collisions : 0
     readonly property int reactionsLeftOut: summary ? summary.reactionsUnmatched : 0
+    readonly property int reactionFilesLeftOut: summary ? summary.reactionFilesLeftOut : 0
     readonly property int mediaMissing: summary ? summary.mediaMissing : 0
     readonly property int mediaFailed: summary ? summary.mediaFailed : 0
     // Anything above zero: the headline must not say the whole backup arrived.
     readonly property int notImported: keyConflicts + groupsLeftOut + chatsLeftOut + chatsTooLarge + chatsDamaged
                                        + entriesLeftOut + localAvatars + collisions + reactionsLeftOut
+                                       + reactionFilesLeftOut
                                        + mediaMissing + mediaFailed + unsupported
 
     function leftOutReason(reason) {
@@ -278,6 +280,13 @@ Page {
                 //% "Reactions left out"
                 label: qsTrId("threesea-la-data-backup-reactions-left-out")
                 value: page.reactionsLeftOut
+            }
+
+            DetailItem {
+                visible: page.reactionFilesLeftOut > 0
+                //% "Lists of reactions left out"
+                label: qsTrId("threesea-la-data-backup-reaction-files-left-out")
+                value: page.reactionFilesLeftOut
             }
 
             DetailItem {
