@@ -5,7 +5,10 @@
 // the way of what happens to the recording. Exit 0: passed.
 #include "voicerecorder.h"
 
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QTemporaryDir>
 #include <cstdio>
@@ -29,6 +32,31 @@ public:
         m_recorder.m_pcmBuffer.write("words");
     }
     void limitAfter(int ms) { m_recorder.m_maxDuration = ms; }
+    // A recording on the platform's path, with what its backend reports played by the test: the SDK
+    // has no microphone for the real one.
+    void startPlatform(QObject *owner, int recordedMs)
+    {
+        m_recorder.m_codec = QStringLiteral("aac");
+        m_recorder.setOwner(owner);
+        m_recorder.m_recording = true;
+        m_recorder.m_stop = VoiceRecorder::Stop::ByItself;
+        m_recorder.m_recordedBefore = recordedMs;
+        m_recorder.m_clock.start();
+    }
+    void writeFile(const QByteArray &data)
+    {
+        QDir().mkpath(QFileInfo(m_recorder.outputPath()).path());
+        QFile file(m_recorder.outputPath());
+        file.open(QIODevice::WriteOnly);
+        file.write(data);
+    }
+    bool fileGone() const { return !QFile::exists(m_recorder.outputPath()); }
+    void reportStopped(QMediaRecorder::Status status) { m_recorder.recorderStopped(status); }
+    void reportStatus(QMediaRecorder::Status status) { m_recorder.recorderStatus(status); }
+    void finalizeWithin(int ms) { m_recorder.m_finalizeWait.setInterval(ms); }
+    void reportTime(qint64 position) { m_recorder.pauseSample(position); }
+    // The real timer stays out of it: the test says when the time is looked at.
+    void noPauseTimer() { m_recorder.m_pauseWait.stop(); }
     bool wordsGone() const { return m_recorder.m_pcm.isEmpty(); }
 
 private:
@@ -293,6 +321,128 @@ void listeningLeavesTheWordsAlone()
     }
 }
 
+// Qt says "stopped" while the file is still being written: nothing may use it before it is done.
+void aFileIsUsedOnlyOnceFinished()
+{
+    {
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        bool pcm = true;
+        QByteArray taken;
+        QObject::connect(&run.recorder, &VoiceRecorder::finished, [&]() { taken = run.recorder.takeRecording(&pcm); });
+        run.recorder.stop();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        check(run.finished == 0 && run.recorder.recording(), "file, send: waits while it is written");
+        run.test.reportStatus(QMediaRecorder::FinalizingStatus);
+        check(run.finished == 0, "file, send: still written");
+        run.test.writeFile("words");
+        run.test.reportStatus(QMediaRecorder::LoadedStatus);
+        check(run.finished == 1 && taken == "words" && !pcm, "file, send: all of it, then");
+        check(run.test.fileGone(), "file, send: gone once taken");
+    }
+    {
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        run.recorder.hold();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        check(!run.recorder.held(), "file, hold: not held while it is written");
+        run.test.writeFile("words");
+        run.test.reportStatus(QMediaRecorder::LoadedStatus);
+        check(run.recorder.held() && !run.recorder.recording(), "file, hold: held once written");
+        run.recorder.cancel();
+        check(run.test.fileGone(), "file, hold: discarded");
+    }
+    {
+        // By itself, and in the state that needs no waiting.
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        run.test.writeFile("words");
+        run.test.reportStopped(QMediaRecorder::LoadedStatus);
+        check(run.recorder.held() && run.finished == 0, "file, by itself: held, not sent");
+    }
+    {
+        // Nothing written after all: gone, and said so.
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        run.test.writeFile("");
+        run.recorder.hold();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        run.test.reportStatus(QMediaRecorder::LoadedStatus);
+        check(!run.recorder.held() && run.discarded == 1, "file, empty: nothing to hold");
+    }
+    {
+        // The status never comes: nobody stays stuck, and what may be cut off doesn't go out.
+        Run run;
+        run.test.finalizeWithin(50);
+        run.test.startPlatform(&run.owner, 2000);
+        run.test.writeFile("wor");
+        run.recorder.stop();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        waitFor(150);
+        check(!run.recorder.recording(), "file, no status: not stuck");
+        check(run.finished == 0 && run.recorder.held(), "file, no status: held, not sent");
+        run.recorder.cancel();
+    }
+    {
+        // Thrown away while it is written.
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        run.recorder.stop();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        run.recorder.cancel();
+        run.test.writeFile("words");
+        run.test.reportStatus(QMediaRecorder::LoadedStatus);
+        check(run.finished == 0 && !run.recorder.held() && run.test.fileGone(), "file, discarded meanwhile: gone");
+    }
+}
+
+// Qt says "paused" at once: only the recorder's time tells.
+void aPauseIsJudgedByTheRecordersTime()
+{
+    {
+        Run run;
+        run.test.startPlatform(&run.owner, 0);
+        waitFor(600);
+        run.recorder.pause();
+        run.test.noPauseTimer();
+        run.test.reportTime(600);
+        run.test.noPauseTimer();
+        run.test.reportTime(620);
+        check(run.recorder.paused() && run.recorder.recording(), "time stands: paused");
+        run.recorder.resume();
+        check(!run.recorder.paused() && run.recorder.recording(), "time stands: goes on");
+    }
+    {
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        waitFor(600);
+        run.recorder.pause();
+        run.test.noPauseTimer();
+        run.test.writeFile("words");
+        run.test.reportTime(600);
+        run.test.noPauseTimer();
+        run.test.reportTime(1100);
+        run.test.reportStopped(QMediaRecorder::LoadedStatus);
+        check(run.recorder.held() && !run.recorder.recording(), "time goes on: stopped and held");
+        run.recorder.cancel();
+    }
+    {
+        // A backend that tells no time can't show it has paused.
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        waitFor(600);
+        run.recorder.pause();
+        run.test.noPauseTimer();
+        run.test.writeFile("words");
+        run.test.reportTime(0);
+        run.test.noPauseTimer();
+        run.test.reportTime(0);
+        run.test.reportStopped(QMediaRecorder::LoadedStatus);
+        check(run.recorder.held(), "no time: stopped and held");
+        run.recorder.cancel();
+    }
+}
+
 void itGoesWithItsOwner()
 {
     Run run;
@@ -323,6 +473,8 @@ int main(int argc, char **argv)
     aPausedOneEndsLikeARunningOne();
     listeningAsksForAHeldOne();
     listeningLeavesTheWordsAlone();
+    aFileIsUsedOnlyOnceFinished();
+    aPauseIsJudgedByTheRecordersTime();
     itGoesWithItsOwner();
     if (failures) {
         std::printf("voice recorder: %d failed\n", failures);

@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QStandardPaths>
 #include <QUrl>
@@ -16,8 +17,14 @@ namespace {
 const int MaxDurationMs = 15 * 60 * 1000;
 // Shorter is a slip of the finger.
 const int MinDurationMs = 1000;
-// How long the platform may take to pause before it counts as not being able to.
-const int PauseWaitMs = 1000;
+// A pause is judged by the recorder's time over this long, after this long to settle.
+const int PauseWaitMs = 500;
+// A paused recorder's time may move this little.
+const int PauseToleranceMs = 200;
+// What a recorder that reports no time at all has to have recorded for that to mean something.
+const int PauseKnownAfterMs = 500;
+// How long the platform may take to finish the file.
+const int FinalizeWaitMs = 5000;
 const int PcmBytesPerMs = 48000 * 2 / 1000;
 
 // GStreamer names AAC "audio/mpeg, mpegversion=(int)4"; other backends say "aac".
@@ -89,17 +96,23 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     });
     m_pauseWait.setSingleShot(true);
     m_pauseWait.setInterval(PauseWaitMs);
-    connect(&m_pauseWait, &QTimer::timeout, this, [this]() {
-        qWarning() << "voice recorder: the platform did not pause, holding the recording";
-        finish(Stop::Hold);
+    connect(&m_pauseWait, &QTimer::timeout, this, [this]() { pauseSample(m_recorder->duration()); });
+    m_finalizeWait.setSingleShot(true);
+    m_finalizeWait.setInterval(FinalizeWaitMs);
+    connect(&m_finalizeWait, &QTimer::timeout, this, [this]() {
+        qWarning() << "voice recorder: the platform did not finish the file, holding the recording";
+        // It may be cut off: for the user to listen to, not to go out unseen.
+        if (m_stop == Stop::Send) {
+            m_stop = Stop::Hold;
+        }
+        stopped();
     });
     connect(m_recorder, &QMediaRecorder::stateChanged, this, [this](QMediaRecorder::State state) {
-        if (state == QMediaRecorder::PausedState) {
-            m_pauseWait.stop();
-        } else if (state == QMediaRecorder::StoppedState && m_recording) {
-            stopped();
+        if (state == QMediaRecorder::StoppedState) {
+            recorderStopped(m_recorder->status());
         }
     });
+    connect(m_recorder, &QMediaRecorder::statusChanged, this, &VoiceRecorder::recorderStatus);
     connect(m_recorder, static_cast<void (QMediaRecorder::*)(QMediaRecorder::Error)>(&QMediaRecorder::error), this,
             [this](QMediaRecorder::Error) { fail(m_recorder->errorString()); });
     // No microphone left open with nothing to show it. What it picked up so far is the user's:
@@ -116,6 +129,49 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     });
 }
 
+void VoiceRecorder::recorderStopped(QMediaRecorder::Status status)
+{
+    if (!m_recording) {
+        return;
+    }
+    if (m_stop == Stop::ByItself) {
+        m_finalDuration = recordedMs();
+        m_stop = Stop::Hold;
+    }
+    m_pauseWait.stop();
+    if (status == QMediaRecorder::LoadedStatus || status == QMediaRecorder::UnloadedStatus) {
+        stopped();
+    } else {
+        m_finalizeWait.start();
+    }
+}
+
+void VoiceRecorder::recorderStatus(QMediaRecorder::Status status)
+{
+    if (m_finalizeWait.isActive()
+        && (status == QMediaRecorder::LoadedStatus || status == QMediaRecorder::UnloadedStatus)) {
+        stopped();
+    }
+}
+
+void VoiceRecorder::pauseSample(qint64 position)
+{
+    if (!m_recording || !m_paused || m_stop != Stop::ByItself) {
+        return;
+    }
+    if (m_pausePosition < 0) {
+        m_pausePosition = position;
+        m_pauseWait.start();
+        return;
+    }
+    const bool goesOn = position - m_pausePosition > PauseToleranceMs;
+    const bool noTime = position <= 0 && m_recordedBefore >= PauseKnownAfterMs;
+    if (goesOn || noTime) {
+        qWarning() << "voice recorder: the platform did not pause, holding the recording";
+        finish(Stop::Hold);
+    }
+}
+
 void VoiceRecorder::stopped()
 {
     const Stop how = m_stop;
@@ -125,12 +181,13 @@ void VoiceRecorder::stopped()
     m_recording = false;
     m_tick.stop();
     m_pauseWait.stop();
+    m_finalizeWait.stop();
     setPaused(false);
     m_pcmBuffer.close();
     emit recordingChanged();
     emit durationChanged();
     const bool wanted = how != Stop::Discard && m_finalDuration >= MinDurationMs;
-    const bool complete = wanted && (usePlatform() ? QFile::exists(outputPath()) : !m_pcm.isEmpty());
+    const bool complete = wanted && (usePlatform() ? QFileInfo(outputPath()).size() > 0 : !m_pcm.isEmpty());
     if (complete && how == Stop::Send) {
         m_haveRecording = true;
         emit finished(m_finalDuration);
@@ -151,6 +208,7 @@ void VoiceRecorder::fail(const QString &error)
     m_recording = false;
     m_tick.stop();
     m_pauseWait.stop();
+    m_finalizeWait.stop();
     setPaused(false);
     if (wasRecording) {
         emit recordingChanged();
@@ -357,9 +415,9 @@ void VoiceRecorder::pause()
     setPaused(true);
     emit durationChanged();
     if (usePlatform()) {
-        m_recorder->pause();
-        // Until it has, what it still takes in is a bit more than the time says.
+        m_pausePosition = -1;
         m_pauseWait.start();
+        m_recorder->pause();
     } else if (m_input) {
         m_input->suspend();
     }
@@ -437,6 +495,11 @@ void VoiceRecorder::startPreview()
             m_previewPlayer->setMedia(QUrl::fromLocalFile(outputPath()));
         }
         m_previewPlayer->play();
+        // Moved before there was a player.
+        if (m_previewFrom > 0) {
+            m_previewPlayer->setPosition(m_previewFrom);
+            m_previewFrom = 0;
+        }
         return;
     }
     if (m_previewOutput && m_previewOutput->state() == QAudio::SuspendedState) {

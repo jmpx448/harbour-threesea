@@ -25,8 +25,13 @@
 //
 // A running recording can pause and go on. A held one can be listened to before it goes: the
 // platform's MP4 is only playable once it is finished, so listening means stopping, and what was
-// held can't go on being recorded. The platform may not manage to pause (gst-droid is only known
-// from the phone): then the recording stops and is held, which keeps what was said.
+// held can't go on being recorded. Qt says "paused" at once whether the pipeline did or not, so the
+// recorder's own time tells: if it goes on (gst-droid is only known from the phone), or there is
+// none to go by, the recording stops and is held, which keeps what was said.
+//
+// On the platform's path the file is complete only after "stopped": Qt reports that at once, while
+// the file is still being finished. Nothing happens to the recording before its status has come to
+// rest; if it never does, the recording is held and never goes out by itself.
 class VoiceRecorder : public QObject
 {
     Q_OBJECT
@@ -101,6 +106,11 @@ private:
     bool usePlatform() const { return !m_codec.isEmpty(); }
     void finish(Stop how);
     void stopped();
+    // The platform says it stopped, with its status at that moment; then each later status.
+    void recorderStopped(QMediaRecorder::Status status);
+    void recorderStatus(QMediaRecorder::Status status);
+    // The platform recorder's time, half a second apart after a pause.
+    void pauseSample(qint64 position);
     void fail(const QString &error);
     // Removes what was recorded and ends the recording's time with its owner.
     void clear();
@@ -127,6 +137,8 @@ private:
     // What was recorded before the running stretch.
     qint64 m_recordedBefore = 0;
     QTimer m_pauseWait;
+    qint64 m_pausePosition = -1;
+    QTimer m_finalizeWait;
     bool m_held = false;
     bool m_previewing = false;
     // Only for the platform's file: the core's fallback has PCM in memory, for the output.
