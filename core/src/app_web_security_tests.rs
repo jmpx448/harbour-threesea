@@ -718,10 +718,12 @@ async fn web_sends_media_as_media() {
                 "says nothing, like any picture sent"
             );
 
-            let body = web_send(&mut app, wire(b"RIFF....WEBP", "image/webp", false))
+            let webp = crate::webp::fixture::animated();
+            let body = web_send(&mut app, wire(&webp, "image/webp", false))
                 .await
                 .unwrap();
             assert_eq!(body["rendering"], "media");
+            assert_eq!(body["animated"], true);
 
             let body = web_send(&mut app, wire(&video, "video/mp4", false))
                 .await

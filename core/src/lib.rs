@@ -75,6 +75,7 @@ pub mod transport;
 pub mod updates;
 pub mod voice;
 pub mod web;
+pub mod webp;
 pub mod websocket;
 
 /// Version of this crate, as reported to the UI.

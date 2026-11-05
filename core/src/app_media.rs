@@ -1198,8 +1198,12 @@ fn prepare_file(
         "width": file.width,
         "height": file.height,
         "duration": file.duration,
-        // Like Android: GIFs shown as media are marked animated (they play in the chat).
-        "animated": (file.media_type == "image/gif" && file.rendering == "media").then_some(true),
+        // Like Android: GIFs and animated WebPs shown as media are marked animated (they play in
+        // the chat).
+        "animated": (file.rendering == "media"
+            && (file.media_type == "image/gif"
+                || (file.media_type == "image/webp" && crate::webp::is_animated(&data))))
+            .then_some(true),
         "thumbnail": thumbnail.is_some(),
         "thumbnailMediaType": "image/jpeg",
         "fileState": STATE_LOCAL,
