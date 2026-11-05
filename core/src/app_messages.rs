@@ -15,6 +15,7 @@ use crate::{
     app::{ApiError, App, Shared},
     connection::{self, ConnectionSetup, FromConnection, ToConnection},
     contacts,
+    media::MediaPart,
     messages::{EDIT_DELETE_MAX_AGE_MS, Message, OutgoingState, ReadMessage, now_ms},
     reactions,
     store::keys,
@@ -1394,6 +1395,55 @@ impl App {
         Ok((id, contact, message))
     }
 
+    /// `resendMessage`: a message that failed goes out again, in its place in the chat. It keeps its
+    /// ID, as on Android: whoever has it drops the repeat, and a linked device shows no second
+    /// bubble; each send has fresh nonces (`Connection::fresh_nonce`). Only a poll's setup gets a new
+    /// one, also as on Android (`MessageServiceImpl.resendPollMessage`). A group's goes to whoever
+    /// is a member now. Nothing of a list's copy is sent (each member's has its own row), and a file
+    /// no longer here has nothing to send.
+    pub(crate) fn resend_message(&mut self, id: i64) -> Result<Value, ApiError> {
+        let message = self
+            .store
+            .message(id)?
+            .filter(|message| {
+                message.outgoing
+                    && message.state == OutgoingState::Failed as i64
+                    && message.kind != "deleted"
+            })
+            .ok_or_else(|| ApiError::Internal("not a failed message".into()))?;
+        let (_, conversation) = self.readable_conversation(&message.conversation)?;
+        conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
+        if matches!(conversation, Conversation::List(_)) {
+            return Err(ApiError::Internal("a list's copy isn't sent".into()));
+        }
+        let is_file = message.kind == "file";
+        if is_file && (self.store.file_keys(id)?.is_none() || !self.media.has(id, MediaPart::File))
+        {
+            return Err(ApiError::FileNotDownloaded);
+        }
+        let message_id = if matches!(message.kind.as_str(), "poll" | crate::polls::KIND_CLOSED) {
+            MessageId::random().0
+        } else {
+            message.message_id
+        };
+        let receivers = match &conversation {
+            Conversation::Group(group) => group.members.as_slice(),
+            _ => &[],
+        };
+        let Some(pending) = self.store.resend_outgoing(id, message_id, receivers)? else {
+            return Ok(json!({}));
+        };
+        self.prepare_sending(&conversation, &pending)?;
+        if is_file {
+            self.upload_again(id)?;
+        } else {
+            let _ = self
+                .media_events
+                .send(crate::providers::CoreEvent::MessagesChanged(vec![pending]));
+        }
+        Ok(json!({}))
+    }
+
     /// The edit submit steps. A message whose send hasn't begun is just changed. One whose send has
     /// may be with anyone already, and a resend under its ID is dropped by those who have it, so it
     /// is edited like a sent one: a resend carries the new text to those who don't have it, the edit
@@ -2303,5 +2353,166 @@ mod tests {
             reactions::OUTBOX_DELETE
         );
         assert!(app.store.pending_outgoing().unwrap().is_empty());
+    }
+
+    /// A message that failed goes back in the queue under its ID, as if never tried.
+    #[test]
+    fn a_failed_message_is_sent_again_under_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let stored = app.store.insert_outgoing(PEER, 7, "text", "hello").unwrap();
+        app.store.set_written_out(stored.id).unwrap();
+        app.store.set_outgoing_failed(stored.id).unwrap();
+
+        app.resend_message(stored.id).unwrap();
+        let again = app.store.message(stored.id).unwrap().unwrap();
+        assert_eq!(again.state, OutgoingState::Pending as i64);
+        assert_eq!(again.message_id, 7);
+        assert!(!again.written_out);
+        assert_eq!(again.body, "hello");
+        assert_eq!(app.store.pending_outgoing().unwrap().len(), 1);
+
+        // Once only: it isn't a failed one any more.
+        assert!(app.resend_message(stored.id).is_err());
+    }
+
+    /// A poll's setup is the one that gets a new ID, as on Android.
+    #[test]
+    fn a_failed_poll_is_sent_again_under_a_new_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        for (message_id, kind) in [(7, "poll"), (8, crate::polls::KIND_CLOSED)] {
+            let stored = app
+                .store
+                .insert_outgoing(PEER, message_id, kind, "{}")
+                .unwrap();
+            app.store.set_outgoing_failed(stored.id).unwrap();
+            app.resend_message(stored.id).unwrap();
+            assert_ne!(
+                app.store.message(stored.id).unwrap().unwrap().message_id,
+                message_id
+            );
+        }
+    }
+
+    /// In a group it goes to who is a member now, and not to who has left since.
+    #[test]
+    fn a_failed_group_message_goes_to_the_members_of_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let key = notes_group(&app);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        group.members = vec![PEER.to_owned()];
+        app.store.upsert_group(&group).unwrap();
+        let stored = app.store.insert_outgoing(&key, 7, "text", "hello").unwrap();
+        app.store
+            .set_pending_receivers(&key, 7, &["OLDIE123".to_owned()])
+            .unwrap();
+        app.store.set_outgoing_failed(stored.id).unwrap();
+
+        app.resend_message(stored.id).unwrap();
+        assert_eq!(app.store.pending_receivers(&key, 7).unwrap(), [PEER]);
+    }
+
+    /// All in one step: a failure leaves it failed, with whom it was for, not pending for nobody
+    /// (which would count as sent) and not pending with an old upload.
+    #[test]
+    fn sending_again_happens_whole_or_not_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_contact(dir.path(), 0);
+        let key = notes_group(&app);
+        let stored = app.store.insert_outgoing(&key, 7, "text", "hello").unwrap();
+        app.store
+            .set_pending_receivers(&key, 7, &["OLDIE123".to_owned()])
+            .unwrap();
+        app.store.set_outgoing_failed(stored.id).unwrap();
+        app.store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER no_receivers BEFORE INSERT ON pending_receivers
+                 BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            app.store
+                .resend_outgoing(stored.id, 7, &[PEER.to_owned()])
+                .is_err()
+        );
+        let same = app.store.message(stored.id).unwrap().unwrap();
+        assert_eq!(same.state, OutgoingState::Failed as i64);
+        assert_eq!(app.store.pending_receivers(&key, 7).unwrap(), ["OLDIE123"]);
+    }
+
+    /// What can't go out stays failed and as it was.
+    #[test]
+    fn what_cannot_go_out_is_not_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        let not_failed = app.store.insert_outgoing(PEER, 7, "text", "hi").unwrap();
+        assert!(app.resend_message(not_failed.id).is_err());
+
+        let body = json!({"mediaType": "image/png", "uploadState": 2}).to_string();
+        let no_file = app.store.insert_outgoing(PEER, 8, "file", &body).unwrap();
+        app.store.set_outgoing_failed(no_file.id).unwrap();
+        assert!(matches!(
+            app.resend_message(no_file.id),
+            Err(ApiError::FileNotDownloaded)
+        ));
+        let same = app.store.message(no_file.id).unwrap().unwrap();
+        assert_eq!(
+            (same.state, same.message_id),
+            (OutgoingState::Failed as i64, 8)
+        );
+
+        let incoming = app
+            .store
+            .insert_incoming(PEER, 9, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+        assert!(app.resend_message(incoming.id).is_err());
+
+        let blocked = app.store.insert_outgoing(PEER, 10, "text", "hi").unwrap();
+        app.store.set_outgoing_failed(blocked.id).unwrap();
+        app.set_blocked(PEER, true).unwrap();
+        assert!(app.resend_message(blocked.id).is_err());
+        assert_eq!(
+            app.store.message(blocked.id).unwrap().unwrap().message_id,
+            10
+        );
+    }
+
+    /// A file goes up anew: a blob on record may be gone by now. The message waits for that.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_file_goes_up_again_before_it_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_contact(dir.path(), 0);
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let body = json!({"mediaType": "image/png", "uploadState": 2}).to_string();
+                let file = app.store.insert_outgoing(PEER, 8, "file", &body).unwrap();
+                app.store
+                    .set_file_keys(
+                        file.id,
+                        &crate::media::FileKeys {
+                            key: Zeroizing::new([1; 32]),
+                            blob_id: Some(libthreema::common::BlobId([2; 16])),
+                            thumbnail_blob_id: None,
+                        },
+                    )
+                    .unwrap();
+                app.media
+                    .write(file.id, MediaPart::File, b"content")
+                    .unwrap();
+                app.store.set_outgoing_failed(file.id).unwrap();
+
+                app.resend_message(file.id).unwrap();
+                let again = app.store.message(file.id).unwrap().unwrap();
+                assert_eq!(again.state, OutgoingState::Pending as i64);
+                let body: Value = serde_json::from_str(&again.body).unwrap();
+                assert_eq!(body["uploadState"], 1);
+                app.cancel_transfer(file.id).unwrap();
+            })
+            .await;
     }
 }

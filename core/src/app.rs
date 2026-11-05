@@ -444,6 +444,10 @@ pub enum Command {
     RetryUpload {
         message: i64,
     },
+    /// Send a failed message again, under a new message ID.
+    ResendMessage {
+        message: i64,
+    },
     /// Stop a running upload or file download.
     CancelTransfer {
         message: i64,
@@ -2409,6 +2413,7 @@ impl App {
                 }
             }
             Command::RetryUpload { message } => self.retry_upload(message),
+            Command::ResendMessage { message } => self.resend_message(message),
             Command::CancelTransfer { message } => self.cancel_transfer(message),
             Command::SaveFile { message, directory } => {
                 if self.in_background.get() {

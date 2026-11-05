@@ -1753,6 +1753,14 @@ impl App {
         Ok(json!({}))
     }
 
+    /// A failed message goes out again, and its file with it: the blob on record may be gone by
+    /// now, so it goes up anew (as on Android). Its message waits for that.
+    pub(crate) fn upload_again(&mut self, id: i64) -> Result<(), ApiError> {
+        self.store.forget_transfer_tries(id, UPLOAD_RETRY)?;
+        self.spawn_upload(id);
+        Ok(())
+    }
+
     /// `cancelTransfer`: stop a message's running upload or file download. An upload counts as
     /// failed with no try planned, as nothing starts it again but a tap: the message stays, with
     /// what was uploaded so far on record. A download goes back to waiting for a tap, which also

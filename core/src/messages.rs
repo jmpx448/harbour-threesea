@@ -961,6 +961,45 @@ impl Store {
         self.message(id)
     }
 
+    /// A failed outgoing message is sent again, as `message_id`, to `receivers` if it is a group's:
+    /// to the queue, as if nothing had been tried. A file counts as uploading from here on, so
+    /// nothing sends its old blob, and the next start takes up the upload if this one ends first.
+    /// One step: pending with no receivers would count as sent. `None` if it isn't a failed one
+    /// (any more).
+    pub fn resend_outgoing(
+        &self,
+        id: i64,
+        message_id: u64,
+        receivers: &[String],
+    ) -> Result<Option<Message>, StoreError> {
+        let Some(old) = self
+            .message(id)?
+            .filter(|old| old.outgoing && old.state == OutgoingState::Failed as i64)
+        else {
+            return Ok(None);
+        };
+        let step = self.step()?;
+        self.conn.execute(
+            "DELETE FROM pending_receivers WHERE conversation = ?1 AND message_id = ?2",
+            params![old.conversation, old.message_id.cast_signed()],
+        )?;
+        self.conn.execute(
+            "UPDATE messages SET message_id = ?2, state = ?3, written_out = 0, updated_at = ?4,
+                 sent_at = NULL, delivered_at = NULL, read_at = NULL,
+                 body = CASE kind WHEN 'file' THEN json_set(body, '$.uploadState', 1) ELSE body END
+             WHERE id = ?1",
+            params![
+                id,
+                message_id.cast_signed(),
+                OutgoingState::Pending as i64,
+                now_ms()
+            ],
+        )?;
+        self.set_pending_receivers(&old.conversation, message_id, receivers)?;
+        step.commit()?;
+        self.message(id)
+    }
+
     /// Outgoing messages that still need sending, oldest first.
     pub fn pending_outgoing(&self) -> Result<Vec<Message>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
