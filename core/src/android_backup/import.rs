@@ -36,7 +36,8 @@ pub(crate) const MIGRATION_IMPORT_IDS: &str = "
     ) WITHOUT ROWID;";
 
 const BATCH: usize = 400;
-const MAX_TABLE_BYTES: usize = 64 << 20;
+/// How much of one table is held in memory (tests stay at what they can write quickly).
+const MAX_TABLE_BYTES: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
 /// A file message whose bytes are applied after its row is committed.
 struct MediaJob {
@@ -108,6 +109,8 @@ pub struct Summary {
     pub chats: usize,
     /// Chat files whose conversation is not on this device (metadata import pending).
     pub skipped_chats: usize,
+    /// Chat files beyond what is read into memory: left out, the rest of the archive goes on.
+    pub too_large_chats: usize,
     pub imported: usize,
     pub existing: usize,
     /// Same message id from a different group sender: reported, neither record touched.
@@ -225,6 +228,7 @@ impl HistoryImport {
             Ok(summary) => {
                 tracing::info!(
                     chats = summary.chats,
+                    too_large = summary.too_large_chats,
                     imported = summary.imported,
                     existing = summary.existing,
                     media = summary.media_files,
@@ -326,18 +330,28 @@ impl HistoryImport {
                 "imported": summary.imported,
             }));
             let entry = plan.entry.clone();
-            let (returned, messages, invalid) = tokio::task::spawn_blocking(
-                move || -> Result<(Archive, Vec<records::Message>, usize), ArchiveError> {
-                    let table = archive.read_table(&entry, MAX_TABLE_BYTES)?;
+            let (returned, parsed) = tokio::task::spawn_blocking(move || {
+                let parsed = archive.read_table(&entry, MAX_TABLE_BYTES).map(|table| {
                     let (mut messages, invalid) = records::messages(&table);
                     // Oldest first, deterministic ties: placement needs ascending times.
                     messages.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.uid.cmp(&b.uid)));
-                    Ok((archive, messages, invalid))
-                },
-            )
+                    (messages, invalid)
+                });
+                (archive, parsed)
+            })
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))??;
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
             archive = returned;
+            let (messages, invalid) = match parsed {
+                Ok(parsed) => parsed,
+                // Every run would stop at this chat, with the later ones and all reactions behind
+                // it: it is left out and reported, the memory bound stays.
+                Err(ArchiveError::TooLarge) => {
+                    summary.too_large_chats += 1;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             summary.invalid_rows += invalid;
             summary.uid_conflicts += checks.claimed_elsewhere(done, plan.family, &messages);
             if plan.family == Family::Group

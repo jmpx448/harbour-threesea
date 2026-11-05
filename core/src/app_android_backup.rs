@@ -1184,6 +1184,94 @@ mod history_tests {
         );
     }
 
+    /// A chat too large to hold in memory is left out and reported; what comes after it arrives,
+    /// where it used to stop every run at the same place.
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_oversized_chat_leaves_the_rest_of_the_backup_alone() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"])
+            + &write_row(&["C0C0C0C0", &"bc".repeat(32), "18"]);
+        let header = write_row(&[
+            "apiid",
+            "uid",
+            "identity",
+            "isoutbox",
+            "type",
+            "body",
+            "posted_at",
+        ]);
+        let oversized = header.clone()
+            + &write_row(&[
+                "0123456789abcdef",
+                "u-1",
+                "B0B0B0B0",
+                "0",
+                "TEXT",
+                &"x".repeat(2 << 20),
+                "1700000000000",
+            ]);
+        let fine = header
+            + &write_row(&[
+                "1123456789abcdef",
+                "u-2",
+                "C0C0C0C0",
+                "0",
+                "TEXT",
+                "fits",
+                "1700000000001",
+            ]);
+        let reactions = write_row(&[
+            "identity",
+            "api_message_id",
+            "sender_identity",
+            "emoji_sequence",
+            "reacted_at",
+        ]) + &write_row(&[
+            "C0C0C0C0",
+            "1123456789abcdef",
+            "C0C0C0C0",
+            "\u{1F44D}",
+            "1700000000002",
+        ]);
+        let path = backup_with(
+            dir.path(),
+            &[
+                ("contacts.csv", contacts),
+                ("message_17.csv", oversized),
+                ("message_18.csv", fine),
+                ("contact_reactions.csv", reactions),
+            ],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["tooLargeChats"], 1, "{summary}");
+        assert_eq!(summary["chats"], 1, "{summary}");
+        assert_eq!(summary["imported"], 1, "{summary}");
+        assert_eq!(summary["reactions"], 1, "{summary}");
+        assert_eq!(
+            app.store
+                .conversation_messages("C0C0C0C0", 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            app.store
+                .conversation_messages("B0B0B0B0", 50)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// Whatever hasn't left, or doesn't say how far it got, never shows as read by the recipient.
     #[tokio::test(flavor = "current_thread")]
     async fn outgoing_states_claim_no_more_than_the_backup_says() {
