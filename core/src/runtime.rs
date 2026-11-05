@@ -430,6 +430,8 @@ async fn run_maintenance(app: &mut App, emit: &Emit) {
     for event in app.maintenance().await {
         emit(json!({ "event": event }).to_string());
     }
+    // Keep messages may have taken some out of what the browsers show.
+    app.web_refresh();
     app.start_update_check(false);
 }
 
@@ -462,6 +464,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                 settle_command(&mut app, &mut media_events, &emit);
                 if app.refresh_imported_contacts().await {
                     emit(json!({ "event": "contactsChanged" }).to_string());
+                    app.web_refresh();
                 }
                 // An ID may just have been created/restored (or removed).
                 if let Some(started) = app.ensure_connection() {
@@ -492,6 +495,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                             for event in app.on_connected().await {
                                 emit(json!({ "event": event }).to_string());
                             }
+                            app.web_refresh();
                         }
                     }
                     Some(FromConnection::Event(event)) => {

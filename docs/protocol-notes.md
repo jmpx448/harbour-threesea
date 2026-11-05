@@ -781,3 +781,19 @@ These are the only requests that send a plain address/number (CLAUDE.md §7.4 ex
   the list has it from then on. Limits: 90 s to begin the transaction, 5 minutes for the transfer
   (60 s per 1 MiB chunk), 3 minutes for `Registered`, 5 s to close the link, 30 s for the commit.
   A commit failing after `Registered` restarts the connection, which releases the lock.
+
+## Threema Web: how the browser stays up to date (not protocol)
+
+Android hangs its updates on listeners. We compare at every refresh (after each command and event,
+if the store's change count, the subscriptions or the picture writes moved), per browser, what it
+was sent with what the store says now: receivers (`update/receiver`, more than 20 of a type at once
+as `update/receivers`), pictures (`update/avatar`, 48 px; `update/profile` has ours in 512 px),
+the profile, the chat list, and the messages it has (`update/messages` mode `removed`). A way of
+changing something that nobody thought of still reaches the browser that way, at its next refresh.
+
+The order matters: what goes away first (messages, conversations, then receivers), new receivers
+before new conversations, as the browser ignores a conversation of a receiver it doesn't know.
+`update/receivers` makes the browser forget the pictures it has loaded, `update/receiver` doesn't.
+The removals say `type: text` and `isStatus: false` whatever the message was: the browser goes by
+the ID. `update/alert` (`source: server`) carries the chat server's words; an alert is a `warning`,
+what it closes the connection with an `error`.
