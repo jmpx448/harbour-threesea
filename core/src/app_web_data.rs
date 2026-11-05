@@ -309,6 +309,39 @@ fn voip(record: &str) -> Value {
     }
 }
 
+/// What Threema Web shows a file message as, like Android's `Message`: how it was sent counts, not
+/// only what it is. Only what is shown as media gets the viewer or the video overlay; everything
+/// else, an animated GIF too, is a file with its name and size, which the browser saves when
+/// clicked (and plays a GIF inline).
+fn file_message_type(body: &str) -> &'static str {
+    /// Android's `MimeUtil.supportedImageMimeTypes`.
+    const SUPPORTED_IMAGES: [&str; 6] = [
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/heic",
+    ];
+    let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let media_type = value["mediaType"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let supported = SUPPORTED_IMAGES
+        .iter()
+        .any(|image| media_type.starts_with(image));
+    match (
+        value["rendering"].as_str(),
+        crate::messages::media_kind(body),
+    ) {
+        (_, "voice") => "audio",
+        (Some("media"), "image") | (Some("sticker"), "image" | "gif") if supported => "image",
+        (Some("media"), "video") => "video",
+        _ => "file",
+    }
+}
+
 /// Status lines as Threema Web shows them (our UI translates the codes; the browser can't).
 fn status_text(code: &str) -> String {
     let (kind, argument) = code.split_once('|').unwrap_or((code, ""));
@@ -581,12 +614,7 @@ impl App {
             "file" => {
                 let body = &json["body"];
                 let media_type = body["mediaType"].as_str().unwrap_or_default();
-                let kind = match crate::messages::media_kind(&message.body) {
-                    "image" | "gif" => "image",
-                    "video" => "video",
-                    "voice" => "audio",
-                    _ => "file",
-                };
+                let kind = file_message_type(&message.body);
                 fields.push(("type", kind.into()));
                 if let Some(caption) = body["caption"].as_str().filter(|c| !c.is_empty()) {
                     fields.push(("caption", caption.into()));
@@ -600,7 +628,7 @@ impl App {
                         ("name", body["name"].as_str().unwrap_or("file").into()),
                         ("size", body["size"].as_i64().unwrap_or(0).into()),
                         ("type", media_type.into()),
-                        ("inApp", false.into()),
+                        ("inApp", (body["rendering"] == "media").into()),
                     ]),
                 ));
             }
@@ -1541,6 +1569,29 @@ fn messages_update(key: &str, mode: &str, data: Vec<Value>) -> Value {
 mod tests {
     use super::*;
     use crate::{app::StartConfig, store::StoredIdentity, web::saltyrtc::field};
+
+    #[test]
+    fn what_a_file_is_shown_as_goes_by_how_it_was_sent() {
+        let shown = |rendering: &str, media_type: &str| {
+            file_message_type(
+                &serde_json::json!({"rendering": rendering, "mediaType": media_type}).to_string(),
+            )
+        };
+        assert_eq!(shown("media", "image/jpeg"), "image");
+        assert_eq!(shown("sticker", "image/png"), "image");
+        assert_eq!(shown("sticker", "image/gif"), "image");
+        assert_eq!(shown("media", "video/mp4"), "video");
+        assert_eq!(shown("media", "audio/ogg"), "audio");
+        // A file stays one, whatever it is; a GIF plays inline only as a file.
+        assert_eq!(shown("file", "image/jpeg"), "file");
+        assert_eq!(shown("file", "video/mp4"), "file");
+        assert_eq!(shown("file", "audio/ogg"), "file");
+        assert_eq!(shown("media", "image/gif"), "file");
+        // What the browser can't draw.
+        assert_eq!(shown("media", "image/tiff"), "file");
+        assert_eq!(shown("media", "image/svg+xml"), "file");
+        assert_eq!(shown("sticker", "video/mp4"), "file");
+    }
 
     #[test]
     fn a_call_refused_because_calls_are_off_says_so() {
