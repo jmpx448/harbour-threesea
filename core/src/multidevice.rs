@@ -28,6 +28,7 @@ pub(crate) const MIGRATION_REFLECTED_WAITING: &str = "
         conversation  TEXT NOT NULL,
         message_id    INTEGER NOT NULL,
         created_at    INTEGER NOT NULL,
+        read_at       INTEGER,
         message       BLOB NOT NULL
     );";
 
@@ -38,6 +39,8 @@ pub struct WaitingReflected {
     pub conversation: String,
     pub message_id: u64,
     pub created_at: i64,
+    /// Read on another device meanwhile.
+    pub read_at: Option<i64>,
     /// The encoded `d2d::IncomingMessage`.
     pub message: Vec<u8>,
 }
@@ -278,7 +281,7 @@ impl Store {
     /// What is kept, oldest first.
     pub fn reflected_waiting(&self) -> Result<Vec<WaitingReflected>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, sender, conversation, message_id, created_at, message
+            "SELECT id, sender, conversation, message_id, created_at, read_at, message
              FROM reflected_waiting ORDER BY id",
         )?;
         let rows = statement.query_map([], |row| {
@@ -288,10 +291,28 @@ impl Store {
                 conversation: row.get(2)?,
                 message_id: row.get::<_, i64>(3)?.cast_unsigned(),
                 created_at: row.get(4)?,
-                message: row.get(5)?,
+                read_at: row.get(5)?,
+                message: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// These were read on another device, should they be among the waiting.
+    pub fn note_waiting_read(
+        &self,
+        conversation: &str,
+        message_ids: &[u64],
+        at: i64,
+    ) -> Result<(), StoreError> {
+        for message_id in message_ids {
+            self.conn.execute(
+                "UPDATE reflected_waiting SET read_at = ?1
+                 WHERE conversation = ?2 AND message_id = ?3",
+                rusqlite::params![at, conversation, message_id.cast_signed()],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn reflected_done(&self, id: i64) -> Result<(), StoreError> {

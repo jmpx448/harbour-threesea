@@ -6887,6 +6887,7 @@ mod sync_order_tests {
                 conversation: CREATOR.into(),
                 message_id: 1,
                 created_at: 1,
+                read_at: None,
                 message: prost::Message::encode_to_vec(&message),
             })
             .unwrap();

@@ -190,7 +190,8 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   again on that connection, only at the next login or the hourly try. It is applied in the connection once they have a contact
   (a contact sync, any change of contacts, a login), held back from notifying like every reflected
   message, and placed by its time among what got here meanwhile. It is dropped if the directory says
-  the ID doesn't exist. Android discards these. Read updates that came meanwhile aren't kept for it.
+  the ID doesn't exist. Android discards these. If it is read on another device meanwhile (update or read receipt), it comes
+  in read; no other update is kept for it.
   At most 1000 wait, the oldest stay. One beyond that is acknowledged and only on the other devices;
   it is logged with a count and the count shows on the linked devices page, for good (no content,
   no sender).

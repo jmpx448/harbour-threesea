@@ -257,6 +257,7 @@ pub fn apply_waiting(
             conversation,
             message_id,
             created_at: _,
+            read_at,
             message,
         } = waited;
         if crate::providers::identity_blocked(store, config, &sender)? {
@@ -290,6 +291,11 @@ pub fn apply_waiting(
             .and_then(|()| {
                 // By its time: newer messages from them can have got here first.
                 store.place_by_time(&conversation, message_id)?;
+                if let Some(at) = read_at {
+                    let changed = store.mark_incoming_read(&conversation, &[message_id], at)?;
+                    seen_elsewhere(store, events, &conversation);
+                    push_changed(events, changed);
+                }
                 store.reflected_done(id)?;
                 Ok(step.commit()?)
             });
@@ -392,6 +398,7 @@ pub fn apply(
                         conversation,
                         message_id: message.message_id,
                         created_at: i64::try_from(message.created_at).unwrap_or(i64::MAX),
+                        read_at: None,
                         message: message.encode_to_vec(),
                     })?;
                     store.owe_member_lookups(&[sender.to_string()])?;
@@ -453,11 +460,10 @@ pub fn apply(
                     continue;
                 };
                 if let Some(incoming_message_update::update::Update::Read(read)) = update.update {
-                    let changed = store.mark_incoming_read(
-                        &conversation,
-                        &[update.message_id],
-                        i64::try_from(read.at).unwrap_or_default(),
-                    )?;
+                    let at = i64::try_from(read.at).unwrap_or_default();
+                    store.note_waiting_read(&conversation, &[update.message_id], at)?;
+                    let changed =
+                        store.mark_incoming_read(&conversation, &[update.message_id], at)?;
                     // Also when nothing changed: the read receipt the other device sent may
                     // have marked these messages read a moment earlier (user report
                     // 2026-10-28: notifications stayed for chats read on Threema Desktop).
@@ -602,6 +608,7 @@ fn outgoing_message(
         ContactMessageBody::DeliveryReceipt(receipt) => {
             if matches!(receipt.receipt_type, DeliveryReceiptType::Read) {
                 let ids: Vec<u64> = receipt.message_ids.iter().map(|id| id.0).collect();
+                store.note_waiting_read(&conversation, &ids, created_at)?;
                 let changed = store.mark_incoming_read(&conversation, &ids, created_at)?;
                 seen_elsewhere(store, events, &conversation);
                 push_changed(events, changed);
@@ -1609,6 +1616,7 @@ mod tests {
                     conversation: "D0D0D0D0".into(),
                     message_id: 1,
                     created_at: 1,
+                    read_at: None,
                     message: b"kept".to_vec(),
                 })
                 .unwrap();
@@ -1652,6 +1660,7 @@ mod tests {
                     conversation: "D0D0D0D0".into(),
                     message_id: 1,
                     created_at: 1,
+                    read_at: None,
                     message: b"kept".to_vec(),
                 })
                 .unwrap();
@@ -1785,5 +1794,44 @@ mod tests {
             .map(|(_, at)| at)
             .collect();
         assert_eq!(times, [1, 1000]);
+    }
+
+    /// Read on another device while it waited, by an update or a read receipt: it comes in read.
+    #[test]
+    fn what_waited_stays_read_if_read_elsewhere() {
+        use libthreema::model::message::DeliveryReceiptMessage;
+        let (_dir, store) = with_identity();
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+        apply_sealed(&store, &stranger_text(2, vec![2; 24]), &Rc::default());
+        apply_sealed(&store, &stranger_text(3, vec![3; 24]), &Rc::default());
+        apply(&store, user, read_update("C0C0C0C0", 1), &Rc::default()).unwrap();
+        let receipt = ContactMessageBody::DeliveryReceipt(DeliveryReceiptMessage {
+            receipt_type: DeliveryReceiptType::Read,
+            message_ids: vec![MessageId(2)],
+        });
+        apply(
+            &store,
+            user,
+            reflected_outgoing("C0C0C0C0", 9, receipt),
+            &Rc::default(),
+        )
+        .unwrap();
+
+        store.upsert_contact(&stranger()).unwrap();
+        let events: EventSink = Rc::default();
+        apply_waiting(&store, &test_config(), &events).unwrap();
+        let unread = |id| {
+            store
+                .message_by_id("C0C0C0C0", false, id)
+                .unwrap()
+                .unwrap()
+                .state
+                == crate::messages::INCOMING_UNREAD
+        };
+        assert!(!unread(1));
+        assert!(!unread(2));
+        assert!(unread(3));
+        assert!(clears(&events, "C0C0C0C0"));
     }
 }

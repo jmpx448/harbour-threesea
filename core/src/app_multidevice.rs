@@ -2762,6 +2762,7 @@ mod tests {
                 conversation: "C0C0C0C0".into(),
                 message_id: 1,
                 created_at: 1,
+                read_at: None,
                 message: Vec::new(),
             })
             .unwrap();
