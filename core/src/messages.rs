@@ -2177,6 +2177,14 @@ mod tests {
         store
             .insert_incoming("BBBBBBBB", 2, "text", "hi", 2)
             .unwrap();
+        // Clearly earlier: in the same millisecond as the emptying, the order would be a tie.
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = received_at - 1000 WHERE conversation = ?1",
+                ["AAAAAAAA"],
+            )
+            .unwrap();
         store.empty_conversation("BBBBBBBB").unwrap();
         let list = store.conversations().unwrap();
         let kinds: Vec<(&str, &str)> = list
