@@ -2573,7 +2573,7 @@ impl App {
 }
 
 /// What a command changes that other devices of the group keep too (multi-device).
-fn sync_change(
+pub(crate) fn sync_change(
     store: &crate::store::Store,
     command: &Command,
 ) -> Option<crate::app_multidevice::SyncChange> {
@@ -2617,7 +2617,10 @@ fn sync_change(
         | Command::SetSyncExcluded { .. } => SyncChange::Settings,
         Command::SetNickname { .. }
         | Command::SetProfilePictureShare { .. }
-        | Command::SetProfilePictureRecipient { .. } => SyncChange::Profile { picture: false },
+        | Command::SetProfilePictureRecipient { .. }
+        | Command::LinkEmail { .. }
+        | Command::LinkMobile { .. }
+        | Command::VerifyMobile { .. } => SyncChange::Profile { picture: false },
         Command::SetProfilePicture | Command::RemoveProfilePicture => {
             SyncChange::Profile { picture: true }
         }

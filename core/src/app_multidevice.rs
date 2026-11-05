@@ -2028,6 +2028,59 @@ mod tests {
         assert!(app.store.next_sync().unwrap().is_none());
     }
 
+    /// The ID's links go with the profile (Android: after a link, an unlink and a verification).
+    #[test]
+    fn a_links_state_goes_with_the_profile() {
+        use libthreema::protobuf::d2d::UserProfileSync;
+        use prost::Message as _;
+        let (_dir, mut app) = app();
+        let _connection = in_a_group(&mut app);
+        for command in [
+            crate::app::Command::LinkEmail {
+                email: String::new(),
+            },
+            crate::app::Command::LinkMobile {
+                number: String::new(),
+            },
+            crate::app::Command::VerifyMobile {
+                code: String::new(),
+                from_link: false,
+            },
+        ] {
+            assert!(matches!(
+                crate::app::sync_change(&app.store, &command),
+                Some(SyncChange::Profile { picture: false })
+            ));
+        }
+        app.store
+            .set_setting(crate::store::keys::LINKED_EMAIL, "ab@example.org")
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(app.reflect_change(SyncChange::Profile { picture: false }, &json!({})));
+        let (_, scope, content) = app.store.next_sync().unwrap().unwrap();
+        assert_eq!(scope, Scope::UserProfileSync as i32);
+        let envelope = libthreema::protobuf::d2d::Envelope::decode(content.as_slice()).unwrap();
+        let Some(Content::UserProfileSync(UserProfileSync {
+            action: Some(libthreema::protobuf::d2d::user_profile_sync::Action::Update(update)),
+        })) = envelope.content
+        else {
+            panic!("not a profile");
+        };
+        assert_eq!(
+            update
+                .user_profile
+                .unwrap()
+                .identity_links
+                .unwrap()
+                .links
+                .len(),
+            1
+        );
+    }
+
     /// One command, many contacts: each of those it changed, and only those.
     #[tokio::test(flavor = "current_thread")]
     async fn clearing_individual_receipt_settings_reaches_the_other_devices() {

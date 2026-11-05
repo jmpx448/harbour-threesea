@@ -798,6 +798,24 @@ pub fn settings_sync(store: &Store, sync: SettingsSync) -> Result<(), StoreError
     store.set_setting(keys::APP_SETTINGS, &json)
 }
 
+/// A link another device says is confirmed, or says isn't there. One still waiting for its
+/// confirmation here stays if there is none: it wasn't known there. (Android forgets it.)
+fn apply_identity_link(
+    store: &Store,
+    link: Option<String>,
+    confirmed: &str,
+    pending: &str,
+) -> Result<(), StoreError> {
+    match link.filter(|link| !link.is_empty()) {
+        Some(link) => {
+            store.set_setting(confirmed, &link)?;
+            store.delete_setting(pending)
+        }
+        None if store.setting(pending)?.is_none() => store.delete_setting(confirmed),
+        None => Ok(()),
+    }
+}
+
 pub fn user_profile_sync(
     store: &Store,
     sync: UserProfileSync,
@@ -835,6 +853,24 @@ pub fn user_profile_sync(
                 store.set_picture_recipients(&list.identities)?;
             }
         }
+    }
+    if let Some(links) = profile.identity_links {
+        use d2d_sync::user_profile::identity_links::identity_link::Type;
+        let (mut email, mut phone) = (None, None);
+        for link in links.links {
+            match link.r#type {
+                Some(Type::Email(address)) if email.is_none() => email = Some(address),
+                Some(Type::PhoneNumber(number)) if phone.is_none() => phone = Some(number),
+                _ => {}
+            }
+        }
+        apply_identity_link(store, email, keys::LINKED_EMAIL, keys::LINKED_EMAIL_PENDING)?;
+        apply_identity_link(
+            store,
+            phone,
+            keys::LINKED_MOBILE,
+            keys::LINKED_MOBILE_PENDING,
+        )?;
     }
     Ok(())
 }
@@ -1203,6 +1239,70 @@ mod tests {
 
     /// Deleted on another device: the chat is gone from the store here, and the app is told, as
     /// the picture and the media are for it to remove.
+    #[test]
+    fn links_from_another_device_are_kept_and_one_waiting_here_stays() {
+        use d2d_sync::user_profile::{
+            IdentityLinks,
+            identity_links::{IdentityLink, identity_link::Type},
+        };
+        let (_dir, store) = store();
+        let apply = |links: Option<Vec<Type>>| {
+            let profile = d2d_sync::UserProfile {
+                identity_links: links.map(|links| IdentityLinks {
+                    links: links
+                        .into_iter()
+                        .map(|link| IdentityLink {
+                            r#type: Some(link),
+                            description: String::new(),
+                        })
+                        .collect(),
+                }),
+                ..Default::default()
+            };
+            user_profile_sync(
+                &store,
+                UserProfileSync {
+                    action: Some(user_profile_sync::Action::Update(
+                        user_profile_sync::Update {
+                            user_profile: Some(profile),
+                        },
+                    )),
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+        };
+        let setting = |key: &str| store.setting(key).unwrap();
+
+        apply(Some(vec![
+            Type::Email("ab@example.org".into()),
+            Type::PhoneNumber("41791234567".into()),
+        ]));
+        assert_eq!(
+            setting(keys::LINKED_EMAIL).as_deref(),
+            Some("ab@example.org")
+        );
+        assert_eq!(setting(keys::LINKED_MOBILE).as_deref(), Some("41791234567"));
+
+        // Nothing said about links: they stay.
+        apply(None);
+        assert!(setting(keys::LINKED_EMAIL).is_some());
+
+        // Removed there, and one waiting for its code here stays.
+        store
+            .set_setting(keys::LINKED_MOBILE_PENDING, "41790000000 v1")
+            .unwrap();
+        store.delete_setting(keys::LINKED_MOBILE).unwrap();
+        apply(Some(vec![]));
+        assert!(setting(keys::LINKED_EMAIL).is_none());
+        assert!(setting(keys::LINKED_MOBILE_PENDING).is_some());
+
+        // Confirmed there: nothing is waiting any more.
+        apply(Some(vec![Type::PhoneNumber("41790000000".into())]));
+        assert!(setting(keys::LINKED_MOBILE_PENDING).is_none());
+        assert_eq!(setting(keys::LINKED_MOBILE).as_deref(), Some("41790000000"));
+    }
+
     #[test]
     fn a_group_deleted_on_another_device_goes_with_all_that_is_its() {
         let dir = tempfile::tempdir().unwrap();

@@ -741,6 +741,8 @@ impl App {
         }
         self.store.delete_setting(keys::LINKED_EMAIL_PENDING)?;
         tracing::info!("e-mail link confirmed");
+        let change = crate::app_multidevice::SyncChange::Profile { picture: false };
+        self.reflect_change(change, &json!({})).await;
         Ok(true)
     }
 
