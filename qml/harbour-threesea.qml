@@ -122,6 +122,38 @@ ApplicationWindow {
                           qsTrId("threesea-la-license-notification-body"))
     }
 
+    // Threema Safe has kept failing for a week: the copy on the server is getting old, and expires,
+    // while Settings says "On". Again when the count of days changes, without a banner; gone with
+    // the first backup that works or when Safe goes off.
+    property int safeWarningShown: 0
+    function checkSafeWarning() {
+        backend.call("safeStatus", {}, function(ok, status) {
+            if (!ok) return
+            var days = status.warningDays || 0
+            if (days === 0) {
+                safeWarningShown = 0
+                clearNotification("safeFailing")
+            } else if (days !== safeWarningShown) {
+                var quiet = safeWarningShown > 0
+                safeWarningShown = days
+                //% "Threema Safe backup failing"
+                plainNotification("safeFailing", qsTrId("threesea-la-safe-failing-notification"),
+                                  //% "Threema Safe hasn't been able to back up for %n day(s). Tap to check."
+                                  qsTrId("threesea-la-safe-failing-notification-body", days), quiet, "showSafe")
+            }
+        })
+    }
+    // Starting, locked or mid-transition: once that is over (the timer below).
+    property bool pendingSafe: false
+    function showSafe() {
+        if (backend.state !== "ready" || shownState !== "ready" || stackHeld || pageStack.busy) {
+            pendingSafe = true
+            return
+        }
+        var top = pageStack.currentPage
+        if (!top || !top.safePage) pushWithPin(Qt.resolvedUrl("pages/SafePage.qml"))
+    }
+
     // What Threema's servers said last, or why they don't let this device in: on the chat list until
     // the next login, as from outside that looks like a bad network.
     property var offlineReason: null
@@ -715,6 +747,7 @@ ApplicationWindow {
         // After start-up or a page transition.
         running: !window.stackHeld && (window.pendingLink.length > 0 || window.pendingChat.length > 0
                                        || window.pendingUpdate || window.pendingWebSessions
+                                       || window.pendingSafe
                                        || window.pendingShare !== null)
         interval: 300
         repeat: true
@@ -727,6 +760,7 @@ ApplicationWindow {
                 window.pendingShare = null
                 window.pendingUpdate = false
                 window.pendingWebSessions = false
+                window.pendingSafe = false
                 return
             }
             // Also wait while the stored data is locked (passphrase).
@@ -747,6 +781,10 @@ ApplicationWindow {
             if (window.pendingWebSessions && backend.state === "ready") {
                 window.pendingWebSessions = false
                 window.showWebSessions()
+            }
+            if (window.pendingSafe && backend.state === "ready") {
+                window.pendingSafe = false
+                window.showSafe()
             }
         }
     }
@@ -865,22 +903,24 @@ ApplicationWindow {
             property string key
             // The chat tapping it opens; otherwise it opens the app.
             property string chat
+            // Another of the D-Bus interface's methods to tap to, without an argument.
+            property string method
             onClosed: {
                 window.notificationClosed(key, plain)
                 plain.destroy()
             }
             appName: "Threesea"
             appIcon: "harbour-threesea"
-            remoteActions: [window.dbusAction("default", "", chat ? "openChat" : "activate", chat)]
+            remoteActions: [window.dbusAction("default", "", method || (chat ? "openChat" : "activate"), chat)]
         }
     }
 
     // The plain notification under this key, new or updated, on the screen; `quiet`: without a
     // banner, as this isn't news.
-    function plainNotification(key, summary, body, quiet) {
+    function plainNotification(key, summary, body, quiet, method) {
         var n = notifications[key]
         if (!n) {
-            n = plainNotificationComponent.createObject(window, { key: key })
+            n = plainNotificationComponent.createObject(window, { key: key, method: method || "" })
             notifications[key] = n
         }
         n.summary = summary
@@ -1236,6 +1276,11 @@ ApplicationWindow {
             return
         }
         var actions = n.remoteActions || []
+        // About backups: the next check says it again if it still holds.
+        if (actions.some(function(action) { return action.method === "showSafe" })) {
+            n.close()
+            return
+        }
         // Of a call this process knows nothing about.
         if (actions.some(function(action) { return action.method === "answerCall" })) {
             n.close()
@@ -1485,7 +1530,7 @@ ApplicationWindow {
         var added = 0
         Object.keys(notifications).forEach(function(key) {
             // Who wrote what isn't in these.
-            if (["appLocked", "locked", "license", "serverMessage", "replyNotSent", "installChanged"].indexOf(key) >= 0
+            if (["appLocked", "locked", "license", "serverMessage", "replyNotSent", "installChanged", "safeFailing", "backupReminder"].indexOf(key) >= 0
                     || key.indexOf("replyNotSent:") === 0) return
             added += Math.max(notifications[key].itemCount, 1)
             if (closeNotification(key)) dbus.releaseToken(key)
@@ -2019,6 +2064,7 @@ ApplicationWindow {
         onActivateRequested: window.activate()
         onShowUpdateRequested: window.showUpdate()
         onShowWebSessionsRequested: window.showWebSessions()
+        onShowSafeRequested: window.showSafe()
         onOpenUrlRequested: window.openLink(url, false)
         onMarkReadRequested: window.notificationAction({ identity: identity })
         onReplyRequested: window.notificationAction({ identity: identity, text: text })
@@ -2060,7 +2106,10 @@ ApplicationWindow {
             window.showStatePage()
             window.startFailedNotification()
             window.syncAddressBook(false)
-            if (backend.state === "ready") window.clearNotification("license")
+            if (backend.state === "ready") {
+                window.clearNotification("license")
+                window.checkSafeWarning()
+            }
             window.runNotificationActions()
         }
         onDataRemoved: window.dataRemoved(linkedDevicesRemain)
@@ -2103,6 +2152,8 @@ ApplicationWindow {
             } else if (name === "wakeSettled") {
                 window.endWake()
                 window.actionsSent()
+            } else if (name === "safeChanged") {
+                window.checkSafeWarning()
             } else if (name === "safeServerCopyLeft") {
                 // From here: the user may have left the Safe page during the wait.
                 //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."

@@ -90,6 +90,16 @@ void DBusInterface::showWebSessions()
     emit showWebSessionsRequested();
 }
 
+void DBusInterface::showSafe()
+{
+    if (windowRefused()) {
+        return;
+    }
+    emit called();
+    emit activateRequested();
+    emit showSafeRequested();
+}
+
 void DBusInterface::activate(const QStringList &urls)
 {
     if (windowRefused()) {

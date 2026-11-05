@@ -79,6 +79,8 @@ public slots:
     Q_SCRIPTABLE void showUpdate();
     // The Threema Web notifications' action: show the window with the sessions page.
     Q_SCRIPTABLE void showWebSessions();
+    // The backup notifications' action: show the window with the Threema Safe page.
+    Q_SCRIPTABLE void showSafe();
 #ifdef THREESEA_DEMO
     // Emulator builds only (`qmake CONFIG+=demo`): fill the store with made-up chats, or take
     // them away again (scripts/emulator-demo.sh). Not compiled into any build for a phone, so
@@ -102,6 +104,7 @@ signals:
     void activateRequested();
     void showUpdateRequested();
     void showWebSessionsRequested();
+    void showSafeRequested();
     void openUrlRequested(const QString &url);
 #ifdef THREESEA_DEMO
     void demoDataRequested(bool remove);

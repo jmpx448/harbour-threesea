@@ -222,6 +222,23 @@ async fn derive(identity: String, password: Zeroizing<String>) -> Result<MasterK
         .map_err(ApiError::from)
 }
 
+/// How long a failing Threema Safe stays quiet: a short outage isn't news (Android's 7 days).
+const SAFE_WARNING_AFTER: i64 = 7 * 24 * 60 * 60;
+
+/// Backups have kept failing for a week: the days since the last one that worked (since the first
+/// failure if none ever did, where Android says nothing though nothing is protected at all).
+fn safe_warning_days(
+    first_failure: Option<i64>,
+    last_upload: Option<i64>,
+    now: i64,
+) -> Option<i64> {
+    let first_failure = first_failure?;
+    if now - first_failure < SAFE_WARNING_AFTER {
+        return None;
+    }
+    Some((now - last_upload.unwrap_or(first_failure)) / (24 * 60 * 60)).filter(|days| *days > 0)
+}
+
 impl App {
     pub(crate) fn safe_check_password(password: &str) -> Value {
         let result = match safe::check_password(password) {
@@ -255,6 +272,18 @@ impl Shared {
         Ok(self.store.setting(key)?.and_then(|v| v.parse().ok()))
     }
 
+    /// See [`safe_warning_days`]; `None` too with Safe off.
+    fn safe_warning(&self) -> Result<Option<i64>, ApiError> {
+        if self.store.setting(keys::SAFE_MASTER_KEY)?.is_none() {
+            return Ok(None);
+        }
+        Ok(safe_warning_days(
+            self.setting_i64(keys::SAFE_FIRST_FAILURE)?,
+            self.setting_i64(keys::SAFE_LAST_UPLOAD)?,
+            now(),
+        ))
+    }
+
     pub(crate) fn safe_status(&self) -> Result<Value, ApiError> {
         let key = self.safe_key()?;
         let (pending_contacts, pending_groups, pending_lists) = self.pending_import_counts()?;
@@ -268,6 +297,7 @@ impl Shared {
             "server": key.as_ref().map(server::base_url),
             "lastBackup": self.setting_i64(keys::SAFE_LAST_UPLOAD)?,
             "lastError": self.store.setting(keys::SAFE_LAST_ERROR)?,
+            "warningDays": self.safe_warning()?,
             "size": self.setting_i64(keys::SAFE_SIZE)?,
             "maxBytes": self.setting_i64(keys::SAFE_MAX_BYTES)?,
             "retentionDays": self.setting_i64(keys::SAFE_RETENTION_DAYS)?,
@@ -305,10 +335,13 @@ impl Shared {
             keys::SAFE_LAST_UPLOAD,
             keys::SAFE_HASH,
             keys::SAFE_LAST_ERROR,
+            keys::SAFE_FIRST_FAILURE,
             keys::SAFE_SIZE,
         ] {
             self.store.delete_setting(k)?;
         }
+        // On from here, also if the first upload fails below: the window's warning goes by this.
+        self.note_ui_events(&["safeChanged"]);
         self.safe_upload(true).await?;
         self.safe_status()
     }
@@ -317,6 +350,8 @@ impl Shared {
         if self.safe_key()?.is_none() {
             return Err(ApiError::Internal("Threema Safe is disabled".into()));
         }
+        // Whichever way it goes, also with the page closed by then.
+        self.note_ui_events(&["safeChanged"]);
         self.safe_upload(true).await?;
         self.safe_status()
     }
@@ -346,12 +381,15 @@ impl Shared {
             keys::SAFE_LAST_UPLOAD,
             keys::SAFE_HASH,
             keys::SAFE_LAST_ERROR,
+            keys::SAFE_FIRST_FAILURE,
             keys::SAFE_SIZE,
             keys::SAFE_MAX_BYTES,
             keys::SAFE_RETENTION_DAYS,
         ] {
             self.store.delete_setting(k)?;
         }
+        // The window's warning goes with it.
+        self.note_ui_events(&["safeChanged"]);
         let mut status = self.safe_status()?;
         status["serverCopyDeleted"] = json!(deleted.is_ok());
         Ok(status)
@@ -521,6 +559,7 @@ impl Shared {
         self.store
             .set_setting(keys::SAFE_LAST_UPLOAD, &now().to_string())?;
         self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+        self.store.delete_setting(keys::SAFE_FIRST_FAILURE)?;
         // A fresh restore starts a fresh import record.
         self.store.delete_setting(keys::SAFE_IMPORT_SUMMARY)?;
         self.store.delete_setting(keys::SAFE_IMPORT_ERROR)?;
@@ -1028,15 +1067,25 @@ impl Shared {
             return Ok(false);
         };
         let result = self.safe_upload_with(&key, force).await;
-        match &result {
-            Ok(_) => self.store.delete_setting(keys::SAFE_LAST_ERROR)?,
-            Err(error) => {
-                tracing::warn!(kind = error.kind(), "Threema Safe backup failed");
-                self.store
-                    .set_setting(keys::SAFE_LAST_ERROR, error.kind())?;
-            }
-        }
+        self.note_safe_upload(result.as_ref().err())?;
         result
+    }
+
+    /// How an upload attempt went: the last error, and since when they have kept failing.
+    fn note_safe_upload(&self, error: Option<&ApiError>) -> Result<(), ApiError> {
+        let Some(error) = error else {
+            self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+            self.store.delete_setting(keys::SAFE_FIRST_FAILURE)?;
+            return Ok(());
+        };
+        tracing::warn!(kind = error.kind(), "Threema Safe backup failed");
+        self.store
+            .set_setting(keys::SAFE_LAST_ERROR, error.kind())?;
+        if self.store.setting(keys::SAFE_FIRST_FAILURE)?.is_none() {
+            self.store
+                .set_setting(keys::SAFE_FIRST_FAILURE, &now().to_string())?;
+        }
+        Ok(())
     }
 
     async fn safe_upload_with(&self, key: &MasterKey, force: bool) -> Result<bool, ApiError> {
@@ -1128,7 +1177,8 @@ impl Shared {
         let before = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();
         let uploaded = self.safe_upload(false).await.unwrap_or(false);
         let after = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();
-        if uploaded || before != after {
+        // Also while the warning stands: its days go up, and it may have just come due.
+        if uploaded || before != after || self.safe_warning().ok().flatten().is_some() {
             round.events.push("safeChanged");
         }
         round.licensed = true;
@@ -1789,6 +1839,55 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_safe_warns_after_a_week_with_the_days_since_the_last_backup() {
+        const DAY: i64 = 24 * 60 * 60;
+        let now = 100 * DAY;
+        assert_eq!(safe_warning_days(None, Some(now - 50 * DAY), now), None);
+        // Not before the week is over, however old the last backup is.
+        assert_eq!(
+            safe_warning_days(Some(now - 7 * DAY + 1), Some(now - 50 * DAY), now),
+            None
+        );
+        assert_eq!(
+            safe_warning_days(Some(now - 7 * DAY), Some(now - 50 * DAY), now),
+            Some(50)
+        );
+        // No backup ever: since the first failure.
+        assert_eq!(safe_warning_days(Some(now - 9 * DAY), None, now), Some(9));
+    }
+
+    #[test]
+    fn only_the_first_failure_starts_the_week_and_success_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let first = |app: &App| app.store.setting(keys::SAFE_FIRST_FAILURE).unwrap();
+        let failure = ApiError::Network("no route".into());
+        app.note_safe_upload(Some(&failure)).unwrap();
+        assert!(first(&app).is_some());
+        app.store
+            .set_setting(keys::SAFE_FIRST_FAILURE, "1000")
+            .unwrap();
+        app.note_safe_upload(Some(&failure)).unwrap();
+        assert_eq!(first(&app).as_deref(), Some("1000"));
+        assert_eq!(
+            app.store.setting(keys::SAFE_LAST_ERROR).unwrap().as_deref(),
+            Some("network")
+        );
+
+        // Safe off: nothing to warn of, whatever was noted.
+        assert_eq!(app.safe_status().unwrap()["warningDays"], json!(null));
+        app.store
+            .set_setting(keys::SAFE_MASTER_KEY, &"00".repeat(64))
+            .unwrap();
+        assert!(app.safe_status().unwrap()["warningDays"].as_i64().unwrap() > 7);
+
+        app.note_safe_upload(None).unwrap();
+        assert_eq!(first(&app), None);
+        assert_eq!(app.store.setting(keys::SAFE_LAST_ERROR).unwrap(), None);
+        assert_eq!(app.safe_status().unwrap()["warningDays"], json!(null));
+    }
+
+    #[test]
     fn turning_safe_off_says_whether_the_server_copy_went() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_identity(dir.path());
@@ -1803,7 +1902,7 @@ mod tests {
         let status = app.forget_safe(Ok(())).unwrap();
         assert_eq!(status["enabled"], false);
         assert_eq!(status["serverCopyDeleted"], true);
-        assert!(app.take_ui_events().is_empty());
+        assert_eq!(app.take_ui_events(), ["safeChanged"]);
 
         // A failed deletion turns it off all the same, and both the reply and an event say so.
         enable(&app);
@@ -1812,7 +1911,7 @@ mod tests {
             .unwrap();
         assert_eq!(status["enabled"], false);
         assert_eq!(status["serverCopyDeleted"], false);
-        assert_eq!(app.take_ui_events(), ["safeServerCopyLeft"]);
+        assert_eq!(app.take_ui_events(), ["safeServerCopyLeft", "safeChanged"]);
         assert!(app.store.setting(keys::SAFE_MASTER_KEY).unwrap().is_none());
         assert_eq!(app.safe_status().unwrap().get("serverCopyDeleted"), None);
     }

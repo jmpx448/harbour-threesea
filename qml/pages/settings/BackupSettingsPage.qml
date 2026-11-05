@@ -8,7 +8,7 @@ Page {
     id: page
     allowedOrientations: Orientation.All
 
-    // Turning Threema Safe on or off happens on the page above and sends no event.
+    // Back from the page above, however it went.
     onStatusChanged: if (status === PageStatus.Active) safeItem.refresh()
 
     SilicaFlickable {
@@ -31,10 +31,14 @@ Page {
                 onClicked: window.pushWithPin(Qt.resolvedUrl("../SafePage.qml"))
 
                 property bool safeEnabled: false
+                property bool safeFailing: false
                 Component.onCompleted: refresh()
                 function refresh() {
                     backend.call("safeStatus", {}, function(ok, result) {
-                        if (ok) safeItem.safeEnabled = result.enabled
+                        if (ok) {
+                            safeItem.safeEnabled = result.enabled
+                            safeItem.safeFailing = result.enabled && !!result.lastError
+                        }
                     })
                 }
                 Connections {
@@ -54,13 +58,17 @@ Page {
                     }
                     Label {
                         width: parent.width
-                        text: safeItem.safeEnabled
-                              //% "On"
-                              ? qsTrId("threesea-la-on")
-                              //% "Off"
-                              : qsTrId("threesea-la-off")
+                        text: safeItem.safeFailing
+                              //% "On, the last attempt failed"
+                              ? qsTrId("threesea-la-safe-on-failing")
+                              : safeItem.safeEnabled
+                                //% "On"
+                                ? qsTrId("threesea-la-on")
+                                //% "Off"
+                                : qsTrId("threesea-la-off")
                         font.pixelSize: Theme.fontSizeSmall
-                        color: safeItem.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
+                        color: safeItem.safeFailing ? Theme.errorColor
+                               : safeItem.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
                     }
                 }
             }

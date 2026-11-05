@@ -8,6 +8,7 @@ import "../components/Format.js" as Fmt
 Page {
     id: page
     objectName: "holdsPin"
+    readonly property bool safePage: true
     allowedOrientations: Orientation.All
 
     property var status: ({ enabled: false })

@@ -47,7 +47,7 @@ the request as a whole ("invalid request"). Name it after what it is — `device
 
 Events (unsolicited): `{"event": "started", "version"}`, `{"event": "upgrading"}` (before `started`: an existing store's schema is being brought up to date, which can take a while),
 `{"event": "fatal", "kind", "message"}` (the core didn't start. `kind`: `storeKey` the key doesn't fit or the first page is damaged, which nobody can tell apart; `storeDamaged`, `storeTooNew` the data comes from a newer version, `diskFull`, `upgradeNoRoom` the upgrade ran out of room and was rolled back, `storeUnreadable` I/O, permissions, a file that won't open, `store` anything else about the store, `internal`. `message`: a code for support, empty for `internal`),
-`{"event": "safeChanged"}` (automatic Safe backup ran or its error state changed),
+`{"event": "safeChanged"}` (Safe went on or off, a backup ran, its error state changed, or the warning in `safeStatus` stands: hourly then),
 `{"event": "safeServerCopyLeft"}` (`safeDisable` couldn't delete the server copy; the window tells the user, as the page may be gone),
 `{"event": "contactsChanged"}` (contacts imported in the background; the bridge reloads the model),
 `{"event": "groupsChanged"}`, `{"event": "profileChanged"}` (the own profile/picture changed,
@@ -93,7 +93,7 @@ Group call events (Full, ADR 0012): `groupCall {conversation, call}`, `groupCall
 | `restoreIdentityBackup` | `backup`, `password` | `{identity}` (needs a license first); error `identityExists` on a device with an ID |
 | `exportIdentityBackup` | `password` (≥ 8 chars), `pin` | `{backup}` |
 | `safeCheckPassword` | `password` | `{result: tooShort\|tooLong\|weak\|ok}` |
-| `safeStatus` | – | `{enabled, server, lastBackup, lastError, size, maxBytes, retentionDays, restore}`; `restore` = `{pendingContacts, pendingGroups, pendingLists, importError, summary}` — what a restore still has to import (retried on reconnect, hourly and via `safeRetryImport`), why the last attempt failed, and the import's counts (`summary`: `{contacts, revokedContacts, groups, lists, skippedGroups: {deleted, unknownCreator, invalid}, at}`) |
+| `safeStatus` | – | `{enabled, server, lastBackup, lastError, warningDays, size, maxBytes, retentionDays, restore}`; `warningDays`: backups have failed for at least a week, the days since the last that worked (else since the first failure), otherwise null; `restore` = `{pendingContacts, pendingGroups, pendingLists, importError, summary}` — what a restore still has to import (retried on reconnect, hourly and via `safeRetryImport`), why the last attempt failed, and the import's counts (`summary`: `{contacts, revokedContacts, groups, lists, skippedGroups: {deleted, unknownCreator, invalid}, at}`) |
 | `safeEnable` | `password`, `pin` | status; derives the key, uploads a first backup |
 | `safeBackupNow` | – | status |
 | `safeDisable` | `pin` | status with `serverCopyDeleted`; deletes the backup from the server, then forgets the key. Off even if the deletion fails (`serverCopyDeleted: false` and the event `safeServerCopyLeft`, as the page may be gone by then; that copy expires with the server's retention) |
