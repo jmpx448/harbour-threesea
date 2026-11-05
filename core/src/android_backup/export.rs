@@ -8,6 +8,11 @@
 //! Not written yet (reported in the summary instead of silently dropped): status lines other
 //! than 1:1 calls, and polls in distribution lists (Android links polls to a contact or a
 //! group only). Nonces go out hashed, exactly like Android's (`nonces.rs`).
+//!
+//! A chat restores only with its contact's row, for the key. Contacts deleted today keep theirs;
+//! a chat without one, left by an older version, gets it back from the directory if it can, and
+//! otherwise is counted as left out, because the page says so (a private one only while the
+//! private chats are open, as the core hides them).
 
 use std::{
     io::Write as _,
@@ -19,12 +24,15 @@ use std::{
     },
 };
 
+use libthreema::common::config::Config;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::csv::write_row;
 use crate::{
     app::ApiError,
+    connection::ToConnection,
+    https::HttpsClient,
     media::{MediaPart, MediaStore},
     messages::{Message, OutgoingState},
     providers::CoreEvent,
@@ -89,9 +97,16 @@ pub struct ExportSummary {
     pub polls: usize,
     pub nonces: usize,
     /// Messages with no representation in the Android format yet (status lines, list polls).
+    /// Also whole chats, under `CHATS_WITHOUT_CONTACT`.
     pub skipped: std::collections::BTreeMap<&'static str, usize>,
+    /// Private chats without a contact row: never in what the page is told while they are hidden.
+    #[serde(skip)]
+    pub private_chats_left_out: usize,
     pub removed_old_backups: usize,
 }
+
+/// In `ExportSummary::skipped`: chats that have no contact row, so no key to restore them with.
+pub const CHATS_WITHOUT_CONTACT: &str = "chatsWithoutContact";
 
 /// Everything the export job owns.
 pub struct Export {
@@ -111,6 +126,15 @@ pub struct Export {
     pub cancel: Arc<AtomicBool>,
     /// How much a folder's storage has free (`free_bytes`).
     pub free_space: FreeSpace,
+    /// The directory, to ask for the keys of chats without a contact row.
+    pub lookup: Option<ContactLookup>,
+}
+
+/// What asking the directory for a contact takes, and who then has something to reflect.
+pub struct ContactLookup {
+    pub https: HttpsClient,
+    pub config: Arc<Config>,
+    pub connection: Option<tokio::sync::mpsc::UnboundedSender<ToConnection>>,
 }
 
 /// How many bytes can be written below a folder; `None` when that can't be told.
@@ -152,6 +176,22 @@ type Writer = zip::ZipWriter<std::fs::File>;
 
 /// How much of an entry is compressed before looking at the cancel flag again.
 const ADD_CHUNK_BYTES: usize = 1 << 20;
+
+/// Whom to ask the directory about for a backup: the chats without a contact row. Nobody while the
+/// directory has told us to rest; a backup runs by itself.
+fn contacts_to_look_up(store: &Store, me: &str) -> Result<Vec<String>, ApiError> {
+    if store.directory_resting() {
+        return Ok(Vec::new());
+    }
+    let mut missing = Vec::new();
+    for chat in store.chats_with_messages()? {
+        let is_identity = crate::contacts::parse_identity(&chat).is_some();
+        if is_identity && chat != me && store.contact(&chat)?.is_none() {
+            missing.push(chat);
+        }
+    }
+    Ok(missing)
+}
 
 /// What an export left behind when the phone restarted or the app was killed during it: gigabytes
 /// nothing else ever takes away. Only one export runs at a time, and this runs before it creates
@@ -244,6 +284,15 @@ impl Export {
                 let _ = self
                     .store
                     .delete_setting(crate::store::keys::ANDROID_EXPORT_ERROR);
+                let left_out = summary.skipped.get(CHATS_WITHOUT_CONTACT).copied();
+                let _ = self.store.set_setting(
+                    crate::store::keys::ANDROID_EXPORT_LEFT_OUT,
+                    &left_out.unwrap_or(0).to_string(),
+                );
+                let _ = self.store.set_setting(
+                    crate::store::keys::ANDROID_EXPORT_LEFT_OUT_PRIVATE,
+                    &summary.private_chats_left_out.to_string(),
+                );
                 self.emit(json!({
                     "event": "androidExportDone",
                     "ok": true,
@@ -329,6 +378,52 @@ impl Export {
         Ok((summary, path))
     }
 
+    /// Chats without a contact row: only what the directory has for them makes them restorable.
+    /// The way of everyone looked up by itself (`resolve_members`): the row stays out of the
+    /// contact list, a linked device hears of it in the same store step, the hourly allowance and
+    /// the directory's rate limit hold. Without an answer they are counted as left out, and the
+    /// next backup asks again.
+    async fn fetch_missing_contacts(&self) -> Result<(), ApiError> {
+        let Some(lookup) = &self.lookup else {
+            return Ok(());
+        };
+        let missing = contacts_to_look_up(&self.store, &self.me)?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let until_cancelled = async {
+            while !self.cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        let resolve = crate::app_groups::resolve_members(
+            &lookup.https,
+            &lookup.config,
+            &self.store,
+            &missing,
+        );
+        let resolved = tokio::select! {
+            resolved = resolve => resolved,
+            () = until_cancelled => return Err(export_cancelled()),
+        };
+        let Some(resolved) = resolved else {
+            return Ok(());
+        };
+        if resolved.synced
+            && let Some(connection) = &lookup.connection
+        {
+            let _ = connection.send(ToConnection::ReflectSync);
+        }
+        if resolved.groups_changed {
+            let _ = self.events.send(CoreEvent::GroupsChanged);
+        }
+        for message in resolved.lines {
+            let _ = self.events.send(CoreEvent::MessageAdded { message });
+        }
+        let _ = self.events.send(CoreEvent::ContactsChanged);
+        Ok(())
+    }
+
     /// Delete the oldest of our backup files beyond `keep` (never anything else).
     fn rotate(&self, just_written: &str) -> usize {
         if self.keep == 0 {
@@ -399,6 +494,8 @@ impl Export {
                 writer = self.add(writer, $name, $data).await?;
             }};
         }
+
+        self.fetch_missing_contacts().await?;
 
         // settings and identity (an ordinary encrypted ID backup, same password).
         add!(
@@ -551,8 +648,8 @@ impl Export {
             Zeroizing::new(rows.into_bytes())
         );
 
-        // Chats: every conversation with messages, under its family's file name, and what a
-        // poll in it links to.
+        // Chats: every conversation of a contact, group or list, under its family's file name,
+        // and what a poll in it links to.
         let mut chats: Vec<(
             String,
             String,
@@ -593,6 +690,23 @@ impl Export {
                 "distribution_list_thumbnail_",
                 None,
             ));
+        }
+        // What that doesn't reach wouldn't restore: said on the page.
+        let listed: std::collections::HashSet<&str> =
+            chats.iter().map(|chat| chat.1.as_str()).collect();
+        let mut left_out = 0;
+        for chat in self.store.chats_with_messages()? {
+            if listed.contains(chat.as_str()) {
+                continue;
+            }
+            if self.store.is_private(&chat)? {
+                summary.private_chats_left_out += 1;
+            } else {
+                left_out += 1;
+            }
+        }
+        if left_out > 0 {
+            summary.skipped.insert(CHATS_WITHOUT_CONTACT, left_out);
         }
         let total = chats.len();
         let mut polls = super::polls::PollWriter::default();
@@ -1046,5 +1160,31 @@ impl Store {
             }
         }
         Ok((contact_rows, group_rows))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only chats without a row are asked about, and nobody while the directory says to rest.
+    #[test]
+    fn who_is_looked_up_for_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store"), &[1; 32]).unwrap();
+        store
+            .upsert_contact(&crate::contacts::test_contact("BBBB2222"))
+            .unwrap();
+        for (id, chat) in [(1, "AAAA1111"), (2, "BBBB2222"), (3, "MEME0000")] {
+            store
+                .insert_incoming(chat, id, "text", "words", 1_800_000_000_000)
+                .unwrap();
+        }
+        assert_eq!(
+            contacts_to_look_up(&store, "MEME0000").unwrap(),
+            ["AAAA1111"]
+        );
+        store.rest_directory_calls();
+        assert!(contacts_to_look_up(&store, "MEME0000").unwrap().is_empty());
     }
 }

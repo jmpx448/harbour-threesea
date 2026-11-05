@@ -2019,6 +2019,13 @@ impl App {
             "keep": number(keys::ANDROID_EXPORT_KEEP).unwrap_or(3),
             "lastBackup": number(keys::ANDROID_EXPORT_LAST),
             "lastError": self.store.setting(keys::ANDROID_EXPORT_ERROR)?,
+            // A private chat counts only while the private chats are open (ADR 0009).
+            "chatsLeftOut": number(keys::ANDROID_EXPORT_LEFT_OUT).unwrap_or(0)
+                + if self.unlocked {
+                    number(keys::ANDROID_EXPORT_LEFT_OUT_PRIVATE).unwrap_or(0)
+                } else {
+                    0
+                },
             "passwordSet": self.store.setting(keys::ANDROID_EXPORT_PASSWORD)?.is_some(),
             "running": self.android_export.as_ref().is_some_and(|done| !done.get()),
         }))
@@ -2120,6 +2127,11 @@ impl App {
             done,
             cancel: std::sync::Arc::clone(&self.android_export_cancel),
             free_space: crate::android_backup::export::free_bytes,
+            lookup: Some(crate::android_backup::export::ContactLookup {
+                https: self.https.clone(),
+                config: std::sync::Arc::clone(&self.config),
+                connection: self.connection.clone(),
+            }),
         };
         tokio::task::spawn_local(job.run());
         Ok(json!({ "started": true }))
@@ -2235,8 +2247,39 @@ mod export_tests {
             cancel: std::sync::Arc::default(),
             // How much the test machine has free says nothing here.
             free_space: |_| None,
+            // No tests over the network.
+            lookup: None,
         };
         (job, events_rx)
+    }
+
+    /// A fresh device with the same identity, after importing the backup at `path`.
+    async fn restored(dir: &std::path::Path, path: &str) -> App {
+        let mut app = app_with_identity(dir, [7; 32]);
+        app.android_backup_import(
+            path.to_owned(),
+            Zeroizing::new("round-trip-pw".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let identity = app.store.identity().unwrap().unwrap();
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::android_backup::import::HistoryImport {
+            store: std::rc::Rc::clone(&app.store),
+            media: std::sync::Arc::clone(&app.media),
+            events,
+            cancel: std::rc::Rc::new(std::cell::Cell::new(false)),
+            me: identity.threema_id.clone(),
+            own_public_key: libthreema::common::keys::ClientKey::from(*identity.client_key)
+                .public_key()
+                .to_string(),
+            path: path.into(),
+            password: Zeroizing::new("round-trip-pw".into()),
+        }
+        .run()
+        .await;
+        app
     }
 
     /// Runs the job and returns the kind of its failure.
@@ -2529,6 +2572,85 @@ mod export_tests {
         ];
         expected.sort();
         assert_eq!(left, expected);
+    }
+
+    /// A contact deleted while their private chat is hidden: the chat stays, and so it stays in the
+    /// backup, its contact row beside it, and comes back from there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_chat_of_a_deleted_contact_is_in_the_backup() {
+        use libthreema::protobuf::d2d_sync::contact as pc;
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut a = app_with_identity(dir_a.path(), [7; 32]);
+        a.store
+            .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
+            .unwrap();
+        a.store
+            .insert_incoming("B0B0B0B0", 0xAAAA, "text", "kept", 1_800_000_000_000)
+            .unwrap();
+        a.store.set_private("B0B0B0B0", true).unwrap();
+        a.delete_contact("B0B0B0B0").unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let done = run_export(&a, out.path(), 0).await;
+        assert_eq!(done["summary"]["chats"], 1, "{done}");
+        assert_eq!(done["summary"]["skipped"].get("chatsWithoutContact"), None);
+
+        let dir_b = tempfile::tempdir().unwrap();
+        let b = restored(dir_b.path(), done["path"].as_str().unwrap()).await;
+        let rows = b.store.conversation_messages("B0B0B0B0", 10).unwrap();
+        assert!(rows.iter().any(|m| m.body == "kept"));
+        assert_eq!(
+            b.store
+                .contact("B0B0B0B0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level,
+            pc::AcquaintanceLevel::GroupOrDeleted
+        );
+    }
+
+    /// A chat left by an older version with no contact row can't be restored: that is said, until
+    /// a backup can hold it. A private one is said only while the private chats are open: the core
+    /// hides them, and the status can be read while they are hidden.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_chat_left_out_of_the_backup_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let out = tempfile::tempdir().unwrap();
+        let store = std::rc::Rc::clone(&app.store);
+        store
+            .insert_incoming("C0C0C0C0", 1, "text", "orphan", 1_800_000_000_000)
+            .unwrap();
+        store
+            .insert_incoming("D0D0D0D0", 2, "text", "hidden", 1_800_000_000_000)
+            .unwrap();
+        store.set_private("D0D0D0D0", true).unwrap();
+
+        let done = run_export(&app, out.path(), 0).await;
+        assert_eq!(
+            done["summary"]["skipped"]["chatsWithoutContact"], 1,
+            "the event goes out while they are hidden too: {done}"
+        );
+        assert!(!app.unlocked);
+        assert_eq!(app.android_export_status().unwrap()["chatsLeftOut"], 1);
+        app.unlocked = true;
+        assert_eq!(app.android_export_status().unwrap()["chatsLeftOut"], 2);
+        app.unlocked = false;
+
+        // The directory's answer comes in as for anyone looked up: out of the contact list. The
+        // next backup holds it, and says so.
+        crate::sync::members_looked_up(
+            &store,
+            vec![(
+                "C0C0C0C0".to_owned(),
+                crate::contacts::Lookup::Found(Box::new(crate::contacts::test_contact("C0C0C0C0"))),
+            )],
+        )
+        .unwrap();
+        let done = run_export(&app, out.path(), 0).await;
+        assert_eq!(done["summary"]["skipped"].get("chatsWithoutContact"), None);
+        assert_eq!(app.android_export_status().unwrap()["chatsLeftOut"], 0);
+        assert!(done["summary"]["chats"].as_u64().unwrap() >= 1);
     }
 
     /// Too little room for what the last backup took: nothing is even started, and the older

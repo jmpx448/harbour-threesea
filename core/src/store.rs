@@ -335,6 +335,10 @@ pub mod keys {
     pub const ANDROID_EXPORT_INTERVAL: &str = "android_export_interval";
     pub const ANDROID_EXPORT_KEEP: &str = "android_export_keep";
     pub const ANDROID_EXPORT_LAST: &str = "android_export_last";
+    /// How many chats the last backup had to leave out (`export::CHATS_WITHOUT_CONTACT`).
+    pub const ANDROID_EXPORT_LEFT_OUT: &str = "android_export_left_out";
+    /// The same for private chats, which `androidBackupExportStatus` adds only while they are open.
+    pub const ANDROID_EXPORT_LEFT_OUT_PRIVATE: &str = "android_export_left_out_private";
     /// When the schedule last started a backup, whatever became of it.
     pub const ANDROID_EXPORT_ATTEMPT: &str = "android_export_attempt";
     pub const ANDROID_EXPORT_ERROR: &str = "android_export_error";

@@ -1184,6 +1184,13 @@ impl Store {
         Ok(ids)
     }
 
+    /// The key of every chat that holds a message, private ones too.
+    pub fn chats_with_messages(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT chat FROM chat_summaries")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// One row per conversation: last message and unread count, newest first. Chats without
     /// messages get a stand-in row (id 0): emptied chats and those a backup brought without their
     /// messages (kind `empty`, from when they were emptied or last changed) and groups and distribution lists with no history yet (kind `none`, from their

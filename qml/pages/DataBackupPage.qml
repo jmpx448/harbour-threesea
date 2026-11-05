@@ -312,6 +312,17 @@ Page {
                        : ""
             }
 
+            Label {
+                visible: (page.exportStatus.chatsLeftOut || 0) > 0
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.secondaryHighlightColor
+                //% "%n chat(s) stayed out of the last backup: restoring them needs the contact's key, which could not be fetched. The next backup tries again."
+                text: qsTrId("threesea-la-android-export-left-out", page.exportStatus.chatsLeftOut || 0)
+            }
+
             DetailItem {
                 visible: !!page.exportStatus.lastError
                 //% "Last attempt failed"
