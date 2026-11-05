@@ -136,9 +136,36 @@ Page {
         onTriggered: page.load()
     }
 
+    // Reloads are for someone looking at the list. Hidden under another page, or with the app in
+    // the background or its window closed, a change only marks it; it reloads on coming back.
+    readonly property bool seen: page.status === PageStatus.Active && Qt.application.state === Qt.ApplicationActive
+    property bool stale: false
+    onSeenChanged: if (seen && stale) reload()
+
+    function reloadWhenSeen() {
+        if (seen) reload()
+        else stale = true
+    }
+
+    // Whether changed messages show in this list: of a row, only the newest message does (its
+    // delivery icon, its text). While a reload is under way the list can't tell yet which is the
+    // newest: a send's ack may overtake the reply that brings the new message.
+    function showsAnyOf(messages) {
+        if (reloadTimer.running || loadsRunning > 0) return true
+        for (var i = 0; i < messages.length; ++i) {
+            var row = conversations.indexOfKey(messages[i].conversation)
+            if (row >= 0 && conversations.get(row).lastMessage.id === messages[i].id) return true
+        }
+        return false
+    }
+    property int loadsRunning: 0
+
     function load() {
+        stale = false
+        loadsRunning++
         backend.call("conversations", { archived: page.archived, private: page.privateList },
                      function(ok, result, kind, message) {
+            page.loadsRunning--
             // Locked: the page goes anyway, and has nothing to say about that.
             if (!ok) {
                 if (kind !== "locked") page.loadError = Errors.text(kind, message)
@@ -216,10 +243,20 @@ Page {
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "messageAdded" || name === "messagesChanged" || name === "contactsChanged"
-                    || name === "conversationRead" || name === "groupsChanged" || name === "chatsChanged"
-                    || name === "privateChanged") {
-                page.reload()
+            if (name === "messageAdded" || name === "contactsChanged"
+                    || name === "conversationRead" || name === "groupsChanged" || name === "chatsChanged") {
+                page.reloadWhenSeen()
+            } else if (name === "privateChanged") {
+                // Seen or not: a chat that went private must not be drawn again on coming back,
+                // not even until the reply is here. Gone from this list at once.
+                if (data.private !== page.privateList) conversations.remove(data.identity)
+                if (data.private) page.reload()
+                else page.reloadWhenSeen()
+            } else if (name === "messagesChanged") {
+                if (!page.seen) page.stale = true
+                // A private chat's message from another device comes only as a change, with an id
+                // the list doesn't know yet, and no conversationRead follows it.
+                else if (page.privateList || page.showsAnyOf(data.messages)) page.reload()
             }
         }
     }
