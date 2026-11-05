@@ -2018,3 +2018,175 @@ fn the_browser_hears_of_our_profile_changing() {
     app.web_refresh();
     assert!(sent_values(&mut rx).is_empty(), "nothing more to tell");
 }
+
+/// The removals a browser got: chat, message IDs.
+fn removed_messages(sent: &[Value]) -> Vec<(String, Vec<String>)> {
+    sent.iter()
+        .filter(|wire| {
+            saltyrtc::field(wire, "subType") == Some(&Value::from("messages"))
+                && saltyrtc::field(saltyrtc::field(wire, "args").unwrap(), "mode")
+                    == Some(&Value::from("removed"))
+        })
+        .map(|wire| {
+            let args = saltyrtc::field(wire, "args").unwrap();
+            let ids = saltyrtc::field(wire, "data").unwrap().as_array().unwrap();
+            (
+                saltyrtc::field(args, "id")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_owned(),
+                ids.iter()
+                    .map(|m| {
+                        saltyrtc::field(m, "id")
+                            .and_then(Value::as_str)
+                            .unwrap()
+                            .to_owned()
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Messages going from the phone go from the browser's open chat too, however they go, and only
+/// those it has: the first page leaves older ones out.
+#[test]
+fn messages_removed_on_the_phone_leave_the_browser() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(&mut app);
+    let incoming = |app: &App, n: u64| {
+        app.store
+            .insert_incoming("BBBBBBBB", n, "text", "hi", n.cast_signed())
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    let older = incoming(&app, 1);
+    for n in 2..=60 {
+        incoming(&app, n);
+    }
+    let shown = incoming(&app, 61);
+    let also_shown = incoming(&app, 62);
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+
+    app.store.remove_message(older).unwrap();
+    app.web_refresh();
+    assert!(
+        removed_messages(&sent_values(&mut rx)).is_empty(),
+        "not shown there"
+    );
+
+    app.store.remove_message(shown).unwrap();
+    app.web_refresh();
+    assert_eq!(
+        removed_messages(&sent_values(&mut rx)),
+        [("BBBBBBBB".to_owned(), vec![shown.to_string()])]
+    );
+
+    // Not said twice, and a message that came later counts too.
+    let later = incoming(&app, 63);
+    app.web_refresh();
+    sent_values(&mut rx);
+    assert!(later > also_shown);
+    app.store
+        .delete_messages_before(i64::MAX, false, &[])
+        .unwrap();
+    app.web_refresh();
+    let removed = removed_messages(&sent_values(&mut rx));
+    assert_eq!(removed.len(), 1);
+    assert!(removed[0].1.contains(&later.to_string()));
+    assert!(removed[0].1.contains(&also_shown.to_string()));
+    assert!(!removed[0].1.contains(&shown.to_string()));
+}
+
+/// Emptying a chat, and the next message there: it may get the ID of the newest one removed, as
+/// the database gives that out again.
+#[test]
+fn a_chat_emptied_on_the_phone_empties_in_the_browser_and_goes_on() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(&mut app);
+    let first = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "first", 1)
+        .unwrap()
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+
+    app.store.empty_conversation("BBBBBBBB").unwrap();
+    app.web_refresh();
+    assert_eq!(
+        removed_messages(&sent_values(&mut rx)),
+        [("BBBBBBBB".to_owned(), vec![first.id.to_string()])]
+    );
+
+    let next = app
+        .store
+        .insert_incoming("BBBBBBBB", 2, "text", "next", 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.id, first.id, "what this is about");
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    assert!(format!("{sent:?}").contains("next"), "{sent:?}");
+}
+
+/// The browser deleting a message itself hears of it once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_message_deleted_in_the_browser_is_removed_there_once() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(&mut app);
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+        .unwrap()
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+    let request = arp::message(
+        "delete",
+        "message",
+        Some(arp::map(vec![
+            ("type", "contact".into()),
+            ("id", "BBBBBBBB".into()),
+            ("messageId", message.id.to_string().into()),
+        ])),
+        None,
+    );
+    let incoming = Incoming::parse(&request).unwrap();
+    let reply = app.web_action(&incoming).await.unwrap().unwrap();
+    assert_eq!(
+        saltyrtc::field(&reply, "subType"),
+        Some(&Value::from("confirm"))
+    );
+    app.web_refresh();
+    assert_eq!(
+        removed_messages(&sent_values(&mut rx)),
+        [("BBBBBBBB".to_owned(), vec![message.id.to_string()])]
+    );
+}
+
+/// A private chat's removals are none of the browser's business.
+#[test]
+fn nothing_of_a_private_chats_removals_reaches_the_browser() {
+    let (_dir, mut app) = fixture();
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(&mut app);
+    let message = app
+        .store
+        .insert_incoming("BBBBBBBB", 1, "text", "hi", 1)
+        .unwrap()
+        .unwrap();
+    app.web_messages(1, "BBBBBBBB", None).unwrap();
+    app.store.set_private("BBBBBBBB", true).unwrap();
+    app.store.remove_message(message.id).unwrap();
+    app.web_refresh();
+    assert!(removed_messages(&sent_values(&mut rx)).is_empty());
+}

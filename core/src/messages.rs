@@ -985,6 +985,32 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The IDs of a conversation's messages from `from` on.
+    pub fn message_ids_from(
+        &self,
+        conversation: &str,
+        from: i64,
+    ) -> Result<std::collections::HashSet<i64>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM messages WHERE conversation = ?1 AND id >= ?2")?;
+        let rows = statement.query_map(params![conversation, from], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A conversation's highest message ID, up to `limit`.
+    pub fn newest_message_id_up_to(
+        &self,
+        conversation: &str,
+        limit: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(id) FROM messages WHERE conversation = ?1 AND id <= ?2",
+            params![conversation, limit],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn message_count(&self, conversation: &str) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation = ?1",

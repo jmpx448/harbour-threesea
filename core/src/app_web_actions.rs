@@ -123,35 +123,17 @@ impl App {
                 self.web_chat_opened(incoming);
                 Ok(confirm())
             }
+            // The browser hears of the removal from the next refresh, like every other.
             ("delete", "message") => match self.web_target(incoming) {
-                Ok((key, Some((message_id, outgoing)))) => {
-                    let removed = map(vec![
-                        ("id", incoming.arg("messageId").unwrap_or_default().into()),
-                        ("isOutbox", outgoing.into()),
-                        ("isStatus", false.into()),
-                        ("type", "text".into()),
-                    ]);
-                    let result = self
-                        .web_command(json!({"cmd": "deleteMessage", "identity": key,
-                            "messageId": message_id, "outgoing": outgoing, "everyone": false}))
-                        .await;
-                    match result {
-                        Ok(_) => Ok({
-                            self.web_changed_chats();
-                            arp::message(
-                                "update",
-                                "messages",
-                                Some(map(vec![
-                                    ("type", receiver_type(&key).into()),
-                                    ("id", key.as_str().into()),
-                                    ("mode", "removed".into()),
-                                ])),
-                                Some(Value::Array(vec![removed])),
-                            )
-                        }),
-                        Err(_) => Err("badRequest"),
-                    }
-                }
+                Ok((key, Some((message_id, outgoing)))) => self
+                    .web_command(json!({"cmd": "deleteMessage", "identity": key,
+                        "messageId": message_id, "outgoing": outgoing, "everyone": false}))
+                    .await
+                    .map(|_| {
+                        self.web_changed_chats();
+                        confirm()
+                    })
+                    .map_err(|_| "badRequest"),
                 Ok(_) => Err("badRequest"),
                 Err(code) => Err(code),
             },

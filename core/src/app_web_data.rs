@@ -13,7 +13,7 @@
 //! IDs: receivers by our keys (Threema ID, `g:…`, `d:…`), messages by their local row ID as a
 //! string, which also sorts them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use libthreema::{model::contact::Contact, protobuf::d2d_sync::contact as pc};
 use rmpv::Value;
@@ -66,6 +66,9 @@ pub(crate) struct Subscriptions {
     conversations: bool,
     /// Chats whose messages it shows: the newest message ID sent.
     chats: HashMap<String, i64>,
+    /// The messages it was sent, per chat: whether each is ours. It holds those and no others, so
+    /// these are the ones it has to hear of when they go.
+    sent_messages: HashMap<String, BTreeMap<i64, bool>>,
     /// The chat list as last sent.
     listed: HashMap<String, ListedState>,
 }
@@ -768,6 +771,14 @@ impl App {
         if more {
             messages.remove(0);
         }
+        self.web
+            .subscriptions
+            .entry(session)
+            .or_default()
+            .sent_messages
+            .entry(key.to_owned())
+            .or_default()
+            .extend(messages.iter().map(|m| (m.id, m.outgoing)));
         if ref_id.is_none() {
             let newest = messages.last().map_or(0, |m| m.id);
             self.web
@@ -789,6 +800,53 @@ impl App {
                 .collect(),
         );
         Ok((args, data))
+    }
+
+    /// `update/messages` for what the store no longer has of what the browser was sent: however it
+    /// went (deleted on the phone or a linked device, a chat emptied, keep messages, clean up).
+    fn web_removed_messages(&self, subscriptions: &mut Subscriptions) -> Vec<Value> {
+        let mut updates = Vec::new();
+        for (key, sent) in &mut subscriptions.sent_messages {
+            let Some(oldest) = sent.keys().next().copied() else {
+                continue;
+            };
+            let Ok(stored) = self.store.message_ids_from(key, oldest) else {
+                continue;
+            };
+            let removed: Vec<i64> = sent
+                .keys()
+                .filter(|id| !stored.contains(*id))
+                .copied()
+                .collect();
+            if removed.is_empty() {
+                continue;
+            }
+            let data = removed
+                .iter()
+                .map(|id| {
+                    map(vec![
+                        ("id", id.to_string().into()),
+                        ("isOutbox", sent.remove(id).unwrap_or_default().into()),
+                        ("isStatus", false.into()),
+                        ("type", "text".into()),
+                    ])
+                })
+                .collect();
+            updates.push(messages_update(key, "removed", data));
+            // The database gives the highest ID out again once it is free: the next message may
+            // have this one's, and would count as sent.
+            if let Some(newest) = subscriptions.chats.get_mut(key)
+                && removed.contains(newest)
+            {
+                *newest = self
+                    .store
+                    .newest_message_id_up_to(key, *newest)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+            }
+        }
+        updates
     }
 
     /// `request/receivers` was answered: the session gets receiver updates.
@@ -1115,8 +1173,13 @@ impl App {
             };
             // Private now: the browser's view of it ends (S03).
             subscriptions.chats.retain(|key, _| !private.contains(key));
+            subscriptions
+                .sent_messages
+                .retain(|key, _| !private.contains(key));
             // In this order: a chat goes while the browser still knows its receiver, and comes
             // when it knows it, as it ignores a conversation of a receiver it doesn't know.
+            let removed = self.web_removed_messages(&mut subscriptions);
+            out.extend(removed.into_iter().map(|update| (session, update)));
             if subscriptions.conversations {
                 let listed: HashSet<&String> = list.iter().map(|(key, ..)| key).collect();
                 for key in subscriptions.listed.keys().filter(|k| !listed.contains(*k)) {
@@ -1146,6 +1209,11 @@ impl App {
                     .unwrap_or_default();
                 if let Some(last) = new.last() {
                     *newest = last.id;
+                    subscriptions
+                        .sent_messages
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(new.iter().map(|m| (m.id, m.outgoing)));
                     let data = new.iter().map(|m| self.web_message(m, &user)).collect();
                     out.push((session, messages_update(key, "new", data)));
                 }
