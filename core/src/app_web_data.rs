@@ -292,7 +292,7 @@ fn call_text(record: &str) -> String {
 }
 
 /// A call ("result|outgoing|seconds") in the protocol's VoIP model: status 1 missed, 2 finished,
-/// 3 rejected (reason 0 unknown, 1 busy, 2 timeout, 3 rejected), 4 aborted.
+/// 3 rejected (reason 0 unknown, 1 busy, 2 timeout, 3 rejected, 4 disabled), 4 aborted.
 fn voip(record: &str) -> Value {
     let mut parts = record.split('|');
     let result = parts.next().unwrap_or_default();
@@ -304,7 +304,7 @@ fn voip(record: &str) -> Value {
         "busy" => rejected(1),
         "unanswered" => rejected(2),
         "rejected" => rejected(3),
-        "disabled" => rejected(0),
+        "disabled" => rejected(4),
         _ => map(vec![("status", 4.into())]),
     }
 }
@@ -1541,6 +1541,14 @@ fn messages_update(key: &str, mode: &str, data: Vec<Value>) -> Value {
 mod tests {
     use super::*;
     use crate::{app::StartConfig, store::StoredIdentity, web::saltyrtc::field};
+
+    #[test]
+    fn a_call_refused_because_calls_are_off_says_so() {
+        assert_eq!(
+            field(&voip("disabled|1|0"), "reason"),
+            Some(&Value::from(4))
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn chats_and_messages_for_the_browser() {
