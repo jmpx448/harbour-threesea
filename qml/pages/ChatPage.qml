@@ -1366,6 +1366,7 @@ Page {
     property bool listenWhenHeld: false
     onRecordingHereChanged: if (!recordingHere) listenWhenHeld = false
     function listenToRecording() {
+        recordingRemorse.cancel()
         voicePlayer.stop()
         if (voiceRecorder.held) {
             if (voiceRecorder.previewing) voiceRecorder.pausePreview()
@@ -1550,6 +1551,8 @@ Page {
             if (voiceRecorder.held && page.recordingHere) {
                 if (page.listenWhenHeld) {
                     page.listenWhenHeld = false
+                    // The microphone button is gone with this: it says why.
+                    page.sayRecordingHeld()
                     voiceRecorder.startPreview()
                 } else if (Qt.application.state === Qt.ApplicationActive) {
                     page.sayRecordingHeld()
@@ -2698,10 +2701,14 @@ Page {
                         IconButton {
                             visible: voiceRecorder.recording && voiceRecorder.paused
                             icon.source: "image://theme/icon-m-mic"
-                            onClicked: voiceRecorder.resume()
+                            onClicked: {
+                                recordingRemorse.cancel()
+                                voiceRecorder.resume()
+                            }
                         }
                         IconButton {
-                            visible: voiceRecorder.held || voiceRecorder.paused
+                            // Under a second there is nothing to keep for listening.
+                            visible: voiceRecorder.held || (voiceRecorder.paused && voiceRecorder.duration >= 1000)
                             icon.source: voiceRecorder.previewing ? "image://theme/icon-m-pause"
                                                                   : "image://theme/icon-m-play"
                             onClicked: page.listenToRecording()
