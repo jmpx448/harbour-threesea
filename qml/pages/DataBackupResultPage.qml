@@ -48,6 +48,23 @@ Page {
                                        + entriesLeftOut + localAvatars + collisions + reactionsLeftOut
                                        + mediaMissing + mediaFailed + unsupported
 
+    function leftOutReason(reason) {
+        switch (reason) {
+        case "tooLarge":
+            //% "too large to import"
+            return qsTrId("threesea-la-data-backup-reason-too-large")
+        case "damaged":
+            //% "damaged in the backup"
+            return qsTrId("threesea-la-data-backup-reason-damaged")
+        case "otherKey":
+            //% "a different key in the backup"
+            return qsTrId("threesea-la-data-backup-reason-other-key")
+        default:
+            //% "not on this device"
+            return qsTrId("threesea-la-data-backup-reason-not-here")
+        }
+    }
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
@@ -276,6 +293,28 @@ Page {
                 //% "Media not imported"
                 label: qsTrId("threesea-la-android-import-media-failed")
                 value: page.mediaFailed
+            }
+
+            SectionHeader {
+                visible: leftOutChats.count > 0
+                //% "Chats that weren't imported"
+                text: qsTrId("threesea-se-data-backup-left-out")
+            }
+
+            Repeater {
+                id: leftOutChats
+                model: page.summary ? page.summary.leftOutChats : []
+
+                // Names come from other people: plain text.
+                Label {
+                    x: Theme.horizontalPageMargin
+                    width: column.width - 2 * x
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.highlightColor
+                    text: modelData.name + ": " + page.leftOutReason(modelData.reason)
+                }
             }
 
             DetailItem {

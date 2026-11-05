@@ -1263,6 +1263,68 @@ mod history_tests {
         assert!(app.store.file_keys(deleted.id).unwrap().is_none());
     }
 
+    /// The result page names what was left out, with one exception: a private chat. It is hidden
+    /// by the core, and that page shows whether or not private chats are open.
+    #[tokio::test(flavor = "current_thread")]
+    async fn left_out_chats_are_named_but_never_a_private_one() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id", "firstname"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17", "Open"])
+            + &write_row(&["C0C0C0C0", &"bc".repeat(32), "18", "Hidden"]);
+        // A group whose creator isn't known here, so it isn't created: its name is the archive's.
+        let groups = write_row(&["creator", "id", "groupname", "members", "group_uid"])
+            + &write_row(&["D0D0D0D0", "0102030405060708", "Far away", "", "3"]);
+        let big = "x".repeat(2 << 20);
+        let oversized = |sender: &str| {
+            write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"])
+                + &write_row(&[sender, sender, "0", "TEXT", &big, "1700000000000"])
+        };
+        let messages = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"])
+            + &write_row(&["g-1", "D0D0D0D0", "0", "TEXT", "hello", "1700000000000"]);
+        let path = backup_with(
+            dir.path(),
+            &[
+                ("contacts.csv", contacts),
+                ("groups.csv", groups),
+                ("message_17.csv", oversized("B0B0B0B0")),
+                ("message_18.csv", oversized("C0C0C0C0")),
+                ("group_message_3.csv", messages),
+            ],
+        );
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        app.store.set_private("C0C0C0C0", true).unwrap();
+
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["tooLargeChats"], 2, "{summary}");
+        assert_eq!(summary["skippedChats"], 1, "{summary}");
+        let named: Vec<(&str, &str)> = summary["leftOutChats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| {
+                (
+                    chat["name"].as_str().unwrap(),
+                    chat["reason"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [("Far away", "notHere"), ("Open", "tooLarge")],
+            "{summary}"
+        );
+        assert!(!summary.to_string().contains("C0C0C0C0"), "{summary}");
+        assert!(!summary.to_string().contains("Hidden"), "{summary}");
+    }
+
     /// A damaged chat file costs that chat, nothing of it goes in, and what comes after it arrives.
     #[tokio::test(flavor = "current_thread")]
     async fn one_damaged_chat_leaves_the_rest_of_the_backup_alone() {
@@ -1301,6 +1363,8 @@ mod history_tests {
         .unwrap();
         let summary = run_import_of(&app, path).await;
         assert_eq!(summary["damagedChats"], 1, "{summary}");
+        assert_eq!(summary["leftOutChats"][0]["conversation"], "B0B0B0B0");
+        assert_eq!(summary["leftOutChats"][0]["reason"], "damaged");
         assert_eq!(summary["chats"], 1, "{summary}");
         assert_eq!(summary["imported"], 1, "{summary}");
         assert!(

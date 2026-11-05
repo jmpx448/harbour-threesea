@@ -36,6 +36,9 @@ pub(crate) const MIGRATION_IMPORT_IDS: &str = "
     ) WITHOUT ROWID;";
 
 const BATCH: usize = 400;
+/// How many left-out chats the summary names; a crafted archive could leave out thousands, and
+/// the counts hold them all.
+const MAX_LEFT_OUT_NAMED: usize = 100;
 /// How much of one table is held in memory (tests stay at what they can write quickly).
 const MAX_TABLE_BYTES: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
@@ -115,6 +118,15 @@ struct ChatPlan {
     family: Family,
 }
 
+/// A chat the import left out, for the result page. Why: `notHere`, `tooLarge`, `damaged`,
+/// `otherKey`.
+#[derive(serde::Serialize)]
+pub struct LeftOutChat {
+    pub conversation: String,
+    pub name: String,
+    pub reason: &'static str,
+}
+
 #[derive(Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
@@ -125,6 +137,9 @@ pub struct Summary {
     pub too_large_chats: usize,
     /// Chat files that fail authentication or aren't text: left out as a whole, the rest goes on.
     pub damaged_chats: usize,
+    /// Which chats those are, as far as they have a name. A private chat is never named here: the
+    /// page shows while the private chats may be hidden, and only the core knows them.
+    pub left_out_chats: Vec<LeftOutChat>,
     /// Chats of contacts whose key in the archive differs from the one stored here: left out.
     pub key_conflict_chats: usize,
     /// Group messages and reactions in the name of such a contact: left out.
@@ -369,6 +384,7 @@ impl HistoryImport {
                 // it: it is left out and reported, the memory bound stays.
                 Err(ArchiveError::TooLarge) => {
                     summary.too_large_chats += 1;
+                    self.name_left_out(&plan.conversation, None, "tooLarge", &mut summary);
                     continue;
                 }
                 // The entry is read to its end first, so none of it went in. The same place
@@ -379,6 +395,7 @@ impl HistoryImport {
                     | ArchiveError::WrongPassword,
                 ) => {
                     summary.damaged_chats += 1;
+                    self.name_left_out(&plan.conversation, None, "damaged", &mut summary);
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -421,6 +438,48 @@ impl HistoryImport {
         Ok(summary)
     }
 
+    /// Note which chat was left out: by its name here, else the one the archive gives it.
+    fn name_left_out(
+        &self,
+        conversation: &str,
+        archive_name: Option<&str>,
+        reason: &'static str,
+        summary: &mut Summary,
+    ) {
+        if summary.left_out_chats.len() >= MAX_LEFT_OUT_NAMED
+            || self.store.is_private(conversation).unwrap_or(true)
+        {
+            return;
+        }
+        let stored = if crate::groups::parse_key(conversation).is_some() {
+            self.store
+                .group(conversation)
+                .ok()
+                .flatten()
+                .map(|group| group.name)
+        } else if conversation.starts_with("d:") {
+            self.store
+                .distribution_list(conversation)
+                .ok()
+                .flatten()
+                .map(|list| list.name)
+        } else {
+            let contact = self.store.contact(conversation).ok().flatten();
+            Some(contact.map_or_else(
+                || conversation.to_owned(),
+                |contact| crate::contacts::display_name(&contact),
+            ))
+        };
+        let name = stored.or_else(|| archive_name.map(str::to_owned));
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            summary.left_out_chats.push(LeftOutChat {
+                conversation: conversation.to_owned(),
+                name,
+                reason,
+            });
+        }
+    }
+
     /// Chat files resolved to local conversations, plus which uids have media/thumbnails.
     fn plan_chats(
         &self,
@@ -459,12 +518,14 @@ impl HistoryImport {
             contact_alias.insert(contact.identity.clone(), contact.identity);
         }
         let mut group_alias = std::collections::HashMap::new();
+        let mut group_names = std::collections::HashMap::new();
         for group in groups {
             if let Ok(creator) = group.creator.parse() {
                 let key = crate::groups::key(&libthreema::common::GroupIdentity {
                     creator_identity: creator,
                     group_id: group.group_id,
                 });
+                group_names.insert(key.clone(), group.name.as_str());
                 for alias in group.aliases() {
                     group_alias.insert(alias, key.clone());
                 }
@@ -530,13 +591,20 @@ impl HistoryImport {
             match conversation {
                 Some(key) if family == Family::Contact && index.other_key.contains(&key) => {
                     summary.key_conflict_chats += 1;
+                    self.name_left_out(&key, None, "otherKey", summary);
                 }
                 Some(key) if exists(&key) => plans.push(ChatPlan {
                     entry: entry.name.clone(),
                     conversation: key,
                     family,
                 }),
-                _ => summary.skipped_chats += 1,
+                conversation => {
+                    summary.skipped_chats += 1;
+                    if let Some(key) = conversation {
+                        let name = group_names.get(&key).copied();
+                        self.name_left_out(&key, name, "notHere", summary);
+                    }
+                }
             }
         }
         Ok((plans, index))
