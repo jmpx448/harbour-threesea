@@ -488,6 +488,10 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     None => connection = None,
                     Some(FromConnection::State(state)) => {
                         app.connection_state = state.as_str();
+                        app.web_connection_changed(matches!(
+                            state,
+                            crate::connection::ConnectionState::Connected
+                        ));
                         emit(json!({"event": "connectionState", "state": state.as_str()}).to_string());
                         // Online again: finish a restored backup's pending import right away
                         // (maintenance alone would retry only hourly).

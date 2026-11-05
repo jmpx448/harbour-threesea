@@ -151,7 +151,7 @@ const WAKE_QUIET: Duration = Duration::from_secs(2);
 /// A wake-up that found the connection dead waits for the next attempt if it comes this soon.
 const WAKE_RETRY_SOON: Duration = Duration::from_secs(2);
 /// A session this long was a working connection: the next attempts start over.
-const STABLE_SESSION: Duration = Duration::from_secs(60);
+pub(crate) const STABLE_SESSION: Duration = Duration::from_secs(60);
 /// libthreema's rule for `RateLimitExceeded`: no new connection attempt before this.
 const RATE_LIMIT_FLOOR: Duration = Duration::from_secs(10);
 /// How far the wait grows while every login meets the rate limit again: each one repeats the

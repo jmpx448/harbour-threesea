@@ -2279,3 +2279,48 @@ fn a_name_taken_away_reaches_the_browser_as_empty() {
         );
     }
 }
+
+/// The browser shows what the server says as a dialog: a server closing each connection with the
+/// same words raises one, until a connection has stayed up.
+#[test]
+fn the_browser_hears_the_same_words_once_until_the_connection_stays_up() {
+    use crate::connection::{OfflineReason, STABLE_SESSION};
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    app.web_subscribe_receivers(1);
+    let closed = OfflineReason::Server("Try again later".into());
+    let mut login_and_close = |app: &mut App, stayed_up: bool| {
+        app.web_connection_changed(true);
+        if stayed_up {
+            app.web.connected_since = std::time::Instant::now().checked_sub(STABLE_SESSION);
+        }
+        app.web_server_said(&closed);
+        app.web_connection_changed(false);
+        sent_values(&mut rx).len()
+    };
+
+    assert_eq!(login_and_close(&mut app, false), 1);
+    assert_eq!(login_and_close(&mut app, false), 0, "closed again at once");
+    assert_eq!(login_and_close(&mut app, false), 0, "and again");
+    assert_eq!(login_and_close(&mut app, true), 1, "it had stayed up");
+    assert_eq!(
+        login_and_close(&mut app, false),
+        0,
+        "and no more after that"
+    );
+
+    // Other words are other news, and closing before the login is through says the same.
+    app.web_server_said(&OfflineReason::Server("Something else".into()));
+    app.web_server_said(&OfflineReason::Server("Try again later".into()));
+    assert_eq!(sent_values(&mut rx).len(), 1);
+
+    // An alert while the connection stays up is news each time it comes.
+    let alert = OfflineReason::ServerAlert("Maintenance tonight".into());
+    app.web_connection_changed(true);
+    app.web_server_said(&alert);
+    app.web_server_said(&alert);
+    assert_eq!(sent_values(&mut rx).len(), 1);
+    app.web.connected_since = std::time::Instant::now().checked_sub(STABLE_SESSION);
+    app.web_server_said(&alert);
+    assert_eq!(sent_values(&mut rx).len(), 1);
+}

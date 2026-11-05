@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     app::{ApiError, App},
     chat_notifications::Policy,
-    connection::OfflineReason,
+    connection::{OfflineReason, STABLE_SESSION},
     contacts,
     distribution_lists::DistributionList,
     group_call_handshake::public_bytes,
@@ -71,6 +71,8 @@ pub(crate) struct Subscriptions {
     sent_messages: HashMap<String, BTreeMap<i64, bool>>,
     /// The chat list as last sent.
     listed: HashMap<String, ListedState>,
+    /// What the chat server said that it has been told, since the connection last stayed up.
+    server_said: HashSet<String>,
 }
 
 #[cfg(test)]
@@ -1082,15 +1084,48 @@ impl App {
         }
     }
 
+    /// The connection to the chat server came up or went: one that stayed up ends the quiet on
+    /// what the server said (`web_server_said`).
+    pub(crate) fn web_connection_changed(&mut self, connected: bool) {
+        if connected {
+            self.web.connected_since = Some(std::time::Instant::now());
+        } else {
+            if self.web_connection_stayed_up() {
+                self.web_forget_what_server_said();
+            }
+            self.web.connected_since = None;
+        }
+    }
+
+    fn web_connection_stayed_up(&self) -> bool {
+        self.web
+            .connected_since
+            .is_some_and(|since| since.elapsed() >= STABLE_SESSION)
+    }
+
+    fn web_forget_what_server_said(&mut self) {
+        for subscriptions in self.web.subscriptions.values_mut() {
+            subscriptions.server_said.clear();
+        }
+    }
+
     /// What the chat server said goes to the browsers too (`update/alert`): the phone may be in a
     /// pocket. An alert is a warning, the words it closes a connection with an error, like
-    /// Android's `AlertHandler`.
+    /// Android's `AlertHandler`. The browser shows each as a dialog, so a server that closes each
+    /// connection with the same words gets one dialog until a connection has stayed up.
     pub(crate) fn web_server_said(&mut self, reason: &OfflineReason) {
         let (kind, text) = match reason {
             OfflineReason::ServerAlert(text) => ("warning", text),
             OfflineReason::Server(text) => ("error", text),
             OfflineReason::Mediator(_) | OfflineReason::LoginRefused => return,
         };
+        if self.web_connection_stayed_up() {
+            self.web_forget_what_server_said();
+            // This connection ends here, and has used up what its time was good for.
+            if kind == "error" {
+                self.web.connected_since = None;
+            }
+        }
         let alert = arp::message(
             "update",
             "alert",
@@ -1100,7 +1135,17 @@ impl App {
             ])),
             Some(map(vec![("message", text.as_str().into())])),
         );
-        let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
+        let sessions: Vec<i64> = self
+            .web
+            .subscriptions
+            .iter_mut()
+            .filter_map(|(session, subscriptions)| {
+                subscriptions
+                    .server_said
+                    .insert(text.clone())
+                    .then_some(*session)
+            })
+            .collect();
         for session in sessions {
             self.send_web(session, alert.clone());
         }
