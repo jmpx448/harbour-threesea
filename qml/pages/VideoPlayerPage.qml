@@ -74,6 +74,7 @@ Page {
         }
 
         Slider {
+            id: positionSlider
             anchors {
                 left: parent.left
                 right: parent.right
@@ -82,9 +83,15 @@ Page {
             }
             minimumValue: 0
             maximumValue: Math.max(1, videoPlayer.duration)
-            value: videoPlayer.position
             valueText: Fmt.duration(videoPlayer.position / 1000) + " / " + Fmt.duration(videoPlayer.duration / 1000)
             onReleased: videoPlayer.seek(value)
+        }
+        // Not a plain `value:` binding: the slider writes its value when let go, which would end it.
+        Binding {
+            target: positionSlider
+            property: "value"
+            value: videoPlayer.position
+            when: !positionSlider.pressed
         }
     }
 }
