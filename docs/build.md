@@ -91,6 +91,13 @@ then doesn't compile on i486, whose SSE comes from there.
 - Our workspace `exclude`s `third_party`, otherwise libthreema becomes an implicit member and
   inherits our (non-existent) lint table.
 
+## The C ABI under AddressSanitizer (development only)
+
+`scripts/test-ffi-asan.sh` runs the tests of `core/src/ffi.rs` (every function the bridge calls,
+with NULLs, short buffers and the buffers released the bridge's way) under AddressSanitizer, with
+the nightly toolchain: a length that disagrees between a buffer and its release, or a write past
+the room a caller gave, only shows there. Run it after changing `ffi.rs`.
+
 ## Fuzzing (development only)
 
 `core/fuzz/` holds coverage-guided fuzz targets for the decoders that take input from outside.
