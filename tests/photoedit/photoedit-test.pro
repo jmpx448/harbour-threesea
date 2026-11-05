@@ -6,4 +6,4 @@ QT = core gui
 CONFIG += c++14 console
 INCLUDEPATH += ../../bridge
 SOURCES += main.cpp ../../bridge/photoedit.cpp ../../bridge/filepreparer.cpp
-HEADERS += ../../bridge/photoedit.h ../../bridge/filepreparer.h
+HEADERS += ../../bridge/photoedit.h ../../bridge/filepreparer.h ../../bridge/filetype.h
