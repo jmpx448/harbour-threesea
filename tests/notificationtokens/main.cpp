@@ -81,6 +81,15 @@ void testWhileRunning()
     const QString token = dbus.actionToken(chat, true);
     check(token.size() == 32, "a token");
     check(!markRead(dbus, QString(32, QLatin1Char('0'))), "another token is ignored");
+    check(!markRead(dbus, QString()), "an empty token is ignored");
+    check(!markRead(dbus, token.left(31)), "a token cut short is ignored");
+    check(!markRead(dbus, token + QLatin1Char('0')), "a token too long is ignored");
+    check(!reply(dbus, QString(), QStringLiteral("hello")), "no reply without a token");
+    // Another chat's token opens only that chat.
+    const QString other = dbus.actionToken(QStringLiteral("EFGH5678"), true);
+    check(!markRead(dbus, other), "another chat's token is ignored");
+    check(!reply(dbus, other, QStringLiteral("hello")), "another chat's token sends no reply");
+    dbus.forgetToken(QStringLiteral("EFGH5678"));
     check(markRead(dbus, token), "the notification's action gets through");
     check(!markRead(dbus, token), "a token works once");
 
