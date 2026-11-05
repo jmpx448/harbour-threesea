@@ -605,6 +605,9 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
   `googlemail.com` both domains are hashed. Phone numbers are normalised to E.164 without "+"
   (`core/src/address_book.rs`). Numbers without a country code take the country from Settings →
   Privacy; "Automatic" is the linked number's calling code, else the locale's (ADR 0016).
+  Without any country they aren't hashed. Extensions and tones (`;12`, `ext. 12`) go, digits of other
+  scripts count. Known gaps against libphonenumber: carrier codes in national or international
+  prefixes (Brazil's `015 11 9…`, Korea's and Israel's carrier prefixes for calling abroad).
   Nothing unhashed leaves the device.
 - Flow: `identity/match_token` (challenge response with the client key, token cached in the
   store and refreshed when the server rejects it), then `identity/match` with the hash lists.
@@ -614,10 +617,12 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
 - Hits become contacts (verification level server-verified, acquired directly) named after the
   address book entry if they have no name yet. Such a name is marked `SyncState::Imported` and follows
   the entry at later syncs, as on Android; an entry without a name changes nothing. A name the user
-  wrote or cleared is `Custom` and stays. Names from before
-  this was kept (`Initial`) can't be told from the user's, so they stay too. An ID claimed by different people's entries is left
-  alone, as Android does (`AndroidContactMatcher`); entries with the same name count as one person.
-  Android also drops an entry that matches several IDs; we add those, under the same name.
+  wrote or cleared is `Custom` and stays. Names from before this was kept (`Initial`) can't be told
+  from the user's, so they stay too.
+- Only one-to-one matches count, as on Android (`AndroidContactMatcher`): an ID claimed by different
+  people's entries is left alone, and so is a person whose entries match several IDs (one of them may
+  be a number shared with someone else). Entries with the same name count as one person; an entry
+  without a name is its own and says nothing against a named one.
   Whoever the user deleted is on the exclusion list and isn't brought back; adding them by hand
   takes them off it.
 - Sailfish side: `org.nemomobile.contacts` PeopleModel in QML (Harbour-allowed, Sailjail

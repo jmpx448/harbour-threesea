@@ -1,6 +1,6 @@
 # 0016 — The user's own number needs its country code
 
-Status: accepted (2026-11-04).
+Status: accepted (2026-11-04); the address book's country added the same day.
 
 ## Context
 
@@ -29,11 +29,19 @@ this address book, and the linked number that decides by default goes with the I
 - Own number and address book differ: the address book can't ask, and its entries are often national.
 - The national rules live in one table (`COUNTRIES` in `address_book.rs`): calling code and national
   prefix per country. Italy has none, so its landlines keep their `0`; North America's is `1`, so
-  `1 415 …` and `415 …` come out the same; Hungary's is `06`; Liechtenstein has its own code, `423`.
-  A country not listed isn't guessed at and can't be chosen: its numbers need their `+` to be found,
-  and a linked number from there leaves Automatic to the locale.
+  `1 415 …` and `415 …` come out the same; Hungary's is `06`; Russia's `8` goes only from all 11 digits,
+  since real numbers start with it too; Liechtenstein has its own code, `423`. The table also has the
+  prefixes for calling abroad besides `00` where they differ (`011` in North America, `010` in Japan,
+  `810` in Russia, `0011` and its kin in Australia, `0[0-3]x` in Singapore). The own number takes only
+  `+` and `00`. A country not listed isn't guessed at and can't be chosen: its numbers need their `+`
+  to be found, and a linked number from there leaves Automatic to the locale. With no country at all,
+  a number that doesn't say its own isn't hashed, as it could equal someone's number elsewhere.
+- Known gaps: carrier codes in prefixes (Brazil's `015 11 9…`, Korea's and Israel's prefixes for calling
+  abroad) aren't understood, so those numbers aren't found unless written with `+`.
 - Numbers that say their country are cleaned up too: `(+49) 171 …` counts as `+49 171 …`, a national
   prefix after the calling code goes (`+49 0171 …`, `+49 (0171) …`, `+36 06 …`), and marks that only
-  set the text's direction (U+202A, U+202C and their kind) are ignored. The prefix goes only if it
-  is a `0` (or `06`) and the country is known to have it. This also holds for the own number: the
-  dialog shows the result before anything is sent.
+  set the text's direction (U+202A, U+202C and their kind) are ignored, as are extensions and tones
+  (`;12`, `ext. 12`); digits of other scripts count. The prefix goes only if it is a `0` (or `06`) and
+  the country is known to have it. `(0)` is dropped except for Italy, where it is part of the number
+  (`+39 (0)6 …`). This also holds for the own number: the dialog shows the result before anything is
+  sent.
