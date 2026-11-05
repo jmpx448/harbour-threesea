@@ -164,7 +164,8 @@ Rules:
   callbacks reach the GUI thread through queued signals. A long command's reply can come after
   those of later commands (ADR 0028).
 - Models: the generic `JsonListModel` (chats, messages, members…; keyed rows, applied with
-  insert/remove/move/dataChanged, never a reset per event) and `ContactListModel`.
+  insert/remove/move/dataChanged, never a reset per event), `ContactListModel`, and `ListFilter`
+  (a search field's view of either by name and ID).
 - Platform integration where it is simplest: notifications (Nemo.Notifications, actions over
   `DBusInterface` with a per-chat token), keepalive (`BackgroundJob`) and sharing
   (Sailfish.Share) in QML; address book matching through `AddressBookReader.qml` (opt-in,

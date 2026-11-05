@@ -101,9 +101,28 @@ Page {
         chats.update(list)
     })
 
+    // What the search field in the header narrows both lists to. The contacts model is shared.
+    property string query
+    ListFilter {
+        id: foundChats
+        sourceModel: chats
+        query: page.query
+    }
+    ListFilter {
+        id: foundContacts
+        sourceModel: backend.contacts
+        query: page.query
+    }
+
     SilicaListView {
+        id: listView
         anchors.fill: parent
-        model: chats
+        model: foundChats
+        // Or the first row becomes the current item and takes the focus from the search field.
+        currentIndex: -1
+
+        // "Chats" goes while no chat matches.
+        StayAtTop { target: listView }
 
         header: Column {
             width: parent.width
@@ -118,7 +137,17 @@ Page {
                              ? qsTrId("threesea-la-share-files", page.files.length)
                              : page.files.length === 1 ? page.files[0].name : page.text
             }
+            SearchField {
+                width: parent.width
+                //% "Search chats and contacts"
+                placeholderText: qsTrId("threesea-la-search-chats-contacts")
+                inputMethodHints: Qt.ImhNoAutoUppercase | window.incognitoHints
+                EnterKey.iconSource: "image://theme/icon-m-enter-close"
+                EnterKey.onClicked: focus = false
+                onTextChanged: page.query = text
+            }
             SectionHeader {
+                visible: foundChats.count > 0
                 //% "Chats"
                 text: qsTrId("threesea-he-chats")
             }
@@ -156,11 +185,12 @@ Page {
         footer: Column {
             width: parent.width
             SectionHeader {
+                visible: foundContacts.count > 0
                 //% "Contacts"
                 text: qsTrId("threesea-he-contacts")
             }
             Repeater {
-                model: backend.contacts
+                model: foundContacts
                 ListItem {
                     id: contactItem
                     contentHeight: Theme.itemSizeLarge
@@ -187,6 +217,12 @@ Page {
                     }
                 }
             }
+        }
+
+        ViewPlaceholder {
+            enabled: page.query.trim().length > 0 && foundChats.count === 0 && foundContacts.count === 0
+            //% "No chats or contacts found"
+            text: qsTrId("threesea-la-search-no-chats-contacts")
         }
 
         VerticalScrollDecorator { }

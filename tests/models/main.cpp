@@ -5,6 +5,7 @@
 #include "contactlistmodel.h"
 #include "coreresult.h"
 #include "jsonlistmodel.h"
+#include "listfilter.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -256,6 +257,62 @@ int main(int argc, char **argv)
     check(got == reordered, "contacts: reorder and remove");
     check(contactCounts.moved == 1 && contactCounts.removed == 1 && contactCounts.inserted == 0,
           "contacts: one move, one removal");
+
+    // A search field's filter over the contacts: names and ID, any case and order, accents or
+    // none; a group's key isn't a name. The source's rows stay as they are, and what changes in
+    // the source reaches the filter.
+    {
+        const auto person = [](const QString &identity, const QString &name, const QString &first, const QString &last) {
+            QVariantMap row;
+            row.insert(QStringLiteral("identity"), identity);
+            row.insert(QStringLiteral("displayName"), name);
+            row.insert(QStringLiteral("firstName"), first);
+            row.insert(QStringLiteral("lastName"), last);
+            return QVariant(row);
+        };
+        ContactListModel source;
+        const QVariantList everyone = {
+            person(QStringLiteral("ABCD1234"), QStringLiteral("Jos\u00e9 Garc\u00eda"), QStringLiteral("Jos\u00e9"), QStringLiteral("Garc\u00eda")),
+            person(QStringLiteral("BCDE2345"), QStringLiteral("Stra\u00dfe \u0141ukasz"), QStringLiteral("Stra\u00dfe"), QStringLiteral("\u0141ukasz")),
+            person(QStringLiteral("g:CDEF3456:00ab"), QStringLiteral("Dinner"), QString(), QString()),
+        };
+        source.update(everyone);
+        ListFilter filter;
+        filter.setSourceModel(&source);
+        int counted = 0;
+        QObject::connect(&filter, &ListFilter::countChanged, [&counted]() { ++counted; });
+        const auto found = [&filter](const QString &query) {
+            filter.setQuery(query);
+            QStringList list;
+            const int role = filter.roleNames().key("identity");
+            for (int i = 0; i < filter.rowCount(); ++i) {
+                list << filter.data(filter.index(i, 0), role).toString();
+            }
+            return list;
+        };
+        check(found(QString()).size() == 3, "filter: no query, all rows");
+        check(found(QStringLiteral("  ")).size() == 3, "filter: only spaces, all rows");
+        check(found(QStringLiteral("jose")) == QStringList{QStringLiteral("ABCD1234")}, "filter: accents off");
+        check(found(QStringLiteral("GARC JOS\u00c9")) == QStringList{QStringLiteral("ABCD1234")}, "filter: any case and order");
+        check(found(QStringLiteral("Jose\u0301")) == QStringList{QStringLiteral("ABCD1234")}, "filter: a mark of its own");
+        check(found(QStringLiteral("strasse lukasz")) == QStringList{QStringLiteral("BCDE2345")}, "filter: letters that don't come apart");
+        check(found(QStringLiteral("bcde23")) == QStringList{QStringLiteral("BCDE2345")}, "filter: by ID");
+        check(found(QStringLiteral("cdef")).isEmpty(), "filter: a group's key is no name");
+        check(found(QStringLiteral("dinner")) == QStringList{QStringLiteral("g:CDEF3456:00ab")}, "filter: a group's name");
+        check(counted > 0, "filter: says when its count changes");
+        check(filter.property("count").toInt() == 1, "filter: count");
+        check(source.rowCount() == 3, "filter: the source keeps its rows");
+
+        // A new matching row comes in, in the source's order, and a renamed one goes.
+        QVariantList changed = everyone;
+        changed.insert(0, person(QStringLiteral("DEFG4567"), QStringLiteral("Dinner guest"), QString(), QString()));
+        source.update(changed);
+        check(filter.rowCount() == 2 && filter.data(filter.index(0, 0), filter.roleNames().key("identity")).toString()
+              == QLatin1String("DEFG4567"), "filter: follows an inserted row");
+        changed[0] = person(QStringLiteral("DEFG4567"), QStringLiteral("Someone"), QString(), QString());
+        source.update(changed);
+        check(filter.rowCount() == 1, "filter: follows a changed row");
+    }
 
     // Null stays null, the core's "no such thing" (a quote of a message this device doesn't have);
     // a result is an object, and an error reply's missing one an empty object.

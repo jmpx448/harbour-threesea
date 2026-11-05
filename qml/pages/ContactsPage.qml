@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import harbour.threesea 1.0
 import "../components"
 import "../components/Errors.js" as Errors
 
@@ -68,10 +69,23 @@ Page {
         })
     }
 
+    // What the search field in the header narrows the list to. The contacts model is shared.
+    property string query
+    ListFilter {
+        id: found
+        sourceModel: backend.contacts
+        query: page.query
+    }
+
     SilicaListView {
         id: listView
         anchors.fill: parent
-        model: backend.contacts
+        model: found
+        // Or the first row becomes the current item and takes the focus from the search field.
+        currentIndex: -1
+
+        // Our own card goes while searching.
+        StayAtTop { target: listView }
 
         // Busy while refreshing, like a list being synced in Jolla's apps.
         PullDownMenu {
@@ -109,9 +123,20 @@ Page {
                 title: qsTrId("threesea-he-contacts")
             }
 
+            SearchField {
+                width: parent.width
+                //% "Search contacts"
+                placeholderText: qsTrId("threesea-la-search-contacts")
+                inputMethodHints: Qt.ImhNoAutoUppercase | window.incognitoHints
+                EnterKey.iconSource: "image://theme/icon-m-enter-close"
+                EnterKey.onClicked: focus = false
+                onTextChanged: page.query = text
+            }
+
             // Our own card, like the contact pages' (Jolla People's card): tap for the profile.
             MouseArea {
                 id: me
+                visible: page.query.trim().length === 0
                 width: parent.width
                 height: myCard.height + Theme.paddingLarge
                 onClicked: pageStack.push(Qt.resolvedUrl("settings/ProfileSettingsPage.qml"))
@@ -217,13 +242,19 @@ Page {
         }
 
         ViewPlaceholder {
-            enabled: listView.count === 0
+            enabled: backend.contacts.count === 0
             // Below the own profile row.
             verticalOffset: listView.headerItem ? listView.headerItem.height / 2 : 0
             //% "No contacts"
             text: qsTrId("threesea-la-no-contacts")
             //% "Pull down to add a contact by Threema ID"
             hintText: qsTrId("threesea-la-no-contacts-hint")
+        }
+        ViewPlaceholder {
+            enabled: backend.contacts.count > 0 && found.count === 0
+            verticalOffset: listView.headerItem ? listView.headerItem.height / 2 : 0
+            //% "No contacts found"
+            text: qsTrId("threesea-la-search-no-contacts")
         }
 
         VerticalScrollDecorator { }

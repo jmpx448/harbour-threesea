@@ -55,7 +55,15 @@ Dialog {
     JsonListModel {
         id: offered
         keyField: "identity"
-        roles: ["identity", "displayName", "section", "pictureVersion"]
+        roles: ["identity", "displayName", "firstName", "lastName", "nickname", "section", "pictureVersion"]
+    }
+
+    // What the search field narrows the offer to. Someone selected stays selected, seen or not.
+    property string query
+    ListFilter {
+        id: found
+        sourceModel: offered
+        query: dialog.query
     }
 
     Component.onCompleted: load()
@@ -68,7 +76,7 @@ Dialog {
     SilicaListView {
         id: listView
         anchors.fill: parent
-        model: offered
+        model: found
         // Or the first row becomes the current item and takes the focus from the name field.
         currentIndex: -1
 
@@ -104,6 +112,14 @@ Dialog {
                       //% "Members"
                       : qsTrId("threesea-he-members")
             }
+            SearchField {
+                width: parent.width
+                placeholderText: qsTrId("threesea-la-search-contacts")
+                inputMethodHints: Qt.ImhNoAutoUppercase | window.incognitoHints
+                EnterKey.iconSource: "image://theme/icon-m-enter-close"
+                EnterKey.onClicked: focus = false
+                onTextChanged: dialog.query = text
+            }
         }
 
         section {
@@ -133,7 +149,7 @@ Dialog {
         }
 
         ViewPlaceholder {
-            enabled: dialog.loaded && listView.count === 0
+            enabled: dialog.loaded && offered.count === 0
             text: dialog.contactCount === 0
                   //% "No contacts"
                   ? qsTrId("threesea-la-no-contacts")
@@ -142,6 +158,10 @@ Dialog {
                     ? qsTrId("threesea-la-all-contacts-on-list")
                     //% "All your contacts are in this group"
                     : qsTrId("threesea-la-all-contacts-in-group")
+        }
+        ViewPlaceholder {
+            enabled: offered.count > 0 && found.count === 0
+            text: qsTrId("threesea-la-search-no-contacts")
         }
 
         VerticalScrollDecorator { }

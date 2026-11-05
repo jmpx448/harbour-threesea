@@ -4,5 +4,5 @@ TARGET = models-test
 QT = core qml
 CONFIG += c++14 console
 INCLUDEPATH += ../../bridge
-SOURCES += main.cpp ../../bridge/jsonlistmodel.cpp ../../bridge/contactlistmodel.cpp
-HEADERS += ../../bridge/jsonlistmodel.h ../../bridge/contactlistmodel.h ../../bridge/coreresult.h
+SOURCES += main.cpp ../../bridge/jsonlistmodel.cpp ../../bridge/contactlistmodel.cpp ../../bridge/listfilter.cpp
+HEADERS += ../../bridge/jsonlistmodel.h ../../bridge/contactlistmodel.h ../../bridge/listfilter.h ../../bridge/coreresult.h

@@ -14,7 +14,7 @@ docker run --rm -i -e "PAGES=$*" -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS"
     B=$HOME/pageload
     mkdir -p $B/bridge
     cp /src/tests/pageload/main.cpp /src/tests/pageload/pageload-test.pro $B/
-    cp /src/bridge/jsonlistmodel.* /src/bridge/contactlistmodel.* /src/bridge/enterkeyfilter.* \
+    cp /src/bridge/jsonlistmodel.* /src/bridge/contactlistmodel.* /src/bridge/listfilter.* /src/bridge/enterkeyfilter.* \
        /src/bridge/emojihighlighter.* $B/bridge/
     cp -r /src/qml $B/
     cd $B

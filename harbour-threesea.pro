@@ -47,6 +47,7 @@ SOURCES += \
     bridge/mediareader.cpp \
     bridge/installcheck.cpp \
     bridge/jsonlistmodel.cpp \
+    bridge/listfilter.cpp \
     bridge/main.cpp \
     bridge/mediaimageprovider.cpp \
     bridge/callroute.cpp \
@@ -75,6 +76,7 @@ HEADERS += \
     bridge/mediareader.h \
     bridge/installcheck.h \
     bridge/jsonlistmodel.h \
+    bridge/listfilter.h \
     bridge/mediaimageprovider.h \
     bridge/peerimage.h \
     bridge/callroute.h \

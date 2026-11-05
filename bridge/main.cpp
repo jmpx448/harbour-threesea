@@ -32,6 +32,7 @@
 #include "endofprocess.h"
 #include "enterkeyfilter.h"
 #include "jsonlistmodel.h"
+#include "listfilter.h"
 #include "mediaimageprovider.h"
 #include "proximitymonitor.h"
 #include "softsound.h"
@@ -170,6 +171,7 @@ int main(int argc, char *argv[])
     app->setQuitOnLastWindowClosed(!keepRunning);
 
     qmlRegisterType<JsonListModel>("harbour.threesea", 1, 0, "JsonListModel");
+    qmlRegisterType<ListFilter>("harbour.threesea", 1, 0, "ListFilter");
     qmlRegisterType<EnterKeyFilter>("harbour.threesea", 1, 0, "EnterKeyFilter");
     qmlRegisterType<EmojiHighlighter>("harbour.threesea", 1, 0, "EmojiHighlighter");
     qmlRegisterType<AnimatedImage>("harbour.threesea", 1, 0, "AnimatedMedia");

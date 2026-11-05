@@ -26,6 +26,7 @@
 #include "emojihighlighter.h"
 #include "enterkeyfilter.h"
 #include "jsonlistmodel.h"
+#include "listfilter.h"
 
 namespace {
 
@@ -114,6 +115,7 @@ int main(int argc, char **argv)
     }
 
     qmlRegisterType<JsonListModel>("harbour.threesea", 1, 0, "JsonListModel");
+    qmlRegisterType<ListFilter>("harbour.threesea", 1, 0, "ListFilter");
     qmlRegisterType<EnterKeyFilter>("harbour.threesea", 1, 0, "EnterKeyFilter");
     qmlRegisterType<EmojiHighlighter>("harbour.threesea", 1, 0, "EmojiHighlighter");
     qmlRegisterType(QUrl::fromLocalFile(dir + QStringLiteral("/fakes/AnimatedMedia.qml")), "harbour.threesea", 1, 0, "AnimatedMedia");

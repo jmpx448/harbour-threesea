@@ -19,6 +19,10 @@ does. Sources are listed at the end; re-check them before building a new page.
   none (e.g. delivery/read state), drawn in the same monochrome style and tinted via Theme.
 - **Navigation:** page stack + swipe back. No hamburger menus, no tab bars, no floating action
   buttons. Avoid deep stacks; `pageStack.replace()` for flows (onboarding).
+- **Long lists of names** (contacts, choosing a chat or members) get a `SearchField` in the list's
+  header, narrowed by `ListFilter` in the model (`currentIndex: -1`, or the first row takes the
+  field's focus). The Search page finds chats and contacts by name through the core (`findChats`),
+  above the messages.
 - **Pulley menus:** ≤ 4 items (Jolla apps use 1–3); most-used item closest to the list. One
   exception: the chat's attachment menu (push-up) has up to six. Silica's image, video and content
   pickers are separate pages, and one picker for all would put a step before the photos.
@@ -68,14 +72,14 @@ and the open Jolla apps (Notes, Gallery, Camera, Weather) for everything else.
 
 | Screen | Pattern | Reference |
 |---|---|---|
-| Conversation list | `SilicaListView`, `PullDownMenu` (New chat, Settings, …), `ViewPlaceholder`, sections (Pinned/Today/Yesterday/Older); `ListItem` delegate = square picture, name with the unread count after it, three-line preview, clock time (details: CLAUDE.md Phase 4.5); `ContextMenu` (pin, mute, delete with `remorseAction`) | whisperfish `qml/pages/MainPage.qml`, `qml/delegates/SessionDelegate.qml` |
+| Conversation list | `SilicaListView`, `PullDownMenu` (New chat, Settings, …), `ViewPlaceholder`, sections (Pinned/Today/Yesterday/Older); `ListItem` delegate = square picture, name with the unread count after it, three-line preview, clock time (details: CLAUDE.md Phase 4.5); `ContextMenu` (pin, mute for 8 hours or on again, delete with `remorseAction`); pinned rows show the day with the time, as their section names none | whisperfish `qml/pages/MainPage.qml`, `qml/delegates/SessionDelegate.qml` |
 | Chat | Header: contact name, avatar to its right (Jolla Messages); contact details as attached page (swipe left). `SilicaListView` with `verticalLayoutDirection: ListView.BottomToTop`; outgoing right, incoming left; bubbles and their corners, time and delivery icons as in CLAUDE.md Phase 4.5 (white overlay 12 %/6 %, run-dependent corners) | whisperfish `qml/components/MessagesView.qml`, `qml/delegates/MessageDelegate.qml`, `qml/components/message/InfoItem.qml` |
 | Input bar | `TextArea` + emoji button + send/record `IconButton`, the last item of the message list so it scrolls with the messages (Jolla Messages), not docked | whisperfish `qml/components/ChatTextInput.qml`; fernschreiber `qml/pages/ChatPage.qml` |
 | Attachments | `Sailfish.Pickers` (`ImagePickerPage`, `ContentPickerPage`, `MultiContentPickerDialog`, …) pushed on the stack; theme icons `icon-m-image`, `icon-m-video`, `icon-m-mic`, `icon-m-document` | docs: sailfish-components-pickers |
 | Image/video viewer | `FullscreenContentPage { allowedOrientations: Orientation.All }`, flick/pinch zoom, overlay with share/save, `VerticalPageBackHint` — re-created without `Sailfish.Gallery` | jolla-gallery `src/pages/GalleryFullscreenPage.qml`, sailfish-components-gallery `ImageViewer.qml`, `GalleryOverlay.qml` |
 | Share out | `ShareAction { mimeType }` + `resources = [url]; trigger()` | jolla-notes `pages/NotePage.qml`, `GalleryOverlay.qml` |
 | Contact / group details | `PageHeader`, avatar, `DetailItem`s, `SectionHeader`s, pulley actions; contact picking via `Sailfish.Contacts` / `org.nemomobile.contacts` | whisperfish `ContactCardPage.qml`, `NewMessage.qml` |
-| Cover | unread count + last sender (not the text; can be hidden) | jolla-notes `cover/NotesCover.qml` |
+| Cover | unread count + last sender (not the text; can be hidden), with the action to that chat next to new message while the name shows | jolla-notes `cover/NotesCover.qml` |
 | Notifications | `Nemo.Notifications` with `appName`, `summary/body`, `previewSummary/previewBody`, `itemCount` grouping per chat, `remoteActions` with a `"default"` D-Bus action (+ `ExecDBus` in X-Sailjail) so tapping works when the app is closed; `replacesId` to update | commhistory-daemon `src/personalnotification.cpp`, whisperfish `qml/harbour-whisperfish-main.qml` |
 | Settings | `Page` with `SectionHeader`s, `TextSwitch`, `ComboBox`, `Slider` | jolla-notes `settings/notes.qml` (look, not the plugin mechanism) |
 | Voice messages | QtMultimedia `Audio`/`AudioRecorder`; playback controls via `Amber.Mpris` if useful. In the bubble: play/pause icon, Silica `Slider`, length, and the speed as a plain tappable label (1× / 1.5× / 2×, Threema's chip — text, not an own control) | docs: amber-mpris |

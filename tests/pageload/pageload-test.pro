@@ -6,5 +6,5 @@ TARGET = pageload-test
 QT = core gui gui-private qml quick quick-private
 CONFIG += c++14 console
 INCLUDEPATH += bridge
-SOURCES += main.cpp bridge/jsonlistmodel.cpp bridge/contactlistmodel.cpp bridge/enterkeyfilter.cpp bridge/emojihighlighter.cpp
-HEADERS += bridge/jsonlistmodel.h bridge/contactlistmodel.h bridge/enterkeyfilter.h bridge/emojihighlighter.h
+SOURCES += main.cpp bridge/jsonlistmodel.cpp bridge/contactlistmodel.cpp bridge/listfilter.cpp bridge/enterkeyfilter.cpp bridge/emojihighlighter.cpp
+HEADERS += bridge/jsonlistmodel.h bridge/contactlistmodel.h bridge/listfilter.h bridge/enterkeyfilter.h bridge/emojihighlighter.h
