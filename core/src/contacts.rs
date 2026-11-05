@@ -190,6 +190,7 @@ pub fn apply_lookup(config: &Config, contact: &mut Contact, result: Lookup) -> b
         (
             c.feature_mask.0,
             c.activity_state,
+            c.identity_type,
             c.verification_level,
             c.nickname.clone(),
         )
@@ -199,6 +200,7 @@ pub fn apply_lookup(config: &Config, contact: &mut Contact, result: Lookup) -> b
         Lookup::Found(fresh) => {
             contact.feature_mask = fresh.feature_mask;
             contact.activity_state = fresh.activity_state;
+            contact.identity_type = fresh.identity_type;
         }
         Lookup::Invalid => contact.activity_state = pc::ActivityState::Invalid,
         // A wrong answer changes nothing.
@@ -244,7 +246,8 @@ pub fn apply_identity_check(
 
 impl Store {
     /// What a directory lookup found for `identity`, on a fresh read of the contact: a lookup takes
-    /// a while, and a rename or a deletion meanwhile stands. Returns whether something changed.
+    /// a while, and a rename or a deletion meanwhile stands. The other devices get what changed,
+    /// to be told to reflect it by whoever gets `true`. Returns whether something changed.
     pub fn store_lookup(
         &self,
         config: &Config,
@@ -254,9 +257,13 @@ impl Store {
         let Some(mut contact) = self.contact(identity)? else {
             return Ok(false);
         };
+        let before = contact.clone();
         let changed = apply_lookup(config, &mut contact, result);
         if changed {
+            let step = self.step()?;
             self.upsert_contact(&contact)?;
+            crate::sync::queue_directory_change(self, &before, &contact)?;
+            step.commit()?;
         }
         Ok(changed)
     }

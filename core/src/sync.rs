@@ -700,6 +700,48 @@ pub(crate) fn reflect_group_contacts_once(store: &Store) -> Result<(), StoreErro
     Ok(())
 }
 
+/// A directory lookup changed `after`: the other devices get just those fields, as a rename made
+/// meanwhile on one of them must stand (Android reflects each alone, `ContactUpdateWorker`).
+/// Desktop looks up nobody itself: what it knows of who can do what and who was revoked comes from
+/// here. Nothing without a device group, or if nothing it keeps changed.
+pub(crate) fn queue_directory_change(
+    store: &Store,
+    before: &libthreema::model::contact::Contact,
+    after: &libthreema::model::contact::Contact,
+) -> Result<(), StoreError> {
+    if store.multi_device()?.is_none() {
+        return Ok(());
+    }
+    let full = after.to_d2d_sync();
+    let mut changed = d2d_sync::Contact {
+        identity: full.identity,
+        ..Default::default()
+    };
+    if before.feature_mask.0 != after.feature_mask.0 {
+        changed.feature_mask = full.feature_mask;
+    }
+    if before.activity_state != after.activity_state {
+        changed.activity_state = full.activity_state;
+    }
+    if before.identity_type != after.identity_type {
+        changed.identity_type = full.identity_type;
+    }
+    if changed.feature_mask.is_none()
+        && changed.activity_state.is_none()
+        && changed.identity_type.is_none()
+    {
+        return Ok(());
+    }
+    store.queue_sync_content(
+        Scope::ContactSync,
+        Content::ContactSync(ContactSync {
+            action: Some(contact_sync::Action::Update(contact_sync::Update {
+                contact: Some(changed),
+            })),
+        }),
+    )
+}
+
 pub fn contact_sync(
     store: &Store,
     sync: ContactSync,
@@ -1264,6 +1306,78 @@ mod tests {
     /// Deleted on another device: the chat is gone from the store here, and the app is told, as
     /// the picture and the media are for it to remove.
     /// What is open on the screen shows it at once.
+    /// What a lookup changes reaches the other devices alone: a name changed there stands.
+    #[test]
+    fn a_lookup_tells_the_other_devices_only_what_it_changed() {
+        use libthreema::{common::FeatureMask, protobuf::d2d::Envelope};
+        use prost::Message as _;
+        let (_dir, store) = store();
+        let config = libthreema::common::config::Config::from(
+            libthreema::common::config::ConfigEnvironment::Production,
+        );
+        let id = "ABCD1234";
+        let mut known = crate::contacts::test_contact(id);
+        known.feature_mask = FeatureMask(0);
+        known.first_name = Some("Ann".into());
+        store.upsert_contact(&known).unwrap();
+        let mut fresh = crate::contacts::test_contact(id);
+        fresh.feature_mask = FeatureMask(255);
+        let found = |fresh: &libthreema::model::contact::Contact| {
+            crate::contacts::Lookup::Found(Box::new(fresh.clone()))
+        };
+
+        // Nobody linked: nothing to tell.
+        assert!(store.store_lookup(&config, id, found(&fresh)).unwrap());
+        assert!(store.next_sync().unwrap().is_none());
+
+        store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        // Nothing new: nothing to tell.
+        assert!(!store.store_lookup(&config, id, found(&fresh)).unwrap());
+        assert!(store.next_sync().unwrap().is_none());
+
+        fresh.feature_mask = FeatureMask(511);
+        assert!(store.store_lookup(&config, id, found(&fresh)).unwrap());
+        let (entry, scope, content) = store.next_sync().unwrap().unwrap();
+        store.sync_done(entry).unwrap();
+        assert_eq!(scope, Scope::ContactSync as i32);
+        let Some(Content::ContactSync(ContactSync {
+            action: Some(contact_sync::Action::Update(update)),
+        })) = Envelope::decode(content.as_slice()).unwrap().content
+        else {
+            panic!("not an update");
+        };
+        let synced = update.contact.unwrap();
+        assert_eq!(synced.identity, id);
+        assert_eq!(synced.feature_mask, Some(511));
+        assert!(synced.activity_state.is_none());
+        assert!(synced.first_name.is_none());
+        assert!(synced.nickname.is_none());
+        assert!(synced.acquaintance_level.is_none());
+
+        // Revoked: they hear of that too, and nothing else.
+        assert!(
+            store
+                .store_lookup(&config, id, crate::contacts::Lookup::Invalid)
+                .unwrap()
+        );
+        let (entry, _, content) = store.next_sync().unwrap().unwrap();
+        store.sync_done(entry).unwrap();
+        let Some(Content::ContactSync(ContactSync {
+            action: Some(contact_sync::Action::Update(update)),
+        })) = Envelope::decode(content.as_slice()).unwrap().content
+        else {
+            panic!("not an update");
+        };
+        let synced = update.contact.unwrap();
+        assert_eq!(
+            synced.activity_state,
+            Some(contact::ActivityState::Invalid as i32)
+        );
+        assert!(synced.feature_mask.is_none());
+    }
+
     /// It comes once, and the fetch can fail or be cut off: what it said stays until it is done.
     #[test]
     fn a_synced_picture_is_noted_with_the_sync() {

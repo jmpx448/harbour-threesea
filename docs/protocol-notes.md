@@ -519,8 +519,10 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   for a new picture: it would be some older picture's.
 - Contacts in `ContactSync`: someone new goes as `Create`, since `Update` of someone unknown is
   dropped (Android: `ReflectedContactSyncTask`). Each user action on a contact is reflected, a
-  deletion as acquaintance level `GROUP_OR_DELETED`. The daily directory refresh isn't, as a sync
-  carries the whole contact and could overwrite a newer name. Identity links go with the user profile after a link, an unlink or a
+  deletion as acquaintance level `GROUP_OR_DELETED`. What a directory lookup changes (feature
+  mask, activity state, identity type) goes as an update with just those fields, as on Android
+  (`ContactUpdateWorker`): Desktop looks up nobody itself, so an imported contact's real feature
+  mask and a revocation reach it only this way. Identity links go with the user profile after a link, an unlink or a
   verification, and come back in the same field; one awaiting its code here stays when another
   device lists none. A Data backup's metadata import reflects the contacts and groups it added.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's

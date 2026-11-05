@@ -953,14 +953,21 @@ impl App {
             let Some(mut contact) = self.store.contact(id)? else {
                 continue;
             };
+            let before = contact.clone();
             let had_fs = contacts::has_fs_support(&contact);
             if contacts::apply_identity_check(&self.config, &mut contact, check) {
+                let step = self.store.step()?;
                 self.store.upsert_contact(&contact)?;
+                crate::sync::queue_directory_change(&self.store, &before, &contact)?;
+                step.commit()?;
                 if had_fs && !contacts::has_fs_support(&contact) {
                     self.fs_support_lost(&contact)?;
                 }
                 changed = true;
             }
+        }
+        if changed {
+            self.tell_connection(crate::connection::ToConnection::ReflectSync);
         }
         if checks.check_interval > 0 {
             self.store.set_setting(

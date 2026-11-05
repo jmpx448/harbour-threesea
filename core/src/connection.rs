@@ -2682,6 +2682,7 @@ impl<'a> Session<'a> {
         }
         if changed {
             self.emit(CoreEvent::ContactsChanged);
+            self.emit(CoreEvent::SyncQueued);
         }
         checks.record(peer, now, true);
         Ok(MaskCheck::Fresh)
