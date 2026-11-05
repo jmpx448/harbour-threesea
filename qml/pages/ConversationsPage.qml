@@ -261,6 +261,17 @@ Page {
         }
     }
 
+    FontMetrics {
+        id: nameMetrics
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.fontSizeLarge
+    }
+    FontMetrics {
+        id: previewMetrics
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.fontSizeSmall
+    }
+
     SilicaListView {
         id: listView
         anchors.fill: parent
@@ -350,7 +361,9 @@ Page {
         // Unread chats are shown in the highlight colour.
         delegate: ListItem {
             id: item
-            contentHeight: Theme.itemSizeExtraLarge
+            // The same for every row, whatever its preview: the name and three lines.
+            contentHeight: Math.max(Theme.itemSizeExtraLarge,
+                                    nameMetrics.height + 3 * previewMetrics.lineSpacing + 2 * Theme.paddingSmall)
             onClicked: page.openChat(model.identity)
 
             // Unread look also for a chat the user marked unread by hand (the count stays away;
@@ -524,8 +537,10 @@ Page {
                             right: parent.right
                             baseline: nameLabel.baseline
                         }
-                        text: model.lastMessage.arrivedAt > 0
-                              ? Fmt.clock(model.lastMessage.arrivedAt, Format, Formatter) : ""
+                        // Under a day's section the clock is enough; "Pinned" says no day.
+                        text: model.lastMessage.arrivedAt <= 0 ? ""
+                              : item.pinned ? Fmt.time(model.lastMessage.arrivedAt, Format, Formatter)
+                              : Fmt.clock(model.lastMessage.arrivedAt, Format, Formatter)
                         font.pixelSize: Theme.fontSizeExtraSmall
                         color: item.highlighted || item.unread ? Theme.highlightColor : Theme.primaryColor
                     }
@@ -550,7 +565,7 @@ Page {
                         width: parent.width - (tick.visible ? tick.width + parent.spacing : 0)
                         // Groups: who wrote it, like Jolla Messages' group conversations.
                         // An unsent draft first, like Jolla Messages.
-                        // About as many characters as the two lines hold, from the width and
+                        // About as many characters as the lines hold, from the width and
                         // the font (measured on the emulator: a line of 534 px at a font size
                         // of 36 holds some 33 characters), a little under so the ellipsis we
                         // add still has room. What is longer is cut by us, see below.
@@ -568,7 +583,7 @@ Page {
                         readonly property bool pictures: backend.threemaEmoji && Fmt.mayHaveEmoji(plain)
                         textFormat: pictures ? Text.StyledText : Text.PlainText
                         text: pictures ? Fmt.markEmoji(Fmt.escapeHtml(plain), Math.round(font.pixelSize * 1.2)) : plain
-                        maximumLineCount: 2
+                        maximumLineCount: 3
                         wrapMode: Text.Wrap
                         // Qt puts the pictures a line away from their place when it elides
                         // text that contains them (Text.StyledText with <img>, user
