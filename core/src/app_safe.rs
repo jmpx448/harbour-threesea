@@ -53,7 +53,7 @@ fn now() -> i64 {
 /// directory otherwise answering (it would say who doesn't exist). Then it goes without them.
 const UNRESOLVED_OUTBOX_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-/// How many missing contact pictures one recovery round (connect, maintenance) may request.
+/// How many restored contacts one round (connect, maintenance) may ask for their picture.
 const PICTURE_REQUEST_BATCH: usize = 20;
 
 /// How many contacts one round of a restore's setup steps writes to.
@@ -660,8 +660,10 @@ impl App {
                     contact.acquaintance_level =
                         libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
                 }
-                if self.store.contact(&contact.identity.to_string())?.is_none() {
+                let id = contact.identity.to_string();
+                if self.store.contact(&id)?.is_none() {
                     self.store.upsert_contact(&contact)?;
+                    self.store.mark_picture_restored(&id)?;
                 }
             }
         }
@@ -809,7 +811,7 @@ impl App {
 
     /// The connection is up: try a pending Safe import right away — `maintenance` alone would
     /// leave restored groups waiting up to an hour after a network failure — and pick up
-    /// picture recovery (kept downloads, missing-picture requests in a bounded batch).
+    /// picture recovery (kept downloads, restored contacts' requests in a bounded batch).
     /// Rate-limited so flapping connections don't hammer the servers. Returns the UI events to
     /// emit.
     pub async fn on_connected(&mut self) -> Vec<&'static str> {
@@ -833,7 +835,7 @@ impl App {
         }
         self.run_restore_setup().await;
         self.resume_picture_downloads();
-        self.request_missing_pictures(PICTURE_REQUEST_BATCH);
+        self.request_restored_pictures(PICTURE_REQUEST_BATCH);
         events
     }
 
@@ -936,7 +938,7 @@ impl App {
                     Err(error) => tracing::warn!(%error, "cannot start a forward secrecy session"),
                 }
             }
-            self.store.request_picture(&id)?;
+            self.store.request_restored_picture(&id)?;
         }
         if rest.is_empty() {
             self.store.delete_setting(keys::SAFE_RESTORE_SETUP)?;
@@ -953,7 +955,7 @@ impl App {
 
     /// Upstream's _solicited contacts_: the people in groups we are in and those we have a chat
     /// with, without revoked IDs. Blocked contacts aren't written to either.
-    fn solicited_contacts(&self, me: &str) -> Result<Vec<String>, ApiError> {
+    pub(crate) fn solicited_contacts(&self, me: &str) -> Result<Vec<String>, ApiError> {
         let mut candidates = std::collections::BTreeSet::new();
         for group in self.store.groups()?.into_iter().filter(|group| !group.left) {
             candidates.insert(group.identity.creator_identity.to_string());
@@ -1111,7 +1113,7 @@ impl App {
         }
         self.run_restore_setup().await;
         self.resume_picture_downloads();
-        self.request_missing_pictures(PICTURE_REQUEST_BATCH);
+        self.request_restored_pictures(PICTURE_REQUEST_BATCH);
         match self
             .store
             .expire_unresolved_outbox(crate::messages::now_ms() - UNRESOLVED_OUTBOX_MAX_AGE_MS)

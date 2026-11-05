@@ -10,8 +10,8 @@ synced from another device came in anyway; one announced while it was off was lo
 turning it back on didn't bring the newer pictures of contacts with an older one. We had called
 this Android's behaviour, but Android downloads whatever it is sent and only decides what it shows
 (`getProfilePicReceive` is read in `IdentityAvatarFetcher`, `AvatarEditView` and `ContactUtil`,
-never when a picture arrives). Android asks for pictures only in `ApplicationSetupSteps`; we also
-ask when a chat opens and when a message comes.
+never when a picture arrives). Android asks for pictures only in `ApplicationSetupSteps`; so do we
+since ADR 0026.
 
 ## Decision
 
@@ -26,6 +26,6 @@ Anything that isn't showing (linking a device, data backups) reads the pictures 
 ## Consequences
 
 With it off, the device still fetches the pictures contacts announce, as Android does. Turned on
-again, those are all there at once, and contacts without one are asked the next time a chat opens or
-a message comes, within the request's backoff. The user may want no fetching at all; it then needs an
+again, those are all there at once, and restored contacts still to be asked are then (ADR 0026). The
+user may want no fetching at all; it then needs an
 honest text and a way to catch up when turned on.

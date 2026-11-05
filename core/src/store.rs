@@ -205,6 +205,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_WRITTEN_OUT,
     // 37: received messages the other devices of the group haven't been told of yet
     crate::messages::MIGRATION_AWAITING_REFLECTION,
+    // 38: whom a restore left without a picture, in place of asking everyone without one
+    crate::profile_pictures::MIGRATION_RESTORED,
 ];
 
 /// Setting keys.

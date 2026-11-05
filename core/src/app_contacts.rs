@@ -596,12 +596,12 @@ impl App {
             self.store.outbox_clear(&key)?;
             self.chat_removed(&key);
         }
+        self.store.forget_restored_picture(&key)?;
         if let Some(mut contact) = self.store.contact(&key)? {
             contact.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
             self.store.upsert_contact(&contact)?;
         }
-        // The group pages still show it for someone a group names, also one we left. A pause in
-        // asking for it stays: the reason for that doesn't change with this.
+        // The group pages still show it for someone a group names, also one we left.
         if !self.store.is_named_by_a_group(&key)? {
             self.store.cancel_picture_download(&key)?;
             self.store.set_contact_picture(&key, None)?;
@@ -1015,6 +1015,7 @@ impl App {
                     continue;
                 }
                 self.store.upsert_contact(&restored)?;
+                self.store.mark_picture_restored(&id)?;
                 if entry.is_private {
                     self.mark_private(&id, true)?;
                 }
@@ -1046,33 +1047,29 @@ impl App {
         Ok(true)
     }
 
-    /// Ask up to `limit` direct contacts without a picture for one: a restored device has no
-    /// pictures until it asks (Safe does not carry contact pictures). Called per round
-    /// (connect, maintenance), so the requests stay bounded; each contact is also bounded by
-    /// its own request backoff. Blocked contacts are left alone. Returns how many were queued.
-    pub(crate) fn request_missing_pictures(&self, limit: usize) -> usize {
-        let Ok(contacts) = self.store.contacts() else {
+    /// Ask up to `limit` of the contacts a restore left without a picture for one (Safe does not
+    /// carry them), as far as there is reason to: a chat or a shared group, like Android's
+    /// _Application Setup Steps_. The others stay marked, in case that changes. Called per round
+    /// (connect, maintenance), so that the requests stay bounded; with nobody marked it is one
+    /// query. Returns how many were queued.
+    pub(crate) fn request_restored_pictures(&self, limit: usize) -> usize {
+        let Ok(marked) = self.store.restored_pictures() else {
             return 0;
         };
-        let blocked = self
-            .app_settings()
-            .map(|s| s.blocked_contacts)
-            .unwrap_or_default();
+        if marked.is_empty() {
+            return 0;
+        }
+        let me = self.store.identity().ok().flatten();
+        let me = me.as_ref().map_or("", |identity| &identity.threema_id);
+        let Ok(solicited) = self.solicited_contacts(me) else {
+            return 0;
+        };
         let mut queued = 0;
-        for contact in contacts {
+        for id in marked.iter().filter(|id| solicited.contains(id)) {
             if queued >= limit {
                 break;
             }
-            if contact.acquaintance_level
-                != libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct
-            {
-                continue;
-            }
-            let id = contact.identity.to_string();
-            if blocked.contains(&id) {
-                continue;
-            }
-            if self.store.request_picture(&id).unwrap_or(false) {
+            if self.store.request_restored_picture(id).unwrap_or(false) {
                 queued += 1;
             }
         }
@@ -1676,16 +1673,14 @@ mod contact_policy_tests {
     /// What is left of someone with a chat, a picture and choices of their own when deleted.
     #[tokio::test(flavor = "current_thread")]
     async fn deleting_a_contact_keeps_the_row_and_takes_the_chat_along() {
-        use crate::profile_pictures::{REQUEST_PAUSE_DELETED_MS, contact_picture_name};
+        use crate::profile_pictures::contact_picture_name;
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(dir.path());
         with_a_chat(&app, "BBBBBBBB");
         let picture = contact_picture_name("BBBBBBBB");
         app.media.write_picture(&picture, b"picture").unwrap();
         app.store.set_contact_picture("BBBBBBBB", Some(5)).unwrap();
-        app.store
-            .pause_picture_requests("BBBBBBBB", REQUEST_PAUSE_DELETED_MS)
-            .unwrap();
+        app.store.mark_picture_restored("BBBBBBBB").unwrap();
         app.store.set_pinned("BBBBBBBB", true).unwrap();
         app.store
             .set_chat_notifications(
@@ -1717,8 +1712,8 @@ mod contact_policy_tests {
         assert!(app.store.chat_tones().unwrap().is_empty());
         assert_eq!(app.store.contact_picture_version("BBBBBBBB").unwrap(), 0);
         assert!(app.media.read_picture(&picture).unwrap().is_none());
-        // Nobody is asked for a picture sooner for having been deleted.
-        assert!(!app.store.request_picture("BBBBBBBB").unwrap());
+        // Nobody deleted is asked for a picture.
+        assert!(!app.store.request_restored_picture("BBBBBBBB").unwrap());
         let shown = call(&mut app, json!({"cmd": "contact", "identity": "BBBBBBBB"})).await;
         assert_eq!(shown["result"]["hidden"], true);
         assert_eq!(shown["result"]["neededByGroup"], false);
@@ -2352,13 +2347,54 @@ mod contact_policy_tests {
         app.store
             .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
             .unwrap();
+        app.store.mark_picture_restored("BBBBBBBB").unwrap();
         let off = json!({"cmd": "setSetting", "name": "showProfilePictures", "value": false});
         call(&mut app, off).await;
-        assert!(!app.store.request_picture("BBBBBBBB").unwrap());
+        assert!(!app.store.request_restored_picture("BBBBBBBB").unwrap());
         assert!(app.store.outbox().unwrap().is_empty());
         let on = json!({"cmd": "setSetting", "name": "showProfilePictures", "value": true});
         call(&mut app, on).await;
-        assert!(app.store.request_picture("BBBBBBBB").unwrap());
+        assert!(app.store.request_restored_picture("BBBBBBBB").unwrap());
+    }
+
+    /// Whoever a restore brought with a chat is asked once, in bounded rounds; nobody else, however
+    /// long they go without a picture.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_round_asks_only_restored_contacts_with_a_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let requests = |app: &App| {
+            app.store
+                .outbox()
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == crate::profile_pictures::OUTBOX_REQUEST_PICTURE)
+                .count()
+        };
+        // In a chat, but not restored.
+        with_a_chat(&app, "BBBBBBBB");
+        // Restored, nothing to talk about yet.
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("CCCCCCCC"))
+            .unwrap();
+        app.store.mark_picture_restored("CCCCCCCC").unwrap();
+        // Restored and in a chat.
+        for id in ["DDDDDDDD", "EEEEEEEE", "FFFFFFFF"] {
+            with_a_chat(&app, id);
+            app.store.mark_picture_restored(id).unwrap();
+        }
+        assert_eq!(app.request_restored_pictures(2), 2);
+        assert_eq!(requests(&app), 2);
+        assert_eq!(app.request_restored_pictures(2), 1);
+        assert_eq!(requests(&app), 3);
+        assert_eq!(app.request_restored_pictures(2), 0);
+        assert_eq!(requests(&app), 3);
+        // A chat begins with the one still marked.
+        app.store
+            .insert_incoming("CCCCCCCC", 8, "text", "hello", 1000)
+            .unwrap();
+        assert_eq!(app.request_restored_pictures(2), 1);
+        assert_eq!(requests(&app), 4);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -680,17 +680,6 @@ impl StoreConversations {
                 )
                 .map_err(foreign)?;
                 let mut events = self.events.borrow_mut();
-                // A group message from someone whose picture we don't have: ask them, like a
-                // 1:1 message does (bounded by the request backoff).
-                if !outcome.added.is_empty()
-                    && !self.from_sync
-                    && self
-                        .store
-                        .request_picture(&message.sender_identity.to_string())
-                        .map_err(foreign)?
-                {
-                    events.push(CoreEvent::OutboxChanged);
-                }
                 for added in outcome.added {
                     events.push(CoreEvent::MessageAdded { message: added });
                 }
@@ -857,16 +846,9 @@ impl StoreConversations {
                 return Ok(());
             }
             ContactMessageBody::DeleteProfilePicture(_) => {
-                // The deletion also obsoletes any download still under way, and there is
-                // nothing to request until they set a new picture (distributed by them).
+                // The deletion also obsoletes any download still under way.
                 self.store
                     .cancel_picture_download(&sender)
-                    .map_err(foreign)?;
-                self.store
-                    .pause_picture_requests(
-                        &sender,
-                        crate::profile_pictures::REQUEST_PAUSE_DELETED_MS,
-                    )
                     .map_err(foreign)?;
                 self.store
                     .set_contact_picture(&sender, None)
@@ -969,9 +951,6 @@ impl StoreConversations {
             .insert_incoming(&sender, message.id.0, kind, &content, created_at)
             .map_err(foreign)?
         {
-            if self.store.request_picture(&sender).map_err(foreign)? {
-                self.events.borrow_mut().push(CoreEvent::OutboxChanged);
-            }
             if let Some(keys) = &file_keys {
                 self.store.set_file_keys(stored.id, keys).map_err(foreign)?;
             }
@@ -1240,10 +1219,10 @@ mod tests {
         );
     }
 
-    /// The group steps and a picture request have store steps of their own, which have to work
-    /// inside the message's.
+    /// The group steps have store steps of their own, which have to work inside the message's. A
+    /// message is no reason to ask its sender for a picture: they send it with their messages.
     #[test]
-    fn a_message_asks_for_the_senders_picture_in_its_own_step() {
+    fn a_message_from_someone_without_a_picture_asks_for_nothing() {
         let (_dir, store) = store();
         contact(
             &store,
@@ -1260,10 +1239,7 @@ mod tests {
             group_body(GroupMessageBody::Text(TextMessage { text: "hi".into() })),
         );
         assert!(store.conn.is_autocommit());
-        assert_eq!(
-            store.outbox().unwrap()[0].kind,
-            crate::profile_pictures::OUTBOX_REQUEST_PICTURE
-        );
+        assert!(store.outbox().unwrap().is_empty());
     }
 
     /// The server won't send a stored message again, so its receipt waits in the store, once. What
@@ -1556,11 +1532,8 @@ mod tests {
                 .any(|event| matches!(event, CoreEvent::MessageAdded { .. }));
             assert!(added);
         };
-        // Reflected: the leader asks for the sender's picture if anyone does.
         receive(true, 1);
         assert!(store.outbox().unwrap().is_empty());
-        receive(false, 2);
-        assert!(!store.outbox().unwrap().is_empty());
     }
 
     #[test]

@@ -756,7 +756,7 @@ impl App {
         before: Option<i64>,
         after: Option<i64>,
     ) -> Result<Value, ApiError> {
-        let (key, conversation) = self.readable_chat(identity)?;
+        let (key, _) = self.readable_chat(identity)?;
         // Scrolling: just the page on that side of the message, nothing else.
         if before.is_some() || after.is_some() {
             let messages = match (before, after) {
@@ -775,15 +775,6 @@ impl App {
                 "messages": self.store.messages_json(&messages),
                 "private": self.store.is_private(&key)?,
             }));
-        }
-        // Opening a 1:1 chat (the initial load, not the follow-ups) may ask the contact for a
-        // missing picture: bounded by the request backoff, never for blocked contacts.
-        if around.is_none()
-            && matches!(conversation, Some(Conversation::Contact(_)))
-            && !self.app_settings()?.blocked_contacts.contains(&key)
-            && self.store.request_picture(&key)?
-        {
-            self.tell_connection(ToConnection::SendPending);
         }
         // The first unread and enough context around it, so the chat can open there and mark
         // where the new messages start; bounded for a chat with thousands unread.

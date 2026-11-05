@@ -23,7 +23,7 @@ As Android's `MarkContactAsDeletedBackgroundTask`:
   choice and the tone are the contact's or group's and stay; emptying a chat keeps all of it.
 - **A deleted contact takes what was chosen for them and queued for them**: notification choice,
   tone and what waits in the outbox (reactions, edits, picture requests). Its picture goes too unless
-  a group names them, since group pages show it; a pause in asking for pictures stays. The block
+  a group names them, since group pages show it. The block
   list, the private mark and the picture allow list are choices about an ID that outlast the contact
   (Android keeps them too): what is hidden or blocked stays so if the person writes again. Forward
   security sessions stay, as on Android, whose task for this doesn't touch them: the row stays, and

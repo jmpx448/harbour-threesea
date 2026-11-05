@@ -409,6 +409,7 @@ impl App {
                         continue;
                     }
                     self.store.upsert_contact(&contact)?;
+                    self.store.mark_picture_restored(&c.identity)?;
                     if c.archived {
                         self.store.set_archived(&c.identity, true)?;
                     }
@@ -791,6 +792,8 @@ mod tests {
             .set_setting(crate::store::keys::CONTACTS_REFRESHED_AT, "1")
             .unwrap();
         assert_eq!(summary["lists"]["added"], 1);
+        // Those added may have no picture here: asked once, with a chat or a shared group.
+        assert!(!app.store.restored_pictures().unwrap().is_empty());
         assert_eq!(summary["pictures"]["own"], true);
         assert_eq!(summary["pictures"]["contacts"], 1);
         assert_eq!(summary["pictures"]["groups"], 1);

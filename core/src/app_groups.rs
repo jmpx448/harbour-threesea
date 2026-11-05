@@ -570,13 +570,8 @@ impl App {
                     );
                     if gone {
                         // The blob expired (or the key is wrong, or it is far too large):
-                        // retrying the download is useless; only a freshly requested picture
-                        // helps.
+                        // retrying the download is useless.
                         let _ = store.cancel_picture_download(&identity);
-                        let _ = store.pause_picture_requests(
-                            &identity,
-                            crate::profile_pictures::REQUEST_PAUSE_EXPIRED_MS,
-                        );
                     } else {
                         let _ = store.picture_download_failed(&identity, generation);
                     }

@@ -566,11 +566,11 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   days; changing the picture or the sharing setting, or a request from the contact, resets
   what each contact has.
 - Received pictures: downloaded without `done`, stored encrypted (`contact:<ID>`), versioned in
-  `contact_pictures` (migration 11). The first message of a contact without a picture triggers
-  one `contact-request-profile-picture`, and so does opening the chat with them (the initial
-  load, bounded by the request's backoff). Both are ours; Android asks in its application setup
-  steps only. A request is a message like any other: it may start a forward secrecy session,
-  and the contact may see that. Revoked and blocked IDs aren't asked.
+  `contact_pictures` (migration 11). Contacts a Threema Safe or data backup import added get one
+  `contact-request-profile-picture`, once there is a chat or a shared group with them (ADR 0026,
+  Android's `isRestored`); a picture or a deletion from them ends that. Nobody else is asked: a
+  request is a message like any other, it may start a forward secrecy session, and the contact
+  may see that. Revoked and blocked IDs aren't asked.
 - Who gets it (Android `PROFILEPIC_RELEASE_*`): everyone, nobody, or selected contacts (allow
   list, migration 18; contacts off the list get a removal like "nobody"). Changing the list
   resets only the changed contacts. Threema Safe carries it as `user.profilePicRelease`:
