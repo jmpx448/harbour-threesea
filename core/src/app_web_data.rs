@@ -267,30 +267,6 @@ fn secs(ms: i64) -> Value {
     Value::from(ms / 1000)
 }
 
-/// A call's line: "result|outgoing|seconds" (app_calls.rs), worded like our chat.
-fn call_text(record: &str) -> String {
-    let mut parts = record.split('|');
-    let result = parts.next().unwrap_or_default();
-    let outgoing = parts.next() == Some("1");
-    let seconds: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    match result {
-        "finished" => format!(
-            "{} call, {}:{:02}",
-            if outgoing { "Outgoing" } else { "Incoming" },
-            seconds / 60,
-            seconds % 60
-        ),
-        "missed" => "Missed call".into(),
-        "rejected" if outgoing => "Call declined".into(),
-        "rejected" => "You declined the call".into(),
-        "busy" => "Call not answered: busy".into(),
-        "unanswered" => "Call not answered".into(),
-        "disabled" => "Call not answered: calls are off".into(),
-        "aborted" => "Call cancelled".into(),
-        _ => "Call failed".into(),
-    }
-}
-
 /// A call ("result|outgoing|seconds") in the protocol's VoIP model: status 1 missed, 2 finished,
 /// 3 rejected (reason 0 unknown, 1 busy, 2 timeout, 3 rejected, 4 disabled), 4 aborted.
 fn voip(record: &str) -> Value {
@@ -371,46 +347,170 @@ fn message_events(message: &Message) -> Value {
     )
 }
 
-/// Status lines as Threema Web shows them (our UI translates the codes; the browser can't).
-fn status_text(code: &str) -> String {
+/// The UI's language for the few texts the core writes itself: Threema Web's status lines, which
+/// the browser shows as they come. The words are the UI's (qml/components/Format.js `status`, and
+/// scripts/translations-*.py): German and French, else English.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Language {
+    English,
+    German,
+    French,
+}
+
+impl Language {
+    /// `de`, `fr_CH`…: the start of the code the app was started with (`StartConfig::language`).
+    fn of(code: &str) -> Self {
+        match code.get(..2) {
+            Some("de") => Self::German,
+            Some("fr") => Self::French,
+            _ => Self::English,
+        }
+    }
+
+    /// One text, given in English, German and French.
+    fn pick(self, [english, german, french]: [&'static str; 3]) -> &'static str {
+        match self {
+            Self::English => english,
+            Self::German => german,
+            Self::French => french,
+        }
+    }
+}
+
+/// What Threema Web shows for a message deleted for everyone.
+const DELETED: [&str; 3] = [
+    "This message was deleted.",
+    "Diese Nachricht wurde gelöscht.",
+    "Ce message a été supprimé.",
+];
+
+/// A status line's text in English, German and French; `%1` is the code's argument (a name).
+fn status_words(kind: &str) -> Option<[&'static str; 3]> {
+    Some(match kind {
+        "distributionListCreated" => [
+            "You created this distribution list.",
+            "Du hast diese Verteilerliste erstellt.",
+            "Vous avez créé cette liste de distribution.",
+        ],
+        "groupCreated" => [
+            "You created this group.",
+            "Du hast diese Gruppe erstellt.",
+            "Vous avez créé ce groupe.",
+        ],
+        "groupJoined" => [
+            "You were added to this group.",
+            "Du wurdest zu dieser Gruppe hinzugefügt.",
+            "Vous avez été ajouté à ce groupe.",
+        ],
+        "groupRemoved" => [
+            "You were removed from this group.",
+            "Du wurdest aus dieser Gruppe entfernt.",
+            "Vous avez été retiré de ce groupe.",
+        ],
+        "groupNoLongerMember" => [
+            "You are no longer a member of this group.",
+            "Du bist kein Mitglied dieser Gruppe mehr.",
+            "Vous n’êtes plus membre de ce groupe.",
+        ],
+        "groupDisbanded" => [
+            "This group was dissolved.",
+            "Diese Gruppe wurde aufgelöst.",
+            "Ce groupe a été dissous.",
+        ],
+        "groupLeft" => [
+            "You left this group.",
+            "Du hast diese Gruppe verlassen.",
+            "Vous avez quitté ce groupe.",
+        ],
+        "groupRenamed" => [
+            "Group renamed to %1.",
+            "Gruppe umbenannt in %1.",
+            "Le groupe a été renommé en %1.",
+        ],
+        "groupMemberAdded" => ["%1 was added.", "%1 wurde hinzugefügt.", "%1 a été ajouté."],
+        "groupMemberRemoved" => ["%1 was removed.", "%1 wurde entfernt.", "%1 a été retiré."],
+        "groupMemberLeft" => [
+            "%1 left the group.",
+            "%1 hat die Gruppe verlassen.",
+            "%1 a quitté le groupe.",
+        ],
+        "groupCallStarted" => [
+            "%1 started a group call.",
+            "%1 hat einen Gruppenanruf gestartet.",
+            "%1 a démarré un appel de groupe.",
+        ],
+        "groupCallYouStarted" => [
+            "You started a group call.",
+            "Du hast einen Gruppenanruf gestartet.",
+            "Vous avez démarré un appel de groupe.",
+        ],
+        "groupCallEnded" => [
+            "The group call ended.",
+            "Der Gruppenanruf wurde beendet.",
+            "L’appel de groupe a pris fin.",
+        ],
+        "fsEstablished" => [
+            "Perfect Forward Secrecy is active for this chat.",
+            "Perfect Forward Secrecy ist für diesen Chat aktiv.",
+            "La confidentialité persistante est active pour cette discussion.",
+        ],
+        "fsReset" => [
+            "Perfect Forward Secrecy was reset. This can happen when the contact changes devices \
+             or reinstalls the app.",
+            "Perfect Forward Secrecy wurde zurückgesetzt. Das kann passieren, wenn der Kontakt \
+             das Gerät wechselt oder die App neu installiert.",
+            "La confidentialité persistante a été réinitialisée. Cela peut arriver quand le \
+             contact change d’appareil ou réinstalle l’application.",
+        ],
+        "fsMessageRejected" => [
+            "Perfect Forward Secrecy was reset. Affected messages are sent again.",
+            "Perfect Forward Secrecy wurde zurückgesetzt. Betroffene Nachrichten werden erneut \
+             gesendet.",
+            "La confidentialité persistante a été réinitialisée. Les messages concernés sont \
+             renvoyés.",
+        ],
+        "fsMessageWithoutFs" => [
+            "A message without Perfect Forward Secrecy was received. Check with the contact that \
+             they turned it off on purpose.",
+            "Eine Nachricht ohne Perfect Forward Secrecy wurde empfangen. Kläre mit dem Kontakt, \
+             ob er sie absichtlich ausgeschaltet hat.",
+            "Un message sans confidentialité persistante a été reçu. Vérifiez avec le contact \
+             qu’il l’a désactivée volontairement.",
+        ],
+        "fsUnavailable" => [
+            "Perfect Forward Secrecy is off in this chat because this contact's app is not using \
+             it at the moment.",
+            "Perfect Forward Secrecy ist in diesem Chat aus, weil die App dieses Kontakts sie \
+             gerade nicht verwendet.",
+            "La confidentialité persistante est désactivée dans cette discussion, car \
+             l’application de ce contact ne l’utilise pas pour le moment.",
+        ],
+        "fsTerminated" => [
+            "The Perfect Forward Secrecy session with this contact ended.",
+            "Die Perfect-Forward-Secrecy-Sitzung mit diesem Kontakt wurde beendet.",
+            "La session de confidentialité persistante avec ce contact a pris fin.",
+        ],
+        _ => return None,
+    })
+}
+
+/// Status lines as Threema Web shows them, in the UI's language (the browser can't translate our
+/// codes). Calls never come here: they go to the browser as its own call messages (`voip`).
+fn status_text(code: &str, language: Language) -> String {
     let (kind, argument) = code.split_once('|').unwrap_or((code, ""));
-    match kind {
-        "distributionListCreated" => "You created this distribution list.".into(),
-        "groupCreated" => "You created this group.".into(),
-        "groupJoined" => "You were added to this group.".into(),
-        "groupRemoved" => "You were removed from this group.".into(),
-        "groupNoLongerMember" => "You are no longer a member of this group.".into(),
-        "groupDisbanded" => "This group was dissolved.".into(),
-        "groupLeft" => "You left this group.".into(),
-        "groupRenamed" => format!("Group renamed to {argument}."),
-        "groupMemberAdded" => format!("{argument} was added."),
-        "groupMemberRemoved" => format!("{argument} was removed."),
-        "groupMemberLeft" => format!("{argument} left the group."),
-        "groupCallStarted" => format!("{argument} started a group call."),
-        "groupCallYouStarted" => "You started a group call.".into(),
-        "groupCallEnded" => "The group call ended.".into(),
-        "fsEstablished" => "Forward secrecy is active for this chat.".into(),
-        "fsReset" => {
-            "Forward secrecy was reset. This can happen when the contact changes devices or \
-             reinstalls the app."
-                .into()
-        }
-        "fsMessageRejected" => {
-            "Forward secrecy was reset. Affected messages are sent again.".into()
-        }
-        "fsMessageWithoutFs" => {
-            "A message without forward secrecy was received. Check with the contact that they \
-             turned it off on purpose."
-                .into()
-        }
-        "fsUnavailable" => {
-            "Forward secrecy is off in this chat because this contact's app is not using it at the \
-             moment."
-                .into()
-        }
-        "fsTerminated" => "The forward secrecy session with this contact ended.".into(),
-        "call" => call_text(argument),
-        _ => code.to_owned(),
+    match (kind, argument) {
+        // A locked private chat's line has lost the name, like in the UI.
+        ("groupCallStarted", "") => language
+            .pick([
+                "A group call started.",
+                "Ein Gruppenanruf hat begonnen.",
+                "Un appel de groupe a démarré.",
+            ])
+            .to_owned(),
+        _ => status_words(kind).map_or_else(
+            || code.to_owned(),
+            |words| language.pick(words).replace("%1", argument),
+        ),
     }
 }
 
@@ -606,6 +706,7 @@ impl App {
     /// One message in the browser's model.
     pub(crate) fn web_message(&self, message: &Message, user: &str) -> Value {
         let json = message.to_json();
+        let language = Language::of(&self.version.language);
         let mut fields = vec![
             ("id", Value::from(message.id.to_string())),
             ("sortKey", message.id.into()),
@@ -704,7 +805,7 @@ impl App {
             "deleted" => {
                 status = true;
                 fields.push(("type", "text".into()));
-                fields.push(("body", "This message was deleted.".into()));
+                fields.push(("body", language.pick(DELETED).into()));
             }
             // Calls as Threema Web's call messages (icon, missed/duration), like Android.
             "status" if message.body.starts_with("call|") => {
@@ -721,7 +822,7 @@ impl App {
             _ => {
                 status = true;
                 fields.push(("type", "text".into()));
-                fields.push(("body", status_text(&message.body).into()));
+                fields.push(("body", status_text(&message.body, language).into()));
             }
         }
         fields.push(("isStatus", status.into()));
@@ -1645,6 +1746,74 @@ mod tests {
     }
 
     #[test]
+    fn status_lines_come_in_the_language_the_app_started_with() {
+        let english = Language::of("en");
+        let german = Language::of("de");
+        let french = Language::of("fr_CH");
+        assert_eq!(Language::of("it"), Language::English);
+        assert_eq!(Language::of(""), Language::English);
+        assert_eq!(
+            status_text("groupRenamed|Club", english),
+            "Group renamed to Club."
+        );
+        assert_eq!(
+            status_text("groupRenamed|Club", german),
+            "Gruppe umbenannt in Club."
+        );
+        assert_eq!(
+            status_text("groupCallStarted|Ann", french),
+            "Ann a démarré un appel de groupe."
+        );
+        assert_eq!(
+            status_text("groupCallStarted", german),
+            "Ein Gruppenanruf hat begonnen."
+        );
+        assert_eq!(
+            status_text("groupCallEnded", english),
+            "The group call ended."
+        );
+        // A name is put in once, as it is, even when it looks like a placeholder.
+        assert_eq!(
+            status_text("groupMemberLeft|%1 50%", german),
+            "%1 50% hat die Gruppe verlassen."
+        );
+        assert!(status_text("fsReset", french).starts_with("La confidentialité persistante"));
+        assert!(!status_text("fsReset", english).contains("  "));
+        // What isn't known stays the code, as before.
+        assert_eq!(status_text("somethingNew|x", german), "somethingNew|x");
+        assert_eq!(german.pick(DELETED), "Diese Nachricht wurde gelöscht.");
+        // Every line has its three texts, each with the argument where English has it.
+        for kind in [
+            "distributionListCreated",
+            "groupCreated",
+            "groupJoined",
+            "groupRemoved",
+            "groupNoLongerMember",
+            "groupDisbanded",
+            "groupLeft",
+            "groupRenamed",
+            "groupMemberAdded",
+            "groupMemberRemoved",
+            "groupMemberLeft",
+            "groupCallStarted",
+            "groupCallYouStarted",
+            "groupCallEnded",
+            "fsEstablished",
+            "fsReset",
+            "fsMessageRejected",
+            "fsMessageWithoutFs",
+            "fsUnavailable",
+            "fsTerminated",
+        ] {
+            let words = status_words(kind).unwrap();
+            for text in words {
+                assert!(!text.is_empty());
+                assert_eq!(text.contains("%1"), words[0].contains("%1"), "{kind}");
+            }
+        }
+    }
+
+    #[test]
     fn a_call_refused_because_calls_are_off_says_so() {
         assert_eq!(
             field(&voip("disabled|1|0"), "reason"),
@@ -1711,7 +1880,6 @@ mod tests {
         );
         assert!(app.web_receiver_key(Some("CCCCCCCC")).is_err());
 
-        assert_eq!(status_text("call|finished|1|83"), "Outgoing call, 1:23");
         let mut reacted = app
             .store
             .conversation_messages("BBBBBBBB", 1)
@@ -1730,12 +1898,6 @@ mod tests {
             Some(&Value::Array(vec!["BBBBBBBB".into(), "AAAAAAAA".into()]))
         );
         assert_eq!(field(&buckets[1], "emoji"), Some(&Value::from("❤️")));
-        assert_eq!(status_text("groupRenamed|Club"), "Group renamed to Club.");
-        assert_eq!(
-            status_text("groupCallStarted|Ann"),
-            "Ann started a group call."
-        );
-        assert_eq!(status_text("groupCallEnded"), "The group call ended.");
 
         // The newest page, then the older rest.
         let (args, data) = app.web_messages(1, "BBBBBBBB", None).unwrap();
