@@ -35,6 +35,15 @@ Page {
         })
     }
 
+    // Here, not in the picker: the upload outlasts it, and with its scope gone the answer would
+    // reach nobody.
+    function setPicture(path) {
+        backend.setGroupPicture(page.identity, path, function(ok, result, kind, message) {
+            if (ok) page.group = result
+            else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+        })
+    }
+
     function addMembers() {
         var current = memberIdentities()
         var dialog = pageStack.push(Qt.resolvedUrl("MemberPickerDialog.qml"), {
@@ -89,13 +98,7 @@ Page {
     Component {
         id: picturePicker
         ImagePickerPage {
-            onSelectedContentPropertiesChanged: {
-                backend.setGroupPicture(page.identity, selectedContentProperties.filePath,
-                                        function(ok, result, kind, message) {
-                    if (ok) page.group = result
-                    else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                })
-            }
+            onSelectedContentPropertiesChanged: page.setPicture(selectedContentProperties.filePath)
         }
     }
 

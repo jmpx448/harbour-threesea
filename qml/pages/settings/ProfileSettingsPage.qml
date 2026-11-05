@@ -35,6 +35,15 @@ Page {
         })
     }
 
+    // Here, not in the picker: the answer can outlast it, and with its scope gone it would reach
+    // nobody.
+    function setPicture(path) {
+        backend.setProfilePicture(path, function(ok, result, kind, message) {
+            if (ok) page.profile = result
+            else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+        })
+    }
+
     // Others can't find the ID by it any more, and linking it again takes a new confirmation.
     function removeLink(command, args, kind) {
         //% "Removing link"
@@ -102,10 +111,7 @@ Page {
         Component {
             id: profilePicturePicker
             ImagePickerPage {
-                onSelectedContentPropertiesChanged: backend.setProfilePicture(selectedContentProperties.filePath,
-                                                                              function(ok, result) {
-                    if (ok) page.profile = result
-                })
+                onSelectedContentPropertiesChanged: page.setPicture(selectedContentProperties.filePath)
             }
         }
 
@@ -183,8 +189,9 @@ Page {
                     text: qsTrId("threesea-me-remove-profile-picture")
                     //% "Removing picture"
                     onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-picture"), function() {
-                        backend.call("removeProfilePicture", {}, function(ok, result) {
+                        backend.call("removeProfilePicture", {}, function(ok, result, kind, message) {
                             if (ok) page.profile = result
+                            else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                         })
                     })
                 }
