@@ -5,8 +5,9 @@
 //! same AES-256 the data backup uses, so the archive can be opened with any ZIP tool.
 //!
 //! Everything stays on the device: the file goes where the UI says (Downloads) and nothing is
-//! sent anywhere. Texts the file shows the user — "Me" and the header — come from the UI, like
-//! everywhere else in the core.
+//! sent anywhere. The one word the file shows the user, "Me", comes from the UI, translated
+//! there; the header holds only the chat's name, the app's and the date, and media left out are
+//! named by their file, like Android, so nothing else needs translating.
 
 use std::io::Write as _;
 
@@ -51,7 +52,7 @@ fn offset_text(offset_minutes: i64) -> String {
 
 impl Shared {
     /// `exportChat`: write the chat as a ZIP into `directory`; returns its path and what went
-    /// in. `me` and `title_line` are the UI's texts (translated there).
+    /// in. `me` is the UI's word for the user (translated there).
     pub(crate) async fn export_chat(
         &self,
         identity: &str,
