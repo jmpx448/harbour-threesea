@@ -215,6 +215,8 @@ const MIGRATIONS: &[&str] = &[
     crate::app_web_data::MIGRATION_RECEIVER_GENERATION,
     // 42: incoming messages say whether their sender wants no receipts
     crate::messages::MIGRATION_NO_RECEIPTS,
+    // 43: indexes for what is looked for often and is rarely there
+    crate::messages::MIGRATION_LOOKUP_INDEXES,
 ];
 
 /// Setting keys.

@@ -35,6 +35,9 @@ pub const STATE_LOADING: i64 = 1;
 pub const STATE_LOCAL: i64 = 2;
 pub const STATE_FAILED: i64 = 3;
 
+// The indexes of `messages::MIGRATION_LOOKUP_INDEXES` and the queries they serve spell these out.
+const _: () = assert!(STATE_REMOTE == 0 && STATE_LOADING == 1);
+
 /// The pauses before a failed transfer tries again by itself, in minutes: as many automatic tries
 /// as there are pauses, on top of the first one. They only cost data on a link that keeps breaking
 /// off, so a large file doesn't get to do that for long. A tap always tries, and starts them over.
@@ -496,10 +499,11 @@ impl Store {
     /// Outgoing file messages whose upload didn't finish (interrupted or failed earlier).
     pub fn unfinished_uploads(&self) -> Result<Vec<i64>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT id FROM messages WHERE kind = 'file' AND outgoing = 1
-                 AND json_extract(body, '$.uploadState') = ?1",
+            "SELECT id FROM messages INDEXED BY messages_uploading
+             WHERE kind = 'file' AND outgoing = 1 AND json_valid(body)
+                 AND json_extract(body, '$.uploadState') = 1",
         )?;
-        let rows = statement.query_map([STATE_LOADING], |row| row.get(0))?;
+        let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -599,7 +603,11 @@ impl Store {
         let mut statement = self.conn.prepare(
             "SELECT id, json_extract(body, '$.thumbnailState'), json_extract(body, '$.fileState'),
                     body
-             FROM messages WHERE kind = 'file'",
+             FROM messages INDEXED BY messages_media_to_come
+             WHERE kind = 'file' AND json_valid(body)
+                 AND (json_extract(body, '$.thumbnailState') = 0
+                      OR json_extract(body, '$.fileState') = 0)
+             ORDER BY id",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -615,9 +623,11 @@ impl Store {
             if thumbnail == Some(STATE_REMOTE) {
                 parts.push((id, MediaPart::Thumbnail));
             }
-            let parsed = serde_json::from_str::<Value>(&body).unwrap_or_default();
-            if file == Some(STATE_REMOTE) && file_comes_by_itself(&parsed, &body, auto, limit) {
-                parts.push((id, MediaPart::File));
+            if file == Some(STATE_REMOTE) {
+                let parsed = serde_json::from_str::<Value>(&body).unwrap_or_default();
+                if file_comes_by_itself(&parsed, &body, auto, limit) {
+                    parts.push((id, MediaPart::File));
+                }
             }
         }
         Ok(parts)

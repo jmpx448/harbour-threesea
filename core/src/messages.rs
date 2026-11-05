@@ -286,6 +286,26 @@ pub struct Message {
 pub(crate) const MIGRATION_NO_RECEIPTS: &str = "
     ALTER TABLE messages ADD COLUMN no_receipts INTEGER NOT NULL DEFAULT 0;";
 
+/// Indexes for what is looked for often and is rarely there: what waits to go out, what waits to
+/// come, what is starred, whose acknowledgement a message waits for. Partial ones stay small. The
+/// queries name them (`INDEXED BY`), since a term that is a bound parameter can't select a partial
+/// index; so a query that stops matching its index fails at once instead of scanning. A body that
+/// is no JSON must not fail its write: `json_valid` comes first. 0 and 1 in here are
+/// [`OutgoingState::Pending`], `STATE_REMOTE` and `STATE_LOADING`.
+pub(crate) const MIGRATION_LOOKUP_INDEXES: &str = "
+    CREATE INDEX messages_pending ON messages (id) WHERE outgoing = 1 AND state = 0;
+    CREATE INDEX messages_uploading ON messages (id)
+        WHERE kind = 'file' AND outgoing = 1 AND json_valid(body)
+            AND json_extract(body, '$.uploadState') = 1;
+    CREATE INDEX messages_media_to_come ON messages (id)
+        WHERE kind = 'file' AND json_valid(body)
+            AND (json_extract(body, '$.thumbnailState') = 0
+                 OR json_extract(body, '$.fileState') = 0);
+    CREATE INDEX messages_starred ON messages (created_at, id) WHERE starred = 1;
+    CREATE INDEX pending_receivers_by_receiver ON pending_receivers (receiver, message_id);";
+
+const _: () = assert!(OutgoingState::Pending as i64 == 0 && INCOMING_UNREAD == 0);
+
 /// Received 1:1 messages stored on a leader whose reflection isn't confirmed
 /// ([`Store::await_reflection`]).
 pub(crate) const MIGRATION_AWAITING_REFLECTION: &str = "
@@ -885,7 +905,8 @@ impl Store {
     /// Outgoing messages that still need sending, oldest first.
     pub fn pending_outgoing(&self) -> Result<Vec<Message>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE outgoing = 1 AND state = 0 AND kind <> 'deleted'
+            "SELECT {} FROM messages INDEXED BY messages_pending
+             WHERE outgoing = 1 AND state = 0 AND kind <> 'deleted'
              ORDER BY id",
             columns()
         ))?;
@@ -971,19 +992,22 @@ impl Store {
     /// How many incoming messages are unread, and the first of them in history order: the
     /// chat page opens there and draws the new-messages line above it.
     pub fn unread_position(&self, conversation: &str) -> Result<(i64, Option<i64>), StoreError> {
-        let count = self.conn.query_row(
-            "SELECT count(*) FROM messages
-             WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
-            params![conversation, INCOMING_UNREAD],
+        let count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM messages INDEXED BY messages_unread
+             WHERE conversation = ?1 AND outgoing = 0 AND state = 0",
+            [conversation],
             |row| row.get(0),
         )?;
+        if count == 0 {
+            return Ok((0, None));
+        }
         let first = self
             .conn
             .query_row(
-                "SELECT id FROM messages
-                 WHERE conversation = ?1 AND outgoing = 0 AND state = ?2
+                "SELECT id FROM messages INDEXED BY messages_unread
+                 WHERE conversation = ?1 AND outgoing = 0 AND state = 0
                  ORDER BY sort_key, id LIMIT 1",
-                params![conversation, INCOMING_UNREAD],
+                [conversation],
                 |row| row.get(0),
             )
             .optional()?;
@@ -1156,7 +1180,8 @@ impl Store {
     /// Starred messages of all chats (or one), newest first.
     pub fn starred_messages(&self, conversation: Option<&str>) -> Result<Vec<Message>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE starred = 1 AND (?1 IS NULL OR conversation = ?1)
+            "SELECT {} FROM messages INDEXED BY messages_starred
+             WHERE starred = 1 AND (?1 IS NULL OR conversation = ?1)
              ORDER BY created_at DESC, id DESC",
             columns()
         ))?;
@@ -1230,11 +1255,11 @@ impl Store {
         conversation: &str,
     ) -> Result<Vec<ReadMessage>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, message_id, no_receipts FROM messages
-             WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
+            "SELECT id, message_id, no_receipts FROM messages INDEXED BY messages_unread
+             WHERE conversation = ?1 AND outgoing = 0 AND state = 0",
         )?;
         let read: Vec<ReadMessage> = statement
-            .query_map(params![conversation, INCOMING_UNREAD], |row| {
+            .query_map([conversation], |row| {
                 Ok(ReadMessage {
                     id: row.get(0)?,
                     message_id: row.get::<_, i64>(1)?.cast_unsigned(),
@@ -1243,9 +1268,10 @@ impl Store {
             })?
             .collect::<Result<_, _>>()?;
         self.conn.execute(
-            "UPDATE messages SET state = ?3, updated_at = ?4, read_at = ?4
-             WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
-            params![conversation, INCOMING_UNREAD, INCOMING_READ, now_ms()],
+            "UPDATE messages INDEXED BY messages_unread
+             SET state = ?2, updated_at = ?3, read_at = ?3
+             WHERE conversation = ?1 AND outgoing = 0 AND state = 0",
+            params![conversation, INCOMING_READ, now_ms()],
         )?;
         // Reading the chat takes the hand-set mark away, as on Android.
         self.set_marked_unread(conversation, false)?;
@@ -2521,6 +2547,69 @@ mod tests {
         assert_eq!(picked, vec![ids[2], ids[0]]);
     }
 
+    /// The lookups go by their indexes, and those follow every change: rows come in and go out of
+    /// them as their state changes. A query that stopped matching its index wouldn't even prepare.
+    #[test]
+    fn lookups_follow_their_indexes() {
+        use crate::app_media::{STATE_LOADING, STATE_LOCAL};
+        use crate::media::MediaPart;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+
+        let text = store.insert_outgoing("ECHOECHO", 1, "text", "hi").unwrap();
+        assert_eq!(store.pending_outgoing().unwrap()[0].id, text.id);
+        store
+            .raise_outgoing_state("ECHOECHO", &[1], OutgoingState::Sent)
+            .unwrap();
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        let body = json!({"thumbnailState": 0, "fileState": 0, "mediaType": "image/png"});
+        let file = store
+            .insert_incoming("00000BOB", 2, "file", &body.to_string(), 2)
+            .unwrap()
+            .unwrap();
+        let images = ["image".to_owned()];
+        let to_come = |store: &Store| store.media_to_download(&images, 0).unwrap();
+        assert_eq!(
+            to_come(&store),
+            [(file.id, MediaPart::Thumbnail), (file.id, MediaPart::File)]
+        );
+        store
+            .set_media_state(file.id, MediaPart::Thumbnail, STATE_LOCAL)
+            .unwrap();
+        assert_eq!(to_come(&store), [(file.id, MediaPart::File)]);
+        store
+            .set_media_state(file.id, MediaPart::File, STATE_LOADING)
+            .unwrap();
+        assert!(to_come(&store).is_empty());
+
+        // A body that isn't JSON is written and read like any other, and waits for nothing.
+        store
+            .insert_incoming("00000BOB", 3, "file", "no json", 3)
+            .unwrap();
+        assert!(to_come(&store).is_empty());
+        assert!(store.unfinished_uploads().unwrap().is_empty());
+
+        // Read and unread, starred or not.
+        let unread = store
+            .insert_incoming("00000BOB", 4, "text", "new", 4)
+            .unwrap()
+            .unwrap();
+        let (count, first) = store.unread_position("00000ANN").unwrap();
+        assert_eq!((count, first), (0, None));
+        assert_eq!(store.unread_position("00000BOB").unwrap().0, 3);
+        store.set_starred(unread.id, true).unwrap();
+        assert_eq!(store.starred_messages(None).unwrap()[0].id, unread.id);
+        assert_eq!(
+            store.starred_messages(Some("00000BOB")).unwrap()[0].id,
+            unread.id
+        );
+        assert!(store.starred_messages(Some("00000ANN")).unwrap().is_empty());
+        assert_eq!(store.mark_conversation_read("00000BOB").unwrap().len(), 3);
+        assert_eq!(store.unread_position("00000BOB").unwrap(), (0, None));
+        assert!(store.mark_conversation_read("00000BOB").unwrap().is_empty());
+    }
+
     /// A message deleted for everyone while it was still going out takes nothing with it: no
     /// clock, no queue entry, and a Reject of it stays without effect. Removing one leaves no
     /// receivers behind.
@@ -2582,7 +2671,10 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "DROP TABLE awaiting_reflection;
+                    "DROP INDEX messages_pending; DROP INDEX messages_uploading;
+                     DROP INDEX messages_media_to_come; DROP INDEX messages_starred;
+                     DROP INDEX pending_receivers_by_receiver;
+                     DROP TABLE awaiting_reflection;
                      ALTER TABLE messages DROP COLUMN written_out;
                      DROP TABLE picture_restored; DROP TABLE synced_pictures;
                      DROP TABLE group_picture_sends;

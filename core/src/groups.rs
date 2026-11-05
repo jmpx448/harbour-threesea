@@ -823,7 +823,8 @@ impl Store {
         message_id: u64,
     ) -> Result<Vec<String>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT conversation FROM pending_receivers WHERE receiver = ?1 AND message_id = ?2",
+            "SELECT conversation FROM pending_receivers INDEXED BY pending_receivers_by_receiver
+             WHERE receiver = ?1 AND message_id = ?2",
         )?;
         let conversations: Vec<String> = statement
             .query_map(params![receiver, message_id.cast_signed()], |row| {
@@ -831,7 +832,8 @@ impl Store {
             })?
             .collect::<Result<_, _>>()?;
         self.conn.execute(
-            "DELETE FROM pending_receivers WHERE receiver = ?1 AND message_id = ?2",
+            "DELETE FROM pending_receivers INDEXED BY pending_receivers_by_receiver
+             WHERE receiver = ?1 AND message_id = ?2",
             params![receiver, message_id.cast_signed()],
         )?;
         let mut done = Vec::new();

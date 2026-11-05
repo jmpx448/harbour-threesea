@@ -1024,6 +1024,9 @@ mod tests {
                      DROP TRIGGER chat_summaries_state; DROP TRIGGER chat_summaries_delete;
                      DROP TABLE chat_summaries; DROP TABLE awaiting_reflection;
                      DROP TABLE picture_restored; DROP TABLE picture_downloads;
+                     DROP INDEX messages_pending; DROP INDEX messages_uploading;
+                     DROP INDEX messages_media_to_come; DROP INDEX messages_starred;
+                     DROP INDEX pending_receivers_by_receiver;
                      DROP INDEX messages_position; DROP TRIGGER messages_sort_key;
                      ALTER TABLE messages DROP COLUMN sort_key;
                      DROP TABLE android_import_ids;
