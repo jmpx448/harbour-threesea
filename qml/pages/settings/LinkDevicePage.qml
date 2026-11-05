@@ -204,5 +204,7 @@ Page {
                 onClicked: pageStack.replace(Qt.resolvedUrl("../ScanQrPage.qml"), { deviceLink: true })
             }
         }
+
+        VerticalScrollDecorator { }
     }
 }

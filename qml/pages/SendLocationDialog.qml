@@ -88,5 +88,7 @@ Dialog {
                 EnterKey.onClicked: if (dialog.canAccept) dialog.accept()
             }
         }
+
+        VerticalScrollDecorator { }
     }
 }

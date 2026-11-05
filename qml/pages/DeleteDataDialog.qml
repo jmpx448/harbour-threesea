@@ -73,5 +73,7 @@ Dialog {
                 text: qsTrId("threesea-la-delete-data-have-backup")
             }
         }
+
+        VerticalScrollDecorator { }
     }
 }

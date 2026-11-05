@@ -63,5 +63,7 @@ Dialog {
                 text: qsTrId("threesea-la-link-pfs-if-on")
             }
         }
+
+        VerticalScrollDecorator { }
     }
 }
