@@ -565,7 +565,8 @@ pub enum Command {
         #[serde(default)]
         identity: Option<String>,
     },
-    /// Several, in the given order: `{forwarded, failed}`.
+    /// Several, in the given order: `{forwarded, failed, errors}`, `errors` being the kinds of
+    /// error that came up, each once.
     ForwardMessages {
         messages: Vec<i64>,
         identity: String,
@@ -2203,16 +2204,20 @@ impl App {
             }
             Command::ForwardMessages { messages, identity } => {
                 let (mut forwarded, mut failed) = (0, 0);
+                let mut errors: Vec<&str> = Vec::new();
                 for message in messages {
                     match Box::pin(self.forward_message(message, &identity)).await {
                         Ok(_) => forwarded += 1,
                         Err(error) => {
                             tracing::warn!(%error, "forwarding failed");
                             failed += 1;
+                            if !errors.contains(&error.kind()) {
+                                errors.push(error.kind());
+                            }
                         }
                     }
                 }
-                Ok(json!({ "forwarded": forwarded, "failed": failed }))
+                Ok(json!({ "forwarded": forwarded, "failed": failed, "errors": errors }))
             }
             Command::SetChatNotifications {
                 identity,

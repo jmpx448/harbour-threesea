@@ -482,6 +482,29 @@ ApplicationWindow {
         var list = captionsOnTheirWay[identity] || []
         return caption === undefined ? list.length > 0 : list.indexOf(caption) >= 0
     }
+    // Forward messages, one command each, so that what the user does meanwhile gets its turn in
+    // the core between them, a picture taking a while. Up here, as the page that asked is gone
+    // before they are through: what couldn't be sent is said once at the end.
+    function forwardInTurn(messages, identity) {
+        var errors = []
+        function next(at) {
+            if (at >= messages.length) {
+                for (var i = 0; i < errors.length; ++i) {
+                    Notices.show(Errors.text(errors[i]), Notice.Long, Notice.Center)
+                }
+                return
+            }
+            backend.call("forwardMessages", { messages: [messages[at]], identity: identity },
+                         function(ok, result, kind) {
+                var kinds = ok ? result.errors : [kind]
+                for (var k = 0; k < kinds.length; ++k) {
+                    if (errors.indexOf(kinds[k]) < 0) errors.push(kinds[k])
+                }
+                next(at + 1)
+            })
+        }
+        next(0)
+    }
     // The answer to a file sent from a chat. Made here, not on the chat page: the answer may come
     // after that page has gone, when nothing of the page can be relied on to run, and a refused
     // file must still be said (`alive`: the page's own record of that). It returns the path of a

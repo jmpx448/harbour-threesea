@@ -70,9 +70,9 @@ Page {
     // Called from this page or from the PIN's above it.
     function deliver(identity) {
         if (forwarding) {
-            // The core sends them in order (this page is gone before the replies come).
+            // In order; this page is gone before the replies come.
             var ids = forwardMessage >= 0 ? [forwardMessage] : forwardMessages.slice()
-            backend.call("forwardMessages", { messages: ids, identity: identity })
+            window.forwardInTurn(ids, identity)
             // Back to where the selection started, then into the target chat.
             var chats = pageStack.find(function(p) { return p.objectName === "conversations" })
             if (chats) pageStack.pop(chats, PageStackAction.Immediate)

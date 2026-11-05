@@ -3948,6 +3948,55 @@ mod tests {
         );
     }
 
+    /// What couldn't be forwarded is said, not only counted: the UI has only this to go by.
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_several_tells_why_some_failed() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let store_file = |id: u64| {
+            let body = json!({"rendering": "media", "mediaType": "image/heic", "name": "a",
+                              "size": 6, "fileState": STATE_LOCAL});
+            let message = app
+                .store
+                .insert_incoming("BBBBBBBB", id, "file", &body.to_string(), 1)
+                .unwrap()
+                .unwrap();
+            app.media
+                .write(message.id, MediaPart::File, b"a heic")
+                .unwrap();
+            message.id
+        };
+        let (one, two) = (store_file(1), store_file(2));
+        let text = app
+            .store
+            .insert_incoming("BBBBBBBB", 3, "text", "hello", 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        let request = json!({"id": 1, "cmd": "forwardMessages", "identity": "CCCCCCCC",
+                             "messages": [one, text, two, 999_999]})
+        .to_string();
+        let reply: Value = serde_json::from_str(&in_own_set(app.handle(&request)).await).unwrap();
+        assert_eq!(reply["result"]["forwarded"], 1, "{reply}");
+        assert_eq!(reply["result"]["failed"], 3, "{reply}");
+        assert_eq!(
+            reply["result"]["errors"],
+            json!(["pictureKeepsMetadata", "internal"]),
+            "{reply}"
+        );
+    }
+
     /// Every way of writing brings an archived chat back, a list's copies their members' chats too.
     #[tokio::test(flavor = "current_thread")]
     async fn writing_brings_a_chat_back_from_the_archive() {

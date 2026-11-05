@@ -112,12 +112,12 @@ function text(kind, message) {
         return qsTrId("threesea-la-error-file-too-large")
     case "videoKeepsMetadata":
         // Where nobody can be asked: the chat was left, or a message is forwarded.
-        //% "A video was not sent: what its file says about where and when it was made could not be removed."
-        return qsTrId("threesea-la-error-video-keeps-metadata")
+        //% "A video was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file."
+        return qsTrId("threesea-la-error-video-metadata")
     case "pictureKeepsMetadata":
         // A message is forwarded, so nobody can be asked.
-        //% "A picture was not sent: what its file says about where and when it was made could not be removed."
-        return qsTrId("threesea-la-error-picture-keeps-metadata")
+        //% "A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. Save it, and it can be sent as a file."
+        return qsTrId("threesea-la-error-picture-metadata")
     case "linkUnknownCode":
         //% "This is not a code of Threema for Desktop. Scan the code it shows when you open it."
         return qsTrId("threesea-la-error-link-unknown-code")
