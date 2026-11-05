@@ -41,7 +41,7 @@ pub(crate) fn title(
 }
 
 /// A group's picture, encrypted and uploaded for its members (persisted).
-async fn upload_group_picture(
+pub(crate) async fn upload_group_picture(
     https: &crate::https::HttpsClient,
     data: &[u8],
 ) -> Result<GroupPicture, media::MediaError> {

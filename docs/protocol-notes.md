@@ -507,11 +507,14 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   group it doesn't have. Migration 35 also marks a one-off: contacts looked up for groups
   before this reached no other device and Desktop drops a member list naming one, so the first
   start while in a device group queues every group-level contact as `ContactSync.Create` (Desktop
-  discards those it has). A picture is reflected from the mirror once it is on this device;
+  discards those it has). A picture is reflected as its public, persisted blob for the members, as
+  Android does and as Desktop fetches it, once it is on this device; one without such a blob is
+  uploaded first;
   `group_picture_syncs` notes it until then, in the same step as the picture, and it is retried
   the same way; deleting the picture clears the note and the file, and a version 0 sends nothing.
   A picture set here takes the same way, and our own too (`OWN_PICTURE_SYNC_OWED`), by itself rather
-  than in the rest of the profile's sync. A picture from another device: what the sync says is kept
+  than in the rest of the profile's sync: the same public, persisted upload contacts get, reused for
+  its week, with its `uploaded_at`, as the others hand it on to contacts as it is. A picture from another device: what the sync says is kept
   in `synced_pictures` with the sync, as it won't come again, until the picture is stored, fetched
   on reconnect and hourly with the contact pictures' backoff; a 404 or a failed decryption ends it,
   and so does a newer word on it, a sync or the contact's or creator's message or a change here. The
@@ -519,8 +522,8 @@ the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg
   for a new picture: it would be some older picture's.
 - Contacts in `ContactSync`: someone new goes as `Create`, since `Update` of someone unknown is
   dropped (Android: `ReflectedContactSyncTask`). Each user action on a contact is reflected, a
-  deletion as acquaintance level `GROUP_OR_DELETED`. What a directory lookup changes (feature
-  mask, activity state, identity type) goes as an update with just those fields, as on Android
+  deletion as acquaintance level `GROUP_OR_DELETED`. What a directory lookup or the regular
+  identity check changes (feature mask, activity state, identity type) goes as an update with just those fields, as on Android
   (`ContactUpdateWorker`): Desktop looks up nobody itself, so an imported contact's real feature
   mask and a revocation reach it only this way. Identity links go with the user profile after a link, an unlink or a
   verification, and come back in the same field; one awaiting its code here stays when another

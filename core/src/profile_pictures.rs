@@ -331,6 +331,13 @@ impl Store {
         })())
     }
 
+    /// The upload, as long as it may still be handed on (a week).
+    pub(crate) fn fresh_picture_upload(&self) -> Result<Option<Upload>, StoreError> {
+        Ok(self
+            .picture_upload()?
+            .filter(|upload| now_ms() - upload.uploaded_at <= WEEK_MS))
+    }
+
     pub fn set_picture_upload(&self, upload: Option<&Upload>) -> Result<(), StoreError> {
         match upload {
             Some(upload) => self.set_setting(
@@ -382,9 +389,7 @@ impl Store {
             }
             return Ok(Distribution::Delete);
         }
-        let upload = self
-            .picture_upload()?
-            .filter(|upload| now - upload.uploaded_at <= WEEK_MS);
+        let upload = self.fresh_picture_upload()?;
         if let (Some(upload), Some((Some(sent), _))) = (&upload, &cache)
             && sent.as_slice() == upload.blob_id.0
         {
