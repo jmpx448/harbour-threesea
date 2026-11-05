@@ -287,7 +287,8 @@ pub(crate) const MIGRATION_NO_RECEIPTS: &str = "
     ALTER TABLE messages ADD COLUMN no_receipts INTEGER NOT NULL DEFAULT 0;";
 
 /// Indexes for what is looked for often and is rarely there: what waits to go out, what waits to
-/// come, what is starred, whose acknowledgement a message waits for. Partial ones stay small. The
+/// come, what is starred, whose acknowledgement a message waits for; and search's walk through all
+/// chats, newest first. Partial ones stay small. The
 /// queries name them (`INDEXED BY`), since a term that is a bound parameter can't select a partial
 /// index; so a query that stops matching its index fails at once instead of scanning. A body that
 /// is no JSON must not fail its write: `json_valid` comes first. 0 and 1 in here are
@@ -302,6 +303,7 @@ pub(crate) const MIGRATION_LOOKUP_INDEXES: &str = "
             AND (json_extract(body, '$.thumbnailState') = 0
                  OR json_extract(body, '$.fileState') = 0);
     CREATE INDEX messages_starred ON messages (created_at, id) WHERE starred = 1;
+    CREATE INDEX messages_by_time ON messages (created_at, id);
     CREATE INDEX pending_receivers_by_receiver ON pending_receivers (receiver, message_id);";
 
 const _: () = assert!(OutgoingState::Pending as i64 == 0 && INCOMING_UNREAD == 0);
@@ -466,6 +468,45 @@ pub fn media_kind(body: &str) -> &'static str {
     } else {
         "file"
     }
+}
+
+/// More than this many candidates from the search index: the text is common, and walking the
+/// messages from the newest on soon comes to enough hits.
+const SEARCH_CANDIDATES_MAX: usize = 1000;
+/// The kinds search looks at.
+const SEARCHED_KINDS: &str = "kind IN ('text', 'file', 'location', 'poll')";
+
+/// Search results in one chat come in its history order, those of all chats by time.
+fn search_order(in_chat: bool) -> &'static str {
+    if in_chat {
+        "sort_key DESC, id DESC"
+    } else {
+        "created_at DESC, id DESC"
+    }
+}
+
+/// All messages from the newest on, in the order an index has them, so that nothing has to be
+/// sorted first and stopping at the limit saves the rest. `liked`: a query too short for the search
+/// index, narrowed down by SQL (messages with mentions always pass: names aren't in the body).
+/// Binds the chat, if `in_chat`, then the pattern, if `liked`.
+fn search_walk(in_chat: bool, liked: bool) -> String {
+    let (index, chat) = if in_chat {
+        ("messages_position", "conversation = ? AND")
+    } else {
+        ("messages_by_time", "")
+    };
+    let like = if liked {
+        "AND (body LIKE ? ESCAPE '\\' OR body LIKE '%@[%')"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT {} FROM messages INDEXED BY {index}
+         WHERE {chat} {SEARCHED_KINDS} {like}
+         ORDER BY {}",
+        columns(),
+        search_order(in_chat)
+    )
 }
 
 /// All kinds, in the filter's order.
@@ -1106,30 +1147,42 @@ impl Store {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let pattern = format!("%{escaped}%");
-        // SQL narrows it down (messages with mentions always pass: names are not in the body).
-        // From three characters on, the trigram index finds the candidates; shorter queries
-        // can't use it and scan, as before.
-        let indexed = query.chars().count() >= 3;
-        let candidates = if indexed {
-            "id IN (SELECT rowid FROM messages_search WHERE messages_search MATCH ?1
-                    UNION SELECT id FROM messages WHERE body LIKE '%@[%')"
+        // From three characters on, the trigram index finds the candidates (messages with mentions
+        // always are: names aren't in the body). Shorter queries can't use it.
+        let short = query.chars().count() < 3;
+        let candidates = if short {
+            None
         } else {
-            "(body LIKE ?1 ESCAPE '\\' OR body LIKE '%@[%')"
+            self.search_candidates(query)?
+                .map(|ids| serde_json::to_string(&ids).unwrap_or_default())
         };
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages
-             WHERE kind IN ('text', 'file', 'location', 'poll')
-               AND {candidates}
-               AND (?2 IS NULL OR conversation = ?2)
-             ORDER BY created_at DESC, id DESC",
-            columns()
-        ))?;
-        // A quoted phrase: the trigram tokenizer matches it as a substring, case-insensitive.
-        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
-        let rows = statement.query_map(
-            params![if indexed { &phrase } else { &pattern }, conversation],
-            from_row,
-        )?;
+        let mut args: Vec<&str> = Vec::new();
+        let sql = if let Some(ids) = &candidates {
+            args.push(ids);
+            let chat = if conversation.is_some() {
+                "AND conversation = ?"
+            } else {
+                ""
+            };
+            format!(
+                "SELECT {} FROM messages
+                 WHERE {SEARCHED_KINDS} AND id IN (SELECT value FROM json_each(?)) {chat}
+                 ORDER BY {}",
+                columns(),
+                search_order(conversation.is_some())
+            )
+        } else {
+            search_walk(conversation.is_some(), short)
+        };
+        if let Some(conversation) = conversation {
+            args.push(conversation);
+        }
+        if short {
+            args.push(&pattern);
+        }
+        let mut statement = self.conn.prepare(&sql)?;
+        // Row by row: what follows stops at the limit, and a walk with it.
+        let rows = statement.query_map(rusqlite::params_from_iter(args), from_row)?;
         let needle = query.to_lowercase();
         let with_names = |text: &str| -> String {
             let mut text = text.to_owned();
@@ -1167,6 +1220,23 @@ impl Store {
             }
         }
         Ok(found)
+    }
+
+    /// What the search index holds for `query`, and every message with a mention; `None` if that is
+    /// more than [`SEARCH_CANDIDATES_MAX`]. Stops there: telling those apart costs little, sorting
+    /// them all would cost as much as the search of a rare word costs nothing.
+    fn search_candidates(&self, query: &str) -> Result<Option<Vec<i64>>, StoreError> {
+        // A quoted phrase: the trigram tokenizer matches it as a substring, case-insensitive.
+        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+        let mut statement = self.conn.prepare(
+            "SELECT rowid FROM messages_search WHERE messages_search MATCH ?1
+             UNION ALL SELECT id FROM messages WHERE body LIKE '%@[%'
+             LIMIT ?2",
+        )?;
+        let ids: Vec<i64> = statement
+            .query_map(params![phrase, SEARCH_CANDIDATES_MAX + 1], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok((ids.len() <= SEARCH_CANDIDATES_MAX).then_some(ids))
     }
 
     pub fn set_starred(&self, id: i64, starred: bool) -> Result<Option<Message>, StoreError> {
@@ -2547,6 +2617,102 @@ mod tests {
         assert_eq!(picked, vec![ids[2], ids[0]]);
     }
 
+    /// A common word: too many candidates to sort, so a walk from the newest on, which finds what
+    /// the index would have found, in the same order, and sorts nothing.
+    #[test]
+    fn search_of_a_common_word_walks_from_the_newest_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let step = store.step().unwrap();
+        for n in 0..=SEARCH_CANDIDATES_MAX as u64 {
+            store
+                .insert_incoming("00000ANN", 100 + n, "text", "COMMON word", 100 + n as i64)
+                .unwrap();
+        }
+        // The newest of all, by the sender's clock; rows are in arrival order.
+        store
+            .insert_incoming("00000BOB", 1, "text", "a common Word", 5000)
+            .unwrap();
+        store
+            .insert_incoming("00000BOB", 2, "text", "Hi @[00000CAT]", 4000)
+            .unwrap();
+        store
+            .insert_incoming("00000BOB", 3, "text", "nothing here", 6000)
+            .unwrap();
+        store
+            .insert_incoming("00000BOB", 4, "file", r#"{"name":"common.pdf"}"#, 3000)
+            .unwrap();
+        // Ann's newest of hers arrived before Bob's, with an older date than the text just below.
+        step.commit().unwrap();
+        let search = |query: &str, chat, limit| {
+            store
+                .search_messages(query, chat, limit, |id| {
+                    (id == "00000CAT").then(|| "Common Cat".to_owned())
+                })
+                .unwrap()
+                .iter()
+                .map(|(m, hit)| (m.message_id, hit.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            store.search_candidates("common").unwrap().is_none(),
+            "this test is about the walk"
+        );
+        let found = search("common", None, 4);
+        assert_eq!(
+            found.iter().map(|f| f.0).collect::<Vec<_>>(),
+            [1, 2, 4, 100 + SEARCH_CANDIDATES_MAX as u64],
+            "by time, across kinds, mentions by name"
+        );
+        assert_eq!(found[1].1, "Hi @[00000CAT]", "the hit is raw");
+        // One chat: its history order, here the order of arrival.
+        let found = search("common", Some("00000BOB"), 10);
+        assert_eq!(
+            found.iter().map(|f| f.0).collect::<Vec<_>>(),
+            [4, 2, 1],
+            "the walk ends where the chat does"
+        );
+        assert_eq!(search("common", Some("00000ANN"), 3).len(), 3);
+        assert!(search("common", Some("00000DAN"), 3).is_empty());
+
+        // The same chat with a rarer word takes the index's way and comes out alike.
+        assert!(store.search_candidates("nothing").unwrap().is_some());
+        assert_eq!(search("NOTHING", Some("00000BOB"), 10)[0].0, 3);
+        assert_eq!(search("NOTHING", None, 10)[0].0, 3);
+        // Too short for the index.
+        assert_eq!(search("Wo", Some("00000BOB"), 1)[0].0, 1);
+        assert_eq!(search("wo", None, 1)[0].0, 1);
+
+        // What makes stopping worth it: neither way sorts first.
+        for (in_chat, liked) in [(false, false), (true, false), (false, true), (true, true)] {
+            // At the top level: the reactions column has a sorted subquery of its own.
+            let plan: Vec<(i64, String)> = store
+                .conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    search_walk(in_chat, liked)
+                ))
+                .unwrap()
+                .query_map(
+                    rusqlite::params_from_iter(
+                        ["00000BOB", "%wo%"]
+                            .into_iter()
+                            .take(usize::from(in_chat) + usize::from(liked)),
+                    ),
+                    |row| Ok((row.get(1)?, row.get(3)?)),
+                )
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(
+                !plan
+                    .iter()
+                    .any(|(parent, line)| *parent == 0 && line.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+    }
+
     /// The lookups go by their indexes, and those follow every change: rows come in and go out of
     /// them as their state changes. A query that stopped matching its index wouldn't even prepare.
     #[test]
@@ -2673,7 +2839,7 @@ mod tests {
                 .execute_batch(
                     "DROP INDEX messages_pending; DROP INDEX messages_uploading;
                      DROP INDEX messages_media_to_come; DROP INDEX messages_starred;
-                     DROP INDEX pending_receivers_by_receiver;
+                     DROP INDEX messages_by_time; DROP INDEX pending_receivers_by_receiver;
                      DROP TABLE awaiting_reflection;
                      ALTER TABLE messages DROP COLUMN written_out;
                      DROP TABLE picture_restored; DROP TABLE synced_pictures;

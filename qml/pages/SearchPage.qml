@@ -28,7 +28,16 @@ Page {
         })
     }
 
+    // One search at a time, the next with what is in the field by then: what was typed in between
+    // nobody is waiting for.
+    property bool searching
+    property bool searchAgain
+
     function search() {
+        if (searching) {
+            searchAgain = true
+            return
+        }
         var text = searchFieldItem.text.trim()
         if (text.length < 2) {
             results = []
@@ -37,7 +46,14 @@ Page {
         }
         var args = { query: text }
         if (identity.length > 0) args.identity = identity
+        searching = true
         backend.call("searchMessages", args, function(ok, result) {
+            page.searching = false
+            if (page.searchAgain) {
+                page.searchAgain = false
+                page.search()
+                return
+            }
             // Only the latest query's answer counts.
             if (ok && text === page.searchFieldItem.text.trim()) {
                 page.query = text
