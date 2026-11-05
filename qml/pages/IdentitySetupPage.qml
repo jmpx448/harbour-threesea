@@ -67,8 +67,8 @@ Page {
             }
 
             InfoLabel {
-                //% "Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe, an ID backup or a Data backup. A Data backup brings your chats as well."
-                text: qsTrId("threesea-la-identity-intro-data-backup")
+                //% "Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe, an ID backup (Threema for Android calls it an ID export) or a Data backup. A Data backup brings your chats as well."
+                text: qsTrId("threesea-la-identity-intro-id-export")
             }
 
             ErrorLabel { id: errorLabel }
