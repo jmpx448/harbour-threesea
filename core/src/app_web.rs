@@ -192,6 +192,8 @@ pub(crate) struct WebSessions {
     pub(crate) subscriptions: HashMap<i64, crate::app_web_data::Subscriptions>,
     /// `request/blob`s waiting for a download.
     pub(crate) pending_blobs: Vec<crate::app_web_media::PendingBlob>,
+    /// What the browser is to be told once it has the reply to the request in hand.
+    pub(crate) alert_after_reply: Option<Value>,
     /// When the browsers were last brought up to date (app_web_data::web_refresh).
     pub(crate) refresh: crate::app_web_data::RefreshState,
     pub(crate) thumbnails: std::cell::RefCell<crate::app_web_media::WebThumbnails>,
@@ -210,6 +212,7 @@ impl Default for WebSessions {
             changed: HashMap::new(),
             subscriptions: HashMap::new(),
             pending_blobs: Vec::new(),
+            alert_after_reply: None,
             refresh: crate::app_web_data::RefreshState::default(),
             thumbnails: std::cell::RefCell::default(),
             connected_since: None,
@@ -702,6 +705,7 @@ impl App {
             return;
         };
         if let Some(result) = self.web_media_action(session, &incoming).await {
+            let alert = self.web.alert_after_reply.take();
             let reply = match (result, incoming.id) {
                 (Ok(None), _) => return,
                 (Ok(Some(reply)), Some(id)) => arp::with_ack(reply, id, None),
@@ -721,6 +725,9 @@ impl App {
                 (Err(_), None) => return,
             };
             self.send_web(session, reply);
+            if let Some(alert) = alert {
+                self.send_web(session, alert);
+            }
             return;
         }
         let result = match self.web_action(&incoming).await {

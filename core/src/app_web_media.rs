@@ -126,7 +126,8 @@ pub(crate) fn web_file_name(message: &Message, body: &serde_json::Value) -> Stri
 }
 
 /// The browser has one general text for a file that wasn't sent. This reason takes more, and it
-/// has no way to translate what we tell it, as with the status lines.
+/// has no way to translate what we tell it, as with the status lines. It goes after the reply: the
+/// dialog the reply brings closes any that is open.
 fn video_not_sent_alert() -> Value {
     arp::message(
         "update",
@@ -137,8 +138,8 @@ fn video_not_sent_alert() -> Value {
         ])),
         Some(map(vec![(
             "message",
-            "This video wasn't sent, because it would keep its metadata, such as where and when \
-             it was taken. Send it as a file to send it as it is."
+            "This video wasn't sent, because its metadata, which can hold where and when it was \
+             taken, can't be removed. Send it as a file to send it as it is."
                 .into(),
         )])),
     )
@@ -188,7 +189,7 @@ impl App {
             ("request", "avatar") => self.web_avatar(incoming).map(Some),
             ("request", "thumbnail") => self.web_thumbnail(incoming).map(Some),
             ("request", "blob") => self.web_blob(session, incoming),
-            ("create", "fileMessage") => self.web_send_file(session, incoming).await.map(Some),
+            ("create", "fileMessage") => self.web_send_file(incoming).await.map(Some),
             _ => return None,
         })
     }
@@ -382,11 +383,7 @@ impl App {
     /// can't make one of the others, which the protocol leaves optional. A video leaves without
     /// its metadata like any other (ADR 0025): there is nobody to ask here, so one that can't be
     /// cleaned isn't sent, and an alert says why.
-    async fn web_send_file(
-        &mut self,
-        session: i64,
-        incoming: &Incoming<'_>,
-    ) -> Result<Value, Code> {
+    async fn web_send_file(&mut self, incoming: &Incoming<'_>) -> Result<Value, Code> {
         let key = self
             .web_receiver_key(incoming.arg("id"))
             .map_err(|_| "invalidIdentity")?;
@@ -446,7 +443,7 @@ impl App {
                 Some("contactRevoked") => "invalidIdentity",
                 Some("messageTooLong") => "valueTooLong",
                 Some("videoKeepsMetadata") => {
-                    self.send_web(session, video_not_sent_alert());
+                    self.web.alert_after_reply = Some(video_not_sent_alert());
                     "internalError"
                 }
                 _ => "internalError",

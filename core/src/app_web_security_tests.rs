@@ -745,19 +745,27 @@ async fn web_sends_media_as_media() {
                 .unwrap()
                 .len();
             while rx.try_recv().is_ok() {}
-            assert_eq!(
-                web_send(&mut app, wire(b"\x1aE\xdf\xa3 a webm", "video/webm", false))
-                    .await
-                    .unwrap_err(),
-                "internalError"
-            );
-            let mut alerted = false;
+            let mut request = wire(b"\x1aE\xdf\xa3 a webm", "video/webm", false);
+            if let Value::Map(fields) = &mut request {
+                fields.push(("id".into(), "request-1".into()));
+            }
+            app.on_web_message(1, &request).await;
+            let mut replies = Vec::new();
             while let Ok(message) = rx.try_recv() {
                 if let ToWeb::Send(message) = message {
-                    alerted |= saltyrtc::field(&message, "subType") == Some(&Value::from("alert"));
+                    replies.push(message);
                 }
             }
-            assert!(alerted, "the browser hears why");
+            let [reply, alert] = replies.as_slice() else {
+                panic!("a reply and an alert, not {replies:?}");
+            };
+            let ack = saltyrtc::field(reply, "ack").expect("the refusal comes first");
+            assert_eq!(saltyrtc::field(ack, "success"), Some(&Value::from(false)));
+            assert_eq!(
+                saltyrtc::field(alert, "subType"),
+                Some(&Value::from("alert")),
+                "its dialog would close this one's"
+            );
             assert_eq!(
                 app.store
                     .conversation_messages("BBBBBBBB", 100)
