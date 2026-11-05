@@ -1754,6 +1754,10 @@ impl App {
     /// A media task reported progress: an upload may have finished, so send what's pending; one
     /// that failed has its next try to look forward to.
     pub(crate) fn on_media_event(&mut self, event: &CoreEvent) {
+        if let CoreEvent::UnknownMembers(identities) = event {
+            self.fetch_members(identities.clone());
+            return;
+        }
         if let CoreEvent::MessagesChanged(messages) = event {
             let now = now_ms();
             for message in messages.iter().filter(|m| m.body.contains("Retry")) {

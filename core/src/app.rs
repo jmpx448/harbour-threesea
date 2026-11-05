@@ -3436,11 +3436,54 @@ mod tests {
         assert!(app.store.directory_resting());
     }
 
+    /// A lookup is quiet work: `wakeSettled` waits for it, and the removal of the ID drops it. Its
+    /// task doesn't get a turn in this test, so no request goes out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_member_lookups_are_kept_track_of_and_go_with_the_id() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                let mut done = app.take_detached_work().unwrap();
+                app.fetch_members(vec!["EFGH5678".to_owned()]);
+                assert_eq!(app.detached.quiet_running, 1);
+
+                app.drop_detached_work();
+                assert_eq!(app.detached.quiet_running, 0);
+                let nothing =
+                    tokio::time::timeout(std::time::Duration::from_millis(50), done.recv()).await;
+                assert!(nothing.is_err(), "the lookup is gone");
+
+                // Queued before the wipe, read after it: nothing is noted for the ID that went.
+                app.identity_removed = true;
+                app.fetch_members(vec!["IJKL9012".to_owned()]);
+                assert_eq!(app.detached.quiet_running, 0);
+                assert!(!app.member_lookups_due().contains(&"IJKL9012".to_owned()));
+            })
+            .await;
+    }
+
+    /// What is due goes through the core loop, which tracks it: this can run on a task beside the
+    /// loop, and there is no `LocalSet` here, so a task spawned on the spot would panic.
+    #[test]
+    fn group_member_lookups_due_are_handed_to_the_loop() {
+        let (_dir, mut app) = licensed_app();
+        let mut events = app.take_media_events().unwrap();
+        app.store
+            .owe_member_lookups(&["EFGH5678".to_owned()])
+            .unwrap();
+        app.resume_picture_downloads();
+        let handed = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+            crate::providers::CoreEvent::UnknownMembers(identities) => Some(identities),
+            _ => None,
+        });
+        assert_eq!(handed.unwrap(), ["EFGH5678"]);
+    }
+
     /// Without another device, too, a group's unknown member isn't lost to a rest or a failed
     /// request: messages to them wait for the contact.
     #[test]
     fn group_members_looked_up_during_a_rest_wait_for_its_end() {
-        let (_dir, app) = licensed_app();
+        let (_dir, mut app) = licensed_app();
         assert!(app.store.multi_device().unwrap().is_none());
         app.store.rest_directory_calls();
         app.fetch_members(vec!["EFGH5678".to_owned(), "IJKL9012".to_owned()]);

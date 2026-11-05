@@ -520,39 +520,50 @@ impl Shared {
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
+}
 
+impl App {
     /// [`resolve_members`] off the connection's path, for what the connection didn't ask itself:
-    /// the retry on reconnect and in maintenance, and what a group sync named.
-    pub(crate) fn fetch_members(&self, identities: Vec<String>) {
+    /// the retry on reconnect and in maintenance, and what a group sync named. Quiet work: a
+    /// wake-up holds the device up for it, and it goes when the ID does.
+    pub(crate) fn fetch_members(&mut self, identities: Vec<String>) {
+        // Read from the queue after the wipe: there is nobody left to store them for.
+        if self.identity_removed {
+            return;
+        }
         if let Err(error) = self.store.owe_member_lookups(&identities) {
             tracing::warn!(%error, "noting group members to look up failed");
         }
         if self.store.directory_resting() {
             return;
         }
-        let https = self.https.clone();
-        let config = std::sync::Arc::clone(&self.config);
-        let store = Rc::clone(&self.store);
-        let events = self.media_events.clone();
-        let connection = self.connection.borrow().clone();
-        tokio::task::spawn_local(async move {
-            let Some(resolved) = resolve_members(&https, &config, &store, &identities).await else {
-                return;
-            };
-            if resolved.synced
-                && let Some(connection) = &connection
-            {
-                let _ = connection.send(ToConnection::ReflectSync);
-            }
-            if resolved.groups_changed {
-                let _ = events.send(CoreEvent::GroupsChanged);
-            }
-            for message in resolved.lines {
-                let _ = events.send(CoreEvent::MessageAdded { message });
-            }
-            // Reload contact names; the media/progress channel also triggers sending.
-            let _ = events.send(CoreEvent::ContactsChanged);
-        });
+        self.detached_quietly(
+            crate::detached::Lane::Free,
+            move |shared| async move {
+                let Some(resolved) =
+                    resolve_members(&shared.https, &shared.config, &shared.store, &identities)
+                        .await
+                else {
+                    return;
+                };
+                if resolved.synced {
+                    let connection = shared.connection.borrow().clone();
+                    if let Some(connection) = connection {
+                        let _ = connection.send(ToConnection::ReflectSync);
+                    }
+                }
+                let events = &shared.media_events;
+                if resolved.groups_changed {
+                    let _ = events.send(CoreEvent::GroupsChanged);
+                }
+                for message in resolved.lines {
+                    let _ = events.send(CoreEvent::MessageAdded { message });
+                }
+                // Reload contact names; the media/progress channel also triggers sending.
+                let _ = events.send(CoreEvent::ContactsChanged);
+            },
+            |_, ()| {},
+        );
     }
 }
 
@@ -708,9 +719,11 @@ impl Shared {
         if let Err(error) = self.store.note_unresolved_member_lookups() {
             tracing::warn!(%error, "noting group members to look up failed");
         }
+        // To the core loop: this can run in a task beside it, and the lookups are kept track of
+        // there.
         let due = self.member_lookups_due();
         if !due.is_empty() {
-            self.fetch_members(due);
+            let _ = self.media_events.send(CoreEvent::UnknownMembers(due));
         }
     }
 
