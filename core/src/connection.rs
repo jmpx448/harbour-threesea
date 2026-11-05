@@ -2157,13 +2157,13 @@ impl<'a> Session<'a> {
             }
         };
         let created_at = crate::messages::now_ms();
+        let message_id = MessageId::random().0;
+        let body = Outgoing::Contact(body);
+        let receivers = [receiver.to_owned()];
+        self.reflect_outgoing(receiver, message_id, created_at, &body, &receivers)
+            .await?;
         for payload in self
-            .encode(
-                receiver,
-                MessageId::random().0,
-                created_at,
-                Outgoing::Contact(body),
-            )
+            .encode(receiver, message_id, created_at, body)
             .await?
             .unwrap_or_default()
         {
@@ -2328,20 +2328,14 @@ impl<'a> Session<'a> {
                 if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))?
                     && self.fits_a_frame(&Outgoing::Contact(body.clone())) =>
             {
-                // A delivery receipt says nothing the other devices go by, and of what was read
-                // they hear through `OUTBOX_READ_UPDATE`, receipt or not.
-                if entry.kind != reactions::OUTBOX_DELIVERY_RECEIPT
-                    && entry.kind != reactions::OUTBOX_READ_RECEIPT
-                {
-                    self.reflect_outgoing(
-                        &entry.conversation,
-                        entry.message_id,
-                        entry.created_at,
-                        &Outgoing::Contact(body.clone()),
-                        core::slice::from_ref(&entry.conversation),
-                    )
-                    .await?;
-                }
+                self.reflect_outgoing(
+                    &entry.conversation,
+                    entry.message_id,
+                    entry.created_at,
+                    &Outgoing::Contact(body.clone()),
+                    core::slice::from_ref(&entry.conversation),
+                )
+                .await?;
                 self.encode(
                     &entry.conversation,
                     entry.message_id,
@@ -6766,6 +6760,37 @@ mod sync_order_tests {
         assert!(!matches!(error, ConnectionError::Timeout), "{error}");
         assert!(setup.store.has_d2d_nonce(&nonce).unwrap());
         assert!(setup.store.has_nonce(&[8; 24]).unwrap());
+    }
+
+    /// Receipts and our picture reach the other devices like every other message: on this socket
+    /// the attempt shows as an error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn receipts_and_our_picture_are_reflected() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        for (message_id, kind) in [
+            (1, reactions::OUTBOX_DELIVERY_RECEIPT),
+            (2, reactions::OUTBOX_READ_RECEIPT),
+        ] {
+            let error = session
+                .send_outbox_entry(reactions::OutboxEntry {
+                    id: 0,
+                    conversation: CREATOR.into(),
+                    message_id,
+                    created_at: 1,
+                    kind: kind.into(),
+                    body: serde_json::json!({ "messageId": "0000000000000007" }),
+                })
+                .await;
+            assert!(error.is_err(), "{kind}");
+        }
+        assert!(session.distribute_picture(CREATOR).await.is_err());
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to

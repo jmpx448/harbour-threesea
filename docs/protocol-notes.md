@@ -142,8 +142,10 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
 - What a read has to tell others is queued in the outbox in the step that marks the messages read
   (reading again finds nothing): read receipts in bundles of 875 IDs, removed on the server's ack;
   with linked devices also a read update (`d2d.IncomingMessageUpdate`) for every chat, receipt or
-  not, removed on the mediator's ack. The spec would reflect the outgoing receipt where one goes
-  out; the update says the same to the other devices and also covers a contact blocked meanwhile.
+  not, removed on the mediator's ack. The outgoing receipt is reflected too, as the spec has it, the
+  delivered one as well; the update says the same to the other devices and also covers a contact
+  blocked meanwhile. So is our profile picture sent to a contact: another device takes a removal as
+  done for that contact, and a picture only if it is its own upload too (the blobs aren't shared).
 - No message body over 7500 bytes goes out (`MESSAGE_BODY_MAX`): a frame holds 8192 and the
   wrappings take up to about 600. A longer one is marked failed or, from the outbox, dropped, so it
   isn't tried at every login. Closing a poll is refused up front when the results don't fit: the

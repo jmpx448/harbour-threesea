@@ -4,10 +4,10 @@
 //!
 //! Upstream: Android's `IncomingReflectedMessageTask` with `reflectedoutgoingmessage/*`,
 //! `reflectedmessageupdate/*` and the incoming message processor. Handled so far: outgoing
-//! messages (text, location, file, edit, delete, reaction, read receipts), incoming messages
-//! (when another device was leader, with its typing indicators), the sent/read updates, and
-//! contact, group, profile and settings sync (`sync.rs`). Distribution lists are not synced
-//! (Android doesn't either).
+//! messages (text, location, file, edit, delete, reaction, read receipts, profile pictures),
+//! incoming messages (when another device was leader, with its typing indicators), the sent/read
+//! updates, and contact, group, profile and settings sync (`sync.rs`). Distribution lists are not
+//! synced (Android doesn't either).
 
 use std::rc::Rc;
 
@@ -464,6 +464,16 @@ fn outgoing_message(
                 body.to_string(),
                 Some(crate::app_media::file_keys(&file)),
             )
+        }
+        // What this contact got of our picture from another device: it needn't go out from here too
+        // (a removal; a picture only if that device's upload is ours as well).
+        ContactMessageBody::SetProfilePicture(picture) => {
+            store.picture_sent(&conversation, Some(&picture.blob_id))?;
+            return Ok(());
+        }
+        ContactMessageBody::DeleteProfilePicture(_) => {
+            store.picture_sent(&conversation, None)?;
+            return Ok(());
         }
         // Read receipts sent elsewhere: those messages are read here too.
         ContactMessageBody::DeliveryReceipt(receipt) => {
@@ -1101,5 +1111,33 @@ mod tests {
             wanted(&reflected_outgoing("C0C0C0C0", 4, text_body())),
             None
         );
+    }
+
+    /// A removal of our picture sent from another device needn't be repeated from here.
+    #[test]
+    fn a_picture_removal_from_another_device_is_not_repeated() {
+        use libthreema::model::message::DeleteProfilePictureMessage;
+
+        use crate::profile_pictures::{Distribution, Share};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store.set_picture_share(Share::Everyone).unwrap();
+        assert!(matches!(
+            store.picture_distribution("B0B0B0B0", false).unwrap(),
+            Distribution::Delete
+        ));
+        let events: EventSink = Rc::default();
+        let removal = ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage);
+        apply(
+            &store,
+            "ABCD1234".parse().unwrap(),
+            reflected_outgoing("B0B0B0B0", 1, removal),
+            &events,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.picture_distribution("B0B0B0B0", false).unwrap(),
+            Distribution::None
+        ));
     }
 }
