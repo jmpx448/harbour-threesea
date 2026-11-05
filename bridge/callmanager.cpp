@@ -7,6 +7,7 @@
 #include <QDBusPendingReply>
 #include <QDateTime>
 #include <QDebug>
+#include <QFile>
 #include <QStringList>
 
 #include "threesebackend.h"
@@ -113,8 +114,9 @@ void CallManager::setTone(Tone tone)
     if (tone == Tone::Ringback) {
         properties.insert(QStringLiteral("tonegen.pattern"), QStringLiteral("ring"));
     } else {
+        // A file gone since it was chosen: the system's tone, not a silent call.
         const QString chosen = m_backend->toneCalls();
-        if (!chosen.isEmpty()) {
+        if (!chosen.isEmpty() && QFile::exists(chosen)) {
             properties.insert(QStringLiteral("audio"), chosen);
         }
         if (!m_backend->vibrateCalls()) {

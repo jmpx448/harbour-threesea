@@ -36,7 +36,9 @@ build for three architectures.
   proximity): built from documentation and emulator checks, fixed then.
 - Earpiece or loudspeaker goes through the audio policy's route manager (its `speaker` feature,
   only offered if it says so at runtime; `bridge/callroute.h`), not through another stream role:
-  the echo canceller stays in the path and the engines change nothing. No Bluetooth entry and no
+  the echo canceller stays in the path and the engines change nothing. A call moves there by
+  itself only once a camera is on, since Android's voice calls say "video" too. Whether the
+  feature's name holds and moves these streams is the phone's to say. No Bluetooth entry and no
   "end the call when Bluetooth goes" setting unless the phone test shows they are needed
   (docs/voice-video-device-checklist.md, "Ringing, routes and the screen in calls").
 - Order: 1:1 audio → 1:1 video → group calls → Threema Web (the same webrtcbin, it only needs

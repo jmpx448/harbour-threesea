@@ -578,27 +578,44 @@ Full, unless it says otherwise. With a second phone calling.
      cases. No notification while the call page is in view.
 3. The same with the app lock on, and from a private chat's contact.
    - Expect: the notification says only "Incoming call", without a name.
+   - Lock while it rings: a notification with the name goes to the one without.
 4. Close the app's process while it rings (`kill` over SSH).
    - Expect: the notification goes by itself after about a minute, and at the next start at once.
 5. A group member starts a call with the phone in your pocket.
    - Expect: "<name> started a group call." in the chat, a notification with it, and "The group
-     call ended." within a few seconds of its end, without the chat open. Nothing but the lines
-     for a muted group or one on mentions only; for a private group, only "Private chat".
+     call ended." once within a few seconds of its end, without the chat open. Nothing but the
+     lines for a muted group; a group on mentions only does notify. For a private group, only
+     "Private chat". With notification preview off: "A group call started.", no name.
+   - With the network off when the announcement comes, and back within a few minutes: the line
+     and the notification still come.
 6. Start a group call yourself.
    - Expect: "You started a group call." and no notification on this phone.
 7. Settings → Notifications → Calls: another ringtone; then Vibrate off.
    - Expect: the call rings with it, at the ringtone's volume; no vibration. **If the system's tone
-     still plays**, ngfd's profile lookup wins over `audio` for this event: say so.
-8. In a 1:1 audio call, tap the speaker button.
-   - Is the button there at all? Without it the route manager doesn't offer `speaker` outside
-     phone calls (`gdbus call --system -d org.nemomobile.Route.Manager -o
-     /org/nemomobile/Route/Manager -m org.nemomobile.Route.Manager.FeaturesAllowed`, during a call,
-     says what it offers): please send that output.
-   - Expect: the sound moves to the loudspeaker and back. **If it doesn't move**, the policy keeps
-     the phone role on the earpiece and the engines must change the stream's role instead. Listen
-     for echo on the other side while on the loudspeaker.
-9. A video call, then a group call.
-   - Expect: both start on the loudspeaker with the button lit.
+     still plays**, ngfd's profile lookup wins over `audio` for this event: say so, and the
+     ringtone setting goes (it would be a control that does nothing); the vibration switch stays
+     if it works.
+   - Choose a music file, delete it, get called: the system's tone, not silence.
+8. In a 1:1 audio call, tap the speaker button. **Nothing about the switch has been run yet.** The
+   SDK shows the route manager's interface but not two names in `bridge/callroute.cpp`, which come
+   from memory: the feature `speaker` and the device `earpiece`. During a call, please send the
+   output of `gdbus call --system -d org.nemomobile.Route.Manager -o
+   /org/nemomobile/Route/Manager -m org.nemomobile.Route.Manager.FeaturesAllowed`, and the same with
+   `…Route.Manager.ActiveRoutes`. How each failing looks:
+   - `speaker` is wrong, or not offered outside phone calls: no button at all, in any call.
+   - `earpiece` is wrong: the button works, but a camera doesn't move the call to the loudspeaker
+     by itself, and the button can light with the sound still at the ear.
+   - The manager takes it but doesn't move phone-role streams: tap, and three seconds later "The
+     sound could not be switched" with the button dark (if the route doesn't change, the sound
+     stays), or a lit button with no change in sound (if the route changes without the streams).
+     Then the engines must change the stream's role instead.
+   - Expect: the sound moves to the loudspeaker and back, the button lit only while it is there.
+     Listen for echo on the other side while on the loudspeaker.
+9. A voice call from **Threema for Android**, answered here (it says "video" on every call).
+   - Expect: "Incoming call", the earpiece, the screen allowed to blank, black at the ear; the
+     camera button is there. Then turn a camera on, on either side.
+   - Expect: it moves to the loudspeaker with the button lit, and stays there when the camera goes
+     off. A group call does this only for our own camera.
 10. After a call on the loudspeaker: make a normal phone call; and once kill the process during such
     a call first.
     - Expect: the phone call is on the earpiece. Say if it starts on the loudspeaker after the kill.
@@ -612,10 +629,10 @@ Full, unless it says otherwise. With a second phone calling.
       the sound ends up somewhere you wouldn't want.
 13. Audio call with the phone at the ear (speaker off), 1:1 and group.
     - Expect: the screen goes black and takes no touches, comes back when lowered. Nothing of this
-      on the loudspeaker or with our camera on.
-14. Leave a video call running past the display timeout, then an audio call with the display
+      on the loudspeaker or with a camera on.
+14. Leave a call with a camera on running past the display timeout, then an audio call with the display
     allowed to blank, for several minutes each.
-    - Expect: the video call's screen stays on; the audio call's sound goes on with the screen off
+    - Expect: the screen stays on with the camera; the audio call's sound goes on with the screen off
       (no gap: the CPU is held awake). An ended call lets the screen blank again.
 
 Screen, in both flavours:
