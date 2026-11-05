@@ -1700,6 +1700,11 @@ impl App {
 impl Shared {
     /// Remember events the current command caused, for [`Self::take_ui_events`].
     pub(crate) fn note_ui_events(&self, events: &[&'static str]) {
+        // What a round beside the loop found (a restored backup, the directory): a contact may be
+        // there for a reflected message that waited for one.
+        if events.contains(&"contactsChanged") {
+            self.apply_waiting_reflected();
+        }
         let mut pending = self.pending_ui_events.borrow_mut();
         for event in events {
             if !pending.contains(event) {

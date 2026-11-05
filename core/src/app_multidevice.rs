@@ -2777,6 +2777,13 @@ mod tests {
             rx.try_recv(),
             Ok(ToConnection::ApplyWaitingReflected)
         ));
+        while rx.try_recv().is_ok() {}
+        // A round beside the loop reports them this way.
+        app.note_ui_events(&["contactsChanged"]);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ToConnection::ApplyWaitingReflected)
+        ));
     }
 
     fn waiting(app: &App, sender: &str, created_at: i64) {
