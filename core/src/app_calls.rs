@@ -165,6 +165,7 @@ impl App {
         };
         if !self.calls_enabled() {
             if let Signal::Offer { call_id, .. } = signal {
+                self.note_call_not_taken(peer, call_id);
                 self.tell_connection(ToConnection::CallSignal {
                     peer: peer.to_owned(),
                     signal: Signal::Reject {
@@ -192,6 +193,23 @@ impl App {
             .calls
             .on_signal(peer, signal, crate::messages::now_ms());
         self.apply_call_effects(effects);
+    }
+
+    /// A build without calls got an offer, from someone whose app still has it down as taking
+    /// them: the chat says that they called, the user never chose not to hear of it. Someone who
+    /// turned calls off did. An offer can come twice, after a lost acknowledgement.
+    fn note_call_not_taken(&self, peer: &str, call_id: u32) {
+        if self.calls_supported || self.store.call_recorded(peer, call_id).unwrap_or(false) {
+            return;
+        }
+        self.record_call(&CallRecord {
+            peer: peer.to_owned(),
+            call_id,
+            outgoing: false,
+            result: "missed".to_owned(),
+            duration: None,
+            at: crate::messages::now_ms(),
+        });
     }
 
     /// A call with `peer` goes only through TURN, which hides our IP address from them: always
@@ -740,6 +758,28 @@ mod tests {
         assert!(app.calls.current.is_none());
     }
 
+    /// The other side was told "calls are off"; here the chat says they called, and a notification
+    /// comes from that line as for any missed call.
+    #[test]
+    fn without_calls_an_offer_leaves_one_missed_call_line() {
+        let (_dir, mut app, mut rx) = app(false);
+        let mut events = app.take_media_events().unwrap();
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        let Ok(event) = events.try_recv() else {
+            panic!("the line");
+        };
+        let json_event = event.to_json(&app.store, true);
+        assert_eq!(json_event["message"]["body"], "call|missed|0|0|7");
+        assert_eq!(json_event["notify"], true);
+
+        // Delivered again: rejected again, no second line.
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        assert_eq!(sent(&mut rx).len(), 2);
+        assert!(events.try_recv().is_err());
+    }
+
     /// A hand-made offer in libwebrtc's format for an Android audio call with video on (audio,
     /// video with RTX and encrypted header extensions, data channel), not a captured one.
     const ANDROID_OFFER: &str = include_str!("../../tests/callengine/android-offer.sdp");
@@ -784,6 +824,7 @@ mod tests {
     #[test]
     fn calls_turned_off_reject_offers() {
         let (_dir, mut app, mut rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
         app.set_app_setting("threemaCalls", false).unwrap();
         let (kind, json) = offer(8);
         app.on_call_signal("ECHOECHO", kind, &json);
@@ -794,6 +835,7 @@ mod tests {
                 reason: RejectReason::Disabled,
             }]
         );
+        assert!(drain(&mut events).0.is_empty(), "the user's own choice");
     }
 
     /// What reached the chat, and what reached the bridge.
