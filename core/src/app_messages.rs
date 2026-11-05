@@ -546,6 +546,7 @@ impl App {
             failing_items: connection::FailingItems::default(),
             carried_events: core::cell::RefCell::default(),
             wake_hold: connection::WakeHold::default(),
+            picture_uploads: Rc::default(),
         };
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         let (from_tx, from_rx) = mpsc::unbounded_channel();

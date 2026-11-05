@@ -378,6 +378,67 @@ pub struct ConnectionSetup {
     pub carried_events: RefCell<Vec<CoreEvent>>,
     /// What a wake-up is waiting for; it may take a new connection to find out.
     pub wake_hold: WakeHold,
+    /// The upload of our picture, beside the connection; outlives one.
+    pub picture_uploads: Rc<PictureUploads>,
+}
+
+/// After a failed upload of our picture, how long messages go out without another try.
+const PICTURE_UPLOAD_PAUSE: Duration = Duration::from_secs(10 * 60);
+
+/// Our profile picture on its way to the blob server, for those who don't have it yet. Its own
+/// task: a blob server out of reach may take minutes to say so, and nothing else the connection
+/// does has to wait for that. Their messages go ahead and the picture comes after them.
+#[derive(Default)]
+pub struct PictureUploads {
+    running: core::cell::Cell<bool>,
+    paused_until: core::cell::Cell<Option<Instant>>,
+    /// Who gets the picture when it is up. In memory: the next message after a restart asks again.
+    waiting: RefCell<std::collections::BTreeSet<String>>,
+    finished: tokio::sync::Notify,
+}
+
+impl PictureUploads {
+    /// Whether an upload may start now; if so it counts as running.
+    fn start(&self, now: Instant) -> bool {
+        if self.running.get() || self.paused_until.get().is_some_and(|until| now < until) {
+            return false;
+        }
+        self.running.set(true);
+        self.paused_until.set(None);
+        true
+    }
+
+    /// The upload is through, either way. A picture that has changed meanwhile is not the one to
+    /// give anyone: those waiting try again and start one of the new picture.
+    fn ended(
+        &self,
+        store: &Store,
+        version_before: Option<&str>,
+        upload: Result<crate::profile_pictures::Upload, crate::media::MediaError>,
+        now: Instant,
+    ) {
+        self.running.set(false);
+        let noted = match upload {
+            Ok(upload) => store
+                .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+                .and_then(|version| {
+                    if version.as_deref() == version_before {
+                        store.set_picture_upload(Some(&upload))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|error| tracing::warn!(%error, "profile picture upload not noted")),
+            Err(error) => {
+                tracing::warn!(%error, "profile picture upload failed");
+                Err(())
+            }
+        };
+        if noted.is_err() {
+            self.paused_until.set(Some(now + PICTURE_UPLOAD_PAUSE));
+        }
+        self.finished.notify_one();
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -837,6 +898,31 @@ fn d2d_conversation(conversation: &str) -> Option<libthreema::protobuf::d2d::Con
         None => return None,
     };
     Some(ConversationId { id: Some(id) })
+}
+
+/// Our picture to the blob server. See [`PictureUploads`].
+async fn upload_own_picture(
+    store: Rc<Store>,
+    https: HttpsClient,
+    uploads: Rc<PictureUploads>,
+    picture: Zeroizing<Vec<u8>>,
+) {
+    let version = store
+        .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+        .ok()
+        .flatten();
+    let mut key = [0_u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    let blob = crate::media::encrypt_blob(&key, crate::media::MediaPart::File, &picture);
+    let upload = crate::media::upload(&https, &blob, true)
+        .await
+        .map(|blob_id| crate::profile_pictures::Upload {
+            blob_id,
+            key,
+            size: u32::try_from(picture.len()).unwrap_or(u32::MAX),
+            uploaded_at: crate::messages::now_ms(),
+        });
+    uploads.ended(&store, version.as_deref(), upload, Instant::now());
 }
 
 /// A mediator payload's kind, for logs (its content may be private).
@@ -2012,9 +2098,10 @@ impl<'a> Session<'a> {
     }
 
     /// The _Profile Picture Distribution Steps_ for `receiver`: our picture (uploaded once per
-    /// week) or a removal, if they don't have the current state yet. Failures only skip it.
+    /// week) or a removal, if they don't have the current state yet. An upload that is needed goes
+    /// on beside the connection, and they get the picture when it is done.
     async fn distribute_picture(&mut self, receiver: &str) -> Result<(), ConnectionError> {
-        use crate::profile_pictures::{Distribution, OWN_PICTURE, Upload};
+        use crate::profile_pictures::{Distribution, OWN_PICTURE};
         // Not even recorded as sent: they get it if they are unblocked.
         if !crate::providers::may_receive(&self.setup.store, &self.setup.config, receiver, false)
             .map_err(storage_error)?
@@ -2036,31 +2123,17 @@ impl<'a> Session<'a> {
                 let upload = match (upload, own) {
                     (Some(upload), _) => upload,
                     (None, Some(picture)) => {
-                        let mut key = [0_u8; 32];
-                        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
-                        let blob = crate::media::encrypt_blob(
-                            &key,
-                            crate::media::MediaPart::File,
-                            &picture,
-                        );
-                        let blob_id =
-                            match crate::media::upload(&self.setup.https, &blob, true).await {
-                                Ok(id) => id,
-                                Err(error) => {
-                                    tracing::warn!(%error, "profile picture upload failed");
-                                    return Ok(());
-                                }
-                            };
-                        let upload = Upload {
-                            blob_id,
-                            key,
-                            size: u32::try_from(picture.len()).unwrap_or(u32::MAX),
-                            uploaded_at: crate::messages::now_ms(),
-                        };
-                        store
-                            .set_picture_upload(Some(&upload))
-                            .map_err(storage_error)?;
-                        upload
+                        let uploads = &self.setup.picture_uploads;
+                        uploads.waiting.borrow_mut().insert(receiver.to_owned());
+                        if uploads.start(Instant::now()) {
+                            tokio::task::spawn_local(upload_own_picture(
+                                Rc::clone(&store),
+                                self.setup.https.clone(),
+                                Rc::clone(uploads),
+                                picture,
+                            ));
+                        }
+                        return Ok(());
                     }
                     (None, None) => return Ok(()),
                 };
@@ -2087,6 +2160,16 @@ impl<'a> Session<'a> {
         {
             self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Our picture is up, or the upload has ended anyway: whoever waits for it gets it. If it
+    /// failed they stay waiting for the next try.
+    async fn send_waiting_pictures(&mut self) -> Result<(), ConnectionError> {
+        let waiting = self.setup.picture_uploads.waiting.take();
+        for receiver in waiting {
+            self.distribute_picture(&receiver).await?;
         }
         Ok(())
     }
@@ -3724,6 +3807,7 @@ impl<'a> Session<'a> {
             let next_held = (!self.reflection_backlog)
                 .then(|| self.held.iter().map(|(_, at)| *at).min())
                 .flatten();
+            let setup = self.setup;
             // A notification that is being held goes out with the device up.
             let wake_settles = self
                 .setup
@@ -3743,6 +3827,7 @@ impl<'a> Session<'a> {
                         None => std::future::pending().await,
                     }
                 } => self.release_held_notifications(false),
+                () = setup.picture_uploads.finished.notified() => self.send_waiting_pictures().await?,
                 read = self.read_inbound(&mut read_buffer) => self.handle_inbound(read?).await?,
                 message = rx.recv() => match message {
                     None => return Err(ConnectionError::Stopped),
@@ -5100,6 +5185,7 @@ mod sync_order_tests {
             failing_items: FailingItems::default(),
             carried_events: RefCell::default(),
             wake_hold: WakeHold::default(),
+            picture_uploads: Rc::default(),
         };
         let mut fs = StoreFs {
             store: Rc::clone(&setup.store),
@@ -5819,6 +5905,94 @@ mod sync_order_tests {
         assert!(another.stay_away(Duration::from_secs(1)));
         // A long session in between: this one is news again.
         assert!(!another.stay_away(ANOTHER_CONNECTION_FORGOTTEN + SHORT));
+    }
+
+    /// Our picture and whoever is to get it, with a contact's `setup`.
+    fn picture_to_share(setup: &ConnectionSetup) {
+        use crate::profile_pictures::{OWN_PICTURE, Share};
+        setup.media.write_picture(OWN_PICTURE, b"jpeg").unwrap();
+        setup.store.bump_profile_picture_version().unwrap();
+        setup.store.set_picture_share(Share::Everyone).unwrap();
+    }
+
+    fn an_upload() -> crate::profile_pictures::Upload {
+        crate::profile_pictures::Upload {
+            blob_id: libthreema::common::BlobId([7; 16]),
+            key: [8; 32],
+            size: 4,
+            uploaded_at: crate::messages::now_ms(),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_upload_of_our_picture_holds_up_nothing_and_they_get_it_after() {
+        use crate::profile_pictures::Distribution;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, app) = app();
+                let (setup, _) = contact_without_fs_support(&app);
+                picture_to_share(&setup);
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let mut session = session(&setup, &tx).await;
+                crate::https::stall_requests();
+                tokio::time::timeout(Duration::from_secs(1), session.distribute_picture(CREATOR))
+                    .await
+                    .expect("the connection doesn't wait for the upload")
+                    .unwrap();
+                tokio::task::yield_now().await;
+                let uploads = &setup.picture_uploads;
+                assert!(uploads.running.get());
+                assert!(uploads.waiting.borrow().contains(CREATOR));
+                assert!(
+                    !uploads.start(Instant::now()),
+                    "one upload for everyone waiting"
+                );
+                assert!(matches!(
+                    setup.store.picture_distribution(CREATOR, true).unwrap(),
+                    Distribution::Set(None)
+                ));
+
+                let version = setup
+                    .store
+                    .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+                    .unwrap();
+                uploads.ended(
+                    &setup.store,
+                    version.as_deref(),
+                    Ok(an_upload()),
+                    Instant::now(),
+                );
+                // No handshake behind this session: the message gets as far as the transport.
+                let _ = session.send_waiting_pictures().await;
+                assert!(uploads.waiting.borrow().is_empty());
+                assert!(matches!(
+                    setup.store.picture_distribution(CREATOR, true).unwrap(),
+                    Distribution::None
+                ));
+            })
+            .await;
+    }
+
+    #[test]
+    fn a_failed_upload_of_our_picture_pauses_and_a_changed_picture_does_not() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let uploads = &setup.picture_uploads;
+        let now = Instant::now();
+        assert!(uploads.start(now));
+        uploads.ended(
+            &setup.store,
+            None,
+            Err(crate::media::MediaError::Status(500)),
+            now,
+        );
+        assert!(!uploads.start(now + PICTURE_UPLOAD_PAUSE - Duration::from_secs(1)));
+        assert!(uploads.start(now + PICTURE_UPLOAD_PAUSE));
+        // Set anew during the upload: that blob is of the old picture.
+        setup.store.bump_profile_picture_version().unwrap();
+        uploads.ended(&setup.store, Some("old"), Ok(an_upload()), now);
+        assert_eq!(setup.store.picture_upload().unwrap(), None);
+        assert!(uploads.start(now), "no pause: the new picture goes now");
     }
 
     /// The markup goes, and nothing that merely looks like it.
@@ -6799,6 +6973,7 @@ mod sync_order_tests {
             failing_items: FailingItems::default(),
             carried_events: RefCell::default(),
             wake_hold: WakeHold::default(),
+            picture_uploads: Rc::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut session = session(&setup, &tx).await;

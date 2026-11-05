@@ -533,6 +533,8 @@ impl HttpsClient {
     /// Like [`Self::send`], refusing an answer of more than `limit` bytes while it comes in; see
     /// [`is_too_large`].
     pub async fn send_limited(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
+        #[cfg(test)]
+        stalled_if_asked().await;
         let builder = self
             .builder(request.method, &request.url, request.headers)?
             .timeout(request.timeout)
@@ -552,6 +554,8 @@ impl HttpsClient {
     /// Like [`Self::send_limited`], for a transfer that takes as long as the link needs:
     /// `request.timeout` is how long nothing may move, not how long the whole may take.
     pub async fn transfer(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
+        #[cfg(test)]
+        stalled_if_asked().await;
         let builder = self.builder(request.method, &request.url, request.headers)?;
         until_stalled(builder, request.body, limit, request.timeout, ANSWER_WAIT).await
     }
@@ -618,6 +622,24 @@ fn map_error(error: reqwest::Error) -> HttpsError {
         HttpsError::Unreachable
     };
     kind(error.without_url().to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    static STALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// From now on this thread's requests get no answer, as on a mobile link that has stalled.
+#[cfg(test)]
+pub(crate) fn stall_requests() {
+    STALLED.set(true);
+}
+
+#[cfg(test)]
+async fn stalled_if_asked() {
+    if STALLED.get() {
+        std::future::pending::<()>().await;
+    }
 }
 
 #[cfg(test)]
