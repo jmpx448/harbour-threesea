@@ -20,7 +20,7 @@ Page {
     Component.onCompleted: {
         voicePlayer.stop()
         if (!videoPlayer.play(messageId)) {
-            //% "Can't play videos on this device"
+            //% "This video could not be played"
             Notices.show(qsTrId("threesea-la-cannot-play-video"), Notice.Long, Notice.Center)
         }
     }

@@ -1204,7 +1204,7 @@ Page {
     // Play a voice message and remember that it is not new any more.
     function playVoice(id) {
         if (!voicePlayer.play(id)) {
-            //% "Can't play voice messages on this device"
+            //% "This voice message could not be played"
             Notices.show(qsTrId("threesea-la-cannot-play"), Notice.Long, Notice.Center)
             return
         }

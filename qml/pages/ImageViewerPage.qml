@@ -61,6 +61,7 @@ Page {
                 source: page.source.length > 0 ? page.source : "image://threesea/" + page.messageId + "/file"
 
                 AnimatedMedia {
+                    id: animation
                     // The picture's area within the image item (PreserveAspectFit).
                     anchors.centerIn: parent
                     width: image.paintedWidth
@@ -90,5 +91,12 @@ Page {
         anchors.centerIn: parent
         size: BusyIndicatorSize.Large
         running: image.status === Image.Loading
+    }
+
+    InfoLabel {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: image.status === Image.Error && !animation.visible
+        //% "This picture could not be shown"
+        text: qsTrId("threesea-la-cannot-show-picture")
     }
 }
