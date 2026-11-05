@@ -2879,6 +2879,9 @@ Page {
             IconButton {
                 icon.source: "image://theme/icon-m-forward"
                 enabled: {
+                    // Nothing selected: not a look at the rows, nor at their number (a binding
+                    // here would otherwise copy the whole window with every new message).
+                    if (page.selectedCount === 0) return false
                     var list = page.selectedMessages()
                     for (var i = 0; i < list.length; ++i) if (!page.forwardable(list[i])) return false
                     return list.length > 0
