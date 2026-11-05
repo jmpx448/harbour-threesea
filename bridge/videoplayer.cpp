@@ -152,6 +152,7 @@ void VideoPlayer::seek(int position)
 void VideoPlayer::stop()
 {
     m_reader->cancel();
+    const bool wasLoading = m_loading;
     setLoading(false);
     m_reloadDue = false;
     m_wantPlaying = false;
@@ -164,7 +165,9 @@ void VideoPlayer::stop()
     // Drop the decrypted video right away.
     m_data.fill('\0');
     m_data.clear();
-    if (m_messageId != -1) {
+    // Also for one stopped while it was being read, which never had an id: whoever shows it waits
+    // for this to know that it has ended.
+    if (m_messageId != -1 || wasLoading) {
         m_messageId = -1;
         emit messageIdChanged();
     }

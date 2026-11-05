@@ -1708,7 +1708,8 @@ ApplicationWindow {
             Notices.show(qsTrId("threesea-la-recording-discarded"), Notice.Long, Notice.Center)
         }
         // The chime leads to the next message: that must not start in the call either.
-        if (voicePlayer.playing || voicePlayer.chiming) voicePlayer.pause()
+        // Active: also while it is still being read, which would start it during the call.
+        if (voicePlayer.active) voicePlayer.pause()
         if (videoPlayer.playing || videoPlayer.loading) videoPlayer.pause()
     }
     // Wherever it was started from: the file turned out unreadable, or the player gave up on it.

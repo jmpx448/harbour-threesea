@@ -256,7 +256,8 @@ public:
     // (image providers call it from their loader threads).
     QByteArray readMedia(qint64 message, bool thumbnail) const;
     // Where the players read (MediaReader): one decrypted file on its way at a time, whichever
-    // player asks, and this object outlives every read.
+    // player asks, and this object outlives every read. Each player keeps what it read, outside the
+    // core's budget for transfers, and a read briefly holds two copies.
     QThreadPool *mediaReads() const { return &m_mediaReads; }
     // A picture by name (group pictures: the group key); empty if none. Thread-safe.
     QByteArray readPicture(const QString &name) const;

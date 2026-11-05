@@ -136,6 +136,7 @@ QtObject {
             [function() { ready(false) }, 100],
             [function() {
                 recorder.recording = true
+                voice.active = true
                 voice.playing = true
                 video.playing = true
                 calls.state = "incoming"
@@ -257,6 +258,7 @@ QtObject {
         callEndsChimeQueue: [
             [function() { ready(false) }, 100],
             [function() {
+                voice.active = true
                 voice.chiming = true
                 calls.state = "incoming"
                 check("queue ended", voice.stops + voice.pauses, 1)
@@ -267,6 +269,7 @@ QtObject {
             [function() { ready(false) }, 100],
             [function() {
                 recorder.recording = true
+                voice.active = true
                 voice.playing = true
                 fakes.groupCalls.state = "joining"
                 check("recording gone", recorder.recording, false)
