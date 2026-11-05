@@ -91,12 +91,15 @@ impl App {
                     match patcher.patch(SdpKind::RemoteOffer, &sdp) {
                         Ok(sdp) => {
                             self.call_patcher = Some(patcher);
+                            let private = self.store.is_private(&peer).unwrap_or(true);
                             self.emit_call(json!({
                                 "event": "callIncoming",
                                 "identity": peer,
                                 "callId": call_id,
                                 "sdp": sdp,
                                 "video": video,
+                                // Its notification names nobody then (ADR 0009).
+                                "private": private,
                             }));
                         }
                         Err(error) => {
@@ -854,6 +857,19 @@ mod tests {
     }
 
     #[test]
+    fn a_private_chats_call_says_so_for_its_notification() {
+        let (_dir, mut app, _rx) = app(true);
+        let mut events = app.take_media_events().unwrap();
+        app.store.set_private("ECHOECHO", true).unwrap();
+        let (kind, json) = offer(7);
+        app.on_call_signal("ECHOECHO", kind, &json);
+        let Ok(CoreEvent::Call(event)) = events.try_recv() else {
+            panic!("no incoming call");
+        };
+        assert_eq!(event["private"], true);
+    }
+
+    #[test]
     fn incoming_call_rings() {
         let (_dir, mut app, mut rx) = app(true);
         let mut events = app.take_media_events().unwrap();
@@ -864,6 +880,7 @@ mod tests {
         };
         assert_eq!(event["event"], "callIncoming");
         assert_eq!(event["callId"], 7);
+        assert_eq!(event["private"], false);
         assert!(event["sdp"].as_str().unwrap().contains("cbr=1"));
         assert_eq!(app.call_state()["call"]["phase"], "incoming");
         // The core tells the caller it rings.

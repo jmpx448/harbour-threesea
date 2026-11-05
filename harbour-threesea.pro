@@ -89,6 +89,7 @@ HEADERS += \
     bridge/voicerecorder.h
 
 DISTFILES += \
+    notifications/x-threesea.call.conf \
     qml/harbour-threesea.qml \
     qml/cover/CoverPage.qml \
     qml/pages/*.qml \
@@ -123,6 +124,10 @@ full {
     service.files = systemd/harbour-threesea.service
     service.path = /usr/lib/systemd/user
     INSTALLS += service
+    # An incoming call's notification (priority, display on); lipstick reads these by category.
+    callnotification.files = notifications/x-threesea.call.conf
+    callnotification.path = /usr/share/lipstick/notificationcategories
+    INSTALLS += callnotification
     # Calls (ADR 0012): the media engine on the system's GStreamer webrtcbin.
     PKGCONFIG += gstreamer-1.0 gstreamer-sdp-1.0 gstreamer-webrtc-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-rtp-1.0 nice
     SOURCES += bridge/callengine.cpp bridge/dtlscertificate.cpp bridge/groupcallengine.cpp \

@@ -32,6 +32,8 @@ class CallManager : public QObject
     // In an active call nothing has come in over the network for a while.
     Q_PROPERTY(bool interrupted READ interrupted NOTIFY interruptedChanged)
     Q_PROPERTY(bool outgoing READ outgoing NOTIFY stateChanged)
+    // With a private chat: what is shown outside the app names nobody.
+    Q_PROPERTY(bool privateChat READ privateChat NOTIFY stateChanged)
     // Start of the active call (ms since epoch), for the duration display.
     Q_PROPERTY(double activeSince READ activeSince NOTIFY stateChanged)
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
@@ -52,6 +54,7 @@ public:
     QString failure() const { return m_failure; }
     bool interrupted() const { return m_interrupted; }
     bool outgoing() const { return m_outgoing; }
+    bool privateChat() const { return m_privateChat; }
     double activeSince() const { return m_activeSince; }
     bool muted() const { return m_muted; }
     bool remoteMuted() const { return m_remoteMuted; }
@@ -137,6 +140,7 @@ private:
     // Changes when a call's media go away; a reply to a request of an earlier value is late.
     unsigned m_serial = 0;
     bool m_outgoing = false;
+    bool m_privateChat = false;
     bool m_muted = false;
     bool m_remoteMuted = false;
     bool m_remoteCamera = false;

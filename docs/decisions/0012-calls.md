@@ -34,6 +34,11 @@ build for three architectures.
   project's extraction of WebRTC's audio processing, BSD), pinned, as our own processing step.
 - Phone tests stay in the last phase (earpiece/speaker routing, echo, ringing while locked,
   proximity): built from documentation and emulator checks, fixed then.
+- Earpiece or loudspeaker goes through the audio policy's route manager (its `speaker` feature,
+  only offered if it says so at runtime; `bridge/callroute.h`), not through another stream role:
+  the echo canceller stays in the path and the engines change nothing. No Bluetooth entry and no
+  "end the call when Bluetooth goes" setting unless the phone test shows they are needed
+  (docs/voice-video-device-checklist.md, "Ringing, routes and the screen in calls").
 - Order: 1:1 audio → 1:1 video → group calls → Threema Web (the same webrtcbin, it only needs
   data channels; SaltyRTC in the core) → calls in Jolla's own phone app (Telepathy plugin,
   Chum).

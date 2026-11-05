@@ -177,6 +177,7 @@ void CallManager::resetCall()
     m_remoteOffer.clear();
     m_activeSince = 0;
     m_callId = -1;
+    m_privateChat = false;
     setInterrupted(false);
     // Not through the setters: nobody is to be told, the call they would tell is over.
     if (m_muted) {
@@ -407,6 +408,7 @@ void CallManager::onCoreEvent(const QString &name, const QVariantMap &data)
         m_identity = data.value(QStringLiteral("identity")).toString();
         m_remoteOffer = data.value(QStringLiteral("sdp")).toString();
         m_outgoing = false;
+        m_privateChat = data.value(QStringLiteral("private")).toBool();
         // The core already said no video if we don't take video calls.
         m_video = data.value(QStringLiteral("video")).toBool();
         setState(QStringLiteral("incoming"));

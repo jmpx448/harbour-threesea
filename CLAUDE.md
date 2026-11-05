@@ -101,6 +101,7 @@ harbour-threesea/
     harbour-threesea.spec   %bcond_with full selects the Full flavour (ADR 0010, 0014),
                             %bcond_with demo the emulator's demo data
   systemd/                  Full only: user service starting the app at login
+  notifications/            Full only: lipstick's category of the incoming call's notification
   scripts/                  sdk-build.sh = full Docker build (sdk/Dockerfile), build-core.sh,
                             update-libthreema.sh, emulator*.py/sh (UI testing), check.sh (all
                             checks; hooks/pre-commit runs its quick part)

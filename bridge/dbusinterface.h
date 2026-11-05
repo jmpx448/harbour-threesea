@@ -70,6 +70,10 @@ public slots:
     Q_SCRIPTABLE void activate(const QStringList &urls);
     Q_SCRIPTABLE void reply(const QString &identity, const QString &token, const QString &text);
     Q_SCRIPTABLE void markRead(const QString &identity, const QString &token);
+    // The incoming call's notification. Its token keeps anyone else on the bus from turning the
+    // microphone on (key: CallTokenKey).
+    Q_SCRIPTABLE void answerCall(const QString &token);
+    Q_SCRIPTABLE void declineCall(const QString &token);
     Q_SCRIPTABLE void background();
     // The update notification's action: show the window with the update (ADR 0014).
     Q_SCRIPTABLE void showUpdate();
@@ -89,6 +93,8 @@ signals:
     void openChatRequested(const QString &identity);
     void replyRequested(const QString &identity, const QString &text);
     void markReadRequested(const QString &identity);
+    void answerCallRequested();
+    void declineCallRequested();
     // A reply with nothing in it: nothing to do, and that is done.
     void blankReply();
     // A reply came without a valid token.

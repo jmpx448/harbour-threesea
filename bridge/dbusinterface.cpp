@@ -332,6 +332,38 @@ void DBusInterface::markRead(const QString &identity, const QString &token)
     emit markReadRequested(identity);
 }
 
+namespace {
+// In place of a chat, for the token of the one incoming call there can be.
+const char *const CallTokenKey = "call";
+} // namespace
+
+void DBusInterface::answerCall(const QString &token)
+{
+    const QString key = QLatin1String(CallTokenKey);
+    if (!tokenValid(key, token)) {
+        qWarning("threesea: notification action without its token ignored");
+        return;
+    }
+    forgetToken(key);
+    if (windowRefused()) {
+        return;
+    }
+    emit called();
+    emit answerCallRequested();
+}
+
+void DBusInterface::declineCall(const QString &token)
+{
+    const QString key = QLatin1String(CallTokenKey);
+    if (!tokenValid(key, token)) {
+        qWarning("threesea: notification action without its token ignored");
+        return;
+    }
+    forgetToken(key);
+    emit called();
+    emit declineCallRequested();
+}
+
 #ifdef THREESEA_DEMO
 void DBusInterface::demoData(bool remove)
 {

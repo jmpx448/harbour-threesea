@@ -564,6 +564,70 @@ Two phones needed for the 1:1 parts; a group with at least one other member for 
    - Expect: `call candidates: relay` only, no `host` or `srflx`, on both an outgoing and an
      incoming call. A verified contact also shows `host` and `srflx`.
 
+## Ringing, routes and the screen in calls
+
+Full, unless it says otherwise. With a second phone calling.
+
+1. Incoming call on a locked phone, once with the screen off and once with it on.
+   - Expect: the display comes on; whether the call page comes over the lock screen, or only the
+     notification with the caller's name, Decline and Answer shows. Say which. Note if the phone
+     asks for the code on Answer.
+2. Answer from that notification; next time Decline; next time let it ring out; next time open the
+   app while it rings.
+   - Expect: Answer opens the running call, Decline ends it, and the notification goes in all four
+     cases. No notification while the call page is in view.
+3. The same with the app lock on, and from a private chat's contact.
+   - Expect: the notification says only "Incoming call", without a name.
+4. Close the app's process while it rings (`kill` over SSH).
+   - Expect: the notification goes by itself after about a minute, and at the next start at once.
+5. A group member starts a call with the phone in your pocket.
+   - Expect: "<name> started a group call." in the chat, a notification with it, and "The group
+     call ended." within a few seconds of its end, without the chat open. Nothing but the lines
+     for a muted group or one on mentions only; for a private group, only "Private chat".
+6. Start a group call yourself.
+   - Expect: "You started a group call." and no notification on this phone.
+7. Settings → Notifications → Calls: another ringtone; then Vibrate off.
+   - Expect: the call rings with it, at the ringtone's volume; no vibration. **If the system's tone
+     still plays**, ngfd's profile lookup wins over `audio` for this event: say so.
+8. In a 1:1 audio call, tap the speaker button.
+   - Is the button there at all? Without it the route manager doesn't offer `speaker` outside
+     phone calls (`gdbus call --system -d org.nemomobile.Route.Manager -o
+     /org/nemomobile/Route/Manager -m org.nemomobile.Route.Manager.FeaturesAllowed`, during a call,
+     says what it offers): please send that output.
+   - Expect: the sound moves to the loudspeaker and back. **If it doesn't move**, the policy keeps
+     the phone role on the earpiece and the engines must change the stream's role instead. Listen
+     for echo on the other side while on the loudspeaker.
+9. A video call, then a group call.
+   - Expect: both start on the loudspeaker with the button lit.
+10. After a call on the loudspeaker: make a normal phone call; and once kill the process during such
+    a call first.
+    - Expect: the phone call is on the earpiece. Say if it starts on the loudspeaker after the kill.
+11. A wired headset, then a Bluetooth headset, connected before a call and during one, also with the
+    speaker button.
+    - Note where the sound goes each time, and what the output is named
+      (`…Route.Manager.ActiveRoutes`, as above). Say if there is a route you'd want to choose and
+      can't: a Bluetooth entry depends on this.
+12. Bluetooth headset goes out of range or off during a call.
+    - Note where the sound goes. Android has a setting that ends the call then; we only add one if
+      the sound ends up somewhere you wouldn't want.
+13. Audio call with the phone at the ear (speaker off), 1:1 and group.
+    - Expect: the screen goes black and takes no touches, comes back when lowered. Nothing of this
+      on the loudspeaker or with our camera on.
+14. Leave a video call running past the display timeout, then an audio call with the display
+    allowed to blank, for several minutes each.
+    - Expect: the video call's screen stays on; the audio call's sound goes on with the screen off
+      (no gap: the CPU is held awake). An ended call lets the screen blank again.
+
+Screen, in both flavours:
+
+15. A video longer than the display timeout; filming in the camera page; a long voice recording.
+    - Expect: the screen stays on for all three; a paused video lets it blank.
+
+Lite:
+
+16. Install Lite after using Full, and have a contact call within the day.
+    - Expect: their app says calls are off; a "Missed call" line and notification here.
+
 ## Recording and camera stop with the app
 
 Voice recording:

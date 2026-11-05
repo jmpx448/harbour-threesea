@@ -173,5 +173,6 @@ exit 0
 %{_datadir}/icons/hicolor/*/apps/%{name}.png
 %if %{with full}
 /usr/lib/systemd/user/harbour-threesea.service
+/usr/share/lipstick/notificationcategories/x-threesea.call.conf
 /usr/lib/systemd/user/post-user-session.target.wants/harbour-threesea.service
 %endif

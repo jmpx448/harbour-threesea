@@ -1133,6 +1133,56 @@ ApplicationWindow {
         }
     }
 
+    // A call rings with the app out of sight, as on a locked phone: who calls, with Answer and
+    // Decline, for as long as it rings. Its own category gives it priority and turns the display
+    // on (notifications/, Full only; only there can a call ring). The ring itself is CallManager's.
+    // Expires a little after the ring time in case this process dies with it on the screen.
+    readonly property bool callNotificationWanted: calls.state === "incoming"
+                                                   && Qt.application.state !== Qt.ApplicationActive
+    onCallNotificationWantedChanged: {
+        if (callNotificationWanted) {
+            showCallNotification()
+        } else {
+            callNotification.close()
+            dbus.forgetToken("call")
+        }
+    }
+    function showCallNotification() {
+        var identity = calls.identity
+        backend.call("contact", { identity: identity }, function(ok, contact) {
+            if (!callNotificationWanted || calls.identity !== identity) return
+            var kind = calls.video ? qsTrId("threesea-la-call-incoming-video") : qsTrId("threesea-la-call-incoming")
+            // As in the other notifications: neither who nor which chat behind a lock or for a
+            // private chat.
+            var named = ok && !calls.privateChat && !lockActive()
+            var token = dbus.actionToken("call", true)
+            callNotification.remoteActions = [
+                dbusAction("default", "", "activate", ""),
+                //% "Decline"
+                callAction("decline", qsTrId("threesea-me-call-decline"), "declineCall", token),
+                //% "Answer"
+                callAction("answer", qsTrId("threesea-me-call-answer"), "answerCall", token)
+            ]
+            callNotification.summary = named ? contact.displayName : kind
+            callNotification.body = named ? kind : ""
+            callNotification.previewSummary = callNotification.summary
+            callNotification.previewBody = callNotification.body
+            callNotification.publish()
+        })
+    }
+    function callAction(name, displayName, method, token) {
+        var action = dbusAction(name, displayName, method, "")
+        action.arguments = [token]
+        return action
+    }
+    Notification {
+        id: callNotification
+        appName: "Threesea"
+        appIcon: "harbour-threesea"
+        category: "x-threesea.call"
+        expireTimeout: 70000
+    }
+
     // Notifications still shown from before a restart: take them over (by their chat).
     Notification { id: notificationQuery }
     // Called by main once the D-Bus name is ours, not on completion: a second process started from a
@@ -1159,6 +1209,11 @@ ApplicationWindow {
             return
         }
         var actions = n.remoteActions || []
+        // Of a call this process knows nothing about.
+        if (actions.some(function(action) { return action.method === "answerCall" })) {
+            n.close()
+            return
+        }
         var identity = actions.length > 0 && actions[0].arguments ? actions[0].arguments[0] : ""
         if (n.summary === qsTrId("threesea-la-reply-not-sent")) {
             // It opens the chat, but isn't that chat's notification.
@@ -1931,6 +1986,12 @@ ApplicationWindow {
         onOpenUrlRequested: window.openLink(url, false)
         onMarkReadRequested: window.notificationAction({ identity: identity })
         onReplyRequested: window.notificationAction({ identity: identity, text: text })
+        onAnswerCallRequested: {
+            if (calls.state !== "incoming") return
+            calls.accept()
+            window.activate()
+        }
+        onDeclineCallRequested: if (calls.state === "incoming") calls.reject()
         onReplyLost: window.replyLost()
         onBlankReply: {
             window.actionsCame = true
