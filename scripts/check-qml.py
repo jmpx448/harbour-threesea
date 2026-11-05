@@ -10,15 +10,18 @@ Imports   QML imports only what the Jolla Store's validator allows, in both flav
           meant; the validator itself only sees the Lite RPM of a release pull request).
 Tests     every program under tests/ belongs to a scripts/test-*.sh, which scripts/run-sdk-tests.sh
           then runs.
---texts   every text of qsTrId/qtTrId is in all translations/*.ts, with its //% comment. New texts
-          get there only in the last step before a release (CLAUDE.md §6), so this is apart: for
-          scripts/check.sh --full and for releases.
+--texts   every text of qsTrId/qtTrId is in all translations/*.ts, with its //% comment, and
+          translated: no unfinished entry in a language's file (scripts/translations-*.py leave a
+          text unfinished whose English changed), plural forms filled in the English one. New
+          texts get there only in the last step before a release (CLAUDE.md §6), so this is apart:
+          for scripts/check.sh --full and for releases.
 
 Usage: scripts/check-qml.py [--texts]
 """
 import pathlib
 import re
 import sys
+import xml.etree.ElementTree as ET
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -276,6 +279,16 @@ def check_texts(errors):
     for text_id, commented in sorted(ids.items()):
         if not commented:
             errors.append("no //% comment for " + text_id)
+    for path in sorted((ROOT / "translations").glob("*.ts")):
+        base = path.name == "harbour-threesea.ts"
+        for message in ET.parse(path).iter("message"):
+            translation = message.find("translation")
+            if message.get("numerus") == "yes":
+                done = all((form.text or "").strip() for form in translation.iter("numerusform"))
+            else:
+                done = base or (translation.get("type") != "unfinished" and (translation.text or "").strip())
+            if not done:
+                errors.append("%s: not translated: %s" % (path.relative_to(ROOT), message.get("id")))
 
 
 def main():
