@@ -9,8 +9,10 @@ use std::sync::Arc;
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
-    tungstenite::{Message, client::IntoClientRequest as _, protocol::WebSocketConfig},
+    Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config,
+    tungstenite::{
+        self, Message, client::IntoClientRequest as _, http::Uri, protocol::WebSocketConfig,
+    },
 };
 
 /// Largest datagram we accept (D2M envelopes are at most 64 KiB; rendezvous chunks 1 MiB).
@@ -31,6 +33,16 @@ pub enum WebSocketError {
     Closed { code: Option<u16>, reason: String },
     #[error("unexpected text message")]
     Text,
+}
+
+/// Where a `wss://` URL connects to (an IPv6 literal without its brackets).
+fn host_and_port(url: &Uri) -> Option<(String, u16)> {
+    let host = url.host()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    Some((host.to_owned(), url.port_u16().unwrap_or(443)))
 }
 
 /// A connected WebSocket carrying binary datagrams.
@@ -70,10 +82,19 @@ impl Datagrams {
         let mut config = WebSocketConfig::default();
         config.max_message_size = Some(MAX_MESSAGE);
         config.max_frame_size = Some(MAX_MESSAGE);
-        let (stream, _response) = connect_async_tls_with_config(
+        // Our own socket, not the library's: it would try the addresses in one go, and a network
+        // that drops IPv6 would use up the caller's whole limit on the first one.
+        let (host, port) = host_and_port(request.uri()).ok_or(tungstenite::Error::Url(
+            tungstenite::error::UrlError::NoHostName,
+        ))?;
+        let socket = crate::dial::connect_tcp(&[(host.as_str(), port)])
+            .await
+            .map_err(tungstenite::Error::Io)?;
+        socket.set_nodelay(true).map_err(tungstenite::Error::Io)?;
+        let (stream, _response) = client_async_tls_with_config(
             request,
+            socket,
             Some(config),
-            true,
             Some(Connector::Rustls(Arc::new(tls))),
         )
         .await?;
@@ -111,5 +132,30 @@ impl Datagrams {
     /// Close normally (errors don't matter any more).
     pub async fn close(mut self) {
         let _ = self.stream.close(None).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(url: &str) -> Option<(String, u16)> {
+        host_and_port(&url.parse().unwrap())
+    }
+
+    #[test]
+    fn the_socket_goes_where_the_url_says() {
+        assert_eq!(
+            target("wss://mediator.example/abc"),
+            Some(("mediator.example".to_owned(), 443))
+        );
+        assert_eq!(
+            target("wss://mediator.example:8443/abc"),
+            Some(("mediator.example".to_owned(), 8443))
+        );
+        assert_eq!(
+            target("wss://[2001:db8::1]:8443/"),
+            Some(("2001:db8::1".to_owned(), 8443))
+        );
     }
 }

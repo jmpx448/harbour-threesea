@@ -36,6 +36,7 @@ pub mod contacts;
 /// Made-up chats for the emulator build; never part of a device build (see `demo.rs`).
 #[cfg(feature = "demo")]
 pub mod demo;
+pub(crate) mod dial;
 pub mod directory;
 pub mod distribution_lists;
 pub mod ffi;

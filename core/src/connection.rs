@@ -100,6 +100,9 @@ const FS_MASK_INIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// The lookup holds up the incoming messages, like looking up an unknown sender.
 const FS_MASK_LOOKUP_LIMIT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The whole way into the mediator: lookup, addresses in turn (`dial`), TLS and its login. An
+/// IPv6 address that takes all its 3 s still leaves IPv4 its own 15 s.
+const MEDIATOR_CONNECT_LIMIT: Duration = Duration::from_secs(25);
 /// How long a transaction may take to begin, other devices' transactions included.
 const TRANSACTION_BEGIN_LIMIT: Duration = Duration::from_secs(90);
 /// How long the mediator gets for one answer.
@@ -113,7 +116,7 @@ const JOIN_REGISTER_LIMIT: Duration = Duration::from_secs(180);
 /// may spend on it, its first connection through the mediator and a minute to spare. Only a
 /// connection that no longer works gets here: the join itself always answers within this.
 pub(crate) const JOIN_REPLY_LIMIT: Duration = Duration::from_secs(
-    CONNECT_TIMEOUT.as_secs()
+    MEDIATOR_CONNECT_LIMIT.as_secs()
         + TRANSACTION_BEGIN_LIMIT.as_secs()
         + JOIN_TRANSFER_LIMIT.as_secs()
         + JOIN_REGISTER_LIMIT.as_secs()
@@ -1112,31 +1115,25 @@ impl<'a> Session<'a> {
 
     /// TCP straight to the chat server (no multi-device).
     async fn connect_direct(setup: &ConnectionSetup) -> Result<TcpStream, ConnectionError> {
-        let mut last_error = None;
-        let mut stream = None;
-        for address in setup
+        let hosts: Vec<_> = setup
             .config
             .chat_server_address
             .addresses(setup.server_group)
-        {
-            let host = crate::https::server_url(&address.0);
-            match timeout(
-                CONNECT_TIMEOUT,
-                TcpStream::connect((host.as_ref(), address.1)),
-            )
+            .into_iter()
+            .map(|address| (crate::https::server_url(&address.0).into_owned(), address.1))
+            .collect();
+        let endpoints: Vec<_> = hosts
+            .iter()
+            .map(|(host, port)| (host.as_str(), *port))
+            .collect();
+        let stream = crate::dial::connect_tcp(&endpoints)
             .await
-            {
-                Ok(Ok(s)) => {
-                    // log-ok: Threema's server and port
-                    tracing::info!(%host, port = address.1, "chat server reached");
-                    stream = Some(s);
-                    break;
-                }
-                Ok(Err(error)) => last_error = Some(ConnectionError::Io(error)),
-                Err(_) => last_error = Some(ConnectionError::Timeout),
-            }
-        }
-        let stream = stream.ok_or_else(|| last_error.unwrap_or(ConnectionError::Timeout))?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::TimedOut => ConnectionError::Timeout,
+                _ => ConnectionError::Io(error),
+            })?;
+        // log-ok: Threema's server's address
+        tracing::info!(address = ?stream.peer_addr().ok(), "chat server reached");
         stream.set_nodelay(true)?;
         Ok(stream)
     }
@@ -1162,7 +1159,7 @@ impl<'a> Session<'a> {
         let transport = match (&multi_device, device_group_key) {
             (Some(properties), Some(device_group_key)) => {
                 let mediator = timeout(
-                    CONNECT_TIMEOUT,
+                    MEDIATOR_CONNECT_LIMIT,
                     Mediator::connect(
                         &setup.config,
                         MediatorLogin {
@@ -5425,6 +5422,6 @@ mod join_tests {
             + JOIN_REGISTER_LIMIT
             + crate::rendezvous::CLOSE_TIMEOUT
             + D2M_REPLY_LIMIT;
-        assert!(JOIN_REPLY_LIMIT > steps + CONNECT_TIMEOUT);
+        assert!(JOIN_REPLY_LIMIT > steps + MEDIATOR_CONNECT_LIMIT);
     }
 }

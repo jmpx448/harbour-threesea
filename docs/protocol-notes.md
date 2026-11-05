@@ -93,6 +93,7 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
 - TLS pins are **leaf** SPKI pins: on 2026-10-21 `*.threema.ch` presented
   `vGQZ8hm2h+km+q7rnJ7kF9S17BwSY0rbhwjz6nIupf0=` (first pin in upstream's set). Fixture:
   `core/tests/fixtures/threema-ch-leaf.der`.
+- Sockets to the chat server, the mediator, rendezvous relays and Threema Web's signalling server (`core/src/dial.rs`): every address on its own, IPv6 first, 3 s per IPv6 address and 15 s per IPv4 address, like Android's `CspSocket` (`CONNECT_TIMEOUT_IPV6`, `CONNECT_TIMEOUT`). A WebSocket's whole connect keeps a limit around that (the mediator's 25 s, login included).
 - Directory base: Android uses `https://apip.threema.ch/`, libthreema `https://ds-apip.threema.ch/`. The `ds-`/`ds.` hosts are dual-stack (Android's "IPv6 for messages": `DIRECTORY_SERVER_IPV6_URL`, `CHAT_SERVER_IPV6_PREFIX` `ds.g-`, `BLOB_SERVER_IPV6_URL` in `app/build.gradle.kts`); we use them by default and drop the prefix for IPv4 only (Settings → Advanced, `https::server_url`).
 
 ## Servers and keys

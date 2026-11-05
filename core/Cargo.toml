@@ -85,3 +85,5 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 
 [dev-dependencies]
 tempfile = "3"
+# The same tokio, its clock under the tests' control.
+tokio = { version = "1.52", default-features = false, features = ["test-util"] }
