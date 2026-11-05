@@ -361,6 +361,23 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   absent, a size may be a float or a numeric string, a media type that isn't a text means none; name
   and caption limits apply when sending only.
 
+## Videos sent as media (not protocol)
+
+A video's MP4 or QuickTime file can hold a GPS position, the time of recording and the phone's
+model, in places that vary by vendor, and Android only loses them by re-encoding. We send media
+videos without them whatever else happens to the file (scaled or not, Lite or Full):
+`core/src/mp4.rs` runs where every outgoing file passes, in `store_outgoing_file`, also for what
+GStreamer's muxer wrote. It keeps only the boxes a player needs and only sound and picture tracks
+(Android's output has no others); the rest become zero-filled `free` boxes of the same size, so
+sample offsets hold and the streams stay byte for byte. The samples of a dropped track are zeroed
+too, the times in `mvhd`, `tkhd` and `mdhd` become 0, handler names are blanked and a trailer behind
+the last box is cut. Decisions in ADR 0025. Limits: the codecs' own streams aren't looked into
+(an H.264 SEI could say something), nor is what lies in an `mdat` outside any track's samples.
+
+Width and height in the file message are the picture's as shown (`tkhd`, with its rotation), not
+the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg"), as on Android
+(`MessageServiceImpl`: "to prevent privacy leaks").
+
 ## Voice messages
 
 - A voice message is a `file` message with an `audio/*` media type and rendering type media

@@ -160,3 +160,17 @@ path = "fuzz_targets/update_check.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "video_clean"
+path = "fuzz_targets/video_clean.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "video_size"
+path = "fuzz_targets/video_size.rs"
+test = false
+doc = false
+bench = false

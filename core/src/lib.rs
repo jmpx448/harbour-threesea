@@ -55,6 +55,7 @@ pub mod links;
 pub mod media;
 pub mod mentions;
 pub mod messages;
+pub mod mp4;
 pub mod multidevice;
 pub mod pins;
 pub mod polls;

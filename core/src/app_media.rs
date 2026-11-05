@@ -1146,10 +1146,27 @@ impl App {
                 None => format!("{name}.ogg"),
             });
         }
+        // Sent as media it is the picture that counts, not what the file says about itself, and
+        // the recipient gets told the real size. What can't be vouched for goes out as a file.
+        if file.rendering == "media" && file.media_type.starts_with("video/") {
+            if let Ok(size) = crate::mp4::clean(&mut data) {
+                if let Some((width, height)) = size {
+                    file.width = Some(width);
+                    file.height = Some(height);
+                }
+            } else {
+                tracing::info!("video goes out as a file: its metadata can't be removed");
+                file.rendering = "file".to_owned();
+                file.width = None;
+                file.height = None;
+            }
+        }
         if data.len() > media::MAX_BLOB_SIZE {
             return Err(ApiError::FileTooLarge);
         }
-        let name = file.name.filter(|name| !name.is_empty());
+        let name = generic_media_name(&file.rendering, &file.media_type)
+            .or(file.name)
+            .filter(|name| !name.is_empty());
         if name
             .as_ref()
             .is_some_and(|name| name.len() > NAME_LENGTH_MAX)
@@ -1696,6 +1713,20 @@ impl App {
             .remove_orphans(|id| store.message_keeps_media(id).unwrap_or(true));
         self.download_pending_media();
     }
+}
+
+/// Pictures and videos sent as media get a name that says nothing, like on Android ("to prevent
+/// privacy leaks"): phones name them after the moment they were taken. Files keep theirs.
+fn generic_media_name(rendering: &str, media_type: &str) -> Option<String> {
+    let kind = match media_type.split('/').next() {
+        Some("image") => "image",
+        Some("video") => "video",
+        _ => return None,
+    };
+    (rendering == "media").then(|| match crate::file_types::extension_for(media_type) {
+        Some(extension) => format!("{kind}.{extension}"),
+        None => kind.to_owned(),
+    })
 }
 
 /// A safe file name for saving: no directories, hidden files or characters that reorder how it
@@ -2773,6 +2804,92 @@ mod tests {
         app.store.mark_deleted(id, 5).unwrap();
         assert!(app.store.message_exists(id).unwrap());
         assert!(!app.store.message_keeps_media(id).unwrap());
+    }
+
+    /// What a video sent as media says about itself stays behind; a file is sent as it is.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_media_video_leaves_without_its_metadata() {
+        use crate::mp4::fixture;
+
+        let (dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let (recording, samples) = fixture::video(1920, 1080, true);
+        let source = dir.path().join("VID_20261105_120000.mp4");
+        std::fs::write(&source, &recording).unwrap();
+        let send = |app: &mut App, rendering: &str, media_type: &str| {
+            let reply = app
+                .send_file(OutgoingFile {
+                    identity: "BBBBBBBB".to_owned(),
+                    path: Some(source.to_string_lossy().into_owned()),
+                    name: Some("VID_20261105_120000.mp4".to_owned()),
+                    media_type: media_type.to_owned(),
+                    caption: None,
+                    rendering: rendering.to_owned(),
+                    width: Some(512),
+                    height: Some(512),
+                    duration: None,
+                    encode: None,
+                })
+                .unwrap();
+            let id = reply["id"].as_i64().unwrap();
+            let body = app.store.message(id).unwrap().unwrap().body;
+            let body: Value = serde_json::from_str(&body).unwrap();
+            let stored = app.media.read(id, MediaPart::File).unwrap().unwrap();
+            (body, stored.to_vec())
+        };
+        let contains = |data: &[u8], needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
+
+        // Ends without yielding: the upload's task doesn't run, so nothing goes to the network.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (body, stored) = send(&mut app, "media", "video/mp4");
+                for secret in fixture::SECRETS {
+                    assert!(!contains(&stored, secret));
+                }
+                assert_eq!(stored.len(), recording.len());
+                assert_eq!(
+                    &stored[samples..][..fixture::PICTURE.len()],
+                    fixture::PICTURE
+                );
+                assert_eq!(body["rendering"], "media");
+                // The real size as shown (filmed upright), not the thumbnail's.
+                assert_eq!(
+                    (&body["width"], &body["height"]),
+                    (&json!(1080), &json!(1920))
+                );
+                assert_eq!(body["name"], "video.mp4");
+                assert_eq!(body["size"], stored.len());
+
+                // Sent as a file, it is the user's file, unchanged.
+                let (body, stored) = send(&mut app, "file", "video/mp4");
+                assert_eq!(stored, recording);
+                assert_eq!(body["rendering"], "file");
+                assert_eq!(body["name"], "VID_20261105_120000.mp4");
+
+                // Another container can't be vouched for: not as media.
+                std::fs::write(&source, b"\x1aE\xdf\xa3 a webm file").unwrap();
+                let (body, stored) = send(&mut app, "media", "video/webm");
+                assert_eq!(stored, b"\x1aE\xdf\xa3 a webm file");
+                assert_eq!(body["rendering"], "file");
+                assert_eq!(body["width"], Value::Null);
+                assert_eq!(body["name"], "VID_20261105_120000.mp4");
+
+                // A photo sent as media says nothing with its name either.
+                std::fs::write(&source, b"\xff\xd8\xff").unwrap();
+                let (body, _) = send(&mut app, "media", "image/jpeg");
+                assert_eq!(body["name"], "image.jpg");
+            })
+            .await;
     }
 
     /// Every way of writing brings an archived chat back, a list's copies their members' chats too.
