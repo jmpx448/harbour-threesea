@@ -232,6 +232,12 @@ Page {
                     })
                 }
                 Component.onCompleted: { refresh(true); refresh(false) }
+                Connections {
+                    target: backend
+                    // Back online with the state still unknown: the server can say now.
+                    onConnectionStateChanged: if (backend.connectionState === "connected"
+                                                  && !revocationButton.status.checked) revocationButton.refresh(false)
+                }
                 //% "ID revocation"
                 label: qsTrId("threesea-la-revocation")
                 value: working
