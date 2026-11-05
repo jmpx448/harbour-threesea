@@ -31,4 +31,8 @@ and during a Safe upload or a linking attempt no notification, ringing or hang-u
 - A task can see changes made between its steps, as it could by the connection task already. Work
   that outlives a lock checks again what it hands out (`exportChat`, `setGroupPicture`), and a group
   call left during its join is not entered.
-- Threema Web's commands, forwarding and favourite GIFs still run in place, with their waits.
+- Threema Web's commands, forwarding and favourite GIFs still run in place, with their waits; the
+  longest are Web's picture uploads and adding a contact from the browser. Those need a browser
+  action, and moving them means splitting `web_manage`'s multi-step replies, so they stay open.
+- Work nobody waits for holds a wake-up's end as transfers do: a device that sleeps halfway through
+  a round would keep it, and what is in turn behind it, occupied over many wake-ups.

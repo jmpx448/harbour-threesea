@@ -417,7 +417,8 @@ details in `docs/STATUS.md`.
 - Open: phone tests (calls, camera, battery, video, and the 2026-10-29 round: at-the-ear
   playback, the chime, in-app sound, playback speed, video scaling, chat background, renaming
   this device, and the 2026-11-02 round: video picture, media controls —
-  `docs/voice-video-device-checklist.md`), Jolla Store and Chum packaging. Done 2026-10-28:
+  `docs/voice-video-device-checklist.md`), P01: Threema Web's picture and contact commands (still
+  wait in the core loop, ADR 0028), Jolla Store and Chum packaging. Done 2026-10-28:
   fuzzing setup and first runs (`core/fuzz/`), indexed search. Done 2026-10-29 (user asked for
   it after all): the per-chat summary (store migration 33) — SQL triggers keep it in step, so
   no write path has to, which was the risk; with the chat list's per-chat lookups batched into
