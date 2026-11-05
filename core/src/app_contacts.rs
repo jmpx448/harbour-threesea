@@ -65,12 +65,9 @@ pub const FEATURE_MASK: u64 = libthreema::common::FeatureMask::VOICE_MESSAGE_SUP
     | libthreema::common::FeatureMask::POLL_SUPPORT;
 
 impl Shared {
-    /// Publish [`FEATURE_MASK`] if the directory doesn't have it yet; without forward security
-    /// while multi-device is active (SE-199, like Android's `updateFeatureMask(isFsAllowed)`).
-    pub(crate) async fn publish_feature_mask(&self) -> Result<(), ApiError> {
-        let Some(identity) = self.store.identity()? else {
-            return Ok(());
-        };
+    /// The feature mask this device is to have in the directory: forward security only while
+    /// neither multi-device nor the user's switch turns it off.
+    pub(crate) fn feature_mask(&self) -> Result<u64, ApiError> {
         let fs_off =
             self.store.multi_device()?.is_some() || self.store.forward_security_disabled()?;
         let feature_mask = if fs_off {
@@ -95,6 +92,16 @@ impl Shared {
         } else {
             feature_mask
         };
+        Ok(feature_mask)
+    }
+
+    /// Publish [`FEATURE_MASK`] if the directory doesn't have it yet; without forward security
+    /// while multi-device is active (SE-199, like Android's `updateFeatureMask(isFsAllowed)`).
+    pub(crate) async fn publish_feature_mask(&self) -> Result<(), ApiError> {
+        let Some(identity) = self.store.identity()? else {
+            return Ok(());
+        };
+        let feature_mask = self.feature_mask()?;
         let mask = feature_mask.to_string();
         if self.store.setting(keys::PUBLISHED_FEATURE_MASK)?.as_deref() == Some(mask.as_str()) {
             return Ok(());

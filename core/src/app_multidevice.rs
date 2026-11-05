@@ -2080,6 +2080,29 @@ mod tests {
         }
     }
 
+    /// Leaving the device group on this device alone: forward security is back in the mask to
+    /// publish, the connection goes straight to the chat server again, and the UI hears of it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn leaving_the_group_here_brings_forward_security_back() {
+        let fs = libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT;
+        let (_dir, mut app) = app();
+        let mut rx = in_a_group(&mut app);
+        assert_eq!(app.feature_mask().unwrap() & fs, 0);
+        app.take_ui_events();
+
+        // Without an ID, publishing stops before the directory: nothing leaves the machine.
+        app.leave_device_group_locally().await;
+
+        assert!(app.store.multi_device().unwrap().is_none());
+        assert_eq!(app.feature_mask().unwrap() & fs, fs);
+        assert!(app.take_ui_events().contains(&"multiDeviceChanged"));
+        let mut told = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            told.push(matches!(message, ToConnection::Reconnect));
+        }
+        assert_eq!(told, [true], "a reconnect, and nothing else");
+    }
+
     /// A connection waiting for its next try, as `connection::run` answers then.
     async fn offline(mut rx: mpsc::UnboundedReceiver<ToConnection>) {
         while let Some(message) = rx.recv().await {
