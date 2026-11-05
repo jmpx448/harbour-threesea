@@ -151,4 +151,6 @@ Threesea stands on the work of others; thank you:
 
 ## License
 
-AGPL-3.0-only, like upstream threema-android. See [LICENSE](LICENSE).
+AGPL-3.0-only, like upstream threema-android. See [LICENSE](LICENSE); the licences of the
+bundled libraries are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt). The app shows both
+under Settings → About.

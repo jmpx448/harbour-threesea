@@ -115,6 +115,11 @@ emojisearch.files = emojis/search/*.csv
 emojisearch.path = /usr/share/$${TARGET}/emojis/search
 INSTALLS += emojisearch
 
+# The AGPL and the third-party notices (scripts/make-notices.py), shown by About.
+licenses.files = LICENSE THIRD-PARTY-NOTICES.txt
+licenses.path = /usr/share/$${TARGET}/licenses
+INSTALLS += licenses
+
 # Developer tool for the emulator (`qmake CONFIG+=demo`, set by scripts/sdk-build.sh for i486
 # only): the made-up chats, asked for over D-Bus (scripts/emulator-demo.sh) so that no build
 # for a phone carries anything of them — not a line of QML, not a word in the translations,

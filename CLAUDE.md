@@ -64,6 +64,8 @@ harbour-threesea/
   CLAUDE.md                 this file
   README.md                 user-facing: what works, how to build, how to install
   LICENSE                   AGPL-3.0
+  THIRD-PARTY-NOTICES.txt   licences of everything bundled (scripts/make-notices.py; installed
+                            with LICENSE, shown under About)
   docs/
     decisions/              one short markdown file per architectural decision (ADR style)
     android-mapping.md      which upstream Kotlin/Java package maps to which module here

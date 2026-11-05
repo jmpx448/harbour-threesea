@@ -16,7 +16,7 @@ body:
     attributes:
       label: Threesea version and flavour
       description: Settings → About. Full or Lite?
-      placeholder: 0.1.0, Full
+      placeholder: 0.2.0, Full
     validations:
       required: true
   - type: input
