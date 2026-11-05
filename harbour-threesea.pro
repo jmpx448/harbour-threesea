@@ -49,6 +49,7 @@ SOURCES += \
     bridge/jsonlistmodel.cpp \
     bridge/main.cpp \
     bridge/mediaimageprovider.cpp \
+    bridge/callroute.cpp \
     bridge/proximitymonitor.cpp \
     bridge/secretstore.cpp \
     bridge/softsound.cpp \
@@ -76,6 +77,7 @@ HEADERS += \
     bridge/jsonlistmodel.h \
     bridge/mediaimageprovider.h \
     bridge/peerimage.h \
+    bridge/callroute.h \
     bridge/proximitymonitor.h \
     bridge/offlinenetwork.h \
     bridge/coreresult.h \

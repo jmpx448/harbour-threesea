@@ -1838,6 +1838,14 @@ ApplicationWindow {
         }
     }
 
+    // The call page on top can be held to the ear: only then does the sensor run for it.
+    Binding {
+        target: proximity
+        property: "forCall"
+        value: Qt.application.state === Qt.ApplicationActive && !!pageStack.currentPage
+               && pageStack.currentPage.atEar === true
+    }
+
     // The camera page is filming.
     property bool cameraRecording: false
     readonly property bool videoCallShowing: {

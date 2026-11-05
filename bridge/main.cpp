@@ -23,6 +23,7 @@
 #include "animatedimage.h"
 #include "applifecycle.h"
 #include "callmanager.h"
+#include "callroute.h"
 #include "callvideo.h"
 #include "groupcallmanager.h"
 #include "dbusinterface.h"
@@ -206,6 +207,20 @@ int main(int argc, char *argv[])
     view->rootContext()->setContextProperty(QStringLiteral("calls"), calls);
     GroupCallManager *groupCalls = new GroupCallManager(backend, view->engine());
     view->rootContext()->setContextProperty(QStringLiteral("groupCalls"), groupCalls);
+    CallRoute *callRoute = new CallRoute(view->engine());
+    view->rootContext()->setContextProperty(QStringLiteral("callRoute"), callRoute);
+    const auto followCalls = [calls, groupCalls, callRoute]() {
+        const QString one = calls->state();
+        const QString group = groupCalls->state();
+        const bool inGroup = group == QLatin1String("joining") || group == QLatin1String("connecting")
+            || group == QLatin1String("connected");
+        const bool inCall = one != QLatin1String("idle") && one != QLatin1String("incoming")
+            && one != QLatin1String("ended");
+        // Video and group calls are held away from the ear.
+        callRoute->setCall(inCall || inGroup, inGroup || calls->video());
+    };
+    QObject::connect(calls, &CallManager::stateChanged, callRoute, followCalls);
+    QObject::connect(groupCalls, &GroupCallManager::stateChanged, callRoute, followCalls);
     // One call has the microphone (like Android): both pipelines would capture it, and a group
     // would hear the private call. Here, not in the pages' buttons: the cover and a notification
     // get past those.

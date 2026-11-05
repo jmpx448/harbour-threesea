@@ -22,7 +22,12 @@ Page {
     readonly property bool connected: groupCalls.state === "connected"
     readonly property int tileSize: Math.floor((width - 2 * Theme.horizontalPageMargin - Theme.paddingMedium) / 2)
 
+    readonly property bool atEar: !groupCalls.camera && !callRoute.speaker
+                                  && (connected || groupCalls.state === "joining"
+                                      || groupCalls.state === "connecting")
+
     allowedOrientations: Orientation.Portrait
+    backNavigation: !guard.shown
 
     function duration() {
         var h = Math.floor(seconds / 3600)
@@ -161,7 +166,7 @@ Page {
             bottom: parent.bottom
             bottomMargin: Theme.paddingLarge * 2
         }
-        spacing: Theme.itemSizeMedium
+        spacing: callRoute.available ? Theme.paddingLarge : Theme.itemSizeMedium
 
         IconButton {
             anchors.verticalCenter: parent.verticalCenter
@@ -177,8 +182,20 @@ Page {
             onClicked: groupCalls.camera = !groupCalls.camera
         }
         IconButton {
+            visible: callRoute.available
+            anchors.verticalCenter: parent.verticalCenter
+            icon.source: "image://theme/icon-m-speaker"
+            highlighted: down || callRoute.speaker
+            onClicked: callRoute.speaker = !callRoute.speaker
+        }
+        IconButton {
             icon.source: "image://theme/icon-l-reject"
             onClicked: groupCalls.leave()
         }
+    }
+
+    EarGuard {
+        id: guard
+        atEar: page.atEar
     }
 }

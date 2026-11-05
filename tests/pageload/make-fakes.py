@@ -28,6 +28,7 @@ OBJECTS = {
     "videoPlayer": ("videoplayer.h", "VideoPlayer"),
     "voiceRecorder": ("voicerecorder.h", "VoiceRecorder"),
     "proximity": ("proximitymonitor.h", "ProximityMonitor"),
+    "callRoute": ("callroute.h", "CallRoute"),
     "softSound": ("softsound.h", "SoftSound"),
 }
 # C++ items as plain QML items with the class's properties and signals: harbour.threesea's name ->

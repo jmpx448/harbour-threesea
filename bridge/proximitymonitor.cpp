@@ -19,7 +19,28 @@ void ProximityMonitor::setEnabled(bool enabled)
         return;
     }
     m_enabled = enabled;
-    if (enabled) {
+    apply();
+    emit enabledChanged();
+}
+
+void ProximityMonitor::setForCall(bool forCall)
+{
+    if (m_forCall == forCall) {
+        return;
+    }
+    m_forCall = forCall;
+    apply();
+    emit enabledChanged();
+}
+
+void ProximityMonitor::apply()
+{
+    const bool run = m_enabled || m_forCall;
+    if (run == m_running) {
+        return;
+    }
+    m_running = run;
+    if (run) {
         m_armed = false;
         m_started.start();
         m_sensor->start();
@@ -30,7 +51,6 @@ void ProximityMonitor::setEnabled(bool enabled)
             emit coveredChanged();
         }
     }
-    emit enabledChanged();
 }
 
 void ProximityMonitor::updateReading()

@@ -117,6 +117,7 @@ Page {
     // bubbles (radius, square outer bottom corner), on the ambience; the controls under them.
     readonly property bool remoteVideo: calls.video && calls.remoteCamera && remote.hasFrame
     readonly property bool inCall: state !== "incoming" && state !== "ended" && state !== "idle"
+    readonly property bool atEar: inCall && !calls.video && !callRoute.speaker
 
     SilicaFlickable {
         anchors.fill: parent
@@ -248,7 +249,8 @@ Page {
                 bottom: parent.bottom
                 bottomMargin: page.remoteVideo ? Theme.paddingLarge : Theme.itemSizeHuge
             }
-            spacing: calls.video ? Theme.itemSizeMedium : Theme.itemSizeLarge
+            spacing: calls.video && callRoute.available ? Theme.paddingLarge
+                     : calls.video ? Theme.itemSizeMedium : Theme.itemSizeLarge
 
             IconButton {
                 anchors.verticalCenter: parent.verticalCenter
@@ -264,9 +266,20 @@ Page {
                 onClicked: calls.camera = !calls.camera
             }
             IconButton {
+                visible: callRoute.available
+                anchors.verticalCenter: parent.verticalCenter
+                icon.source: "image://theme/icon-m-speaker"
+                highlighted: down || callRoute.speaker
+                onClicked: callRoute.speaker = !callRoute.speaker
+            }
+            IconButton {
                 icon.source: "image://theme/icon-l-reject"
                 onClicked: calls.hangUp()
             }
         }
+    }
+
+    EarGuard {
+        atEar: page.atEar
     }
 }
