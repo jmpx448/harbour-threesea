@@ -1708,3 +1708,47 @@ fn the_browser_hears_what_the_chat_server_says() {
         assert_eq!(saltyrtc::field(data, "message"), Some(&Value::from(text)));
     }
 }
+
+/// A real picture, which what the browser gets is scaled from.
+fn picture() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(64, 64))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    bytes
+}
+
+/// Our own picture shows in the browser: in the profile, and when asked for by our ID, which is
+/// no contact's.
+#[test]
+fn the_browser_gets_our_own_picture() {
+    use crate::profile_pictures::OWN_PICTURE;
+    let (_dir, app) = fixture();
+    let ask = |app: &App, kind: &str, id: &str| {
+        let message = arp::message(
+            "request",
+            "avatar",
+            Some(arp::map(vec![("type", kind.into()), ("id", id.into())])),
+            None,
+        );
+        let incoming = Incoming::parse(&message).unwrap();
+        app.web_avatar(&incoming).unwrap()
+    };
+
+    assert!(saltyrtc::field(&app.web_profile().unwrap(), "avatar").is_none());
+    assert!(saltyrtc::field(&ask(&app, "me", "AAAAAAAA"), "data").is_none_or(Value::is_nil));
+
+    app.media.write_picture(OWN_PICTURE, &picture()).unwrap();
+    assert!(
+        saltyrtc::field(&app.web_profile().unwrap(), "avatar").is_some_and(Value::is_bin),
+        "in the profile"
+    );
+    let reply = ask(&app, "me", "AAAAAAAA");
+    assert!(saltyrtc::field(&reply, "data").is_some_and(Value::is_bin));
+    let args = saltyrtc::field(&reply, "args").unwrap();
+    assert_eq!(saltyrtc::field(args, "type"), Some(&Value::from("me")));
+    assert_eq!(saltyrtc::field(args, "id"), Some(&Value::from("AAAAAAAA")));
+}

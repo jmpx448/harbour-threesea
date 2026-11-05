@@ -11,6 +11,7 @@ use crate::{
     app::App,
     app_web_data::receiver_type,
     media::MediaPart,
+    profile_pictures::{OWN_PICTURE, contact_picture_name},
     providers::CoreEvent,
     web::{
         arp::{self, Incoming, map},
@@ -71,10 +72,34 @@ impl App {
         })
     }
 
-    fn web_avatar(&self, incoming: &Incoming<'_>) -> Result<Value, Code> {
-        let key = self
-            .web_receiver_key(incoming.arg("id"))
-            .map_err(|_| "invalidIdentity")?;
+    /// Our own picture in the size Threema Web's profile shows, if we have one.
+    pub(crate) fn web_own_picture(&self) -> Option<Vec<u8>> {
+        let picture = self.media.read_picture(OWN_PICTURE).ok().flatten()?;
+        images::scaled_jpeg(&picture, images::AVATAR_HIGH_MAX, 75)
+    }
+
+    /// The file of a receiver's picture, for what the browser may see of it: not a private
+    /// contact's, and contacts' only while the user wants them shown.
+    pub(crate) fn web_picture_name(key: &str, shown: bool) -> Option<String> {
+        match receiver_type(key) {
+            "contact" if shown => Some(contact_picture_name(key)),
+            "group" => Some(key.to_owned()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn web_avatar(&self, incoming: &Incoming<'_>) -> Result<Value, Code> {
+        // We are no contact, and can't be private.
+        let own = self
+            .user()
+            .ok()
+            .filter(|user| incoming.arg("id") == Some(user.as_str()));
+        let key = match &own {
+            Some(user) => user.clone(),
+            None => self
+                .web_receiver_key(incoming.arg("id"))
+                .map_err(|_| "invalidIdentity")?,
+        };
         let high = incoming
             .args
             .and_then(|args| field(args, "highResolution"))
@@ -91,17 +116,18 @@ impl App {
                 .filter(|size| (16..=images::AVATAR_HIGH_MAX).contains(size))
                 .unwrap_or(images::AVATAR_LOW_MAX)
         };
-        let name = match receiver_type(&key) {
-            "contact" if self.store.pictures_shown().unwrap_or(true) => {
-                Some(crate::profile_pictures::contact_picture_name(&key))
-            }
-            "group" => Some(key.clone()),
-            _ => None,
+        let name = match &own {
+            Some(_) => Some(OWN_PICTURE.to_owned()),
+            None => Self::web_picture_name(&key, self.store.pictures_shown().unwrap_or(true)),
         };
         let picture = name
             .and_then(|name| self.media.read_picture(&name).ok().flatten())
             .and_then(|picture| images::scaled_jpeg(&picture, max, if high { 75 } else { 90 }));
-        let mut args = receiver_args(&key);
+        let mut args = match (&own, incoming.arg("type")) {
+            // Threema Web's type for us is its own.
+            (Some(_), Some(kind)) => vec![("type", kind.into()), ("id", key.as_str().into())],
+            _ => receiver_args(&key),
+        };
         args.push(("highResolution", high.into()));
         Ok(arp::message(
             "response",

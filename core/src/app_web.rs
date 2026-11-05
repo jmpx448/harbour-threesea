@@ -867,7 +867,7 @@ impl App {
         ]))
     }
 
-    /// `response/profile`: our ID, public key and nickname.
+    /// `response/profile`: our ID, public key, nickname and picture.
     fn web_profile(&self) -> Result<Value, ApiError> {
         let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let public = ClientKey::from(*identity.client_key).public_key();
@@ -881,6 +881,9 @@ impl App {
             .filter(|n| !n.is_empty())
         {
             fields.push(("publicNickname", nickname.into()));
+        }
+        if let Some(picture) = self.web_own_picture() {
+            fields.push(("avatar", Value::Binary(picture)));
         }
         Ok(arp::map(fields))
     }
