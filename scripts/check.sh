@@ -97,6 +97,8 @@ if $full; then
         scripts/test-mediareader.sh >/dev/null 2>&1 || fail "media reader (scripts/test-mediareader.sh)"
         step "pictures upright (SDK)"
         scripts/test-mediaimage.sh >/dev/null 2>&1 || fail "pictures (scripts/test-mediaimage.sh)"
+        step "what pictures carry out (SDK)"
+        scripts/test-photoedit.sh >/dev/null 2>&1 || fail "pictures (scripts/test-photoedit.sh)"
         step "app lock (SDK)"
         scripts/test-lockstate.sh >/dev/null 2>&1 || fail "app lock (scripts/test-lockstate.sh)"
         step "every page opens (SDK)"

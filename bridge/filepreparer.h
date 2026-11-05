@@ -10,8 +10,8 @@
 #include <QVariantMap>
 
 // Prepares a picked file for sending, on a worker thread: photos are re-encoded (at most
-// 2048 px, JPEG; PNG if they have transparency) which also drops their EXIF data (GPS!), and get
-// a 512 px JPEG thumbnail. Videos larger than the setting asks for are scaled down where the
+// 2048 px, JPEG; PNG if they have transparency) which also drops their EXIF data (GPS!) and text
+// (PhotoEdit::withoutMetadata), and get a 512 px JPEG thumbnail. Videos larger than the setting asks for are scaled down where the
 // phone can do it (Full flavour, VideoTranscoder); the core drops their metadata when it reads
 // them. Other files are only described (the core reads them itself).
 class FilePreparer : public QObject, public QRunnable

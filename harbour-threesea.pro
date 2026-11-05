@@ -50,6 +50,7 @@ SOURCES += \
     bridge/listfilter.cpp \
     bridge/main.cpp \
     bridge/mediaimageprovider.cpp \
+    bridge/photoedit.cpp \
     bridge/callroute.cpp \
     bridge/proximitymonitor.cpp \
     bridge/secretstore.cpp \
@@ -78,6 +79,7 @@ HEADERS += \
     bridge/jsonlistmodel.h \
     bridge/listfilter.h \
     bridge/mediaimageprovider.h \
+    bridge/photoedit.h \
     bridge/peerimage.h \
     bridge/callroute.h \
     bridge/proximitymonitor.h \

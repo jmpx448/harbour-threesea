@@ -8,6 +8,9 @@
 #include <QMimeDatabase>
 #include <QPainter>
 #include <QSettings>
+
+#include "photoedit.h"
+
 #ifdef THREESEA_FULL
 #include <threesea_core.h>
 
@@ -53,7 +56,7 @@ QByteArray encode(const QImage &image, const char *format, int quality)
     QByteArray bytes;
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
-    image.save(&buffer, format, quality);
+    PhotoEdit::withoutMetadata(image).save(&buffer, format, quality);
     return bytes;
 }
 

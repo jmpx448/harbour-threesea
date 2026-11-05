@@ -4,7 +4,8 @@ Status: accepted (2026-11-05).
 
 ## Context
 
-Photos lose EXIF when re-encoded, but a video sent as media went out byte for byte unless scaled,
+Photos lose EXIF when re-encoded (and the text a QImage brings along from a JPEG comment or PNG
+chunk, which Qt would write out again: `PhotoEdit::withoutMetadata`), but a video sent as media went out byte for byte unless scaled,
 with whatever the camera wrote: position, time of recording, device. Scaling exists only in Full
 and needs an H.264 encoder; Lite and "Original size" must be covered too. `mp4mux` also takes tags
 over from `qtdemux`, so a scaled video isn't clean by itself.

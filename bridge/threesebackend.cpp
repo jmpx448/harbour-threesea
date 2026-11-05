@@ -32,6 +32,7 @@
 #include "coreresult.h"
 #include "endofprocess.h"
 #include "filepreparer.h"
+#include "photoedit.h"
 #include "voicerecorder.h"
 #include "secretstore.h"
 
@@ -959,12 +960,13 @@ void ThreeseBackend::sendSquarePicture(const QString &path, QVariantMap request,
     image = image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side)
                 .scaled(512, 512, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                 .convertToFormat(QImage::Format_RGB32);
+    image = PhotoEdit::withoutMetadata(image);
     QByteArray jpeg;
     QBuffer buffer(&jpeg);
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "JPEG", 85);
     // Threema Safe's format (safe-backup.schema.yml): JPEG, q=60, at most 400×400, no metadata
-    // (Qt writes none).
+    // (Qt writes what the image still carries: none, since withoutMetadata above).
     QByteArray safeJpeg;
     if (safeCopy) {
         QBuffer safeBuffer(&safeJpeg);
