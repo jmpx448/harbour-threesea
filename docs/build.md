@@ -66,17 +66,20 @@ What it does (see docs/decisions/0002-rust-toolchain.md): builds the image
 `target/<triple>/release/libthreesea_core.a` with Jolla's cross gcc, then runs `mb2 build` on a
 copy of the tree inside the container and extracts the RPMs.
 
-Harbour check:
+`STORE=1` makes a store's build, without the GitHub update check (ADR 0014). The Jolla Store's
+validator (`scripts/validate-rpm.sh`, for a Lite build with `FLAVOUR_SUFFIX=0`) and the store
+submission: docs/release.md. `scripts/check-package.sh` looks inside built RPMs: the licence
+texts are installed, a phone build (aarch64, armv7hl) has no demo data, and with `--store` no
+update check.
 
-```sh
-docker run --rm -v $PWD/RPMS:/rpms:ro harbour-threesea-sdk:5.1.0.11 \
-  sh -c 'cp /rpms/*.aarch64.rpm ~ && mb2 -t SailfishOS-5.1.0.11-aarch64 check ~/*.rpm'
-```
+`THIRD-PARTY-NOTICES.txt` (installed with `LICENSE`, shown under About) lists every crate the
+core links and their licence texts. After a change to `Cargo.lock`, run
+`python3 -I scripts/make-notices.py`; `scripts/check.sh` fails while it is out of date.
 
 ## Install on a device
 
-Enable developer mode, then `scp RPMS/harbour-threesea-*.aarch64.rpm defaultuser@<phone>:` and
-`devel-su pkcon install-local harbour-threesea-*.rpm` (or `rpm -U`).
+Enable developer mode, then `scp RPMS/full/harbour-threesea-full-*.aarch64.rpm defaultuser@<phone>:`
+and `devel-su pkcon install-local harbour-threesea-full-*.rpm` (or `rpm -U`).
 
 ## Hardening
 

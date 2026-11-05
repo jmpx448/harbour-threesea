@@ -112,3 +112,5 @@ jobs:
       - name: Harbour validation (Lite)
         if: matrix.flavour == 'lite'
         run: scripts/validate-rpm.sh RPMS/lite/harbour-threesea-*-1.${{ matrix.arch }}.rpm
+      - name: Look inside the package
+        run: scripts/check-package.sh RPMS/${{ matrix.flavour }}/harbour-threesea-[0-9]*-1.${{ matrix.arch }}.rpm

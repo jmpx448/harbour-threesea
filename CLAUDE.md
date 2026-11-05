@@ -109,7 +109,8 @@ harbour-threesea/
                             update-libthreema.sh, emulator*.py/sh (UI testing), check.sh (all
                             checks; hooks/pre-commit runs its quick part), check-qml.py (UI
                             against core, imports, texts), test-*.sh (one per tests/ program, all
-                            run by run-sdk-tests.sh)
+                            run by run-sdk-tests.sh), check-package.sh (inside built RPMs: no demo
+                            data, licences), make-notices.py
   .github/                  CI on every push (checks, libthreema's tests, every SDK test, both
                             flavours for all architectures), weekly cargo audit, Dependabot for
                             the actions, releases from the `release` branch (docs/release.md),

@@ -22,7 +22,9 @@ hand. `main` is where work happens; `release` only ever receives merges from `ma
    - runs all of CI's checks and tests again (the same workflow, without its builds); nothing is
      built without them,
    - checks the version again (and that the tag `v<version>` doesn't exist yet),
-   - builds Full and Lite for aarch64, armv7hl and i486,
+   - builds Full and Lite for aarch64, armv7hl and i486, and looks inside each RPM
+     (`scripts/check-package.sh`: the licence texts are there, and no demo data in the aarch64 and
+     armv7hl ones; the i486 builds are for the emulator and carry it on purpose),
    - writes `SHA256SUMS` and a build provenance attestation per RPM,
    - creates the tag `v<version>` on the merged commit and the GitHub release with the 6 RPMs.
 
@@ -57,7 +59,10 @@ Settings → Rules → Rulesets → **New ruleset** → **New branch ruleset**:
      reviewer; with collaborators, 1).
    - **Require status checks to pass** → Add checks: `checks` and the two `sdk-build` jobs
      (`sdk-build (full)`, `sdk-build (lite)`); they can be picked once they have run once.
-     Tick "Require branches to be up to date before merging".
+     Leave "Require branches to be up to date before merging" **off**: every merge makes a
+     merge commit on `release` that `main` doesn't have, so with it on, the next pull request
+     would be blocked until `release` is merged back into `main` ("Update branch"). It adds
+     nothing here: the release workflow runs all checks again on the merged commit.
 5. Create.
 
 For `main`, a second ruleset with only "Restrict deletions" and "Block force pushes" keeps its
@@ -90,14 +95,19 @@ Harbour allows. Jolla's own validator says it is in order
 (`scripts/validate-rpm.sh`, which runs `rpmvalidation` inside the SDK image):
 
 ```sh
-FLAVOUR=lite FLAVOUR_SUFFIX=0 scripts/sdk-build.sh aarch64 armv7hl
+STORE=1 FLAVOUR=lite FLAVOUR_SUFFIX=0 scripts/sdk-build.sh aarch64 armv7hl
 scripts/validate-rpm.sh RPMS/lite/harbour-threesea-<version>-1.aarch64.rpm
+scripts/check-package.sh --store RPMS/lite/harbour-threesea-<version>-1.aarch64.rpm
 ```
 
-`FLAVOUR_SUFFIX=0` keeps the plain file name: the store insists on
-`harbour-threesea-<version>-<release>.<arch>.rpm`, while a release on GitHub carries the
-flavour in the name (`…-lite-…`) so both can sit side by side. CI runs the validator on every
-Lite build, for every push, so a change that would be refused shows up at once.
+`STORE=1` leaves out the GitHub update check (ADR 0014): a store brings its own updates.
+`check-package.sh --store` makes sure of it (no GitHub host in the package, no dialog asking for
+it) and that no demo data is in it. `FLAVOUR_SUFFIX=0` keeps the plain file name: the store
+insists on `harbour-threesea-<version>-<release>.<arch>.rpm`, while a release on GitHub carries
+the flavour in the name (`…-lite-…`) so both can sit side by side. CI builds Lite for all three
+architectures on every push and runs the validator on each, so a change that would be refused
+shows up at once; those are builds for GitHub (with the update check), and the store's build
+above is made and validated by hand.
 
 What the validator checks and passes today (2026-10-30): file name and package name, the
 `.desktop` file, the icons, the installed paths, the libraries linked, the RPATH, sandboxing
