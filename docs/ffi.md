@@ -17,6 +17,7 @@ small and debuggable; secrets inside messages are wiped on both sides after use.
 | `threesea_core_send_data(core, request_json, data, len, thumbnail, len)` | A request with binary attachments (`sendFile`, pictures); never blocks. |
 | `threesea_media_read(core, message, thumbnail, &len)` / `threesea_picture_read(core, name, &len)` | Decrypted media for the UI's image providers (other threads). NULL while the message's private chat is hidden (ADR 0009); of a contact's picture also while "Show profile pictures" is off (their `pictureVersion` is 0 then, too). |
 | `threesea_voice_decode(core, message, &len)` | Opus voice message → 16-bit PCM (no platform decoder); NULL as above. |
+| `threesea_video_size(path, &width, &height)` | A video's picture size as shown, from its index (MP4, QuickTime); false if it can't be told. For deciding whether to scale it (Full). |
 | `threesea_buffer_free(buffer, len)` | Wipes and frees a buffer from the readers above or the key functions. |
 | `threesea_qr_decode(grey, width, height)` | First QR code in a grey image (camera scanning); no core needed. |
 | `threesea_group_call_encrypt` / `_decrypt` / `_vp8_packets` | Group call frame encryption on GStreamer's threads (ADR 0012). |

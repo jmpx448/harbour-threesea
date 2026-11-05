@@ -49,6 +49,10 @@ uint8_t *threesea_voice_decode(const ThreeseaCore *core, int64_t message, size_t
 uint8_t *threesea_picture_read(const ThreeseaCore *core, const char *name, size_t *out_len);
 void threesea_buffer_free(uint8_t *buffer, size_t len);
 
+/* The size of the picture of the video at `path` as a player shows it, from the file's index (MP4 and
+ * QuickTime). False if it can't be told. Any thread, no core needed. */
+bool threesea_video_size(const char *path, uint32_t *width, uint32_t *height);
+
 /* Database key encryption with the app lock passphrase (ADR 0009); scrypt, so slow: call off the
  * GUI thread. Buffers are freed with threesea_buffer_free; NULL on failure (wrong passphrase). */
 uint8_t *threesea_key_wrap(const uint8_t *key, size_t key_len, const char *passphrase, bool keyboard,

@@ -9,6 +9,8 @@
 #include <QPainter>
 #include <QSettings>
 #ifdef THREESEA_FULL
+#include <threesea_core.h>
+
 #include "videotranscoder.h"
 #endif
 
@@ -92,26 +94,23 @@ void FilePreparer::run()
     const QImage videoFrame = m_videoFrame.isNull() ? QImage() : opaquePart(m_videoFrame);
     if (mediaType.startsWith(QLatin1String("video/")) && !videoFrame.isNull()
             && request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")) {
+        // The frame is only the thumbnail, a square whatever the video is: the core takes the
+        // size it announces from the file it sends.
         QString path = m_path;
-        int width = videoFrame.width();
-        int height = videoFrame.height();
 #ifdef THREESEA_FULL
         const int videoSize = QSettings().value(QStringLiteral("videoSize"), 0).toInt();
         const int edge = VideoTranscoder::edgeForSetting(videoSize);
-        if (edge > 0 && !m_scratchPath.isEmpty() && qMax(width, height) > edge
+        uint32_t width = 0;
+        uint32_t height = 0;
+        // An unknown size may well be too large: then scaling is tried, and it says if it can't.
+        const bool sizeKnown = threesea_video_size(m_path.toUtf8().constData(), &width, &height);
+        if (edge > 0 && !m_scratchPath.isEmpty() && (!sizeKnown || qMax(width, height) > static_cast<uint32_t>(edge))
                 && VideoTranscoder::scaleDown(m_path, videoSize, m_scratchPath)) {
             path = m_scratchPath;
-            const qreal factor = qreal(edge) / qMax(width, height);
-            // Even numbers: encoders work on pairs of lines.
-            width = 2 * qRound(width * factor / 2);
-            height = 2 * qRound(height * factor / 2);
             request.insert(QStringLiteral("mediaType"), QStringLiteral("video/mp4"));
-            request.insert(QStringLiteral("name"), info.completeBaseName() + QStringLiteral(".mp4"));
         }
 #endif
         request.insert(QStringLiteral("path"), path);
-        request.insert(QStringLiteral("width"), width);
-        request.insert(QStringLiteral("height"), height);
         const QImage frame = limited(videoFrame, ThumbnailSide).convertToFormat(QImage::Format_RGB32);
         emit prepared(request, QByteArray(), encode(frame, "JPEG", 80), QString());
         return;
@@ -158,10 +157,6 @@ void FilePreparer::run()
     const QByteArray data = transparent ? encode(image, "PNG", -1) : encode(image, "JPEG", 85);
     request.insert(QStringLiteral("mediaType"),
                    transparent ? QStringLiteral("image/png") : QStringLiteral("image/jpeg"));
-    if (!transparent) {
-        QString name = info.completeBaseName() + QStringLiteral(".jpg");
-        request.insert(QStringLiteral("name"), name);
-    }
     request.insert(QStringLiteral("width"), image.width());
     request.insert(QStringLiteral("height"), image.height());
 

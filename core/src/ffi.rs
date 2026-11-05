@@ -213,6 +213,37 @@ pub unsafe extern "C" fn threesea_picture_read(
     }
 }
 
+/// The size of the picture of the video at `path` as a player shows it, read from the file's index
+/// (MP4 and QuickTime). False if it can't be told. Any thread, no core needed.
+///
+/// # Safety
+/// `path` a valid C string, `width` and `height` valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn threesea_video_size(
+    path: *const c_char,
+    width: *mut u32,
+    height: *mut u32,
+) -> bool {
+    if path.is_null() || width.is_null() || height.is_null() {
+        return false;
+    }
+    // SAFETY: caller contract.
+    let Ok(path) = unsafe { CStr::from_ptr(path) }.to_str() else {
+        return false;
+    };
+    let Some((found_width, found_height)) =
+        crate::mp4::video_size_of_file(std::path::Path::new(path))
+    else {
+        return false;
+    };
+    // SAFETY: caller contract.
+    unsafe {
+        *width = found_width;
+        *height = found_height;
+    }
+    true
+}
+
 /// Decode a message's Ogg Opus voice message to 16-bit mono PCM at 48 kHz (little endian), for
 /// playing without a platform player. Thread-safe; NULL if not on the device or not Opus. Free
 /// with `threesea_buffer_free`.

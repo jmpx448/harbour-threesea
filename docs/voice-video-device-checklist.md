@@ -69,7 +69,16 @@ Settings → Media & storage → Video size: "Small (480 px)".
    - Expect: the same, and no leftover files: `ls ~/.cache/org.threesea/harbour-threesea/capture`
      is empty after sending.
 3. Set it back to "Original size" and send once more.
-   - Expect: the file goes out as it is (same size as in the Gallery).
+   - Expect: the same size as in the Gallery (the video itself isn't re-encoded; its metadata goes).
+4. A video already smaller than the setting (a short clip at 480 px or less) with "Small (480 px)".
+   - Expect: not re-encoded (no `video scaled down` line in the log).
+5. Have the recipient look at these, on Android or another Threesea.
+   - Expect: the bubble keeps the video's proportions (16:9 stays 16:9, also filmed upright) and
+     it plays with sound. If a video refuses to play as media but plays when sent as a file,
+     please keep it: then the core removed too much for that player.
+6. A video with a position in it (the camera with location on; `exiftool` or a media info app shows
+   `GPS`), sent as media and saved by the recipient.
+   - Expect: no position, no phone model and no recording time in the recipient's copy.
 
 ## F. Chat background and text size
 

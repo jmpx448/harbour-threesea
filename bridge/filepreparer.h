@@ -11,9 +11,9 @@
 
 // Prepares a picked file for sending, on a worker thread: photos are re-encoded (at most
 // 2048 px, JPEG; PNG if they have transparency) which also drops their EXIF data (GPS!), and get
-// a 512 px JPEG thumbnail. Videos are scaled down where the setting asks for it and the phone
-// can do it (Full flavour, VideoTranscoder). Other files are only described (the core reads
-// them itself).
+// a 512 px JPEG thumbnail. Videos larger than the setting asks for are scaled down where the
+// phone can do it (Full flavour, VideoTranscoder); the core drops their metadata when it reads
+// them. Other files are only described (the core reads them itself).
 class FilePreparer : public QObject, public QRunnable
 {
     Q_OBJECT
@@ -26,7 +26,8 @@ public:
     void run() override;
 
 signals:
-    // `request` completed with mediaType, name, rendering, width, height (and path for files);
+    // `request` completed with mediaType, name, rendering, width and height for pictures (and
+    // path for files);
     // `data` empty for files the core reads from `path`. `error` non-empty on failure.
     void prepared(const QVariantMap &request, const QByteArray &data, const QByteArray &thumbnail,
                   const QString &error);
