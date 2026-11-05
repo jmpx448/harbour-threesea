@@ -19,6 +19,15 @@ pub(crate) const MIGRATION: &str = "
         nonce BLOB PRIMARY KEY NOT NULL
     ) WITHOUT ROWID;";
 
+/// Schema: reflected incoming messages whose sender this device has no contact for yet. Their
+/// envelope is acknowledged and counts as seen, so this is all that is left of them.
+pub(crate) const MIGRATION_REFLECTED_WAITING: &str = "
+    CREATE TABLE reflected_waiting (
+        id       INTEGER PRIMARY KEY,
+        sender   TEXT NOT NULL,
+        message  BLOB NOT NULL
+    );";
+
 /// Schema (store migration 23): sync envelopes waiting for the mediator (changed while offline or
 /// before the reflection went through); removed once committed.
 pub(crate) const MIGRATION_SYNC_QUEUE: &str = "
@@ -178,6 +187,30 @@ impl Store {
     /// Multi-device off: nothing left to reflect.
     pub fn clear_sync_queue(&self) -> Result<(), StoreError> {
         self.conn.execute("DELETE FROM d2d_sync_queue", [])?;
+        Ok(())
+    }
+
+    /// Keep a reflected incoming message until `sender` has a contact.
+    pub fn keep_reflected(&self, sender: &str, message: &[u8]) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO reflected_waiting (sender, message) VALUES (?1, ?2)",
+            rusqlite::params![sender, message],
+        )?;
+        Ok(())
+    }
+
+    /// What is kept, oldest first: (id, sender, message).
+    pub fn reflected_waiting(&self) -> Result<Vec<(i64, String, Vec<u8>)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, sender, message FROM reflected_waiting ORDER BY id")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn reflected_done(&self, id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM reflected_waiting WHERE id = ?1", [id])?;
         Ok(())
     }
 

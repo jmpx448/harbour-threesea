@@ -196,30 +196,86 @@ fn note_seen(store: &Store, envelope_nonce: &[u8], csp: &[Vec<u8>]) -> Result<()
     store.add_nonces(&csp)
 }
 
-/// The sender of a reflected message that needs one to be stored at all, if this device has no
-/// contact for them: the other device has one, and no contact sync will come for it here. The
-/// same messages as on a device that leads: those that make a direct contact, and group messages,
-/// which may be from a member whose lookup is still open. What is left is of no use without a chat
-/// to show it in.
-pub fn sender_to_look_up(
+/// Whether a reflected message from someone this device has no contact for is worth keeping until
+/// it has one: what makes them a direct contact on a device that leads, and what is said in a group
+/// we have, by a member whose lookup is still open. What is left is of no use without a chat to
+/// show it in, and someone on the block list doesn't become a contact by trying (ADR 0019).
+fn waits_for_sender(
     store: &Store,
-    envelope: &d2d::Envelope,
-) -> Result<Option<String>, StoreError> {
-    let Some(envelope::Content::IncomingMessage(message)) = &envelope.content else {
-        return Ok(None);
+    sender: ThreemaId,
+    body: &IncomingMessageBody,
+) -> Result<bool, StoreError> {
+    let wanted = match body {
+        IncomingMessageBody::Contact(_) => body.requires_direct_contact(),
+        IncomingMessageBody::Group(group) => {
+            let control = group.body.uses_creator_container()
+                || matches!(
+                    group.body,
+                    GroupMessageBody::Leave(_)
+                        | GroupMessageBody::SyncRequest(_)
+                        | GroupMessageBody::CallStart(_)
+                );
+            !control
+                && store
+                    .group(&crate::groups::key(&group.group_identity))?
+                    .is_some()
+        }
     };
-    let Ok(sender) = message.sender_identity.parse::<ThreemaId>() else {
-        return Ok(None);
-    };
-    let Ok(body) = IncomingMessageBody::decode_reflected(sender, message.r#type, &message.body)
-    else {
-        return Ok(None);
-    };
-    let wanted = body.requires_direct_contact() || matches!(body, IncomingMessageBody::Group(_));
-    if !wanted || store.contact(sender.as_str())?.is_some() {
-        return Ok(None);
+    Ok(wanted && !store.is_explicitly_blocked(sender.as_str())?)
+}
+
+/// Apply what has waited for a sender who has a contact by now ([`waits_for_sender`]), each in a
+/// store step of its own. Who the directory has said doesn't exist or who has been blocked since
+/// takes it with them; for the rest the lookup stays owed.
+pub fn apply_waiting(store: &Rc<Store>, events: &EventSink) -> Result<(), StoreError> {
+    let waiting = store.reflected_waiting()?;
+    if waiting.is_empty() {
+        return Ok(());
     }
-    Ok(Some(sender.to_string()))
+    let Some(user) = store
+        .identity()?
+        .and_then(|identity| identity.threema_id.parse::<ThreemaId>().ok())
+    else {
+        return Ok(());
+    };
+    let mut owed = Vec::new();
+    for (id, sender, message) in waiting {
+        if store.contact(&sender)?.is_none() {
+            if store.recently_invalid(&sender) || store.is_explicitly_blocked(&sender)? {
+                tracing::warn!("a reflected message's sender can't get a contact, message dropped");
+                store.reflected_done(id)?;
+            } else {
+                owed.push(sender);
+            }
+            continue;
+        }
+        let announced = events.borrow().len();
+        let content = d2d::IncomingMessage::decode(message.as_slice())
+            .map(envelope::Content::IncomingMessage)
+            .map_err(|error| ReflectedError::Decode(error.to_string()));
+        let step = store.step()?;
+        let applied = content
+            .and_then(|content| {
+                let envelope = d2d::Envelope {
+                    content: Some(content),
+                    ..Default::default()
+                };
+                apply(store, user, envelope, events)
+            })
+            .and_then(|()| {
+                store.reflected_done(id)?;
+                Ok(step.commit()?)
+            });
+        if let Err(error) = applied {
+            events.borrow_mut().truncate(announced);
+            tracing::warn!(%error, "a reflected message that waited for its sender failed");
+            // Comes again if the store failed; otherwise it won't do any better next time.
+            if error.storage_code().is_none() {
+                store.reflected_done(id)?;
+            }
+        }
+    }
+    store.owe_member_lookups(&owed)
 }
 
 /// Apply an opened envelope and note its nonces, in one store step. An envelope this can't use
@@ -285,9 +341,18 @@ pub fn apply(
                 .map_err(|_| ReflectedError::Decode("sender identity".into()))?;
             let body = IncomingMessageBody::decode_reflected(sender, message.r#type, &message.body)
                 .map_err(ReflectedError::Decode)?;
-            // `sender_to_look_up` has been there: the directory doesn't know them.
+            // Nothing else brings it here and the mediator's queue must go on: it stays here, for
+            // as long as the directory takes (`apply_waiting`).
             let Some(mut contact) = store.contact(sender.as_str())? else {
-                tracing::warn!("reflected incoming message from an unknown contact skipped");
+                if waits_for_sender(store, sender, &body)? {
+                    store.keep_reflected(sender.as_str(), &message.encode_to_vec())?;
+                    store.owe_member_lookups(&[sender.to_string()])?;
+                    events
+                        .borrow_mut()
+                        .push(CoreEvent::UnknownMembers(vec![sender.to_string()]));
+                } else {
+                    tracing::warn!("reflected incoming message from an unknown contact skipped");
+                }
                 return Ok(());
             };
             // Not stored. Whether it is still news is for the connection to say
@@ -1085,38 +1150,6 @@ mod tests {
         assert!(events.borrow().is_empty());
     }
 
-    /// Who is looked up before a reflected message is applied.
-    #[test]
-    fn only_the_unknown_sender_of_a_message_to_keep_is_looked_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
-        store
-            .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
-            .unwrap();
-        let wanted = |envelope: &d2d::Envelope| sender_to_look_up(&store, envelope).unwrap();
-        assert_eq!(
-            wanted(&reflected_incoming("C0C0C0C0", 1, Vec::new(), text_body())).as_deref(),
-            Some("C0C0C0C0")
-        );
-        assert_eq!(
-            wanted(&reflected_incoming("B0B0B0B0", 2, Vec::new(), text_body())),
-            None
-        );
-        assert_eq!(
-            wanted(&reflected_incoming(
-                "C0C0C0C0",
-                3,
-                Vec::new(),
-                typing_body()
-            )),
-            None
-        );
-        assert_eq!(
-            wanted(&reflected_outgoing("C0C0C0C0", 4, text_body())),
-            None
-        );
-    }
-
     /// A removal of our picture sent from another device needn't be repeated from here.
     #[test]
     fn a_picture_removal_from_another_device_is_not_repeated() {
@@ -1267,5 +1300,190 @@ mod tests {
                 .acquaintance_level,
             AcquaintanceLevel::GroupOrDeleted
         );
+    }
+
+    fn stranger_text(message_id: u64, nonce: Vec<u8>) -> d2d::Envelope {
+        reflected_incoming("C0C0C0C0", message_id, nonce, text_body())
+    }
+
+    fn stranger() -> libthreema::model::contact::Contact {
+        crate::contacts::test_contact("C0C0C0C0")
+    }
+
+    /// A message from someone this device doesn't know yet: acknowledged and kept, and there once
+    /// they have a contact, however long the directory takes, as a direct one like on the leader.
+    #[test]
+    fn a_reflected_message_waits_for_its_sender_and_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        let events: EventSink = Rc::default();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &events);
+        assert!(store.has_nonce(&[1; 24]).unwrap());
+        assert_eq!(store.reflected_waiting().unwrap().len(), 1);
+        assert_eq!(store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            CoreEvent::UnknownMembers(identities) if identities.as_slice() == ["C0C0C0C0"]
+        )));
+
+        // No contact yet: it stays, and a lookup no longer noted as owed is owed again.
+        store.member_lookups_answered(&["C0C0C0C0"]).unwrap();
+        apply_waiting(&store, &events).unwrap();
+        assert_eq!(store.reflected_waiting().unwrap().len(), 1);
+        assert_eq!(store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
+
+        let mut contact = stranger();
+        contact.acquaintance_level = AcquaintanceLevel::GroupOrDeleted;
+        store.upsert_contact(&contact).unwrap();
+        let events: EventSink = Rc::default();
+        apply_waiting(&store, &events).unwrap();
+        assert!(store.reflected_waiting().unwrap().is_empty());
+        let stored = store.conversation_messages("C0C0C0C0", 5).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].body, "hi");
+        assert_eq!(
+            store
+                .contact("C0C0C0C0")
+                .unwrap()
+                .unwrap()
+                .acquaintance_level,
+            AcquaintanceLevel::Direct
+        );
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+        );
+    }
+
+    /// Nothing waits for an ID the directory says doesn't exist.
+    #[test]
+    fn a_reflected_message_from_an_invalid_id_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        let events: EventSink = Rc::default();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &events);
+        store.note_invalid_ids(&["C0C0C0C0".to_owned()]);
+        apply_waiting(&store, &events).unwrap();
+        assert!(store.reflected_waiting().unwrap().is_empty());
+    }
+
+    /// A store failure while applying what waited leaves it waiting, with nothing announced.
+    #[test]
+    fn a_waiting_message_the_store_failed_on_waits_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: zeroize::Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &Rc::default());
+        store.upsert_contact(&stranger()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE DELETE ON reflected_waiting
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let events: EventSink = Rc::default();
+        apply_waiting(&store, &events).unwrap();
+        assert_eq!(store.reflected_waiting().unwrap().len(), 1);
+        assert!(events.borrow().is_empty());
+        assert!(
+            store
+                .conversation_messages("C0C0C0C0", 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A stranger on the block list doesn't become a contact by trying (ADR 0019): no lookup.
+    #[test]
+    fn a_blocked_stranger_is_not_looked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        block(&store, "C0C0C0C0");
+        let events: EventSink = Rc::default();
+        apply_sealed(&store, &stranger_text(1, vec![1; 24]), &events);
+        assert!(store.reflected_waiting().unwrap().is_empty());
+        assert!(store.owed_member_lookups().unwrap().is_empty());
+        assert!(events.borrow().is_empty());
+        assert!(store.has_nonce(&[1; 24]).unwrap());
+    }
+
+    /// What is kept: what makes a contact and what is said in a group we have. Not typing, group
+    /// control, or a group we don't have.
+    #[test]
+    fn only_what_needs_its_sender_waits() {
+        use libthreema::model::message::{GroupLeaveMessage, TextMessage};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let waiting = |envelope: d2d::Envelope| {
+            let before = store.reflected_waiting().unwrap().len();
+            apply(&store, user, envelope, &Rc::default()).unwrap();
+            store.reflected_waiting().unwrap().len() > before
+        };
+        let identity = |group_id| libthreema::common::GroupIdentity {
+            group_id,
+            creator_identity: "B0B0B0B0".parse().unwrap(),
+        };
+        store
+            .upsert_group(&crate::groups::Group {
+                key: crate::groups::key(&identity(9)),
+                identity: identity(9),
+                name: "Lunch".into(),
+                members: vec!["ABCD1234".into()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let text = || GroupMessageBody::Text(TextMessage { text: "hi".into() });
+        assert!(!waiting(reflected_incoming(
+            "C0C0C0C0",
+            1,
+            Vec::new(),
+            typing_body()
+        )));
+        assert!(!waiting(reflected_group_incoming(
+            "C0C0C0C0",
+            2,
+            identity(9),
+            GroupMessageBody::Leave(GroupLeaveMessage),
+        )));
+        assert!(!waiting(reflected_group_incoming(
+            "C0C0C0C0",
+            3,
+            identity(8),
+            text()
+        )));
+        assert!(waiting(reflected_group_incoming(
+            "C0C0C0C0",
+            4,
+            identity(9),
+            text()
+        )));
+        assert!(waiting(stranger_text(5, Vec::new())));
     }
 }

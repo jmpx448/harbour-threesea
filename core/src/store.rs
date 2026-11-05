@@ -219,6 +219,8 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_LOOKUP_INDEXES,
     // 44: the start's clean-up of file messages without reading all messages
     crate::messages::MIGRATION_FILE_MESSAGES,
+    // 45: reflected incoming messages waiting for their sender's contact
+    crate::multidevice::MIGRATION_REFLECTED_WAITING,
 ];
 
 /// Setting keys.

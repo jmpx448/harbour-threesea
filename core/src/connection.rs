@@ -105,6 +105,9 @@ const FS_MASK_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const FS_MASK_INIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// The lookup holds up the incoming messages, like looking up an unknown sender.
 const FS_MASK_LOOKUP_LIMIT: Duration = Duration::from_secs(10);
+/// How long a member's or a reflected message sender's lookup may hold up the connection: what it
+/// is for stays noted and is tried again later.
+const MEMBER_LOOKUP_LIMIT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// The whole way into the mediator: lookup, addresses in turn (`dial`), TLS and its login. An
 /// IPv6 address that takes all its 3 s still leaves IPv4 its own 15 s.
@@ -582,10 +585,6 @@ impl StorageFailing {
 /// a way that says trying again won't help ([`ConnectionError::fails_every_time`]). It would hold
 /// up all that comes after it, for good: one bug of ours must not stop someone's whole inbox.
 const TRIES_BEFORE_DROPPING: u32 = 3;
-/// A reflected message whose sender can't be looked up is given up on after this many logins: it
-/// is only held up by the directory, but it holds up the mediator's queue, and with it the promotion
-/// to leader.
-const REFLECTED_LOOKUP_TRIES: u32 = 10;
 /// More than this many failing at once isn't one bad message; start counting over.
 const FAILING_ITEMS_MAX: usize = 64;
 
@@ -1650,6 +1649,7 @@ impl<'a> Session<'a> {
             self.handle_d2m(payload).await?;
         }
         self.resume_carried_events().await?;
+        self.apply_waiting_reflected().await?;
         self.terminate_fs_if_pending().await?;
         self.reflect_queued_syncs().await?;
         self.send_pending().await?;
@@ -3408,10 +3408,12 @@ impl<'a> Session<'a> {
         let device_group_key = self.device_group_key()?;
         let store = Rc::clone(&self.setup.store);
         let opened = crate::reflected::open(&store, &device_group_key, &reflected.envelope);
-        if let Ok(opened) = &opened {
-            self.look_up_reflected_sender(&opened.envelope, &reflected.envelope)
-                .await?;
-        }
+        let brings_contact = opened.as_ref().is_ok_and(|opened| {
+            matches!(
+                opened.envelope.content,
+                Some(libthreema::protobuf::d2d::envelope::Content::ContactSync(_))
+            )
+        });
         let applied = opened.and_then(|opened| {
             // log-ok: the kind of content, not the content
             tracing::info!(
@@ -3471,6 +3473,10 @@ impl<'a> Session<'a> {
         self.setup
             .failing_items
             .forget(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
+        if brings_contact && let Err(error) = crate::reflected::apply_waiting(&store, &self.events)
+        {
+            tracing::warn!(%error, "applying reflected messages that waited failed");
+        }
         // The mediator hands out old typing indicators again at login (see below): not news.
         if self.reflection_backlog {
             self.events
@@ -3505,62 +3511,12 @@ impl<'a> Session<'a> {
         self.after_incoming().await
     }
 
-    /// A reflected message from someone this device has no contact for (the other device has):
-    /// find them before it is applied. As long as the lookup fails the envelope stays
-    /// unacknowledged, as nothing else brings it here, but only for so long: it holds up the
-    /// mediator's queue. Someone the directory doesn't know leaves it to [`crate::reflected::apply`].
-    async fn look_up_reflected_sender(
-        &mut self,
-        envelope: &libthreema::protobuf::d2d::Envelope,
-        sealed: &[u8],
-    ) -> Result<(), ConnectionError> {
-        let store = Rc::clone(&self.setup.store);
-        let Some(sender) =
-            crate::reflected::sender_to_look_up(&store, envelope).map_err(storage_error)?
-        else {
-            return Ok(());
-        };
-        let resolved = if store.directory_resting() {
-            None
-        } else {
-            crate::app_groups::resolve_members(
-                &self.setup.https,
-                &self.setup.config,
-                &store,
-                core::slice::from_ref(&sender),
-            )
-            .await
-        };
-        let Some(resolved) = resolved else {
-            let failures = self
-                .setup
-                .failing_items
-                .failed(&FailingItem::Envelope(envelope_nonce(sealed)));
-            if failures < REFLECTED_LOOKUP_TRIES {
-                tracing::warn!(failures, "looking up a reflected message's sender failed");
-                return Err(ConnectionError::Timeout);
-            }
-            tracing::error!(
-                failures,
-                "a reflected message's sender can't be looked up, the message is dropped"
-            );
-            return Ok(());
-        };
-        let mut events = self.events.borrow_mut();
-        if resolved.synced {
-            events.push(CoreEvent::SyncQueued);
+    /// Apply the reflected messages that waited for a contact, now that one may be there.
+    async fn apply_waiting_reflected(&mut self) -> Result<(), ConnectionError> {
+        if let Err(error) = crate::reflected::apply_waiting(&self.setup.store, &self.events) {
+            tracing::warn!(%error, "applying reflected messages that waited failed");
         }
-        if resolved.groups_changed {
-            events.push(CoreEvent::GroupsChanged);
-        }
-        events.push(CoreEvent::ContactsChanged);
-        events.extend(
-            resolved
-                .lines
-                .into_iter()
-                .map(|message| CoreEvent::MessageAdded { message }),
-        );
-        Ok(())
+        Box::pin(self.after_incoming()).await
     }
 
     /// Notify the held messages that are due (all of them when `all`) and still unread.
@@ -4310,14 +4266,13 @@ impl<'a> Session<'a> {
         if self.setup.store.directory_resting() {
             return Ok(());
         }
-        let Some(resolved) = crate::app_groups::resolve_members(
+        let lookup = crate::app_groups::resolve_members(
             &self.setup.https,
             &self.setup.config,
             &self.setup.store,
             identities,
-        )
-        .await
-        else {
+        );
+        let Ok(Some(resolved)) = tokio::time::timeout(MEMBER_LOOKUP_LIMIT, lookup).await else {
             return Ok(());
         };
         if resolved.synced {
@@ -4330,6 +4285,7 @@ impl<'a> Session<'a> {
         for message in resolved.lines {
             self.emit(CoreEvent::MessageAdded { message });
         }
+        self.apply_waiting_reflected().await?;
         self.send_pending().await
     }
 
@@ -6707,10 +6663,11 @@ mod sync_order_tests {
         assert!(typing_shows(&mut session, false).await);
     }
 
-    /// A message from someone this device doesn't know waits for the directory, not for ever. No
-    /// network here: the directory is resting.
+    /// A rest of the directory takes nothing away and holds up nothing: the message from someone
+    /// unknown is taken from the mediator (the acknowledgement is what fails on this socket), the
+    /// lookup asks for nothing and stays owed, and the next envelope gets its turn.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_reflected_message_waits_for_its_senders_lookup_for_a_while() {
+    async fn a_resting_directory_holds_up_no_reflection_and_loses_no_message() {
         use libthreema::{
             csp_e2e::message::task::outgoing::encode_message_body,
             model::message::{OutgoingContactMessageBody, OutgoingMessageBody, TextMessage},
@@ -6743,23 +6700,27 @@ mod sync_order_tests {
         let (nonce, data) = key
             .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
             .unwrap();
-        let reflected = || libthreema::d2m::payload::Reflected {
-            reflect_id: 1,
-            flags: D2mReflectFlags(0),
-            timestamp: 1,
-            envelope: data.clone(),
-        };
-        for _ in 1..REFLECTED_LOOKUP_TRIES {
-            let error = session.handle_reflected(reflected()).await.unwrap_err();
-            assert!(matches!(error, ConnectionError::Timeout), "{error}");
-            assert!(!setup.store.has_d2d_nonce(&nonce).unwrap());
-            assert!(!setup.store.has_nonce(&[8; 24]).unwrap());
-        }
-        // Given up on: what it told counts as seen; the acknowledgement fails on this socket.
-        let error = session.handle_reflected(reflected()).await.unwrap_err();
+        let error = session
+            .handle_reflected(libthreema::d2m::payload::Reflected {
+                reflect_id: 1,
+                flags: D2mReflectFlags(0),
+                timestamp: 1,
+                envelope: data,
+            })
+            .await
+            .unwrap_err();
         assert!(!matches!(error, ConnectionError::Timeout), "{error}");
         assert!(setup.store.has_d2d_nonce(&nonce).unwrap());
         assert!(setup.store.has_nonce(&[8; 24]).unwrap());
+        assert_eq!(setup.store.reflected_waiting().unwrap().len(), 1);
+
+        session
+            .resolve_members(&["C0C0C0C0".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(setup.store.reflected_waiting().unwrap().len(), 1);
+        assert_eq!(setup.store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
+        assert!(setup.store.contact("C0C0C0C0").unwrap().is_none());
     }
 
     /// Receipts and our picture reach the other devices like every other message: on this socket

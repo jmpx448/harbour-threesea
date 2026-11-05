@@ -1031,6 +1031,7 @@ mod tests {
                      DROP INDEX messages_position; DROP TRIGGER messages_sort_key;
                      ALTER TABLE messages DROP COLUMN sort_key;
                      DROP TABLE android_import_ids;
+                     DROP TABLE reflected_waiting;
                      INSERT INTO settings (key, value) VALUES ('pictureRequested:00000BOB', '1000');
                      PRAGMA user_version = 26;",
                 )

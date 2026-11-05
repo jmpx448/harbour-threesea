@@ -3041,6 +3041,7 @@ mod tests {
                      DROP TABLE group_picture_sends;
                      ALTER TABLE groups DROP COLUMN picture_pending;
                      ALTER TABLE messages DROP COLUMN no_receipts;
+                     DROP TABLE reflected_waiting;
                      PRAGMA user_version = 35;",
                 )
                 .unwrap();
