@@ -16,9 +16,15 @@ Page {
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "updateChecked") backend.call("updateSettings", {}, function(ok, result) {
+            if (name !== "updateChecked") return
+            backend.call("updateSettings", {}, function(ok, result) {
                 if (ok) page.updates = result
             })
+            // The pulley's own check, not the daily one; nothing on the page changes on a failure.
+            if (data.manual && !data.ok) {
+                //% "Could not check for updates. Try again later."
+                Notices.show(qsTrId("threesea-la-update-check-failed"), Notice.Long, Notice.Center)
+            }
         }
     }
 

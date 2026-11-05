@@ -47,32 +47,28 @@ impl App {
     /// Start a check for a newer release if the user agreed and the last attempt is a day old
     /// (or `manual`, "Check for updates now"). The request runs as a task of its own, so the
     /// core goes on with everything else meanwhile (deep audit P01); its result arrives as
-    /// events: `updateChecked` always, `updateAvailable` once per new version. Returns whether
-    /// a check was started.
+    /// events: `updateChecked {ok, manual}` always, `updateAvailable` once per new version.
+    /// Returns whether a check was started. A manual one asked for during a check adopts it: the
+    /// user is waiting for its answer now, whichever started it.
     pub(crate) fn start_update_check(&mut self, manual: bool) -> bool {
+        if manual && self.update_check_running.get() {
+            self.update_check_manual.set(true);
+        }
         if !self.begin_update_check(manual) {
             return false;
         }
         let store = std::rc::Rc::clone(&self.store);
         let events = self.media_events.clone();
         let running = std::rc::Rc::clone(&self.update_check_running);
+        let asked = std::rc::Rc::clone(&self.update_check_manual);
         running.set(true);
+        asked.set(manual);
         tokio::task::spawn_local(async move {
             let result = updates::latest().await;
             running.set(false);
-            let available = match result {
-                Ok(release) => record_release(&store, release),
-                Err(error) => {
-                    tracing::info!(%error, "update check failed");
-                    None
-                }
-            };
-            if let Some(event) = available {
+            for event in finish_update_check(&store, result, asked.take()) {
                 let _ = events.send(crate::providers::CoreEvent::Call(event));
             }
-            let _ = events.send(crate::providers::CoreEvent::Call(
-                json!({ "event": "updateChecked" }),
-            ));
         });
         true
     }
@@ -109,6 +105,29 @@ impl App {
             .set_setting(keys::UPDATE_ATTEMPTED_AT, &now.to_string());
         true
     }
+}
+
+/// What a finished check tells the UI, in order. A failure changes no setting, so the event is
+/// the only sign of it; `manual` tells the check the user asked for from the daily one.
+fn finish_update_check(
+    store: &crate::store::Store,
+    result: Result<Option<updates::Release>, String>,
+    manual: bool,
+) -> Vec<Value> {
+    let ok = result.is_ok();
+    let available = match result {
+        Ok(release) => record_release(store, release),
+        Err(error) => {
+            tracing::info!(%error, "update check failed");
+            None
+        }
+    };
+    available
+        .into_iter()
+        .chain(std::iter::once(
+            json!({ "event": "updateChecked", "ok": ok, "manual": manual }),
+        ))
+        .collect()
 }
 
 /// A successful answer: remembered (`checkedAt`, the newest release); the `updateAvailable`
@@ -167,6 +186,51 @@ mod tests {
         )
         .unwrap();
         (dir, app)
+    }
+
+    /// The check the user asked for says whether it worked, or a failure would leave no trace.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_finished_check_says_how_it_went() {
+        let (_dir, app) = new_app(true);
+        let failed = finish_update_check(&app.store, Err("no route".into()), true);
+        assert_eq!(
+            failed,
+            [json!({ "event": "updateChecked", "ok": false, "manual": true })]
+        );
+        assert!(
+            app.update_settings_json().unwrap()["checkedAt"].is_null(),
+            "a failure doesn't count as checked"
+        );
+        let daily = finish_update_check(&app.store, Err("no route".into()), false);
+        assert_eq!(daily[0]["manual"], false);
+
+        let none_yet = finish_update_check(&app.store, Ok(None), true);
+        assert_eq!(
+            none_yet,
+            [json!({ "event": "updateChecked", "ok": true, "manual": true })]
+        );
+        assert!(app.update_settings_json().unwrap()["checkedAt"].is_i64());
+
+        let newer = updates::Release {
+            version: "999.0.0".into(),
+            url: "https://example.org/release".into(),
+        };
+        let found = finish_update_check(&app.store, Ok(Some(newer)), false);
+        assert_eq!(found[0]["event"], "updateAvailable");
+        assert_eq!(found[1]["event"], "updateChecked");
+        assert_eq!(found[1]["ok"], true);
+    }
+
+    /// "Check now" during the daily check starts nothing, but its failure is the user's to hear.
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_now_adopts_a_running_check() {
+        let (_dir, mut app) = new_app(true);
+        app.store.set_setting(keys::UPDATE_CHECK, "1").unwrap();
+        app.update_check_running.set(true);
+        assert!(!app.start_update_check(false), "one at a time");
+        assert!(!app.update_check_manual.get(), "the daily tick asks nobody");
+        assert!(!app.start_update_check(true), "one at a time");
+        assert!(app.update_check_manual.get());
     }
 
     /// Nothing is asked before the user agreed, nor in a build without the check; a stored

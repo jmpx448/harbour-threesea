@@ -1375,6 +1375,8 @@ pub struct App {
     /// The build may check for updates (ADR 0014); a check is under way.
     pub(crate) update_check_built: bool,
     pub(crate) update_check_running: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The user asked for the running check, by starting it or while it ran.
+    pub(crate) update_check_manual: std::rc::Rc<std::cell::Cell<bool>>,
     pub(crate) calls: crate::calls::Calls,
     pub(crate) call_patcher: Option<crate::sdp::SdpPatcher>,
     pub(crate) call_media: crate::app_calls::CallMedia,
@@ -1473,6 +1475,7 @@ impl App {
             calls_supported: start.calls,
             update_check_built: start.update_check,
             update_check_running: std::rc::Rc::default(),
+            update_check_manual: std::rc::Rc::default(),
             calls: crate::calls::Calls::default(),
             call_patcher: None,
             call_media: crate::app_calls::CallMedia::default(),
