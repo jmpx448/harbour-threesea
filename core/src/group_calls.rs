@@ -406,12 +406,12 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    pub fn remove_group_call(&self, call_id: &[u8; 32]) -> Result<(), StoreError> {
-        self.conn.execute(
+    /// Whether it was still there: refreshes run side by side, and only one of them removes it.
+    pub fn remove_group_call(&self, call_id: &[u8; 32]) -> Result<bool, StoreError> {
+        Ok(self.conn.execute(
             "DELETE FROM group_calls WHERE call_id = ?1",
             params![call_id.as_slice()],
-        )?;
-        Ok(())
+        )? > 0)
     }
 
     /// A peek failed (`false`) or worked again (`true`).
@@ -504,7 +504,11 @@ mod tests {
             store.groups_with_calls().unwrap(),
             vec![call.conversation.clone()]
         );
-        store.remove_group_call(&call.call_id).unwrap();
+        assert!(store.remove_group_call(&call.call_id).unwrap());
+        assert!(
+            !store.remove_group_call(&call.call_id).unwrap(),
+            "a second refresh has nothing to say"
+        );
         assert!(store.group_calls(&call.conversation).unwrap().is_empty());
     }
 

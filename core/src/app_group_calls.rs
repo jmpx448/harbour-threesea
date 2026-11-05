@@ -295,8 +295,7 @@ impl Context {
                     }
                 }
                 Ok(Peek::NotRunning) => {
-                    let _ = self.store.remove_group_call(&call.call_id);
-                    ended = true;
+                    ended |= self.store.remove_group_call(&call.call_id).unwrap_or(false);
                 }
                 Ok(Peek::Unauthorized) | Err(_) => {
                     if let Err(error) = &result {
@@ -305,8 +304,7 @@ impl Context {
                     let _ = self.store.set_group_call_reachable(&call.call_id, false);
                     let stale = crate::messages::now_ms() - call.received_at > STALE_AFTER_MS;
                     if call.failed + 1 >= 3 && stale {
-                        let _ = self.store.remove_group_call(&call.call_id);
-                        ended = true;
+                        ended |= self.store.remove_group_call(&call.call_id).unwrap_or(false);
                     }
                 }
             }
