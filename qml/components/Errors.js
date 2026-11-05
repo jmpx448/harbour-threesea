@@ -114,6 +114,10 @@ function text(kind, message) {
         // Where nobody can be asked: the chat was left, or a message is forwarded.
         //% "A video was not sent: what its file says about where and when it was made could not be removed."
         return qsTrId("threesea-la-error-video-keeps-metadata")
+    case "pictureKeepsMetadata":
+        // A message is forwarded, so nobody can be asked.
+        //% "A picture was not sent: what its file says about where and when it was made could not be removed."
+        return qsTrId("threesea-la-error-picture-keeps-metadata")
     case "linkUnknownCode":
         //% "This is not a code of Threema for Desktop. Scan the code it shows when you open it."
         return qsTrId("threesea-la-error-link-unknown-code")

@@ -42,4 +42,7 @@ inner boxes (`avcC` and the like) beyond their vendor and encoder name fields.
 Pictures from Threema Web follow the same rule, as nothing prepares them on the way like the chat's
 FilePreparer: JPEG and PNG are made anew (`web/images.rs`), a WebP loses all but its picture and
 animation (`core/src/webp.rs`, a list of what stays too), and one that can't be read isn't sent. A
-GIF goes as it is, as on the phone and on Android.
+GIF goes as it is, as on the phone and on Android. A picture received as media and forwarded goes
+through the same, and is refused (`pictureKeepsMetadata`) if it can't; our own passed it when they
+first left, so a list's copies and forwards of our own aren't made anew. Those sent from Threema Web
+before this are the exception that remains.

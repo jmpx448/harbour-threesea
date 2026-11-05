@@ -2273,19 +2273,42 @@ impl App {
                 self.check_readable(&message.conversation)?;
                 let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
                 let media = Arc::clone(&self.media);
-                let (data, thumbnail) = media::off_thread(move || {
-                    Ok::<_, media::MediaError>((
-                        media.read(id, MediaPart::File)?,
-                        media.read(id, MediaPart::Thumbnail)?,
-                    ))
+                // A picture of someone else's says what they or their app left in it, and doesn't
+                // pass that on (ADR 0025). Ours were cleaned on their way out, a list's copies too.
+                let clean_picture = !message.outgoing
+                    && body["rendering"] != "file"
+                    && body["mediaType"]
+                        .as_str()
+                        .is_some_and(|media_type| media_type.starts_with("image/"));
+                let claimed = body["mediaType"].as_str().unwrap_or_default().to_owned();
+                let (data, thumbnail, picture) = media::off_thread(move || {
+                    let thumbnail = media.read(id, MediaPart::Thumbnail)?;
+                    let mut data = media.read(id, MediaPart::File)?;
+                    let picture = match &mut data {
+                        Some(data) if clean_picture => Some(
+                            crate::web::images::sent_picture(data, &claimed)
+                                .ok()
+                                .flatten(),
+                        ),
+                        _ => None,
+                    };
+                    Ok::<_, media::MediaError>((data, thumbnail, picture))
                 })
                 .await
                 .and_then(|read| read)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-                self.attachments = vec![
-                    data.ok_or(ApiError::FileNotDownloaded)?,
-                    thumbnail.unwrap_or_default(),
-                ];
+                let data = data.ok_or(ApiError::FileNotDownloaded)?;
+                let picture = match picture {
+                    Some(None) => return Err(ApiError::PictureKeepsMetadata),
+                    Some(picture) => picture,
+                    None => None,
+                };
+                let thumbnail = picture
+                    .as_ref()
+                    .and_then(|picture| picture.thumbnail.clone())
+                    .map(Zeroizing::new)
+                    .or(thumbnail);
+                self.attachments = vec![data, thumbnail.unwrap_or_default()];
                 let text = |field: &str| body[field].as_str().map(str::to_owned);
                 let dimension = |field: &str| {
                     body[field]
@@ -2300,12 +2323,23 @@ impl App {
                             identity: identity.to_owned(),
                             path: None,
                             name: text("name"),
-                            media_type: text("mediaType")
+                            media_type: picture
+                                .as_ref()
+                                .map(|picture| picture.media_type.to_owned())
+                                .or_else(|| text("mediaType"))
                                 .unwrap_or_else(|| "application/octet-stream".into()),
                             caption: text("caption"),
                             rendering: text("rendering").unwrap_or_else(|| "file".into()),
-                            width: dimension("width"),
-                            height: dimension("height"),
+                            width: picture
+                                .as_ref()
+                                .and_then(|picture| picture.size)
+                                .map(|(width, _)| width)
+                                .or_else(|| dimension("width")),
+                            height: picture
+                                .as_ref()
+                                .and_then(|picture| picture.size)
+                                .map(|(_, height)| height)
+                                .or_else(|| dimension("height")),
                             duration: body["duration"].as_f64(),
                             encode: None,
                             keep_metadata: false,
@@ -3713,6 +3747,104 @@ mod tests {
             in_own_set(app.forward_message(received.id, "CCCCCCCC")).await,
             Err(ApiError::VideoKeepsMetadata)
         ));
+    }
+
+    /// Someone else's picture doesn't pass on what its file says; one of ours isn't made anew.
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_a_received_picture_leaves_its_metadata_behind() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let secret = crate::web::images::fixture::SECRET;
+        let contains = |data: &[u8], part: &[u8]| data.windows(part.len()).any(|w| w == part);
+        let jpeg = crate::web::images::fixture::jpeg_with_exif();
+        let received = |app: &App, id: u64, media_type: &str, rendering: &str, data: &[u8]| {
+            let body = json!({"rendering": rendering, "mediaType": media_type, "name": "a",
+                              "size": data.len(), "fileState": STATE_LOCAL});
+            let message = app
+                .store
+                .insert_incoming("BBBBBBBB", id, "file", &body.to_string(), 1)
+                .unwrap()
+                .unwrap();
+            app.media.write(message.id, MediaPart::File, data).unwrap();
+            message.id
+        };
+        let forward = async |app: &mut App, id: i64| -> Result<Value, ApiError> {
+            let local = tokio::task::LocalSet::new();
+            let sent = local.run_until(app.forward_message(id, "CCCCCCCC")).await?;
+            let id = sent["id"].as_i64().unwrap();
+            let body = app.store.message(id).unwrap().unwrap().body;
+            let mut body: Value = serde_json::from_str(&body).unwrap();
+            let data = app.media.read(id, MediaPart::File).unwrap().unwrap();
+            body["sent"] = data_encoding::HEXLOWER.encode(&data).into();
+            Ok(body)
+        };
+        let bytes = |body: &Value| {
+            data_encoding::HEXLOWER
+                .decode(body["sent"].as_str().unwrap().as_bytes())
+                .unwrap()
+        };
+
+        let id = received(&app, 1, "image/jpeg", "media", &jpeg);
+        let body = forward(&mut app, id).await.unwrap();
+        assert!(!contains(&bytes(&body), secret));
+        assert_eq!((&body["width"], &body["height"]), (&json!(10), &json!(20)));
+        assert_eq!(body["thumbnail"], true);
+
+        let webp = crate::webp::fixture::still();
+        let id = received(&app, 2, "image/webp", "media", &webp);
+        let body = forward(&mut app, id).await.unwrap();
+        assert!(!contains(&bytes(&body), b"GPS here"));
+
+        // A file is what the sender made of it, and stays as it was, as does a GIF.
+        let id = received(&app, 3, "image/jpeg", "file", &jpeg);
+        let body = forward(&mut app, id).await.unwrap();
+        assert_eq!(bytes(&body), jpeg);
+        let gif = b"GIF89a\x40\x01\xf0\x00rest";
+        let id = received(&app, 4, "image/gif", "media", gif);
+        let body = forward(&mut app, id).await.unwrap();
+        assert_eq!(bytes(&body), gif);
+
+        // What can't be read isn't passed on.
+        let damaged = [&jpeg[..40], b"cut"].concat();
+        for (message, media_type, data) in [
+            (5, "image/jpeg", damaged.as_slice()),
+            (6, "image/heic", b"a heic".as_slice()),
+        ] {
+            let id = received(&app, message, media_type, "media", data);
+            assert!(matches!(
+                forward(&mut app, id).await,
+                Err(ApiError::PictureKeepsMetadata)
+            ));
+        }
+
+        // Ours left clean already: a copy to another chat or a list's member is the same picture.
+        let own = app
+            .store
+            .insert_outgoing(
+                "BBBBBBBB",
+                7,
+                "file",
+                &json!({"rendering": "media", "mediaType": "image/jpeg", "name": "image.jpg",
+                        "size": 9, "fileState": STATE_LOCAL})
+                .to_string(),
+            )
+            .unwrap();
+        app.media
+            .write(own.id, MediaPart::File, b"own bytes")
+            .unwrap();
+        let body = forward(&mut app, own.id).await.unwrap();
+        assert_eq!(bytes(&body), b"own bytes");
     }
 
     /// Every way of writing brings an archived chat back, a list's copies their members' chats too.

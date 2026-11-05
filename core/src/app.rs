@@ -1097,6 +1097,9 @@ pub enum ApiError {
     /// `keepMetadata`, as a plain file.
     #[error("the video keeps its metadata")]
     VideoKeepsMetadata,
+    /// A picture someone else sent, to forward as media, whose metadata can't be taken out.
+    #[error("the picture keeps its metadata")]
+    PictureKeepsMetadata,
     /// Only GIFs can be favourite GIFs.
     #[error("not a GIF")]
     NotGif,
@@ -1204,6 +1207,7 @@ impl ApiError {
             Self::PollResultsTooLong => "pollResultsTooLong",
             Self::FileTooLarge => "fileTooLarge",
             Self::VideoKeepsMetadata => "videoKeepsMetadata",
+            Self::PictureKeepsMetadata => "pictureKeepsMetadata",
             Self::NotGif => "notGif",
             Self::GroupCallNotRunning => "groupCallNotRunning",
             Self::GroupCallFull => "groupCallFull",
