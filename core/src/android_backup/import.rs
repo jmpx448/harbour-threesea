@@ -123,6 +123,8 @@ pub struct Summary {
     pub skipped_chats: usize,
     /// Chat files beyond what is read into memory: left out, the rest of the archive goes on.
     pub too_large_chats: usize,
+    /// Chat files that fail authentication or aren't text: left out as a whole, the rest goes on.
+    pub damaged_chats: usize,
     /// Chats of contacts whose key in the archive differs from the one stored here: left out.
     pub key_conflict_chats: usize,
     /// Group messages and reactions in the name of such a contact: left out.
@@ -246,6 +248,7 @@ impl HistoryImport {
                     chats = summary.chats,
                     skipped = summary.skipped_chats,
                     too_large = summary.too_large_chats,
+                    damaged = summary.damaged_chats,
                     key_conflicts = summary.key_conflict_chats + summary.key_conflict_rows,
                     invalid_rows = summary.invalid_rows,
                     imported = summary.imported,
@@ -366,6 +369,16 @@ impl HistoryImport {
                 // it: it is left out and reported, the memory bound stays.
                 Err(ArchiveError::TooLarge) => {
                     summary.too_large_chats += 1;
+                    continue;
+                }
+                // The entry is read to its end first, so none of it went in. The same place
+                // would end every run: an altered or damaged file costs this chat, and says so.
+                Err(
+                    ArchiveError::Corrupt(_)
+                    | ArchiveError::Invalid(_)
+                    | ArchiveError::WrongPassword,
+                ) => {
+                    summary.damaged_chats += 1;
                     continue;
                 }
                 Err(error) => return Err(error.into()),

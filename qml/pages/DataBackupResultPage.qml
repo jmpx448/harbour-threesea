@@ -35,6 +35,7 @@ Page {
                                                     + imported.groups.skippedUnknownCreator : 0
     readonly property int chatsLeftOut: summary ? summary.skippedChats + summary.keyConflictChats : 0
     readonly property int chatsTooLarge: summary ? summary.tooLargeChats : 0
+    readonly property int chatsDamaged: summary ? summary.damagedChats : 0
     readonly property int entriesLeftOut: (imported ? imported.invalidRows + imported.pictures.skipped : 0)
                                           + (summary ? summary.invalidRows + summary.keyConflictRows : 0)
     readonly property int localAvatars: imported ? imported.pictures.localAvatarsNotImported : 0
@@ -43,7 +44,7 @@ Page {
     readonly property int mediaMissing: summary ? summary.mediaMissing : 0
     readonly property int mediaFailed: summary ? summary.mediaFailed : 0
     // Anything above zero: the headline must not say the whole backup arrived.
-    readonly property int notImported: keyConflicts + groupsLeftOut + chatsLeftOut + chatsTooLarge
+    readonly property int notImported: keyConflicts + groupsLeftOut + chatsLeftOut + chatsTooLarge + chatsDamaged
                                        + entriesLeftOut + localAvatars + collisions + reactionsLeftOut
                                        + mediaMissing + mediaFailed + unsupported
 
@@ -226,6 +227,13 @@ Page {
                 //% "Chats too large to import"
                 label: qsTrId("threesea-la-data-backup-chats-too-large")
                 value: page.chatsTooLarge
+            }
+
+            DetailItem {
+                visible: page.chatsDamaged > 0
+                //% "Damaged chats left out"
+                label: qsTrId("threesea-la-data-backup-chats-damaged")
+                value: page.chatsDamaged
             }
 
             DetailItem {

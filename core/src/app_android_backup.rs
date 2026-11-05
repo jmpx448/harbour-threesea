@@ -1263,6 +1263,61 @@ mod history_tests {
         assert!(app.store.file_keys(deleted.id).unwrap().is_none());
     }
 
+    /// A damaged chat file costs that chat, nothing of it goes in, and what comes after it arrives.
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_damaged_chat_leaves_the_rest_of_the_backup_alone() {
+        use crate::android_backup::csv::write_row;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let contacts = write_row(&["identity", "publickey", "identity_id"])
+            + &write_row(&["B0B0B0B0", &"ab".repeat(32), "17"])
+            + &write_row(&["C0C0C0C0", &"bc".repeat(32), "18"]);
+        let rows = |sender: &str| {
+            write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"])
+                + &write_row(&[sender, sender, "0", "TEXT", "secretword", "1700000000000"])
+        };
+        let path = backup_with(
+            dir.path(),
+            &[
+                ("contacts.csv", contacts),
+                // Stored rather than deflated would do too; what counts is the altered byte below.
+                ("message_17.csv", rows("B0B0B0B0")),
+                ("message_18.csv", rows("C0C0C0C0")),
+            ],
+        );
+        // One byte of the first chat's ciphertext: its authentication code no longer fits.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let name = b"message_17.csv";
+        let at = bytes.windows(name.len()).position(|w| w == name).unwrap();
+        bytes[at + name.len() + 40] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+
+        app.android_backup_import(
+            path.to_string_lossy().into_owned(),
+            Zeroizing::new("test-password".into()),
+            "metadata",
+        )
+        .await
+        .unwrap();
+        let summary = run_import_of(&app, path).await;
+        assert_eq!(summary["damagedChats"], 1, "{summary}");
+        assert_eq!(summary["chats"], 1, "{summary}");
+        assert_eq!(summary["imported"], 1, "{summary}");
+        assert!(
+            app.store
+                .conversation_messages("B0B0B0B0", 50)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            app.store
+                .conversation_messages("C0C0C0C0", 50)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     /// A list of used nonces over the bound goes unread and is reported; contacts and chats come.
     #[tokio::test(flavor = "current_thread")]
     async fn an_oversized_nonce_list_stops_nothing_else() {
