@@ -216,6 +216,7 @@ impl App {
         self.connection_flushed().await;
         let linked_devices_remain = self.drop_linked_devices_for_removal().await;
         self.stop_connection();
+        self.connection_gone().await;
         // A kill from here on: the next start finishes the job, whatever the bridge got to hear.
         if let Err(error) = crate::runtime::mark_removal(&self.data_dir, linked_devices_remain) {
             tracing::warn!(%error, "the removal could not be marked");

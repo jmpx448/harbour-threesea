@@ -1310,6 +1310,8 @@ pub struct App {
     /// Channel to the running chat server connection, if any.
     pub(crate) connection:
         Option<tokio::sync::mpsc::UnboundedSender<crate::connection::ToConnection>>,
+    /// Its task, to stop it wherever it is.
+    pub(crate) connection_task: Option<tokio::task::JoinHandle<()>>,
     /// Last known connection state, for `connectionState`.
     pub connection_state: &'static str,
     /// Encrypted files of messages (shared with the bridge's image provider).
@@ -1410,6 +1412,7 @@ impl App {
             },
             config: Arc::new(Config::from(ConfigEnvironment::Production)),
             connection: None,
+            connection_task: None,
             connection_state: "disconnected",
             media,
             media_events,
@@ -3247,6 +3250,45 @@ mod tests {
         ] {
             assert_eq!(ApiError::from(error).kind(), kind);
         }
+    }
+
+    /// What goes on after a refusal: a login in progress would go through with the old key, and
+    /// send what is queued. So it is stopped where it stands, not only told at its next read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_login_in_progress_ends_with_the_stop() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                let (login_answer, login) = tokio::sync::oneshot::channel::<()>();
+                app.connection_task = Some(tokio::task::spawn_local(async move {
+                    let _ = login.await;
+                    panic!("the login went on");
+                }));
+                tokio::task::yield_now().await;
+                app.stop_connection();
+                app.connection_gone().await;
+                assert!(login_answer.send(()).is_err(), "nobody waits for it now");
+            })
+            .await;
+    }
+
+    /// The wipe can't begin inside what the task had open, and comes after all it writes on its
+    /// way out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_wipe_waits_until_the_connection_is_gone() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                let store = std::rc::Rc::clone(&app.store);
+                app.connection_task = Some(tokio::task::spawn_local(async move {
+                    let _step = store.step().unwrap();
+                    std::future::pending::<()>().await;
+                }));
+                tokio::task::yield_now().await;
+                app.delete_all_data().await.unwrap();
+                assert!(app.store.identity().unwrap().is_none());
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]

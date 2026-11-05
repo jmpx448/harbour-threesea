@@ -403,6 +403,19 @@ pub(crate) fn settle_command(
     app.web_refresh();
 }
 
+/// A stopped connection has no more to say. What it said before that lies unread in its channel,
+/// and must not take effect now: a "connected" from a login that was stopped would start what runs
+/// on connecting. It can't say "disconnected" itself any more either.
+fn forget_stopped_connection(
+    app: &App,
+    connection: &mut Option<mpsc::UnboundedReceiver<FromConnection>>,
+    emit: &Emit,
+) {
+    if app.connection.is_none() && connection.take().is_some() {
+        emit(json!({"event": "connectionState", "state": app.connection_state}).to_string());
+    }
+}
+
 /// The core loop: commands (in order), connection events, hourly maintenance.
 async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, emit: Emit) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -419,6 +432,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
     // Locked at start: the private chats' media stay hidden from the UI's readers.
     app.update_media_gate();
     loop {
+        forget_stopped_connection(&app, &mut connection, &emit);
         let transfer_retry_at = app.transfer_retry_at;
         tokio::select! {
             request = rx.recv() => {
@@ -514,6 +528,39 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_a_stopped_connection_said_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(FromConnection::State(
+            crate::connection::ConnectionState::Connected,
+        ))
+        .unwrap();
+        let mut connection = Some(rx);
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let emit: Emit = {
+            let said = std::sync::Arc::clone(&said);
+            Box::new(move |message| said.lock().unwrap().push(message))
+        };
+
+        // Still running: it keeps its channel.
+        let (to_connection, _to_rx) = mpsc::unbounded_channel();
+        app.connection = Some(to_connection);
+        forget_stopped_connection(&app, &mut connection, &emit);
+        assert!(connection.is_some());
+        assert!(said.lock().unwrap().is_empty());
+
+        app.stop_connection();
+        forget_stopped_connection(&app, &mut connection, &emit);
+        assert!(connection.is_none());
+        assert!(tx.is_closed(), "nobody reads the \"connected\"");
+        let said = said.lock().unwrap();
+        assert_eq!(said.len(), 1);
+        let state: serde_json::Value = serde_json::from_str(&said[0]).unwrap();
+        assert_eq!(state["state"], "disconnected");
+    }
 
     fn start_config(dir: &std::path::Path) -> StartConfig {
         serde_json::from_value(json!({

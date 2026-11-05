@@ -524,15 +524,30 @@ impl App {
         };
         let (to_tx, to_rx) = mpsc::unbounded_channel();
         let (from_tx, from_rx) = mpsc::unbounded_channel();
-        tokio::task::spawn_local(connection::run(setup, to_rx, from_tx));
+        self.connection_task = Some(tokio::task::spawn_local(connection::run(
+            setup, to_rx, from_tx,
+        )));
         self.connection = Some(to_tx);
         Some(from_rx)
     }
 
-    /// Stop the connection (e.g. before wiping data).
+    /// Stop the connection, wherever it is: after this it sends nothing more, also if it was in the
+    /// middle of logging in. The run loop drops what it had said already
+    /// (`runtime::forget_stopped_connection`).
     pub(crate) fn stop_connection(&mut self) {
         self.connection = None;
         self.connection_state = "disconnected";
+        if let Some(task) = &self.connection_task {
+            task.abort();
+        }
+    }
+
+    /// Wait until a stopped connection's task is really gone, with what it was still writing to the
+    /// store rolled back or done: what follows needs the store to itself (a wipe).
+    pub(crate) async fn connection_gone(&mut self) {
+        if let Some(task) = self.connection_task.take() {
+            let _ = task.await;
+        }
     }
 
     /// Wait until the connection has handled what it was told so far, within a short limit.
