@@ -182,6 +182,14 @@ function coordinates(location) {
     return text
 }
 
+// Whether a position's time (a Date) is recent enough to say where the device is now. Without a
+// valid time it isn't: Qt's own QGeoPositionInfo counts as invalid then.
+function isRecentFix(timestamp, now) {
+    if (!timestamp) return false
+    var taken = new Date(timestamp).getTime()
+    return !isNaN(taken) && now - taken <= 60000
+}
+
 // A local path as a file: URL. Names come from senders and from the device's files: #, ? and % in
 // them are part of the name, and only encoded do they stay that (as a query or a fragment the rest
 // of the name would be lost, and %2F would lead to another folder). Some paths come as URLs already.

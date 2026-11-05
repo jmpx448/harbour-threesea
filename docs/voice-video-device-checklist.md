@@ -765,3 +765,18 @@ network to 3G if it can, or find a weak signal, and use a video that takes more 
 8. First emoji search after starting the app: tap the search key and type a letter.
    - Note whether the page hitches. The terms are read in the UI thread at the first search only; it
      stays so unless this shows on the phone.
+
+## Sending a location
+
+1. Turn location off in Settings → Location, then open Send location in a chat.
+   - Note what the dialog says at once: "Positioning is not available…" means Sailfish reports the
+     switch through `sourceError`. If it keeps saying "Finding your location…", the text about
+     checking location must still come after 30 seconds. Send stays unavailable throughout.
+2. Turn location on while the dialog is open, outdoors.
+   - Expect: the coordinates appear without reopening the dialog.
+3. Get a fix outdoors, walk indoors to where no fix comes, wait some minutes, and open the dialog.
+   - Expect: no old coordinates; Send stays unavailable. Check that real fixes pass at all: if an
+     outdoor fix never shows, the platform's fixes have no valid or a much older time, or the phone's
+     clock is more than a minute ahead of them.
+4. Stay in the dialog with a fix showing, then cover the antenna or go indoors for over a minute.
+   - Expect: the coordinates go away again and Send becomes unavailable.

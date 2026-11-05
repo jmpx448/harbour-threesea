@@ -100,6 +100,14 @@ QtObject {
 
     Component.onCompleted: {
         var i
+        var now = 1700000000000
+        check("fix now", Fmt.isRecentFix(new Date(now), now), true)
+        check("fix a minute old", Fmt.isRecentFix(new Date(now - 60000), now), true)
+        check("fix too old", Fmt.isRecentFix(new Date(now - 60001), now), false)
+        check("fix hours old", Fmt.isRecentFix(new Date(now - 7200000), now), false)
+        check("fix slightly ahead of the clock", Fmt.isRecentFix(new Date(now + 2000), now), true)
+        check("fix without time", Fmt.isRecentFix(new Date(NaN), now), false)
+        check("fix with nothing", Fmt.isRecentFix(undefined, now), false)
         for (i = 0; i < markupCases.length; ++i) {
             check("mark " + markupCases[i][0], Fmt.markMarkup(html(markupCases[i][0])), markupCases[i][1])
         }
