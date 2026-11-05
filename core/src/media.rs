@@ -30,7 +30,7 @@ use libthreema::{
 };
 use rusqlite::{OptionalExtension as _, params};
 use sha2::{Digest as _, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     https::HttpsClient,
@@ -434,7 +434,8 @@ impl MediaStore {
                 (&*tag).into(),
             )
             .map_err(|_| MediaError::Decrypt)?;
-        stored.drain(..header + TAG_LENGTH);
+        let length = move_to_front(&mut stored, header + TAG_LENGTH);
+        stored.truncate(length);
         Ok(Some(stored))
     }
 
@@ -536,6 +537,16 @@ impl MediaStore {
     }
 }
 
+/// Move what follows the first `start` bytes to the front, wiping what stays behind it: from here on
+/// it is out of the vector's sight, and whoever takes the vector over must not find plain text there.
+/// Returns the new length.
+fn move_to_front(buffer: &mut [u8], start: usize) -> usize {
+    let length = buffer.len() - start;
+    buffer.copy_within(start.., 0);
+    buffer[length..].zeroize();
+    length
+}
+
 /// Encrypt a blob with a file message key.
 pub fn encrypt_blob(key: &[u8; 32], part: MediaPart, data: &[u8]) -> Vec<u8> {
     XSalsa20Poly1305::new(key.into())
@@ -549,7 +560,9 @@ pub fn encrypt_blob_in_place(key: &[u8; 32], part: MediaPart, data: Zeroizing<Ve
     XSalsa20Poly1305::new(key.into())
         .encrypt_in_place(part.nonce().into(), b"", &mut *data)
         .expect("XSalsa20Poly1305 encryption cannot fail");
-    // It is ciphertext now, nothing the wipe would have to protect.
+    // It is ciphertext now, nothing the wipe would have to protect. Except what lies behind it: the
+    // tag overwrites only the first of whatever the buffer once held there.
+    data.spare_capacity_mut().zeroize();
     std::mem::take(&mut *data)
 }
 
@@ -993,6 +1006,16 @@ mod tests {
         assert!(media_dir.join("0.file").exists());
         assert!(!media_dir.join("1.file").exists());
         assert_eq!(stored_names(&dir).len(), (files as usize).div_ceil(2) + 1);
+    }
+
+    /// What the decrypted file leaves behind it in the buffer is plain text nobody tracks any more.
+    #[test]
+    fn moving_a_file_to_the_front_leaves_nothing_behind_it() {
+        let mut buffer = *b"headerplain text";
+        let length = move_to_front(&mut buffer, 6);
+        assert_eq!(length, 10);
+        assert_eq!(&buffer[..length], b"plain text");
+        assert_eq!(buffer[length..], [0; 6]);
     }
 
     #[test]
