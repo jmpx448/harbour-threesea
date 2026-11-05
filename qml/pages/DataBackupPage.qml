@@ -20,14 +20,25 @@ Page {
     // Creating backups: the stored schedule settings and the last written file.
     property var exportStatus: ({})
     property bool exportRunning: false
+    // The running backup's progress in chats; total 0 until the first report.
+    property int exportDone: 0
+    property int exportTotal: 0
     property string exportResult
+    // Typed twice, or every later backup uses a password nobody knows.
+    readonly property bool exportPasswordDiffers: exportPassword.text.length > 0
+                                                  && exportPasswordRepeat.text !== exportPassword.text
     // The app lock's PIN, while this page lives (window.pushWithPin).
     property string pin
 
     function refreshExportStatus() {
         backend.call("androidBackupExportStatus", {}, function(ok, result) {
-            if (ok) page.exportStatus = result
+            if (ok) page.applyExportStatus(result)
         })
+    }
+    // Also a backup that was already running, or that the schedule started, when the page opened.
+    function applyExportStatus(status) {
+        exportStatus = status
+        exportRunning = status.running === true
     }
     Component.onCompleted: refreshExportStatus()
 
@@ -36,14 +47,16 @@ Page {
     function setExportFolder(path) {
         if (!path) return
         backend.call("androidBackupSchedule", { directory: path, pin: page.pin }, function(ok, result, kind, message) {
-            if (ok) page.exportStatus = result
+            if (ok) page.applyExportStatus(result)
             else exportError.text = Errors.text(kind, message)
         })
     }
 
-    // The password stays only in this field while the page lives.
+    // The passwords stay only in these fields while the page lives.
     Component.onDestruction: {
         password.text = ""
+        exportPassword.text = ""
+        exportPasswordRepeat.text = ""
         pin = ""
     }
 
@@ -72,8 +85,13 @@ Page {
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "androidExportDone") {
+            if (name === "androidExportProgress") {
+                page.exportRunning = true
+                page.exportDone = data.done
+                page.exportTotal = data.total
+            } else if (name === "androidExportDone") {
                 page.exportRunning = false
+                page.exportTotal = 0
                 if (data.ok) {
                     page.exportResult = data.path.split("/").pop()
                 } else {
@@ -114,8 +132,8 @@ Page {
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.highlightColor
-                //% "Encrypted backups of chats, contacts and settings, in the format of Threema for Android: they restore here and there."
-                text: qsTrId("threesea-la-data-backup-description")
+                //% "Encrypted backups of your Threema ID, chats, contacts, groups and media, in the format of Threema for Android."
+                text: qsTrId("threesea-la-data-backup-contents")
             }
 
             SectionHeader {
@@ -215,6 +233,16 @@ Page {
                                  //% "Password saved"
                                  ? qsTrId("threesea-la-android-export-password-saved")
                                  : qsTrId("threesea-la-android-backup-password")
+                EnterKey.iconSource: "image://theme/icon-m-enter-next"
+                EnterKey.onClicked: exportPasswordRepeat.focus = true
+            }
+
+            PasswordField {
+                id: exportPasswordRepeat
+                visible: exportPassword.text.length > 0
+                label: qsTrId("threesea-la-repeat-password")
+                placeholderText: label
+                errorHighlight: text.length > 0 && text !== exportPassword.text
             }
 
             ChoiceBox {
@@ -226,6 +254,8 @@ Page {
                           qsTrId("threesea-la-android-export-daily"),
                           //% "Weekly"
                           qsTrId("threesea-la-android-export-weekly")]
+                // It stores the password in the field too.
+                enabled: !page.exportPasswordDiffers
                 choice: page.exportStatus.interval === "daily" ? 1
                         : page.exportStatus.interval === "weekly" ? 2 : 0
                 onChosen: backend.call("androidBackupSchedule", {
@@ -233,7 +263,7 @@ Page {
                     password: exportPassword.text,
                     pin: page.pin
                 }, function(ok, result, kind, message) {
-                    if (!ok) exportError.text = Errors.text(kind, message)
+                    exportError.text = ok ? "" : Errors.text(kind, message)
                     page.refreshExportStatus()
                 })
             }
@@ -260,6 +290,7 @@ Page {
                 visible: !page.exportRunning
                 enabled: (page.exportStatus.directory || "").length > 0
                          && (exportPassword.text.length > 0 || page.exportStatus.passwordSet === true)
+                         && !page.exportPasswordDiffers
                 onClicked: {
                     exportError.text = ""
                     page.exportResult = ""
@@ -275,16 +306,22 @@ Page {
                             }
                         } else {
                             exportError.text = Errors.text(kind, message)
+                            page.refreshExportStatus()
                         }
                     })
                 }
             }
 
-            BusyIndicator {
-                anchors.horizontalCenter: parent.horizontalCenter
-                size: BusyIndicatorSize.Medium
-                running: page.exportRunning
-                visible: running
+            ProgressBar {
+                width: parent.width
+                visible: page.exportRunning
+                indeterminate: page.exportTotal === 0
+                minimumValue: 0
+                maximumValue: Math.max(page.exportTotal, 1)
+                value: page.exportDone
+                valueText: indeterminate ? "" : Math.round(100 * value / maximumValue) + " %"
+                //% "Writing the backup"
+                label: qsTrId("threesea-la-android-export-running")
             }
 
             ErrorLabel { id: exportError }

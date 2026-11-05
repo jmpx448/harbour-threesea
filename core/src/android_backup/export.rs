@@ -793,6 +793,11 @@ impl Export {
             }
             tokio::task::yield_now().await;
         }
+        self.emit(json!({
+            "event": "androidExportProgress",
+            "done": total,
+            "total": total,
+        }));
         summary.polls = polls.count;
         for (name, text) in polls.finish() {
             add!(name.into(), Zeroizing::new(text.into_bytes()));
