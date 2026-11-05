@@ -43,7 +43,11 @@ function day(ms) {
 // Formatter.DateFullWithoutYear doesn't follow the language ("Montag, 14 Oktober").
 function withoutYear(pattern) {
     return pattern.replace(/^y+(?:[^dM']|'[^']*')*/, "")
-                  .replace(/(?:[\s,.\/-]|'[^']*')*y+(?:[\s.]|'[^']*')*/, "")
+                  .replace(/(?:[\s,.\u060c\/-]|'[^']*')*y+(?:[\s.]|'[^']*')*/, function(year, at, whole) {
+        // Between two format letters the parts would run together.
+        var between = /[dM]$/.test(whole.slice(0, at)) && /^[dM]/.test(whole.slice(at + year.length))
+        return between ? " " : ""
+    })
 }
 
 // What the app lock's row says. A PIN without "Lock the app" only guards the private chats: the app

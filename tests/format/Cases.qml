@@ -150,6 +150,9 @@ QtObject {
         check("long date without year, a word after it", Fmt.withoutYear("dddd, d MMMM yyyy '\u0433'."), "dddd, d MMMM")
         check("long date without year, year in the middle", Fmt.withoutYear("d MMMM yyyy, dddd"), "d MMMM, dddd")
 
+        check("long date without year, Turkish", Fmt.withoutYear("d MMMM yyyy dddd"), "d MMMM dddd")
+        check("long date without year, Latvian", Fmt.withoutYear("dddd, yyyy. 'gada' d. MMMM"), "dddd d. MMMM")
+        check("long date without year, Urdu", Fmt.withoutYear("dddd\u060c d MMMM\u060c yyyy"), "dddd\u060c d MMMM")
         check("a day of an earlier year has its year", Fmt.day(new Date(2001, 0, 15, 12).getTime()).indexOf("2001") >= 0, true)
 
         check("preview, a GIF", Fmt.preview({ kind: "file", body: { mediaType: "image/gif", rendering: "media" } }), "threesea-la-gif")
