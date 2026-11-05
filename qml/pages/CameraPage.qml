@@ -83,7 +83,10 @@ Page {
         imageCapture.onImageSaved: page.finish(path)
         imageCapture.onCaptureFailed: {
             page.removeCapture()
-            Notices.show(message, Notice.Short, Notice.Center)
+            // Qt's words are in English and can name files: neither shown nor logged.
+            console.warn("taking a photo failed")
+            //% "The photo could not be taken."
+            Notices.show(qsTrId("threesea-la-camera-photo-failed"), Notice.Long, Notice.Center)
         }
         videoRecorder {
             mediaContainer: "mp4"
@@ -109,7 +112,9 @@ Page {
             }
             onError: {
                 page.removeCapture()
-                Notices.show(camera.videoRecorder.errorString, Notice.Short, Notice.Center)
+                console.warn("recording a video failed, code", camera.videoRecorder.errorCode)
+                //% "The video could not be recorded."
+                Notices.show(qsTrId("threesea-la-camera-video-failed"), Notice.Long, Notice.Center)
             }
         }
     }

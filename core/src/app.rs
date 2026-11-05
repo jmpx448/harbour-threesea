@@ -1729,7 +1729,10 @@ impl App {
             &path,
             header + &crate::runtime::log_text(&self.data_dir, usize::MAX),
         )
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(kind = ?e.kind(), "support package not written");
+            ApiError::Internal(e.to_string())
+        })?;
         Ok(json!({ "path": path.to_string_lossy() }))
     }
 
