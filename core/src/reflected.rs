@@ -5,8 +5,9 @@
 //! Upstream: Android's `IncomingReflectedMessageTask` with `reflectedoutgoingmessage/*`,
 //! `reflectedmessageupdate/*` and the incoming message processor. Handled so far: outgoing
 //! messages (text, location, file, edit, delete, reaction, read receipts), incoming messages
-//! (when another device was leader), the sent/read updates, and contact, group, profile and
-//! settings sync (`sync.rs`). Distribution lists are not synced (Android doesn't either).
+//! (when another device was leader, with its typing indicators), the sent/read updates, and
+//! contact, group, profile and settings sync (`sync.rs`). Distribution lists are not synced
+//! (Android doesn't either).
 
 use std::rc::Rc;
 
@@ -258,6 +259,16 @@ pub fn apply(
             if store.contact(sender.as_str())?.is_none() {
                 // The contact comes with a contact sync, which isn't applied yet.
                 tracing::warn!("reflected incoming message from an unknown contact skipped");
+                return Ok(());
+            }
+            // Not stored. Whether it is still news is for the connection to say
+            // (`Session::handle_reflected`).
+            if let IncomingMessageBody::Contact(ContactMessageBody::TypingIndicator(typing)) = &body
+            {
+                events.borrow_mut().push(CoreEvent::Typing {
+                    identity: sender.to_string(),
+                    typing: typing.is_typing,
+                });
                 return Ok(());
             }
             let mut conversations = StoreConversations {
@@ -897,14 +908,7 @@ mod tests {
         assert!(store.has_nonce(&[6; 24]).unwrap());
 
         // Without replay protection there is nothing to keep.
-        let typing = reflected_incoming(
-            "B0B0B0B0",
-            5,
-            vec![7; 24],
-            ContactMessageBody::TypingIndicator(
-                libthreema::model::message::TypingIndicatorMessage { is_typing: true },
-            ),
-        );
+        let typing = reflected_incoming("B0B0B0B0", 5, vec![7; 24], typing_body());
         apply_sealed(&store, &typing, &events);
         assert!(!store.has_nonce(&[7; 24]).unwrap());
     }
@@ -928,5 +932,40 @@ mod tests {
         }
         apply_sealed(&store, &outgoing, &events);
         assert!(!store.has_nonce(&[2; 24]).unwrap());
+    }
+
+    fn typing_body() -> ContactMessageBody {
+        ContactMessageBody::TypingIndicator(libthreema::model::message::TypingIndicatorMessage {
+            is_typing: true,
+        })
+    }
+
+    /// Typing reaches this device from a leading one; of someone unknown it means nothing.
+    #[test]
+    fn typing_on_another_device_shows_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        store
+            .upsert_contact(&crate::contacts::test_contact("B0B0B0B0"))
+            .unwrap();
+        let user: ThreemaId = "ABCD1234".parse().unwrap();
+        let events: EventSink = Rc::default();
+        let typing = reflected_incoming("B0B0B0B0", 1, Vec::new(), typing_body());
+        apply(&store, user, typing, &events).unwrap();
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [CoreEvent::Typing { identity, typing: true }] if identity == "B0B0B0B0"
+        ));
+        assert!(
+            store
+                .conversation_messages("B0B0B0B0", 1)
+                .unwrap()
+                .is_empty()
+        );
+
+        let events: EventSink = Rc::default();
+        let typing = reflected_incoming("C0C0C0C0", 2, Vec::new(), typing_body());
+        apply(&store, user, typing, &events).unwrap();
+        assert!(events.borrow().is_empty());
     }
 }

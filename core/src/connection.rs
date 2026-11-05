@@ -3469,6 +3469,12 @@ impl<'a> Session<'a> {
         self.setup
             .failing_items
             .forget(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
+        // The mediator hands out old typing indicators again at login (see below): not news.
+        if self.reflection_backlog {
+            self.events
+                .borrow_mut()
+                .retain(|event| !matches!(event, CoreEvent::Typing { .. }));
+        }
         // A message another device received first: its notification waits a moment.
         for event in self.events.borrow().iter() {
             if let CoreEvent::MessageAdded { message, .. } = event
@@ -6579,6 +6585,66 @@ mod sync_order_tests {
             .unwrap()
             .unwrap();
         assert!(!carries(&again, &told[0]));
+    }
+
+    /// Typing from a leading device shows, unless it is the mediator's old stock at login.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_live_typing_from_another_device_shows() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody},
+            protobuf::d2d::{Envelope, IncomingMessage, envelope::Content},
+        };
+        let (_dir, app) = app();
+        let (setup, peer) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let (message_type, body) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: setup.identity,
+                body: ContactMessageBody::TypingIndicator(TypingIndicatorMessage {
+                    is_typing: true,
+                }),
+            }));
+        let envelope = Envelope {
+            content: Some(Content::IncomingMessage(IncomingMessage {
+                sender_identity: peer.to_string(),
+                message_id: 1,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body,
+                nonce: Vec::new(),
+            })),
+            ..Default::default()
+        };
+        let mut typing_shows = async |session: &mut Session<'_>, backlog: bool| {
+            session.reflection_backlog = backlog;
+            let (_, data) = key
+                .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
+                .unwrap();
+            // Its acknowledgement fails on this socket, what is for the UI has gone by then.
+            let _ = session
+                .handle_reflected(libthreema::d2m::payload::Reflected {
+                    reflect_id: 1,
+                    flags: D2mReflectFlags(0),
+                    timestamp: 1,
+                    envelope: data,
+                })
+                .await;
+            let mut shown = false;
+            while let Ok(from) = rx.try_recv() {
+                shown |= matches!(
+                    from,
+                    FromConnection::Event(event) if matches!(*event, CoreEvent::Typing { .. })
+                );
+            }
+            shown
+        };
+        assert!(!typing_shows(&mut session, true).await);
+        assert!(typing_shows(&mut session, false).await);
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to

@@ -178,6 +178,8 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   store failed on stays unacknowledged, so the mediator hands it out at the next login, by the same
   rule as above (without an end of that queue there is no promotion to leader either). Android
   acknowledges those too (with a TODO), but nothing else brings them to a follower.
+- Typing reflected from a leading device shows, except while the mediator is still handing out its
+  backlog at login: those can be old.
 - The CSP nonces an envelope tells of (`IncomingMessage.nonce`, `OutgoingMessage.nonces`) go into
   the nonce store in that same step, unless the message has no replay protection: without them, a
   chat server could replay to a new leader what the last one received. Our own envelope's D2D nonce
