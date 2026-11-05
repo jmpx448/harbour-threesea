@@ -62,6 +62,10 @@ Notes:
   Without this, the screen is 1024×768 landscape and apps come up rotated.
 - After each boot, Sailfish Secrets asks to confirm access to our key once (the emulator has no
   device lock code; on a phone with a lock code the collection unlocks with the device).
+- **Confirm that prompt before deploying.** The Full build's background instance starts at boot and
+  waits on it; deploying meanwhile crashed `sailfishsecretsd`, and from then on every read of the
+  key failed with `secrets read 11` and no prompt, until a reboot. Answer the prompt (or let the app
+  open once), then run `scripts/emulator-deploy.sh`.
 - Jolla Settings may not start from the app grid in this setup; `nohup jolla-settings &` over
   SSH works. Its device-lock switch does not react in the emulator.
 - **Translucency is rendered too weak**: the emulator's software renderer blends translucent
