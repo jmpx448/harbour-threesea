@@ -486,7 +486,7 @@ impl Shared {
         self.store.store_new_group_picture(&group)?;
         self.tell_connection(ToConnection::SendPending);
         // Locked during the upload: a private group's details stay in the core.
-        self.check_readable(key)?;
+        self.check_visible_group(key)?;
         self.group_info(key)
     }
 

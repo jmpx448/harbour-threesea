@@ -495,7 +495,7 @@ impl App {
         policy: Option<&str>,
         until: Option<i64>,
     ) -> Result<Value, ApiError> {
-        let key = self.conversation(identity)?.0;
+        let key = self.visible_conversation(identity)?.0;
         let policy = match policy {
             Some(policy) => Some(
                 crate::chat_notifications::Policy::parse(policy)
@@ -520,7 +520,7 @@ impl App {
         identity: &str,
         tone: Option<&str>,
     ) -> Result<Value, ApiError> {
-        let (key, _) = self.readable_conversation(identity)?;
+        let (key, _) = self.visible_conversation(identity)?;
         self.store.set_chat_tone(&key, tone)?;
         Ok(json!({}))
     }

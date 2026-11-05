@@ -2138,7 +2138,7 @@ impl App {
             }
             Command::SetPrivate { identity, private } => self.set_private(&identity, private),
             Command::SetArchived { identity, archived } => {
-                let key = self.conversation(&identity)?.0;
+                let key = self.visible_conversation(&identity)?.0;
                 self.store.set_archived(&key, archived)?;
                 // Chats were once seen landing in the archive unasked (an unexplained oddity).
                 tracing::info!(archived, "chat archive state set from the UI");
@@ -2174,27 +2174,27 @@ impl App {
             Command::MarkRead { identity } => self.mark_read(&identity),
             Command::SetTyping { identity, typing } => self.set_typing(&identity, typing),
             Command::DownloadFile { message } => self.download_file(message),
-            // A hidden private group or list is as closed as a hidden chat: its name and members
-            // are what the chat list leaves out.
+            // A hidden private group or list is as closed as a hidden chat, and answers as one that
+            // isn't there: its name and members are what the chat list leaves out.
             Command::Group { key } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.group_info(&key)
             }
             Command::CreateGroup { name, members } => self.create_group(&name, &members),
             Command::RenameGroup { key, name } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.rename_group(&key, &name)
             }
             Command::SetGroupMembers { key, members } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.set_group_members(&key, &members)
             }
             Command::LeaveGroup { key } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.leave_group(&key)
             }
             Command::SetGroupPicture { key } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.set_group_picture(&key).await
             }
             Command::SendLocation {
@@ -2228,20 +2228,20 @@ impl App {
                 self.create_distribution_list(&name, &members)
             }
             Command::DistributionList { key } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.distribution_list_json(&key)
             }
             Command::UpdateDistributionList { key, name, members } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 self.update_distribution_list(&key, name.as_deref(), members.as_deref())
             }
             Command::SetPinned { identity, pinned } => {
-                let key = self.conversation(&identity)?.0;
+                let key = self.visible_conversation(&identity)?.0;
                 self.store.set_pinned(&key, pinned)?;
                 Ok(json!({}))
             }
             Command::MovePinned { identity, offset } => {
-                let key = self.conversation(&identity)?.0;
+                let key = self.visible_conversation(&identity)?.0;
                 self.store.move_pinned(&key, offset)?;
                 Ok(json!({}))
             }
@@ -2399,7 +2399,7 @@ impl App {
             Command::ClosePoll { message } => self.close_poll(message),
             Command::Polls { identity } => self.polls_json(&identity),
             Command::RemoveGroupPicture { key } => {
-                self.check_readable(&key)?;
+                self.check_visible_group(&key)?;
                 // In turn: behind a new picture still on its way up, or that one would win.
                 self.detached(
                     Lane::InTurn,
@@ -2561,7 +2561,7 @@ impl App {
             Command::AddressBookCountry => self.address_book_country_json(),
             Command::SetAddressBookCountry { country } => self.set_address_book_country(&country),
             Command::GroupCallRefresh { conversation } => {
-                self.check_readable(&conversation)?;
+                self.check_visible_group(&conversation)?;
                 Ok(self.group_call_refresh(&conversation))
             }
             Command::GroupCallJoin {
@@ -2569,7 +2569,7 @@ impl App {
                 fingerprint,
                 create,
             } => {
-                self.check_readable(&conversation)?;
+                self.check_visible_group(&conversation)?;
                 Box::pin(self.group_call_join(conversation, fingerprint, create)).await
             }
             Command::GroupCallChannel { data } => self.group_call_channel(&data),

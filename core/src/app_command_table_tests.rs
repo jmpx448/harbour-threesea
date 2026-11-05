@@ -20,6 +20,9 @@ enum Gate {
     /// Tried with these arguments on the hidden chat, its messages, group or list, it answers
     /// `locked` before it waits for anything, and leaves the chat as it was.
     Locked(&'static str),
+    /// Like [`Gate::Locked`] for a hidden group or list, which answers `groupNotFound` as one that
+    /// doesn't exist would: the answer doesn't even say it is there.
+    Missing(&'static str),
     /// Tried with these arguments, it answers without anything of the hidden chats and leaves
     /// their messages and drafts as they were: lists and searches, which leave the hidden chats
     /// out; what is about the contact, who stays visible as groups name their members; and the
@@ -27,7 +30,7 @@ enum Gate {
     Hidden(&'static str),
 }
 
-use Gate::{Hidden, Locked};
+use Gate::{Hidden, Locked, Missing};
 
 /// Placeholders in the arguments (each `"$NAME"` a JSON string where the command takes text, or
 /// one replaced by a number): the hidden chat `$CHAT`, its group `$GROUP` and list `$LIST`; of
@@ -131,14 +134,14 @@ const TABLE: &[(&str, Gate)] = &[
     ("retryUpload", Locked(r#"{"message":"$OUTGOING_FILE"}"#)),
     ("resendMessage", Locked(r#"{"message":"$OUTGOING"}"#)),
     ("cancelTransfer", Locked(r#"{"message":"$OUTGOING_FILE"}"#)),
-    ("group", Locked(r#"{"key":"$GROUP"}"#)),
+    ("group", Missing(r#"{"key":"$GROUP"}"#)),
     ("createGroup", Gate::None),
-    ("renameGroup", Locked(r#"{"key":"$GROUP","name":"x"}"#)),
+    ("renameGroup", Missing(r#"{"key":"$GROUP","name":"x"}"#)),
     (
         "setGroupMembers",
-        Locked(r#"{"key":"$GROUP","members":[]}"#),
+        Missing(r#"{"key":"$GROUP","members":[]}"#),
     ),
-    ("leaveGroup", Locked(r#"{"key":"$GROUP"}"#)),
+    ("leaveGroup", Missing(r#"{"key":"$GROUP"}"#)),
     ("matchAddressBook", Gate::None),
     (
         "sendLocation",
@@ -157,10 +160,10 @@ const TABLE: &[(&str, Gate)] = &[
     ("syncExcluded", Gate::None),
     ("refreshContacts", Gate::None),
     ("createDistributionList", Gate::None),
-    ("distributionList", Locked(r#"{"key":"$LIST"}"#)),
+    ("distributionList", Missing(r#"{"key":"$LIST"}"#)),
     (
         "updateDistributionList",
-        Locked(r#"{"key":"$LIST","name":"x"}"#),
+        Missing(r#"{"key":"$LIST","name":"x"}"#),
     ),
     ("setPinned", Hidden(r#"{"identity":"$CHAT","pinned":true}"#)),
     ("movePinned", Hidden(r#"{"identity":"$CHAT","offset":1}"#)),
@@ -209,8 +212,8 @@ const TABLE: &[(&str, Gate)] = &[
     ("vote", Locked(r#"{"message":"$POLL","choices":[0]}"#)),
     ("closePoll", Locked(r#"{"message":"$POLL"}"#)),
     ("polls", Locked(r#"{"identity":"$CHAT"}"#)),
-    ("setGroupPicture", Locked(r#"{"key":"$GROUP"}"#)),
-    ("removeGroupPicture", Locked(r#"{"key":"$GROUP"}"#)),
+    ("setGroupPicture", Missing(r#"{"key":"$GROUP"}"#)),
+    ("removeGroupPicture", Missing(r#"{"key":"$GROUP"}"#)),
     ("downloadFile", Locked(r#"{"message":"$FILE"}"#)),
     (
         "editMessage",
@@ -252,10 +255,10 @@ const TABLE: &[(&str, Gate)] = &[
     ("setVideoQuality", Gate::None),
     ("addressBookCountry", Gate::None),
     ("setAddressBookCountry", Gate::None),
-    ("groupCallRefresh", Locked(r#"{"conversation":"$GROUP"}"#)),
+    ("groupCallRefresh", Missing(r#"{"conversation":"$GROUP"}"#)),
     (
         "groupCallJoin",
-        Locked(r#"{"conversation":"$GROUP","fingerprint":"00","create":true}"#),
+        Missing(r#"{"conversation":"$GROUP","fingerprint":"00","create":true}"#),
     ),
     ("groupCallChannel", Gate::None),
     ("groupCallLeave", Gate::None),
@@ -550,12 +553,12 @@ async fn every_gate() {
     // the others each get their own.
     let mut shared = fixture();
     for (name, gate) in TABLE {
-        let (Locked(arguments) | Hidden(arguments)) = *gate else {
+        let (Locked(arguments) | Missing(arguments) | Hidden(arguments)) = *gate else {
             continue;
         };
         let mut own = None;
         let fixture = match gate {
-            Locked(_) => &mut shared,
+            Locked(_) | Missing(_) => &mut shared,
             _ => own.insert(fixture()),
         };
         let failed = failures.len();
@@ -574,7 +577,7 @@ async fn every_gate() {
         }
         match reply {
             // Waiting for a server sends nothing back, so leaks nothing; but a gate comes first.
-            Err(_) if matches!(gate, Locked(_)) => {
+            Err(_) if matches!(gate, Locked(_) | Missing(_)) => {
                 failures.push(format!("{name}: went on to the network"));
             }
             Err(_) => {}
@@ -587,6 +590,9 @@ async fn every_gate() {
                     Locked(_) if reply["error"]["kind"] != "locked" => {
                         failures.push(format!("{name}: not refused: {reply}"));
                     }
+                    Missing(_) if reply["error"]["kind"] != "groupNotFound" => {
+                        failures.push(format!("{name}: not refused as missing: {reply}"));
+                    }
                     Hidden(_) if reply["error"]["message"] == "invalid request" => {
                         failures.push(format!("{name}: arguments not understood"));
                     }
@@ -594,7 +600,7 @@ async fn every_gate() {
                 }
             }
         }
-        if matches!(gate, Locked(_)) && failures.len() > failed {
+        if matches!(gate, Locked(_) | Missing(_)) && failures.len() > failed {
             shared = self::fixture();
         }
     }

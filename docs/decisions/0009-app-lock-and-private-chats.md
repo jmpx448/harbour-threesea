@@ -26,6 +26,11 @@ entered after every start). The user decided (2026-10-22):
   notification works without content ever crossing to the UI layer; `messagesChanged` leaves
   their messages out, typing events are not forwarded. Enforcing this in the core keeps the
   QML dumb (§6) and makes a QML bug unable to leak a private chat.
+  A hidden private group or list isn't there for the commands that show or manage it (`group`,
+  members, name, picture, leaving, its group call, `distributionList`, its pin, archive,
+  notification and tone marks, deleting its chat): they answer `groupNotFound`, as for one that
+  doesn't exist, so the answer doesn't even say it is private. A hidden contact's chat answers
+  `locked` there.
 - **PIN or passphrase:** digits on Silica's keypad, or (keyboard button top left, like the
   device lock) a passphrase; the screens follow the system's code entry (title in the upper part,
   dots right-aligned above the keypad with backspace beside them, cancel bottom left, accept

@@ -3392,7 +3392,7 @@ async fn hidden_groups_and_lists_are_closed_to_their_commands() {
         let reply = app.handle(&request.to_string()).await;
         assert!(!reply.contains("TELLING"), "{request}: {reply}");
         let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["error"]["kind"], "locked", "{request}");
+        assert_eq!(reply["error"]["kind"], "groupNotFound", "{request}");
     }
     let stored = app.store.group(&group).unwrap().unwrap();
     assert_eq!(stored.name, "TELLING GROUP NAME");

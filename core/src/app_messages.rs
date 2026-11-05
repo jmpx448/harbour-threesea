@@ -177,6 +177,29 @@ impl Shared {
         Ok(())
     }
 
+    /// A group or list as one that doesn't exist while it is a hidden private chat: commands that
+    /// show or manage it answer nothing of it then (§7.8, ADR 0009), not even that it is private.
+    pub(crate) fn check_visible_group(&self, key: &str) -> Result<(), ApiError> {
+        match self.check_readable(key) {
+            Err(ApiError::Locked) => Err(ApiError::GroupNotFound),
+            other => other,
+        }
+    }
+
+    /// A chat whose marks (pinned, archived, notifications) are to change: a hidden group or list
+    /// isn't there ([`Self::check_visible_group`]), a hidden contact's chat is locked.
+    pub(crate) fn visible_conversation(
+        &self,
+        identity: &str,
+    ) -> Result<(String, Conversation), ApiError> {
+        let (key, conversation) = self.conversation(identity)?;
+        match conversation {
+            Conversation::Contact(_) => self.check_readable(&key)?,
+            Conversation::Group(_) | Conversation::List(_) => self.check_visible_group(&key)?,
+        }
+        Ok((key, conversation))
+    }
+
     /// The conversation, if its content may be read or changed now: not a hidden private chat
     /// (ADR 0009; every command that shows or changes messages goes through this or
     /// `check_readable`, deep audit D02).
@@ -1542,6 +1565,11 @@ impl App {
     }
 
     pub(crate) fn delete_conversation(&mut self, identity: &str) -> Result<Value, ApiError> {
+        if crate::groups::parse_key(identity).is_some()
+            || crate::distribution_lists::is_key(identity)
+        {
+            self.check_visible_group(identity)?;
+        }
         let (id, conversation) = self.readable_chat(identity)?;
         match conversation {
             // A group's conversation goes with the group, which must have been left.

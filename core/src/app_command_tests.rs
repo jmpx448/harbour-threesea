@@ -926,6 +926,120 @@ fn the_creator_leaving_disbands_the_group_with_an_empty_list_for_everyone() {
     });
 }
 
+/// What is asked of a group's or list's chat, all of which a hidden private one doesn't answer.
+fn chat_commands(key: &str) -> Vec<Value> {
+    vec![
+        json!({"cmd": "setPinned", "identity": key, "pinned": true}),
+        json!({"cmd": "movePinned", "identity": key, "offset": 1}),
+        json!({"cmd": "setArchived", "identity": key, "archived": true}),
+        json!({"cmd": "setChatNotifications", "identity": key, "policy": "never"}),
+        json!({"cmd": "setChatTone", "identity": key, "tone": "a.ogg"}),
+        json!({"cmd": "deleteConversation", "identity": key}),
+    ]
+}
+
+/// The reply to `request` about a hidden chat must read as one about a chat that isn't there.
+async fn answers_as_missing(ui: &mut Ui, request: &Value, missing: &str) {
+    let key = request
+        .get("key")
+        .or_else(|| request.get("identity"))
+        .unwrap();
+    let mut elsewhere = request.clone();
+    for field in ["key", "identity"] {
+        if elsewhere.get(field) == Some(key) {
+            elsewhere[field] = json!(missing);
+        }
+    }
+    let attachments = || vec![b"jpeg".to_vec()];
+    let reply = ui.command_with(request.clone(), attachments()).await;
+    let nothing = ui.command_with(elsewhere, attachments()).await;
+    assert_eq!(reply["error"], nothing["error"], "{request}: {reply}");
+    assert_eq!(
+        reply["error"]["kind"], "groupNotFound",
+        "{request}: {reply}"
+    );
+}
+
+/// §7.8: while the app is locked, a private group is hidden by the core: whatever is asked of it
+/// answers as for a group that doesn't exist, and nothing of it changes.
+#[test]
+fn a_hidden_private_group_is_not_there_for_any_command() {
+    scenario(async {
+        let (servers, _in_place) = Servers::start();
+        let mut ui = Ui::with_identity();
+        let ours = ui.group(&["BBBBBBBB"]).await;
+        let theirs = ui.group_of_someone_else("CCCCCCCC", &["CCCCCCCC"]);
+        for key in [&ours, &theirs] {
+            ui.app.store.set_private(key, true).unwrap();
+        }
+        ui.lock().await;
+
+        let missing = "g:AAAAAAAA:00000000000000ff";
+        for key in [&ours, &theirs] {
+            let mut requests = vec![
+                json!({"cmd": "group", "key": key}),
+                json!({"cmd": "setGroupMembers", "key": key, "members": ["CCCCCCCC"]}),
+                json!({"cmd": "renameGroup", "key": key, "name": "Ship"}),
+                json!({"cmd": "leaveGroup", "key": key}),
+                json!({"cmd": "setGroupPicture", "key": key}),
+                json!({"cmd": "removeGroupPicture", "key": key}),
+            ];
+            requests.extend(chat_commands(key));
+            for request in &requests {
+                answers_as_missing(&mut ui, request, missing).await;
+            }
+        }
+
+        for key in [&ours, &theirs] {
+            let group = ui.app.store.group(key).unwrap().expect("still there");
+            assert!(!group.left);
+            assert_ne!(group.name, "Ship");
+            assert!(group.picture.is_none());
+            assert!(ui.outbox(key).is_empty());
+            assert!(!ui.app.store.pinned_chats().unwrap().contains(key));
+        }
+        assert_eq!(ui.statuses(&ours), ["groupCreated"]);
+        assert_eq!(servers.uploads_seen(), 0);
+        assert_eq!(ui.sends_asked(), 0);
+
+        // Unlocked, it is there again.
+        ui.ok(json!({"cmd": "unlock", "pin": "2468", "privateChats": true}))
+            .await;
+        ui.ok(json!({"cmd": "renameGroup", "key": ours, "name": "Ship"}))
+            .await;
+        ui.ok(json!({"cmd": "group", "key": theirs})).await;
+    });
+}
+
+#[test]
+fn a_hidden_private_list_is_not_there_for_any_command() {
+    scenario(async {
+        let (_servers, _in_place) = Servers::start();
+        let mut ui = Ui::with_identity();
+        let list = ui
+            .ok(json!({"cmd": "createDistributionList", "name": "Friends",
+                       "members": ["BBBBBBBB"]}))
+            .await;
+        let key = list["key"].as_str().unwrap().to_owned();
+        ui.app.store.set_private(&key, true).unwrap();
+        ui.lock().await;
+
+        let mut requests = vec![
+            json!({"cmd": "distributionList", "key": key}),
+            json!({"cmd": "updateDistributionList", "key": key, "name": "Others",
+                   "members": ["CCCCCCCC"]}),
+        ];
+        requests.extend(chat_commands(&key));
+        for request in &requests {
+            answers_as_missing(&mut ui, request, "d:00000000000000ff").await;
+        }
+        let stored = ui.app.store.distribution_list(&key).unwrap().unwrap();
+        assert_eq!(stored.name, "Friends");
+        assert_eq!(stored.members, names(&["BBBBBBBB"]));
+        assert!(!ui.app.store.pinned_chats().unwrap().contains(&key));
+    });
+}
+
 // Threema Safe restore
 
 /// A device's life up to a backup: `(its Ui, the servers holding the backup)`. Contacts BBBBBBBB,
