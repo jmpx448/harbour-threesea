@@ -103,7 +103,83 @@ QtObject {
         backend.state = "ready"
     }
 
+    readonly property var dbus: fakes.dbus
+    readonly property var lifecycle: fakes.lifecycle
+
     readonly property var scenarios: ({
+        // Keep running off and started by a notification's action: it stays until the reply has
+        // gone out, and no longer.
+        replyEndsTheRunWhenItHasGone: [
+            [function() {
+                ready(false)
+                backend.results["wake"] = { waiting: true }
+            }, 100],
+            [function() { check("nothing happened yet", lifecycle.left, 0) }, 0],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                check("sent", countSent("sendText"), 1)
+                check("read", countSent("markRead"), 1)
+                check("a wake-up asks how it went", countSent("wake"), 1)
+                check("still on its way", lifecycle.left, 0)
+                backend.coreEvent("wakeSettled", {})
+                check("gone", lifecycle.left, 1)
+            }, 100],
+        ],
+        // The core not connected: nothing to wait for.
+        markReadEndsTheRunAtOnceWithoutAConnection: [
+            [function() { ready(false) }, 100],
+            [function() { dbus.markReadRequested(chat) }, 100],
+            [function() {
+                check("read", countSent("markRead"), 1)
+                check("gone", lifecycle.left, 1)
+            }, 0],
+        ],
+        blankReplyEndsTheRun: [
+            [function() { ready(false) }, 100],
+            [function() { dbus.blankReply() }, 100],
+            [function() { check("gone", lifecycle.left, 1) }, 0],
+        ],
+        // A refused reply goes to its draft first.
+        refusedReplyEndsTheRunWhenKept: [
+            [function() {
+                ready(false)
+                backend.refused["sendText"] = "messageTooLong"
+            }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                check("kept", countSent("setDraft"), 1)
+                check("no read", countSent("markRead"), 0)
+                check("gone", lifecycle.left, 1)
+            }, 0],
+        ],
+        // Keep running on: the run goes on.
+        replyLeavesARunThatKeepsRunning: [
+            [function() {
+                backend.keepRunning = true
+                ready(false)
+            }, 100],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                check("sent", countSent("sendText"), 1)
+                check("no wake-up for it", countSent("wake"), 0)
+                check("stays", lifecycle.left, 0)
+            }, 0],
+        ],
+        // Behind the app lock the reply waits for the PIN, and the run with it.
+        replyBehindTheLockEndsTheRunAfterThePin: [
+            [function() { ready(true) }, 100],
+            [function() { window.lockNow() }, 50],
+            [function() { dbus.replyRequested(chat, "words") }, 100],
+            [function() {
+                check("not sent", countSent("sendText"), 0)
+                check("stays", lifecycle.left, 0)
+                unlock()
+            }, 100],
+            [function() {
+                check("sent", countSent("sendText"), 1)
+                check("gone", lifecycle.left, 1)
+            }, 0],
+        ],
         // Behind the lock nothing shows that the microphone is on.
         lockEndsRecording: [
             [function() { ready(true) }, 100],

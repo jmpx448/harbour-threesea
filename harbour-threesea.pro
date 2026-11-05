@@ -33,6 +33,7 @@ PRE_TARGETDEPS += $$CORE_LIB
 
 SOURCES += \
     bridge/animatedimage.cpp \
+    bridge/applifecycle.cpp \
     bridge/gifdecoder.cpp \
     bridge/callmanager.cpp \
     bridge/callvideo.cpp \
@@ -57,6 +58,7 @@ SOURCES += \
 
 HEADERS += \
     bridge/animatedimage.h \
+    bridge/applifecycle.h \
     bridge/gifdecoder.h \
     bridge/callmanager.h \
     bridge/callvideo.h \

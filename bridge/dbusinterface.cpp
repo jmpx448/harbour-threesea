@@ -294,6 +294,7 @@ void DBusInterface::reply(const QString &identity, const QString &token, const Q
     emit called();
     // A blank reply sends nothing, so it doesn't use the token up.
     if (text.trimmed().isEmpty()) {
+        emit blankReply();
         return;
     }
     forgetToken(identity);

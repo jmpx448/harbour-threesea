@@ -1437,6 +1437,10 @@ ApplicationWindow {
     function dataRemoved(linkedDevicesRemain) {
         forgetNotifications()
         NotificationActions.drop()
+        actionsCame = false
+        actionsRunning = 0
+        actionsSendLimit.stop()
+        actionsWaitLimit.stop()
         addressBook.active = false
         graceTimer.stop()
         lockedNotificationLater.stop()
@@ -1471,6 +1475,7 @@ ApplicationWindow {
     // the app locked waits for the PIN: nothing goes out in the user's name without it.
     function notificationAction(action) {
         NotificationActions.add(action)
+        actionsCame = true
         runNotificationActions()
         lockedNotification()
         if (locked && action.text !== undefined) showAppLocked(0, true)
@@ -1480,21 +1485,23 @@ ApplicationWindow {
         // Only these two states have an app lock (showLock); not known yet counts as locked.
         if ((backend.state === "ready" || backend.state === "needsLicense") && (!lockChecked || lockActive())) {
             NotificationActions.repliesToKeep().forEach(window.keepWaitingReply)
+            leaveAfterActions()
             return
         }
         NotificationActions.release(backend.state).forEach(function(action) {
+            window.actionsRunning = window.actionsRunning + 1
             if (action.text === undefined) {
-                window.markNotifiedRead(action.identity)
+                window.markNotifiedRead(action.identity, window.actionEnded)
                 return
             }
             backend.call("sendText", { identity: action.identity, text: action.text },
                          function(ok, result, kind, message) {
                 // Replying means it has been read; one that didn't go out hasn't been answered.
                 if (ok) {
-                    window.markNotifiedRead(action.identity)
+                    window.markNotifiedRead(action.identity, window.actionEnded)
                     if (action.kept || action.keeping) window.dropKeptReply(action.identity, action.text)
                 } else {
-                    window.replyRefused(action, Errors.text(kind, message))
+                    window.replyRefused(action, Errors.text(kind, message), window.actionEnded)
                 }
             })
         })
@@ -1504,17 +1511,64 @@ ApplicationWindow {
                               //% "Threesea could not start. Open it to see why."
                               qsTrId("threesea-la-reply-not-sent-body"))
         }
+        leaveAfterActions()
     }
 
-    function markNotifiedRead(identity) {
-        backend.call("markRead", { identity: identity }, function() { backend.refreshUnread() })
+    // With Keep running off and no window, a run started for a notification's action ends with it
+    // (lifecycle.leaveIfUnwanted, which knows about the window). The core answering isn't enough:
+    // a reply it has stored would stay unsent until the app is next opened, and that may be days.
+    // A wake-up asks the server for an answer after what is on its way, and says how it went.
+    property bool actionsCame: false
+    property int actionsRunning: 0
+    function actionEnded() {
+        actionsRunning = actionsRunning - 1
+        leaveAfterActions()
+    }
+    function leaveAfterActions() {
+        if (!actionsCame || backend.keepRunning || actionsRunning > 0) return
+        if (NotificationActions.anyWaiting()) {
+            actionsWaitLimit.restart()
+            return
+        }
+        actionsCame = false
+        actionsWaitLimit.stop()
+        actionsSendLimit.restart()
+        backend.call("wake", {}, function(ok, result) {
+            if (!ok || !result.waiting) window.actionsSent()
+        })
+    }
+    function actionsSent() {
+        if (!actionsSendLimit.running) return
+        actionsSendLimit.stop()
+        if (actionsRunning === 0 && !NotificationActions.anyWaiting()) lifecycle.leaveIfUnwanted()
+    }
+    // As long as a dead connection takes to find out and come back (wakeLimit).
+    Timer {
+        id: actionsSendLimit
+        interval: 45000
+        onTriggered: lifecycle.leaveIfUnwanted()
+    }
+    // Waiting behind a lock. The reply's words are in the chat's draft by then and the app says so
+    // as it ends (appEnding), so nobody has to come back for it to end. With no core running there
+    // is no draft: the process holds the only copy and stays for it, with nothing connected.
+    Timer {
+        id: actionsWaitLimit
+        interval: 600000
+        onTriggered: if (!backend.keepRunning && NotificationActions.allRepliesKept()) lifecycle.leaveIfUnwanted()
+    }
+
+    function markNotifiedRead(identity, done) {
+        backend.call("markRead", { identity: identity }, function() {
+            backend.refreshUnread()
+            if (done) done()
+        })
         clearNotification(identity)
     }
 
     // A reply from a notification that the core refused. A notice would be drawn in a window that
     // isn't on screen, and the notification it was typed in has gone: this one says so, without
     // the words, which go back into the chat and wait there.
-    function replyRefused(action, reason) {
+    function replyRefused(action, reason, done) {
         keepReply(action, function(kept) {
             var key = "replyNotSent:" + action.identity
             var n = notifications[key]
@@ -1529,6 +1583,7 @@ ApplicationWindow {
             n.previewSummary = n.summary
             n.previewBody = n.body
             n.publish()
+            done()
         })
     }
 
@@ -1756,6 +1811,10 @@ ApplicationWindow {
         onMarkReadRequested: window.notificationAction({ identity: identity })
         onReplyRequested: window.notificationAction({ identity: identity, text: text })
         onReplyLost: window.replyLost()
+        onBlankReply: {
+            window.actionsCame = true
+            window.leaveAfterActions()
+        }
     }
 
     Connections {
@@ -1820,6 +1879,7 @@ ApplicationWindow {
                 window.backlogChanged(data.active)
             } else if (name === "wakeSettled") {
                 window.endWake()
+                window.actionsSent()
             } else if (name === "safeServerCopyLeft") {
                 // From here: the user may have left the Safe page during the wait.
                 //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."

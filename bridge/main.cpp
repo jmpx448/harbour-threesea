@@ -20,6 +20,7 @@
 #include <sailfishapp.h>
 
 #include "animatedimage.h"
+#include "applifecycle.h"
 #include "callmanager.h"
 #include "callvideo.h"
 #include "groupcallmanager.h"
@@ -277,11 +278,9 @@ int main(int argc, char *argv[])
     showUnlessCalled.setSingleShot(true);
     QObject::connect(&showUnlessCalled, &QTimer::timeout, view.data(), [&view]() { view->show(); });
     QObject::connect(dbus, &DBusInterface::called, &showUnlessCalled, &QTimer::stop);
-    QObject::connect(dbus, &DBusInterface::backgroundRequested, app.data(), [keepRunning]() {
-        if (!keepRunning) {
-            QCoreApplication::quit();
-        }
-    });
+    AppLifecycle *lifecycle = new AppLifecycle(view.data(), [backend]() { return backend->keepRunning(); }, view->engine());
+    view->rootContext()->setContextProperty(QStringLiteral("lifecycle"), lifecycle);
+    QObject::connect(dbus, &DBusInterface::backgroundRequested, lifecycle, &AppLifecycle::leaveIfUnwanted);
 
     view->setSource(SailfishApp::pathToMainQml());
     showUnlessCalled.start(2000);

@@ -36,7 +36,7 @@ int main(int argc, char **argv)
         qCritical("%s", qPrintable(fakesComponent.errorString()));
         return 2;
     }
-    for (const char *name : { "backend", "dbus", "calls", "groupCalls", "voicePlayer", "videoPlayer", "voiceRecorder", "softSound" }) {
+    for (const char *name : { "backend", "dbus", "lifecycle", "calls", "groupCalls", "voicePlayer", "videoPlayer", "voiceRecorder", "softSound" }) {
         engine.rootContext()->setContextProperty(QString::fromLatin1(name), fakes->property(name));
     }
     Harness harness;

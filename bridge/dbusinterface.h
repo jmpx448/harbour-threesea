@@ -82,6 +82,8 @@ signals:
     void openChatRequested(const QString &identity);
     void replyRequested(const QString &identity, const QString &text);
     void markReadRequested(const QString &identity);
+    // A reply with nothing in it: nothing to do, and that is done.
+    void blankReply();
     // A reply came without a valid token.
     void replyLost();
     void activateRequested();

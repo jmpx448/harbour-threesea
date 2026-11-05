@@ -26,6 +26,10 @@ function release(state) {
     return actions
 }
 
+function anyWaiting() {
+    return waiting.length > 0
+}
+
 function replyWaiting() {
     return waiting.some(function(action) { return action.text !== undefined })
 }

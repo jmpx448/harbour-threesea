@@ -21,6 +21,7 @@ import sys
 OBJECTS = {
     "backend": ("threesebackend.h", "ThreeseBackend"),
     "dbus": ("dbusinterface.h", "DBusInterface"),
+    "lifecycle": ("applifecycle.h", "AppLifecycle"),
     "calls": ("callmanager.h", "CallManager"),
     "groupCalls": ("groupcallmanager.h", "GroupCallManager"),
     "voicePlayer": ("voiceplayer.h", "VoicePlayer"),

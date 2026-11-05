@@ -73,6 +73,7 @@ QtObject {
         signal markReadRequested(string identity)
         signal replyRequested(string identity, string text)
         signal replyLost()
+        signal blankReply()
         function actionToken() { return "" }
         function retainTokens(identities) { }
         // Those whose grace started.
@@ -83,6 +84,11 @@ QtObject {
         function forgetToken(identity) { forgotten.push(identity) }
         function forgetAllTokens() { }
         function activate() { }
+    }
+    property QtObject lifecycle: QtObject {
+        // How often the window said that this run has done what it was for.
+        property int left: 0
+        function leaveIfUnwanted() { left = left + 1 }
     }
     property QtObject calls: QtObject {
         property string state: "idle"
