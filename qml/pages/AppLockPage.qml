@@ -3,6 +3,7 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
 import "../components/Errors.js" as Errors
+import "../components/Format.js" as Fmt
 
 // App lock settings (ADR 0009), reached through the PIN like the device lock settings:
 // `pin` is what was entered to get here (empty while there is no lock). Choices go
@@ -116,11 +117,7 @@ Page {
                 //% "App lock"
                 label: qsTrId("threesea-he-app-lock")
                 choice: page.lock ? 1 : 0
-                valueText: !page.lock ? "" : page.lock.keyboard
-                           //% "Passphrase"
-                           ? qsTrId("threesea-la-lock-passphrase")
-                           //% "PIN"
-                           : qsTrId("threesea-la-lock-pin")
+                valueText: Fmt.lockValue(page.lock)
                 onChosen: {
                     if (index === 1 && !page.lock) {
                         // Switching it on continues to choosing the PIN.

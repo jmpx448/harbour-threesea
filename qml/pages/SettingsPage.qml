@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
+import "../components/Format.js" as Fmt
 
 // The settings, laid out like Sailfish's Settings app: section headers, below them a row with
 // an icon per category, each opening its page in pages/settings/.
@@ -62,11 +63,13 @@ Page {
             SettingsEntry {
                 icon: "icon-m-device-lock"
                 text: qsTrId("threesea-se-security")
-                description: window.lockInfo && window.lockInfo.lock
-                             //% "App lock on"
-                             ? qsTrId("threesea-la-app-lock-on")
+                description: !(window.lockInfo && window.lockInfo.lock)
                              //% "App lock off"
-                             : qsTrId("threesea-la-app-lock-off")
+                             ? qsTrId("threesea-la-app-lock-off")
+                             : window.lockInfo.lock.appLock
+                               //% "App lock on"
+                               ? qsTrId("threesea-la-app-lock-on")
+                               : Fmt.lockValue(window.lockInfo.lock)
                 page: "SecuritySettingsPage.qml"
             }
 

@@ -156,6 +156,12 @@ QtObject {
         check("preview, a GIF as a file", Fmt.preview({ kind: "file", body: { mediaType: "image/gif", rendering: "file", name: "a.gif" } }) === "threesea-la-gif", false)
         check("preview, a photo", Fmt.preview({ kind: "file", body: { mediaType: "image/jpeg", rendering: "media" } }), "threesea-la-photo")
 
+        check("no lock", Fmt.lockValue(null), "threesea-me-lock-off")
+        check("app lock, PIN", Fmt.lockValue({ appLock: true, keyboard: false }), "threesea-la-lock-pin")
+        check("app lock, passphrase", Fmt.lockValue({ appLock: true, keyboard: true }), "threesea-la-lock-passphrase")
+        check("only private chats, PIN", Fmt.lockValue({ appLock: false, keyboard: false }), "threesea-la-lock-private-pin")
+        check("only private chats, passphrase", Fmt.lockValue({ appLock: false, keyboard: true }), "threesea-la-lock-private-passphrase")
+
         var senders = Fmt.reactionSenders([{ emoji: "a", sender: "ABCD1234" }, { emoji: "b", sender: "" },
                                            { emoji: "a", sender: "" }, { emoji: "a", sender: "EFGH5678" }])
         check("who reacted, by emoji", senders.length, 2)

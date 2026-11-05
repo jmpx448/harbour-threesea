@@ -46,6 +46,25 @@ function withoutYear(pattern) {
                   .replace(/(?:[\s,.\/-]|'[^']*')*y+(?:[\s.]|'[^']*')*/, "")
 }
 
+// What the app lock's row says. A PIN without "Lock the app" only guards the private chats: the app
+// itself opens without asking then (lock: lockStatus's, or null).
+function lockValue(lock) {
+    //% "Off"
+    if (!lock) return qsTrId("threesea-me-lock-off")
+    if (lock.appLock) {
+        return lock.keyboard
+                //% "Passphrase"
+                ? qsTrId("threesea-la-lock-passphrase")
+                //% "PIN"
+                : qsTrId("threesea-la-lock-pin")
+    }
+    return lock.keyboard
+            //% "Passphrase for private chats"
+            ? qsTrId("threesea-la-lock-private-passphrase")
+            //% "PIN for private chats"
+            : qsTrId("threesea-la-lock-private-pin")
+}
+
 // A call in the chat: "call|result|outgoing|seconds" (core/src/app_calls.rs).
 function callStatus(result, outgoing, seconds) {
     switch (result) {

@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../../components"
+import "../../components/Format.js" as Fmt
 
 // Settings → Security: the app lock, and the passphrase for the stored data (Android's
 // "Encryption of locally stored data"), which are independent of each other (ADR 0009).
@@ -57,14 +58,7 @@ Page {
             ValueButton {
                 //% "App lock"
                 label: qsTrId("threesea-he-app-lock")
-                value: !(window.lockInfo && window.lockInfo.lock)
-                       //% "Off"
-                       ? qsTrId("threesea-me-lock-off")
-                       : window.lockInfo.lock.keyboard
-                         //% "Passphrase"
-                         ? qsTrId("threesea-la-lock-passphrase")
-                         //% "PIN"
-                         : qsTrId("threesea-la-lock-pin")
+                value: Fmt.lockValue(window.lockInfo && window.lockInfo.lock)
                 onClicked: {
                     if (!(window.lockInfo && window.lockInfo.lock)) {
                         pageStack.push(Qt.resolvedUrl("../AppLockPage.qml"))
