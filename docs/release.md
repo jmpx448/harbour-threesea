@@ -41,6 +41,9 @@ A failed release workflow changes nothing (the tag and release are made last); f
 - Settings → Code security: enable "Private vulnerability reporting" (SECURITY.md points there),
   and "Dependabot alerts" (advisories for the crates in Cargo.lock; `.github/dependabot.yml`
   only proposes updates of the workflows' actions).
+- After the first push with the current `.github/workflows/ci.yml`: check that the runners had room
+  for the SDK image (about 16 GB) in the `sdk-tests` job and in each of the six builds; the
+  workflows have not run on GitHub since they were extended.
 - Your account: Settings → Emails → "Keep my email addresses private" and "Block command line
   pushes that expose my email".
 
@@ -122,7 +125,15 @@ Still to be done by hand, and only by the maintainer:
    page and the README already say so).
 3. The store reviews by hand as well; expect questions about the Threema name. The launcher
    name is "Threesea" for exactly that reason.
-4. Chum (for the Full flavour) stays blocked on Rust: OBS builds from source and the SFOS
+4. Decide the Sailjail `OrganizationName` before the first store release. It is `org.threesea`
+   today (`harbour-threesea.desktop`, `bridge/main.cpp`, the D-Bus names in
+   `bridge/dbusinterface.cpp`, the systemd unit and the spec's scriptlets), and Sailjail derives the
+   app's data folder (`~/.local/share/org.threesea/harbour-threesea`) and its Secrets access from
+   it. Keeping it costs nothing. Changing it would make every installed copy start empty, without
+   its ID, chats or database key, unless the update moves the data folder and the key in Secrets
+   over first; the D-Bus names and the notifications' actions change with it. The question is open
+   in CLAUDE.md §11 until the maintainer decides.
+5. Chum (for the Full flavour) stays blocked on Rust: OBS builds from source and the SFOS
    5.1/5.2 repositories only have Rust 1.75, while libthreema needs 1.95 (docs/decisions,
    CLAUDE.md §11).
 
