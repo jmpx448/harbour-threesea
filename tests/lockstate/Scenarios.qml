@@ -10,6 +10,7 @@ QtObject {
     property int failures: 0
     property int step: 0
     property string handedOver
+    property var cut
 
     readonly property var backend: fakes.backend
     readonly property var calls: fakes.calls
@@ -464,6 +465,7 @@ QtObject {
             [function() {
                 var editor = page("editor")
                 check("can be accepted", editor.canAccept, true)
+                check("nothing done yet", editor.changed, false)
                 var crop = editor.crop()
                 check("the whole picture", [crop.x, crop.y, crop.width, crop.height].join(), "0,0,1,1")
                 var picture = findItem(editor, function(i) { return i.objectName === "picture" })
@@ -471,6 +473,7 @@ QtObject {
                 harness.move(picture, picture.width / 2, picture.height / 2)
                 harness.release(picture, picture.width / 2, picture.height / 2)
                 check("a line", editor.strokes.length, 1)
+                check("something done", editor.changed, true)
                 var points = editor.strokes[0].points
                 check("from where the finger was", Math.round(points[0] * 100), 25)
                 check("to where it went", Math.round(points[points.length - 2] * 100), 50)
@@ -543,6 +546,29 @@ QtObject {
                 check("and down", crop.y, 0)
                 var grip = findItem(page("editor"), function(i) { return i.objectName === "grip2" })
                 harness.release(grip, grip.width / 2, grip.height / 2)
+                root.cut = crop
+                // The phone is turned: another size, the same cut.
+                page("editor").width = 960
+                page("editor").height = 540
+            }, 200],
+            [function() {
+                var crop = page("editor").crop()
+                check("the cut stays across", Math.round(crop.x * 1000), Math.round(root.cut.x * 1000))
+                check("and down", Math.round(crop.height * 1000), Math.round(root.cut.height * 1000))
+                // Going on from where it was left.
+                var state = page("editor").state()
+                state.history = ["stroke"]
+                state.strokes = [{ points: [0.5, 0.5], color: "#e60003", width: 0.01 }]
+                state.texts = [{ text: "Look", x: 0.5, y: 0.5, color: "#e60003", size: 0.05, angle: 0 }]
+                push("pages/EditPhotoPage.qml", { objectName: "again", path: "/tmp/threesea-wide.png", earlier: state })
+                page("again").width = 960
+                page("again").height = 540
+            }, 600],
+            [function() {
+                var again = page("again")
+                check("the lines back", again.strokes.length, 1)
+                check("the text back", again.marks().length, 2)
+                check("the cut back", Math.round(again.crop().x * 1000), Math.round(root.cut.x * 1000))
             }, 0],
         ],
         // From a shot to the square editor, and only the cut copy goes on; the shot doesn't stay.

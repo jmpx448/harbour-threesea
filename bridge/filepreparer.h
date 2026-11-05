@@ -38,7 +38,7 @@ signals:
                   const QString &error);
 
 private:
-    void preparePicture(QImage image, QVariantMap request);
+    void preparePicture(const QImage &picture, QVariantMap request);
 
     std::function<QImage()> m_picture;
     QString m_path;

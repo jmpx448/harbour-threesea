@@ -334,11 +334,14 @@ public:
     // camera's GPS!) stays behind with the original, as it does for everything we send.
     Q_INVOKABLE void editPhoto(const QString &path, const QRectF &crop, int rotation, const QVariantList &marks,
                                const QJSValue &callback);
-    // The picture of `message` edited the same way and sent to `identity`, like sendFile with a
-    // photo. From the decrypted bytes in memory to the core: no plain copy of a received picture
-    // on disk at any point (ADR 0029).
-    Q_INVOKABLE void sendEditedPicture(const QString &identity, qint64 message, const QRectF &crop, int rotation,
-                                       const QVariantList &marks, const QJSValue &callback);
+    // The picture of `message` edited the same way, in two steps, for the time a remorse takes. A
+    // private chat's picture can only be read while the chat is showing, so its bytes are taken
+    // now, on the GUI thread, into memory only: a number for them, 0 if they can't be read. Then
+    // sendHeldPicture sends it to `identity`, like sendFile with a photo, and dropHeldPicture
+    // wipes it. No plain copy of a received picture on disk at any point (ADR 0029).
+    Q_INVOKABLE int holdPicture(qint64 message, const QRectF &crop, int rotation, const QVariantList &marks);
+    Q_INVOKABLE void sendHeldPicture(int held, const QString &identity, const QJSValue &callback);
+    Q_INVOKABLE void dropHeldPicture(int held);
     // Keep a GIF from the device as a favourite (`addGifFavourite`).
     Q_INVOKABLE void addGifFavourite(const QString &path, const QJSValue &callback = QJSValue());
     VoiceRecorder *voiceRecorder() const;
@@ -455,6 +458,18 @@ private:
     QMultiHash<quint64, QString> m_tempSources;
     // Files with a FilePreparer running, by request: the chat each is for.
     QHash<quint64, QString> m_filesPreparing;
+    // See holdPicture.
+    struct HeldPicture {
+        QByteArray data;
+        QRectF crop;
+        int rotation;
+        QVariantList marks;
+    };
+    QHash<int, HeldPicture> m_heldPictures;
+    int m_nextHeldPicture = 1;
+    // Files whose encoded bytes are wiped once the core has its copy: from a received picture.
+    QSet<quint64> m_wipeWhenPrepared;
+    void dropHeldPictures();
     QHash<quint64, NativeCallback> m_nativeCallbacks;
     // The chats' own tones (from the core, while it runs): the notifications ask for them at once.
     QVariantMap m_chatTones;

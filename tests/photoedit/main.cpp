@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// What a picture carries out of the app: nothing but its pixels, whichever way it goes. Exit 0:
-// passed.
+// What a picture carries out of the app through Qt's writers: nothing but its pixels. GIFs (not
+// written here) and the browser's pictures have their tests in the core. Exit 0: passed.
 #include <QBuffer>
 #include <QDirIterator>
 #include <QFontDatabase>
@@ -121,6 +121,18 @@ void turnsAndCuts()
     check(cut.size() == QSize(20, 20) && qBlue(cut.pixel(10, 10)) == 0, "cut after turning");
 
     check(PhotoEdit::edited(halves(false), QRectF(0, 0, 0, 0), 0).isNull(), "nothing left: nothing");
+}
+
+void wipesOnlyWhatIsItsOwn()
+{
+    QImage own = halves(false);
+    PhotoEdit::wipe(own);
+    check(qRed(own.pixel(1, 1)) == 0, "nothing left of the picture");
+
+    const QImage other = halves(false);
+    QImage sharing = other;
+    PhotoEdit::wipe(sharing);
+    check(qRed(other.pixel(1, 1)) == 255, "what is shared stays for whoever shares it");
 }
 
 void transparencyStays(const QString &dir)
@@ -247,6 +259,7 @@ int main(int argc, char **argv)
     QTemporaryDir dir;
     metadataStaysBehind(dir.path());
     turnsAndCuts();
+    wipesOnlyWhatIsItsOwn();
     transparencyStays(dir.path());
     marksLandInPlace();
     if (failures == 0) {

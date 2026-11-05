@@ -14,6 +14,9 @@ namespace PhotoEdit {
 // comments, a PNG's text chunks) through scaling and copying, and Qt's writers write it out again.
 QImage withoutMetadata(const QImage &image);
 
+// Zeroes the pixels if nothing else shares them (decrypted pictures, once done with).
+void wipe(QImage &image);
+
 // The picture with `marks` drawn on it, then turned by `rotation` (0, 90, 180, 270 degrees
 // clockwise) and cut to `crop`, a rectangle in fractions (0..1) of the turned picture. Null if
 // nothing is left of it.

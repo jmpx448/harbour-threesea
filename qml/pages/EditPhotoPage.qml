@@ -5,7 +5,8 @@ import "../components/Format.js" as Fmt
 
 // Cut, turn and draw on a photo before it is sent (Android's editor and ImagePaintActivity, with a
 // pen and text). Whoever opened it calls save() when it is accepted, for a new picture in the app's
-// capture folder, or send() for the picture of a message; the original is never changed.
+// capture folder, or hold() for the picture of a message; the original is never changed. state()
+// and `earlier` bring back where it was left, if the user takes back sending or leaving.
 Dialog {
     id: dialog
     allowedOrientations: Orientation.All
@@ -15,6 +16,8 @@ Dialog {
     // Or the picture of this message (its id), which stays in memory: see send().
     property var message: -1
     readonly property bool ofMessage: message >= 0
+    // A state() to go on from.
+    property var earlier: null
     // The frame stays a square, and nothing is drawn (profile and group pictures).
     property bool square
 
@@ -33,8 +36,34 @@ Dialog {
     property int turn: 0
     readonly property bool sideways: turn % 180 !== 0
 
-    // Only once the picture is there: reset() sizes the frame then.
-    canAccept: frame.width > 0 && frame.height > 0
+    // The frame in fractions of the picture as it is shown, which stay when the phone is turned.
+    property var kept: ({ x: 0, y: 0, width: 1, height: 1 })
+    // Sending a picture that nothing was done to would only be a copy of it.
+    readonly property bool changed: history.length > 0 || turn !== 0
+                                    || kept.x !== 0 || kept.y !== 0 || kept.width !== 1 || kept.height !== 1
+
+    canAccept: photo.status === Image.Ready && frame.width > 0 && frame.height > 0 && (!ofMessage || changed)
+
+    Component.onCompleted: {
+        if (!earlier) return
+        strokes = earlier.strokes
+        history = earlier.history
+        turn = earlier.turn
+        tool = earlier.tool
+        penColor = earlier.penColor
+        for (var i = 0; i < earlier.texts.length; ++i) texts.append(earlier.texts[i])
+    }
+
+    function state() {
+        var list = []
+        for (var i = 0; i < texts.count; ++i) {
+            var text = texts.get(i)
+            list.push({ text: text.text, x: text.x, y: text.y, color: text.color, size: text.size,
+                        angle: text.angle })
+        }
+        return { strokes: strokes, texts: list, history: history, turn: turn, tool: tool,
+                 penColor: "" + penColor, crop: kept }
+    }
 
     // The frame's place inside the picture as it is shown, as fractions of it.
     function crop() {
@@ -57,9 +86,9 @@ Dialog {
         backend.editPhoto(dialog.path, crop(), dialog.turn, marks(), callback)
     }
 
-    // See ThreeseBackend::sendEditedPicture.
-    function send(identity, callback) {
-        backend.sendEditedPicture(identity, dialog.message, crop(), dialog.turn, marks(), callback)
+    // See ThreeseBackend::holdPicture.
+    function hold() {
+        return backend.holdPicture(dialog.message, crop(), dialog.turn, marks())
     }
 
     function undo() {
@@ -93,10 +122,23 @@ Dialog {
 
     // The whole picture again, or the largest square in its middle.
     function reset() {
-        frame.width = square ? Math.min(view.width, view.height) : view.width
-        frame.height = square ? frame.width : view.height
-        frame.x = (view.width - frame.width) / 2
-        frame.y = (view.height - frame.height) / 2
+        var side = Math.min(view.width, view.height)
+        var width = square && view.width > 0 ? side / view.width : 1
+        var height = square && view.height > 0 ? side / view.height : 1
+        kept = { x: (1 - width) / 2, y: (1 - height) / 2, width: width, height: height }
+        applyFrame()
+    }
+
+    function applyFrame() {
+        frame.x = kept.x * view.width
+        frame.y = kept.y * view.height
+        frame.width = kept.width * view.width
+        frame.height = kept.height * view.height
+    }
+
+    // After a finger moved the frame.
+    function rememberFrame() {
+        kept = crop()
     }
 
     SilicaFlickable {
@@ -158,8 +200,8 @@ Dialog {
                 width: Math.min(area.width, area.height * ratio)
                 height: Math.min(area.height, area.width / ratio)
                 anchors.centerIn: parent
-                onWidthChanged: dialog.reset()
-                onHeightChanged: dialog.reset()
+                onWidthChanged: dialog.applyFrame()
+                onHeightChanged: dialog.applyFrame()
 
                 // The picture as it lies before turning, with what is drawn on it.
                 Item {
@@ -187,7 +229,15 @@ Dialog {
                         // Shown no larger than the screen; the cut is made from the original.
                         sourceSize.width: Screen.width
                         sourceSize.height: Screen.height
-                        onStatusChanged: if (status === Image.Ready) dialog.reset()
+                        onStatusChanged: {
+                            if (status !== Image.Ready) return
+                            if (dialog.earlier) {
+                                dialog.kept = dialog.earlier.crop
+                                dialog.applyFrame()
+                            } else {
+                                dialog.reset()
+                            }
+                        }
                     }
 
                     Canvas {
@@ -303,6 +353,8 @@ Dialog {
                         // Or the dialog's own left/right swipe (accept, cancel) takes the drag
                         // away after a few pixels and the frame stops following the finger.
                         preventStealing: true
+                        onPositionChanged: dialog.rememberFrame()
+                        onReleased: dialog.rememberFrame()
                         drag {
                             target: frame
                             minimumX: 0
@@ -359,6 +411,7 @@ Dialog {
                                     frame.height = side
                                     frame.x = parent.atRight ? fixedX : fixedX - side
                                     frame.y = parent.atBottom ? fixedY : fixedY - side
+                                    dialog.rememberFrame()
                                     return
                                 }
                                 if (parent.atRight) {
@@ -381,6 +434,7 @@ Dialog {
                                     frame.height += frame.y - top
                                     frame.y = top
                                 }
+                                dialog.rememberFrame()
                             }
                         }
                     }
@@ -390,11 +444,13 @@ Dialog {
 
         Row {
             id: tools
+            // Not by `visible`: that is off too while another page covers this one, and the picture
+            // would change size meanwhile.
             visible: !dialog.square
-            height: visible ? Theme.itemSizeSmall : 0
+            height: dialog.square ? 0 : Theme.itemSizeSmall
             anchors {
                 bottom: parent.bottom
-                bottomMargin: visible ? Theme.paddingMedium : 0
+                bottomMargin: dialog.square ? 0 : Theme.paddingMedium
                 horizontalCenter: parent.horizontalCenter
             }
 

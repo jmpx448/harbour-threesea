@@ -562,11 +562,17 @@ ApplicationWindow {
         }
     }
 
-    // The same for a picture drawn on (sendEditedPicture): nothing comes back to the chat's input.
+    // The same for a picture drawn on (sendHeldPicture): nothing comes back to the chat's input.
     function editedPictureAnswer(chat, alive) {
         return function(ok, result, kind, message) {
-            if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-            else if (alive.yes && result.id !== undefined) chat.messageSent(result)
+            if (ok) {
+                if (alive.yes && result.id !== undefined) chat.messageSent(result)
+            } else if (kind === "internal") {
+                // From the bridge, in no language: what it was about is known here.
+                Notices.show(qsTrId("threesea-la-edit-photo-failed"), Notice.Long, Notice.Center)
+            } else {
+                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            }
         }
     }
 

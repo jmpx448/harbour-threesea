@@ -1163,10 +1163,11 @@ Page {
     // Edits on their way (off the GUI thread): nothing is sent until their copies are in place.
     property int editsRunning: 0
     // Cut and turn a picked photo (EditPhotoPage); the edited copy takes its place.
-    function editAttachment(index) {
+    function editAttachment(index, earlier) {
         var file = page.attachments[index]
         if (!file || !file.photo) return
-        var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"), { path: file.path })
+        var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"), { path: file.path, earlier: earlier || null })
+        keepDrawingOnLeaving(editor, function(state) { page.editAttachment(index, state) })
         editor.accepted.connect(function() {
             page.editsRunning++
             editor.save(function(editedPath) {
@@ -1194,12 +1195,64 @@ Page {
     }
 
     // Draw on the picture of a message and send it to this chat, in two taps as on Android. It goes
-    // straight out: an attachment would need a plain copy of it on disk (ADR 0029).
-    function drawOnPicture(message) {
-        var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"), { message: message, tool: "draw" })
+    // from memory, not as an attachment, which would need a plain copy on disk (ADR 0029). A swipe
+    // is quickly done, so sending and leaving with something drawn both go through a remorse, and
+    // taking that back returns to the editor as it was.
+    function drawOnPicture(message, earlier) {
+        var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"),
+                                    { message: message, tool: "draw", earlier: earlier || null })
         editor.accepted.connect(function() {
-            editor.send(identity, window.editedPictureAnswer(page, pageAlive))
+            var state = editor.state()
+            var held = editor.hold()
+            if (!held) {
+                Notices.show(qsTrId("threesea-la-edit-photo-failed"), Notice.Long, Notice.Center)
+                return
+            }
+            page.finishDrawing()
+            page.heldDrawing = held
+            page.backToEditor = function() { page.drawOnPicture(message, state) }
+            //% "Sending drawing"
+            drawingRemorse.execute(qsTrId("threesea-la-sending-drawing"), function() { page.sendDrawing(held) })
         })
+        keepDrawingOnLeaving(editor, function(state) { page.drawOnPicture(message, state) })
+    }
+    // A picture's bytes, read already, waiting for the remorse. Read while the chat still shows, as
+    // a private chat's can't be once it has gone.
+    property int heldDrawing: 0
+    property var backToEditor: null
+    function sendDrawing(held) {
+        if (held !== heldDrawing) return
+        heldDrawing = 0
+        backToEditor = null
+        backend.sendHeldPicture(held, identity, window.editedPictureAnswer(page, pageAlive))
+    }
+    // What the remorse waits for happens now: another one is starting, or the chat is leaving.
+    function finishDrawing() {
+        if (heldDrawing) sendDrawing(heldDrawing)
+        backToEditor = null
+        if (drawingRemorse.active) drawingRemorse.cancel()
+    }
+    function keepDrawingOnLeaving(editor, reopen) {
+        editor.rejected.connect(function() {
+            if (editor.history.length === 0) return
+            var state = editor.state()
+            page.finishDrawing()
+            page.backToEditor = function() { reopen(state) }
+            //% "Discarding drawing"
+            drawingRemorse.execute(qsTrId("threesea-la-discarding-drawing"), function() { page.backToEditor = null })
+        })
+    }
+    RemorsePopup {
+        id: drawingRemorse
+        onCanceled: {
+            var back = page.backToEditor
+            page.backToEditor = null
+            if (page.heldDrawing) {
+                backend.dropHeldPicture(page.heldDrawing)
+                page.heldDrawing = 0
+            }
+            if (back && pageStack.currentPage === page) back()
+        }
     }
 
     // Whether this took a photo or video away for good (the device's own files stay where they are).
@@ -1831,6 +1884,8 @@ Page {
     }
     onQuotingChanged: draftSaver.restart()
     Component.onDestruction: {
+        // Before a private chat is hidden below: it goes, which is what the remorse was to do.
+        finishDrawing()
         pageAlive.yes = false
         // Playing on is fine, the system's media controls have it; a paused message would only
         // stay in the way, and a private chat's is hidden with the chat.

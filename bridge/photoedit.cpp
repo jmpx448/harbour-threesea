@@ -76,6 +76,13 @@ QImage withoutMetadata(const QImage &image)
     return bare.copy();
 }
 
+void wipe(QImage &image)
+{
+    if (!image.isNull() && image.isDetached()) {
+        image.fill(0u);
+    }
+}
+
 QImage edited(const QImage &image, const QRectF &crop, int rotation, const QVariantList &marks)
 {
     QImage work = image.convertToFormat(image.hasAlphaChannel() ? QImage::Format_ARGB32 : QImage::Format_RGB32);
@@ -85,16 +92,21 @@ QImage edited(const QImage &image, const QRectF &crop, int rotation, const QVari
     if (rotation % 360 != 0) {
         QTransform turn;
         turn.rotate(rotation);
-        work = work.transformed(turn, Qt::SmoothTransformation);
+        QImage turned = work.transformed(turn, Qt::SmoothTransformation);
+        wipe(work);
+        work = turned;
     }
     // In fractions, so it survives any scaling the view did.
     const QRect cut = QRect(qRound(crop.x() * work.width()), qRound(crop.y() * work.height()),
                             qRound(crop.width() * work.width()), qRound(crop.height() * work.height()))
                           .intersected(work.rect());
     if (cut.width() < 1 || cut.height() < 1) {
+        wipe(work);
         return QImage();
     }
-    return withoutMetadata(cut == work.rect() ? work : work.copy(cut));
+    const QImage result = withoutMetadata(cut == work.rect() ? work : work.copy(cut));
+    wipe(work);
+    return result;
 }
 
 QString extensionFor(const QImage &image)

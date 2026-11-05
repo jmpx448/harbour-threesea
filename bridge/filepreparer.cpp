@@ -56,7 +56,9 @@ QByteArray encode(const QImage &image, const char *format, int quality)
     QByteArray bytes;
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
-    PhotoEdit::withoutMetadata(image).save(&buffer, format, quality);
+    QImage bare = PhotoEdit::withoutMetadata(image);
+    bare.save(&buffer, format, quality);
+    PhotoEdit::wipe(bare);
     return bytes;
 }
 
@@ -90,7 +92,7 @@ void FilePreparer::run()
 {
     QVariantMap request = m_request;
     if (m_picture) {
-        const QImage image = m_picture();
+        QImage image = m_picture();
         if (image.isNull()) {
             emit prepared(request, QByteArray(), QByteArray(), QStringLiteral("the picture could not be read"));
             return;
@@ -98,6 +100,7 @@ void FilePreparer::run()
         request.insert(QStringLiteral("name"), image.hasAlphaChannel() ? QStringLiteral("picture.png")
                                                                        : QStringLiteral("picture.jpg"));
         preparePicture(image, request);
+        PhotoEdit::wipe(image);
         return;
     }
     const QFileInfo info(m_path);
@@ -175,13 +178,11 @@ void FilePreparer::run()
     preparePicture(image, request);
 }
 
-void FilePreparer::preparePicture(QImage image, QVariantMap request)
+void FilePreparer::preparePicture(const QImage &picture, QVariantMap request)
 {
     // Settings → Media & storage → Image size (Android's: default 1600 px; 0: original).
     const int maxSide = QSettings().value(QStringLiteral("imageSize"), 1600).toInt();
-    if (maxSide > 0) {
-        image = limited(image, maxSide);
-    }
+    QImage image = maxSide > 0 ? limited(picture, maxSide) : picture;
     const bool transparent = image.hasAlphaChannel();
     const QByteArray data = transparent ? encode(image, "PNG", -1) : encode(image, "JPEG", 85);
     request.insert(QStringLiteral("mediaType"),
@@ -189,5 +190,10 @@ void FilePreparer::preparePicture(QImage image, QVariantMap request)
     request.insert(QStringLiteral("width"), image.width());
     request.insert(QStringLiteral("height"), image.height());
 
-    emit prepared(request, data, encode(jpegThumbnail(image), "JPEG", 80), QString());
+    QImage thumbnail = jpegThumbnail(image);
+    const QByteArray thumbnailBytes = encode(thumbnail, "JPEG", 80);
+    emit prepared(request, data, thumbnailBytes, QString());
+    // A scaled copy of ours, and the thumbnail. (`image` itself, if not scaled, is the caller's.)
+    PhotoEdit::wipe(thumbnail);
+    PhotoEdit::wipe(image);
 }

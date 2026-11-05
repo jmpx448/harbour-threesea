@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "threesebackend.h"
 
+#include <algorithm>
+#include <memory>
+
 #include <QCoreApplication>
 #include <QBuffer>
 #include <QDBusConnection>
@@ -37,6 +40,11 @@
 #include "secretstore.h"
 
 namespace {
+
+// The largest a picture of a message is edited at: what leaves is at most what Settings say (1600
+// px by default), and cutting a part out of it should still leave something to see.
+const int EditedPictureMaxSide = 4096;
+
 
 QString takeCoreString(char *s)
 {
@@ -508,6 +516,7 @@ void ThreeseBackend::finishDataRemoval()
     m_statusRequests.clear();
     m_contactRequests.clear();
     m_keyWork.clear();
+    dropHeldPictures();
     m_tempSources.clear();
     m_chatTones.clear();
     m_firstLiveId = m_nextId;
@@ -731,14 +740,39 @@ void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rota
     }));
 }
 
-void ThreeseBackend::sendEditedPicture(const QString &identity, qint64 message, const QRectF &crop, int rotation,
-                                       const QVariantList &marks, const QJSValue &callback)
+int ThreeseBackend::holdPicture(qint64 message, const QRectF &crop, int rotation, const QVariantList &marks)
+{
+    const QByteArray data = readMedia(message, false);
+    if (data.isEmpty()) {
+        qWarning("picture of a message could not be read for editing");
+        return 0;
+    }
+    const int held = m_nextHeldPicture++;
+    m_heldPictures.insert(held, HeldPicture { data, crop, rotation, marks });
+    return held;
+}
+
+void ThreeseBackend::dropHeldPicture(int held)
+{
+    QByteArray data = m_heldPictures.take(held).data;
+    data.fill('\0');
+}
+
+void ThreeseBackend::dropHeldPictures()
+{
+    for (const int held : m_heldPictures.keys()) {
+        dropHeldPicture(held);
+    }
+}
+
+void ThreeseBackend::sendHeldPicture(int held, const QString &identity, const QJSValue &callback)
 {
     const quint64 id = m_nextId++;
     if (m_core || m_ending) {
         m_mustArrive.insert(id);
     }
     if (!m_core) {
+        dropHeldPicture(held);
         answerNoCore(callback, id);
         return;
     }
@@ -752,17 +786,27 @@ void ThreeseBackend::sendEditedPicture(const QString &identity, qint64 message, 
     request.insert(QStringLiteral("caption"), QString());
     request.insert(QStringLiteral("rendering"), QStringLiteral("media"));
     m_filesPreparing.insert(id, identity);
-    auto picture = [this, message, crop, rotation, marks]() {
-        QByteArray data = readMedia(message, false);
-        // From someone else, so read as everything from someone else is.
+    m_wipeWhenPrepared.insert(id);
+    // One buffer, whatever gets copied on the way, so that wiping it really wipes it.
+    const HeldPicture source = m_heldPictures.take(held);
+    auto bytes = std::make_shared<QByteArray>(source.data);
+    const QRectF crop = source.crop;
+    const int rotation = source.rotation;
+    const QVariantList marks = source.marks;
+    auto picture = [bytes, crop, rotation, marks]() {
+        // From someone else, so read as everything from someone else is. Crop and marks are
+        // fractions, and what leaves is smaller than this anyway: a huge picture decodes scaled
+        // down, not at up to 400 MB.
         QString problem;
-        const QImage image = data.isEmpty() ? QImage() : PeerImage::decode(data, QSize(), &problem);
-        data.fill('\0');
+        QImage image = PeerImage::decode(*bytes, QSize(EditedPictureMaxSide, EditedPictureMaxSide), &problem);
+        std::fill_n(const_cast<char *>(bytes->constData()), bytes->size(), '\0');
         if (image.isNull()) {
-            qWarning("picture of a message could not be read for editing");
+            qWarning("picture of a message could not be decoded for editing");
             return QImage();
         }
-        return PhotoEdit::edited(image, crop, rotation, marks);
+        const QImage result = PhotoEdit::edited(image, crop, rotation, marks);
+        PhotoEdit::wipe(image);
+        return result;
     };
     auto *preparer = new FilePreparer(picture, request);
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
@@ -1115,6 +1159,19 @@ void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &
 {
     const quint64 id = request.value(QStringLiteral("id")).toULongLong();
     m_filesPreparing.remove(id);
+    // threesea_core_send_data copies. The worker that made these is done with them too.
+    struct Wiping {
+        bool wanted;
+        const QByteArray &data;
+        const QByteArray &thumbnail;
+        ~Wiping()
+        {
+            if (wanted) {
+                std::fill_n(const_cast<char *>(data.constData()), data.size(), '\0');
+                std::fill_n(const_cast<char *>(thumbnail.constData()), thumbnail.size(), '\0');
+            }
+        }
+    } wiping { m_wipeWhenPrepared.remove(id), data, thumbnail };
     if (id < m_firstLiveId) {
         return;
     }
