@@ -370,6 +370,13 @@ function stripMarkup(text) {
     return markupRender(units, chars, function() { return "" })
 }
 
+// A search hit's matching text: a message's own text without its marks; file and place names are
+// names, whatever they look like.
+function snippet(message) {
+    var own = message.kind === "text" || (!!message.body && message.snippet === message.body.caption)
+    return withMentions(own ? stripMarkup(message.snippet) : message.snippet, message.mentions)
+}
+
 function preview(message) {
     if (!message) return ""
     if (message.kind === "text") return withMentions(stripMarkup(message.text), message.mentions).replace(/\s+/g, " ")

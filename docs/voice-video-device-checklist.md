@@ -653,12 +653,12 @@ Voice recording:
    - Expect: the screen stays on and the recording runs on.
 2. Group chat → swipe to its page → a member → record there and tap send.
    - Expect: it goes to the member's chat and nothing to the group.
-3. Record, then swipe to the contact page and back; the same with a held recording ("Recorded").
+3. Record, then swipe to the contact page and back; the same with a held recording (the bar shows its time and a slider).
    - Expect: "Recording stopped and discarded" on the way there, the recording is gone and the mic
      is back; nothing was sent.
 4. Start a recording and have someone call the phone (the phone app, not Threesea).
    - Expect: the microphone is free for the call. Back in the chat, "Recording stopped. Send it or
-     discard it." and the bar shows "Recorded" with send and discard, or the bar still recording if
+     discard it." and the bar shows the time and slider with listen, discard and send, or the bar still recording if
      the call took no focus. Nothing is sent by itself, and
      `ls ~/.cache/org.threesea/harbour-threesea/` shows no `voice-recording.m4a` after a discard.
 5. Record, then close the window (Full), or let the app lock engage.
@@ -740,10 +740,12 @@ network to 3G if it can, or find a weak signal, and use a video that takes more 
    seconds; wait; tap the microphone in the bar and speak again. Tap send.
    - Expect: the time stands still during the pause, and the message plays both parts without the
      pause and without a glitch at the join.
-   - If gst-droid can't pause, the log says `the platform did not pause` and the recording stops
-     and waits, with the notice "Recording stopped. Send it or discard it."; then please report it:
-     the pause button would need to go. A message that sends but doesn't play at the join is
-     worth reporting too.
+   - Qt reports a pause at once whatever the pipeline does, so the app watches the recorder's time.
+     If it goes on or isn't reported, the log says `the platform did not pause` about a second after
+     the tap and the recording stops and waits, with the notice "Recording stopped. Send it or
+     discard it."; then please report it: the pause button would need to go. Please also report if
+     the time stands in the app but the pause can be heard in the message, and a message that sends
+     but doesn't play at the join.
 2. Record, pause, tap play.
    - Expect: the bar shows the slider; it plays through the loudspeaker what was said; pause,
      dragging and playing to the end and again work; send then sends all of it.
@@ -753,3 +755,13 @@ network to 3G if it can, or find a weak signal, and use a video that takes more 
    cancel it, and send what is there. One under 10 seconds goes at once.
 5. While listening, press the power key.
    - Expect: it stops sounding; the recording still waits when the app is back.
+6. Send several recordings of different lengths, and listen to one right after stopping it.
+   - Expect: each is complete to its last word, at the recipient too, and listening starts at once.
+     The file is used only once the platform has finished it. If the log says `the platform did not
+     finish the file` (after 5 seconds), the recording waits to be sent or discarded instead of
+     going out: please report that, and whether what it holds was cut off.
+7. Move the slider of a held recording before the first play, then play.
+   - Expect: it starts where the slider is.
+8. First emoji search after starting the app: tap the search key and type a letter.
+   - Note whether the page hitches. The terms are read in the UI thread at the first search only; it
+     stays so unless this shows on the phone.

@@ -129,9 +129,23 @@ QtObject {
         check("rich", Fmt.needsRichText("<s>a</s>"), true)
         check("rich links", Fmt.colourLinks("x <a href=\"y\">y</a>", "#102030"), "x <a style=\"color:#102030\" href=\"y\">y</a>")
 
+        // Search hits.
+        check("snippet", Fmt.snippet({ kind: "text", snippet: "*a* @[ABCD1234]", mentions: { ABCD1234: "b_c_" } }), "a @b_c_")
+        check("snippet", Fmt.snippet({ kind: "file", snippet: "~a~ b", body: { caption: "~a~ b", name: "c" } }), "a b")
+        check("snippet", Fmt.snippet({ kind: "file", snippet: "_a_.pdf", body: { caption: "", name: "_a_.pdf" } }), "_a_.pdf")
+        check("snippet", Fmt.snippet({ kind: "location", snippet: "_a_", body: { name: "_a_" } }), "_a_")
+
         // What the real link finder gives is what markMarkup expects. It takes a moment: until
         // then a bubble has the text without its links.
-        for (i = 0; i < linkerCases.length; ++i) parsers.push(linkParser.createObject(root, { text: linkerCases[i][0] }))
+        for (i = 0; i < linkerCases.length; ++i) {
+            var parser = linkParser.createObject(root, { text: linkerCases[i][0] })
+            parsers.push(parser)
+            // The text a bubble has until then counts as well.
+            if (linkerCases[i][1] === null) {
+                check("before the link finder " + linkerCases[i][0],
+                      Fmt.markMarkup(parser.linkedText.replace(/\n/g, "<br>")).indexOf(linkerCases[i][2]), -1)
+            }
+        }
         linkerDone.start()
     }
 
@@ -145,6 +159,12 @@ QtObject {
         ["*a* mail a_b_c@example.com *b*", "<b>a</b> mail LINK <b>b</b>"],
         // What comes in stays text.
         ["~a~ <img src=\"x\"> https://example.com/\"><img src=x> <s>", null, "<img"],
+        // Written as an entity: stays what it reads as, also when something around it is formatted.
+        ["~a~ &lt;img src=x&gt; *b*", null, "<img"],
+        ["~a~ &amp;lt;img src=x&amp;gt; _c_", null, "<img"],
+        ["*&lt;a href=x&gt;y&lt;/a&gt;*", null, "<a "],
+        ["~a~ <a href=\"x\">y</a> <font color=\"red\">z</font>", null, "<font"],
+        ["*a <br> b* https://example.com/?a=<img>", null, "<img"],
     ]
     function searchIn(locale, then) {
         EmojiSearch.load(Qt.resolvedUrl("../../emojis/search/"), locale, function(ok) {

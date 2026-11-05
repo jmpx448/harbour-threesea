@@ -224,7 +224,7 @@ Page {
                     readonly property int limit: Math.max(24, Math.round(
                         width / (font.pixelSize * 0.47)) * maximumLineCount)
                     // The matching text (caption, file or place name…), mentions as names.
-                    readonly property string one: (modelData.snippet ? Fmt.withMentions(modelData.snippet, modelData.mentions)
+                    readonly property string one: (modelData.snippet ? Fmt.snippet(modelData)
                                                                      : Fmt.preview(modelData))
                                                   .replace(/\s+/g, " ")
                     readonly property string plain: Fmt.previewLine(Fmt.matchWindow(one, page.query, limit), limit, page.query)
