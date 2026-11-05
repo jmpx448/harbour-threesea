@@ -287,15 +287,21 @@ impl Shared {
         Ok(())
     }
 
-    /// `safeDeclineSetup`: the user chose to go on without Threema Safe. The reminder stays.
+    /// `safeDeclineSetup`: the user chose to go on without a backup, so no more reminders either.
     pub(crate) fn safe_decline_setup(&self) -> Result<Value, ApiError> {
         self.store.delete_setting(keys::SAFE_SETUP_UNANSWERED)?;
+        self.end_backup_reminder()?;
         self.safe_status()
     }
 
-    /// Some backup of the ID exists now: nothing to remind of any more.
-    pub(crate) fn note_backup_made(&self) -> Result<(), ApiError> {
-        self.store.delete_setting(keys::BACKUP_REMINDER_AT)?;
+    /// A backup of the ID exists, or the user wants none: nothing to remind of any more, and a
+    /// notification still on the screen goes (the window reads `backupReminder` in the status).
+    /// A Data backup's job ends it by itself; its `androidExportDone` tells the window.
+    pub(crate) fn end_backup_reminder(&self) -> Result<(), ApiError> {
+        if self.store.setting(keys::BACKUP_REMINDER_AT)?.is_some() {
+            self.store.delete_setting(keys::BACKUP_REMINDER_AT)?;
+            self.note_ui_events(&["safeChanged"]);
+        }
         Ok(())
     }
 
@@ -341,6 +347,7 @@ impl Shared {
             "lastBackup": self.setting_i64(keys::SAFE_LAST_UPLOAD)?,
             "lastError": self.store.setting(keys::SAFE_LAST_ERROR)?,
             "warningDays": self.safe_warning()?,
+            "backupReminder": self.store.setting(keys::BACKUP_REMINDER_AT)?.is_some(),
             "size": self.setting_i64(keys::SAFE_SIZE)?,
             "maxBytes": self.setting_i64(keys::SAFE_MAX_BYTES)?,
             "retentionDays": self.setting_i64(keys::SAFE_RETENTION_DAYS)?,
@@ -384,7 +391,7 @@ impl Shared {
         ] {
             self.store.delete_setting(k)?;
         }
-        self.note_backup_made()?;
+        self.end_backup_reminder()?;
         // On from here, also if the first upload fails below: the window's warning goes by this.
         self.note_ui_events(&["safeChanged"]);
         self.safe_upload(true).await?;
@@ -2005,7 +2012,7 @@ mod tests {
     fn a_new_id_without_a_backup_is_reminded_now_and_then() {
         const DAY: i64 = 24 * 60 * 60;
         let dir = tempfile::tempdir().unwrap();
-        let app = app_with_identity(dir.path());
+        let mut app = app_with_identity(dir.path());
         // Restored or older IDs: never.
         assert!(!app.backup_reminder_due(now() + 1000 * DAY).unwrap());
 
@@ -2016,17 +2023,23 @@ mod tests {
         assert!(!app.backup_reminder_due(first + 89 * DAY).unwrap());
         assert!(app.backup_reminder_due(first + 90 * DAY).unwrap());
 
-        // Declining Safe doesn't end it; a backup does.
+        // Choosing to go on without a backup ends it, and the window hears.
+        app.take_ui_events();
+        assert_eq!(app.safe_status().unwrap()["backupReminder"], true);
         app.safe_decline_setup().unwrap();
-        assert!(app.backup_reminder_due(first + 1000 * DAY).unwrap());
-        app.note_backup_made().unwrap();
-        assert!(!app.backup_reminder_due(first + 9000 * DAY).unwrap());
+        assert_eq!(app.safe_status().unwrap()["backupReminder"], false);
+        assert_eq!(app.take_ui_events(), ["safeChanged"]);
+        assert!(!app.backup_reminder_due(first + 1000 * DAY).unwrap());
+
+        // Nothing left to end: nothing to hear.
+        app.end_backup_reminder().unwrap();
+        assert!(app.take_ui_events().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn an_exported_id_backup_ends_the_reminder() {
         let dir = tempfile::tempdir().unwrap();
-        let app = app_with_identity(dir.path());
+        let mut app = app_with_identity(dir.path());
         app.note_new_identity().unwrap();
         // Refused: nothing was made.
         assert!(
@@ -2044,6 +2057,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(app.store.setting(keys::BACKUP_REMINDER_AT).unwrap(), None);
+        assert_eq!(app.take_ui_events(), ["safeChanged"]);
     }
 
     #[test]

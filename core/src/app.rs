@@ -2953,7 +2953,7 @@ impl Shared {
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        self.note_backup_made()?;
+        self.end_backup_reminder()?;
         Ok(json!({ "backup": backup }))
     }
 }

@@ -129,7 +129,7 @@ ApplicationWindow {
     function checkSafeWarning() {
         backend.call("safeStatus", {}, function(ok, status) {
             if (!ok) return
-            if (status.enabled) clearNotification("backupReminder")
+            if (!status.backupReminder) clearNotification("backupReminder")
             var days = status.warningDays || 0
             if (days === 0) {
                 safeWarningShown = 0
@@ -2163,7 +2163,8 @@ ApplicationWindow {
             } else if (name === "wakeSettled") {
                 window.endWake()
                 window.actionsSent()
-            } else if (name === "safeChanged") {
+            } else if (name === "safeChanged" || name === "androidExportDone") {
+                // A Data backup written ends the reminder as well.
                 window.checkSafeWarning()
             } else if (name === "backupReminder") {
                 //% "Back up your Threema ID"
