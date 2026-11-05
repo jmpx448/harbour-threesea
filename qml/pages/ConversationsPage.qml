@@ -373,6 +373,9 @@ Page {
             }
         }
 
+        // The hint below arrives after the first layout.
+        StayAtTop { target: listView }
+
         header: Column {
             width: listView.width
 
