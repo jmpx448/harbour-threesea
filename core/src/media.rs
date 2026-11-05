@@ -16,6 +16,7 @@
 use std::{
     io::Write as _,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crypto_secretbox::{
@@ -215,6 +216,7 @@ pub type PictureStamp = (u64, Option<std::time::SystemTime>);
 const MEDIA_MAGIC: &[u8; 4] = b"3SM1";
 const NONCE_LENGTH: usize = 24;
 const TAG_LENGTH: usize = 16;
+const ORPHAN_LOOKUPS_PER_STEP: usize = 2000;
 
 /// Names the temporary files apart: several writes run at once, on different threads.
 static NEXT_TEMPORARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -490,22 +492,47 @@ impl MediaStore {
 
     /// Remove files whose message no longer exists (deleted while we were not looking).
     pub fn remove_orphans(&self, exists: impl Fn(i64) -> bool) {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(id) = name
-                .to_str()
-                .and_then(|name| name.split('.').next())
-                .and_then(|id| id.parse::<i64>().ok())
-            else {
-                continue;
-            };
+        for (id, path) in self.message_files() {
             if !exists(id) {
-                let _ = std::fs::remove_file(entry.path());
+                let _ = std::fs::remove_file(path);
             }
         }
+    }
+
+    /// [`Self::remove_orphans`] for a store of any size in the middle of things: the directory is
+    /// read on a blocking thread, the core thread looks a few thousand files up at a time, and
+    /// everything else on it gets its turn in between. A file goes in the same breath as its
+    /// message was found missing, so that a row id that came back meanwhile keeps its new file.
+    pub async fn remove_orphans_in_steps(
+        media: &Arc<Self>,
+        exists: impl Fn(i64) -> bool,
+    ) -> Result<(), MediaError> {
+        let reader = Arc::clone(media);
+        let files = off_thread(move || reader.message_files()).await?;
+        for files in files.chunks(ORPHAN_LOOKUPS_PER_STEP) {
+            for (id, path) in files {
+                if !exists(*id) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok(())
+    }
+
+    /// Every file of a message, and which message. Temporary files have no message yet.
+    fn message_files(&self) -> Vec<(i64, PathBuf)> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let id = name.to_str()?.split('.').next()?.parse().ok()?;
+                Some((id, entry.path()))
+            })
+            .collect()
     }
 }
 
@@ -930,6 +957,42 @@ mod tests {
         let read = |part| media.read(1, part).unwrap().unwrap().to_vec();
         assert_eq!(read(MediaPart::File), b"file");
         assert_eq!(read(MediaPart::Thumbnail), b"thumb");
+    }
+
+    #[test]
+    fn orphans_go_a_few_at_a_time_and_only_they() {
+        let (dir, media) = media_store();
+        let media = Arc::new(media);
+        let files = ORPHAN_LOOKUPS_PER_STEP as i64 + 2;
+        let media_dir = dir.path().join("media");
+        for id in 0..files {
+            std::fs::write(media_dir.join(format!("{id}.file")), b"x").unwrap();
+        }
+        std::fs::write(media_dir.join("write-0.tmp"), b"x").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let turns = runtime.block_on(local.run_until(async {
+            let turns = std::rc::Rc::new(std::cell::Cell::new(0));
+            let theirs = std::rc::Rc::clone(&turns);
+            tokio::task::spawn_local(async move {
+                loop {
+                    theirs.set(theirs.get() + 1);
+                    tokio::task::yield_now().await;
+                }
+            });
+            MediaStore::remove_orphans_in_steps(&media, |id| id % 2 == 0)
+                .await
+                .unwrap();
+            turns.get()
+        }));
+        assert!(turns >= 2, "{turns} turns");
+        assert!(media_dir.join("write-0.tmp").exists());
+        assert!(media_dir.join("0.file").exists());
+        assert!(!media_dir.join("1.file").exists());
+        assert_eq!(stored_names(&dir).len(), (files as usize).div_ceil(2) + 1);
     }
 
     #[test]

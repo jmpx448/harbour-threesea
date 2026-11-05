@@ -278,7 +278,25 @@ impl App {
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))??;
-        let summary = self.apply_android_metadata(&own_id, data)?;
+        // Nothing depends on them but the check on receiving, which only gains: not in the step of
+        // the rest, whose transaction would stand open across the pauses.
+        let csp_nonces =
+            crate::android_backup::nonces::add_in_steps(&self.store, false, &data.csp_nonces)
+                .await?;
+        let d2d_nonces =
+            crate::android_backup::nonces::add_in_steps(&self.store, true, &data.d2d_nonces)
+                .await?;
+        let existing_nonces =
+            (data.csp_nonces.len() + data.d2d_nonces.len()).saturating_sub(csp_nonces + d2d_nonces);
+        let mut summary = self.apply_android_metadata(&own_id, data)?;
+        summary["nonces"]["csp"] = csp_nonces.into();
+        summary["nonces"]["d2d"] = d2d_nonces.into();
+        summary["nonces"]["existing"] = existing_nonces.into();
+        // log-ok: counts
+        tracing::info!(
+            nonces = csp_nonces + d2d_nonces,
+            "Android backup nonces imported"
+        );
         self.reflect_owed_pictures();
         Ok(summary)
     }
@@ -618,10 +636,6 @@ impl App {
                 pictures_skipped += 1;
             }
         }
-        // Nonces: hashes beside our raw nonces, checked on every receive (idempotent).
-        let csp_nonces = self.store.add_hashed_nonces(false, &data.csp_nonces)?;
-        let d2d_nonces = self.store.add_hashed_nonces(true, &data.d2d_nonces)?;
-
         self.reflect_imported(&new_contacts, &raised_contacts, &new_groups)?;
 
         events.push("contactsChanged");
@@ -632,7 +646,6 @@ impl App {
             contacts = contacts_summary["added"].as_i64().unwrap_or(0),
             groups = groups_summary["added"].as_i64().unwrap_or(0),
             pictures = contact_pictures + group_pictures,
-            nonces = csp_nonces + d2d_nonces,
             nonces_skipped = data.nonces_skipped,
             invalid_rows = data.invalid_rows,
             "Android backup metadata imported"
@@ -650,10 +663,6 @@ impl App {
                 "skipped": pictures_skipped,
             },
             "nonces": {
-                "csp": csp_nonces,
-                "d2d": d2d_nonces,
-                "existing": (data.csp_nonces.len() + data.d2d_nonces.len())
-                    .saturating_sub(csp_nonces + d2d_nonces),
                 "skipped": data.nonces_skipped,
                 "missing": data.nonces_missing,
             },

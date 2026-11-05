@@ -440,9 +440,11 @@ impl HistoryImport {
         }
         drop(archive);
         // Partially written media without a committed row are removed like other orphans.
-        let store = Rc::clone(&self.store);
-        self.media
-            .remove_orphans(move |id| store.message_exists(id).unwrap_or(true));
+        MediaStore::remove_orphans_in_steps(&self.media, |id| {
+            self.store.message_exists(id).unwrap_or(true)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
         Ok(summary)
     }
 

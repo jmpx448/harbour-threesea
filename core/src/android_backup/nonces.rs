@@ -49,9 +49,66 @@ pub fn write_counts(csp: usize, d2d: usize) -> String {
     write_row(&["csp", "d2d"]) + &write_row(&[&csp.to_string(), &d2d.to_string()])
 }
 
+/// Rows per transaction in [`add_in_steps`]: a moment's work on a phone.
+const ROWS_PER_STEP: usize = 2000;
+
+/// Add hashed nonces a few thousand at a time, the connection and everything else on the core
+/// thread getting their turn in between: a backup may hold a million. Returns how many were new.
+pub async fn add_in_steps(
+    store: &crate::store::Store,
+    d2d: bool,
+    hashed: &[[u8; 32]],
+) -> Result<usize, crate::store::StoreError> {
+    let mut added = 0;
+    for rows in hashed.chunks(ROWS_PER_STEP) {
+        added += store.add_hashed_nonces(d2d, rows)?;
+        tokio::task::yield_now().await;
+    }
+    Ok(added)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Others get to the core thread, and to the store, while a long list goes in.
+    #[test]
+    fn a_long_list_of_nonces_leaves_room_for_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::rc::Rc::new(
+            crate::store::Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap(),
+        );
+        let hashed: Vec<[u8; 32]> = (0..2 * ROWS_PER_STEP + 1)
+            .map(|row| {
+                let mut hash = [0; 32];
+                hash[..8].copy_from_slice(&(row as u64).to_le_bytes());
+                hash
+            })
+            .collect();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let (added, turns) = runtime.block_on(local.run_until(async {
+            let turns = std::rc::Rc::new(std::cell::Cell::new(0));
+            let (their_turns, their_store) =
+                (std::rc::Rc::clone(&turns), std::rc::Rc::clone(&store));
+            tokio::task::spawn_local(async move {
+                loop {
+                    // A step of its own opens: none of the list's stands open meanwhile.
+                    their_store.step().unwrap().commit().unwrap();
+                    their_turns.set(their_turns.get() + 1);
+                    tokio::task::yield_now().await;
+                }
+            });
+            (
+                add_in_steps(&store, false, &hashed).await.unwrap(),
+                turns.get(),
+            )
+        }));
+        assert_eq!(added, hashed.len());
+        assert!(turns >= 3, "{turns} turns");
+    }
 
     /// `DatabaseNonceStoreTest.hashNonce`: identity "01234567", 23 zero bytes + counter.
     const ANDROID_HASH_OF_ZERO: &str =
