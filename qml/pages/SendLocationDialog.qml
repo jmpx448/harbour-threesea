@@ -136,6 +136,8 @@ Dialog {
                 value: dialog.place ? dialog.place.name
                                     //% "Your position"
                                     : qsTrId("threesea-la-location-own")
+                //% "To find places, Threema's map server gets your position and what you search for."
+                description: qsTrId("threesea-la-place-server")
                 onClicked: {
                     dialog.picking = true
                     pageStack.push(Qt.resolvedUrl("PlacePickerPage.qml"), { positioning: dialog })

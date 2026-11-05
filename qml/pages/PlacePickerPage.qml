@@ -6,7 +6,7 @@ import "../components/Format.js" as Fmt
 
 // Choosing a place to send (from SendLocationDialog), from Threema's map server: nearby places
 // around the position, or by name, nearest first. The server gets the position and the search
-// text, so nothing is asked before this page opens.
+// text, so nothing is asked before this page opens, and the row that opens it says so.
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -125,21 +125,13 @@ Page {
                 width: parent.width
                 //% "Search by name"
                 placeholderText: qsTrId("threesea-la-place-search")
+                // What the core accepts: no longer text goes out, and no error can blame the network.
+                maximumLength: 200
                 inputMethodHints: Qt.ImhNoAutoUppercase | window.incognitoHints
                 EnterKey.iconSource: "image://theme/icon-m-enter-close"
                 EnterKey.onClicked: focus = false
                 onTextChanged: page.searchTextChanged(text)
                 Component.onCompleted: page.searchFieldItem = searchField
-            }
-            Label {
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2 * Theme.horizontalPageMargin
-                //% "To find places, Threema's map server gets your position and what you search for."
-                text: qsTrId("threesea-la-place-server")
-                wrapMode: Text.Wrap
-                font.pixelSize: Theme.fontSizeExtraSmall
-                color: Theme.secondaryHighlightColor
-                bottomPadding: Theme.paddingMedium
             }
             BackgroundItem {
                 id: ownPosition

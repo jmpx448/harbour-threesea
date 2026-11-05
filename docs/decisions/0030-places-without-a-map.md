@@ -11,8 +11,9 @@ offer.
 ## Decision
 
 - Choosing a place uses `poi.threema.ch` only, through the pinned client, like Android.
-- The position leaves the device only after the user opened the place list, which says so. Opening
-  the dialog to send the device's own position sends nothing to that server.
+- The position leaves the device only after the user tapped the row that opens the place list, and
+  that row says so beforehand. Opening the dialog to send the device's own position sends nothing to
+  that server.
 - Search goes around the last position known, even an old one: it only orders the results. Sending
   one's own position still takes a recent fix.
 - No map. Whether its tiles come from Threema alone hasn't been checked, and §7.6 allows no other
