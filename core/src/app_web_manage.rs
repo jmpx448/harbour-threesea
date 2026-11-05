@@ -41,6 +41,13 @@ fn contact_arg<'a>(incoming: &Incoming<'a>) -> Option<&'a str> {
     incoming.arg("identity").or_else(|| incoming.arg("id"))
 }
 
+/// What a request says of a picture.
+enum Picture {
+    Unchanged,
+    Removed,
+    New(Vec<u8>),
+}
+
 /// A string field: `Some(None)` for an explicit `null` (clear it), `None` if left out.
 fn optional<'a>(data: Option<&'a Value>, name: &str) -> Option<Option<&'a str>> {
     let value = field(data?, name)?;
@@ -76,40 +83,51 @@ impl App {
         let _ = self.media_events.send(event);
     }
 
-    /// A picture from the browser as our JPEG (512 px) for `cmd` (`setGroupPicture`,
-    /// `setProfilePicture`), or its removal (`remove`) for an explicit `null`.
-    async fn web_picture(
+    /// A picture from the browser, made into our JPEG (512 px); done before anything changes, so
+    /// that one that can't be read refuses the request as a whole.
+    fn web_picture(data: Option<&Value>) -> Result<Picture, Code> {
+        let Some(avatar) = data.and_then(|data| field(data, "avatar")) else {
+            return Ok(Picture::Unchanged);
+        };
+        if avatar.is_nil() {
+            return Ok(Picture::Removed);
+        }
+        avatar
+            .as_slice()
+            .and_then(|bytes| images::scaled_jpeg(bytes, images::AVATAR_HIGH_MAX, 85))
+            .map(Picture::New)
+            .ok_or("invalidAvatar")
+    }
+
+    /// Run `set` (`setGroupPicture`, `setProfilePicture`) or `remove` for what `web_picture` found.
+    async fn web_apply_picture(
         &mut self,
-        data: Option<&Value>,
+        picture: Picture,
         set: serde_json::Value,
         remove: serde_json::Value,
     ) -> Result<(), Code> {
-        let Some(avatar) = data.and_then(|data| field(data, "avatar")) else {
-            return Ok(());
-        };
-        if avatar.is_nil() {
-            return self
+        match picture {
+            Picture::Unchanged => Ok(()),
+            Picture::Removed => self
                 .web_command(remove)
                 .await
                 .map(|_| ())
-                .map_err(|_| "badRequest");
-        }
-        let jpeg = avatar
-            .as_slice()
-            .and_then(|bytes| images::scaled_jpeg(bytes, images::AVATAR_HIGH_MAX, 85))
-            .ok_or("invalidAvatar")?;
-        let mut set = set;
-        set["id"] = json!(0);
-        let reply: serde_json::Value = serde_json::from_str(
-            &self
-                .handle_with(&set.to_string(), vec![zeroize::Zeroizing::new(jpeg)])
-                .await,
-        )
-        .unwrap_or_default();
-        if reply["ok"] == true {
-            Ok(())
-        } else {
-            Err("badRequest")
+                .map_err(|_| "badRequest"),
+            Picture::New(jpeg) => {
+                let mut set = set;
+                set["id"] = json!(0);
+                let reply: serde_json::Value = serde_json::from_str(
+                    &self
+                        .handle_with(&set.to_string(), vec![zeroize::Zeroizing::new(jpeg)])
+                        .await,
+                )
+                .unwrap_or_default();
+                if reply["ok"] == true {
+                    Ok(())
+                } else {
+                    Err("badRequest")
+                }
+            }
         }
     }
 
@@ -221,9 +239,10 @@ impl App {
                 {
                     Ok(group) => {
                         let key = group["key"].as_str().unwrap_or_default().to_owned();
+                        let picture = Self::web_picture(data).unwrap_or(Picture::Unchanged);
                         let _ = self
-                            .web_picture(
-                                data,
+                            .web_apply_picture(
+                                picture,
                                 json!({"cmd": "setGroupPicture", "key": key}),
                                 json!({"cmd": "removeGroupPicture", "key": key}),
                             )
@@ -253,6 +272,10 @@ impl App {
                 {
                     return Some(Err("valueTooLong"));
                 }
+                let picture = match Self::web_picture(data) {
+                    Ok(picture) => picture,
+                    Err(code) => return Some(Err(code)),
+                };
                 if let Some(members) = members(data) {
                     if members.is_empty() {
                         return Some(Err("noMembers"));
@@ -278,8 +301,8 @@ impl App {
                     }
                 }
                 if let Err(code) = self
-                    .web_picture(
-                        data,
+                    .web_apply_picture(
+                        picture,
                         json!({"cmd": "setGroupPicture", "key": key}),
                         json!({"cmd": "removeGroupPicture", "key": key}),
                     )
@@ -413,6 +436,10 @@ impl App {
                 Ok(confirm())
             }
             ("update", "profile") => {
+                let picture = match Self::web_picture(data) {
+                    Ok(picture) => picture,
+                    Err(code) => return Some(Err(code)),
+                };
                 if let Some(nickname) = optional(data, "publicNickname") {
                     let nickname = nickname.unwrap_or_default();
                     if nickname.trim().len() > NICKNAME_BYTES_MAX {
@@ -427,8 +454,8 @@ impl App {
                     }
                 }
                 if let Err(code) = self
-                    .web_picture(
-                        data,
+                    .web_apply_picture(
+                        picture,
                         json!({"cmd": "setProfilePicture"}),
                         json!({"cmd": "removeProfilePicture"}),
                     )

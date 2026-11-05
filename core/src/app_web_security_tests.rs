@@ -488,11 +488,16 @@ async fn web_names_too_long_are_value_too_long() {
                 Some("ä".repeat(16))
             );
 
+            // A picture that can't be read refuses the request before anything of it is done.
+            let bad = Value::Binary(vec![1, 2, 3]);
             let wire = arp::message(
                 "update",
                 "profile",
                 None,
-                Some(arp::map(vec![("avatar", Value::Binary(vec![1, 2, 3]))])),
+                Some(arp::map(vec![
+                    ("publicNickname", "Other".into()),
+                    ("avatar", bad.clone()),
+                ])),
             );
             assert_eq!(
                 app.web_manage(&Incoming::parse(&wire).unwrap())
@@ -501,6 +506,30 @@ async fn web_names_too_long_are_value_too_long() {
                     .unwrap_err(),
                 "invalidAvatar"
             );
+            assert_eq!(
+                app.store.setting(crate::store::keys::NICKNAME).unwrap(),
+                Some("ä".repeat(16))
+            );
+            let wire = arp::message(
+                "update",
+                "group",
+                Some(arp::map(vec![("id", group.key.as_str().into())])),
+                Some(arp::map(vec![
+                    ("name", "Other".into()),
+                    ("members", Value::Array(vec!["CCCCCCCC".into()])),
+                    ("avatar", bad),
+                ])),
+            );
+            assert_eq!(
+                app.web_manage(&Incoming::parse(&wire).unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap_err(),
+                "invalidAvatar"
+            );
+            let group = app.store.group(&group.key).unwrap().unwrap();
+            assert_eq!(group.name, "Crew");
+            assert_eq!(group.members, ["BBBBBBBB"]);
         })
         .await;
 }
