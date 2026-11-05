@@ -48,11 +48,24 @@ Dialog {
                 width: parent.width - 2 * x
                 wrapMode: Text.Wrap
                 color: Theme.highlightColor
-                text: dialog.matches
-                      //% "Adds what is missing: contacts, groups and pictures, then messages and media. Everything already on this device stays as it is. Nothing is sent."
-                      ? qsTrId("threesea-la-android-backup-import-intro")
-                      //% "This backup belongs to another Threema ID or key. It can only be imported on the device of that ID."
-                      : qsTrId("threesea-la-android-backup-import-other")
+                text: {
+                    if (!dialog.preview) return ""
+                    switch (dialog.preview.identity) {
+                    case "match":
+                        //% "Adds what is missing: contacts, groups and pictures, then messages and media. Everything already on this device stays as it is. No messages are sent."
+                        return qsTrId("threesea-la-data-backup-import-intro")
+                    case "otherIdentity":
+                    case "keyMismatch":
+                        //% "This backup belongs to another Threema ID or key. To import it, first restore that ID on this device."
+                        return qsTrId("threesea-la-data-backup-import-other")
+                    case "unreadable":
+                        //% "The Threema ID in this backup isn't readable with this password. The file may be damaged. Only a backup of this device's ID is imported."
+                        return qsTrId("threesea-la-data-backup-import-unreadable")
+                    default:
+                        //% "This backup holds no Threema ID. Only a backup of this device's ID is imported."
+                        return qsTrId("threesea-la-data-backup-import-no-id")
+                    }
+                }
             }
 
             SectionHeader {
@@ -63,12 +76,6 @@ Dialog {
             DetailItem {
                 label: qsTrId("threesea-la-android-backup-file")
                 value: dialog.fileName
-            }
-
-            DetailItem {
-                //% "Format version"
-                label: qsTrId("threesea-la-android-backup-version")
-                value: dialog.preview ? dialog.preview.version : ""
             }
 
             DetailItem {
