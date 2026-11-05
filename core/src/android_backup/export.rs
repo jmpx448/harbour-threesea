@@ -290,6 +290,10 @@ impl Export {
                 let _ = self
                     .store
                     .delete_setting(crate::store::keys::ANDROID_EXPORT_ERROR);
+                // It holds the ID: nothing to remind of any more.
+                let _ = self
+                    .store
+                    .delete_setting(crate::store::keys::BACKUP_REMINDER_AT);
                 let left_out = summary.skipped.get(CHATS_WITHOUT_CONTACT).copied();
                 let _ = self.store.set_setting(
                     crate::store::keys::ANDROID_EXPORT_LEFT_OUT,

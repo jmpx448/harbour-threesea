@@ -334,6 +334,10 @@ pub mod keys {
     pub const SAFE_HASH: &str = "safe_hash";
     /// Threema Safe: last error kind, absent if the last attempt worked.
     pub const SAFE_LAST_ERROR: &str = "safe_last_error";
+    /// A new ID's question whether to turn Threema Safe on: present until it is answered.
+    pub const SAFE_SETUP_UNANSWERED: &str = "safe_setup_unanswered";
+    /// A new ID with no backup of any kind yet: unix time of the next reminder.
+    pub const BACKUP_REMINDER_AT: &str = "backup_reminder_at";
     /// Threema Safe: unix time of the first failed upload since the last one that worked.
     pub const SAFE_FIRST_FAILURE: &str = "safe_first_failure";
     /// Threema Safe: server limits from `GET config`.

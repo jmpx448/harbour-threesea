@@ -225,15 +225,46 @@ Page {
 
     // A new or restored ID is asked for a nickname once. If the update question is up first, at
     // the next showing.
-    property bool nicknameChecked: false
-    function askNickname() {
+    // What a new ID is asked on the chat list, one at a time, each pushed when the page before it
+    // has gone: nickname, Threema Safe, then the one-time update question. Coming back here runs
+    // this again, up to what is left. Under a lock or mid-transition it waits for the next time.
+    property bool firstRunDone: false
+    // Going back from the question leaves it open for the next start, not for this page's next look.
+    property bool safeSetupAsked: false
+    function firstRunSteps() {
         backend.call("profile", {}, function(ok, profile) {
-            if (!ok || nicknameChecked) return
+            if (!ok || firstRunDone || !firstRunFree()) return
             if (profile.askNickname) {
-                if (status !== PageStatus.Active || window.stackHeld || pageStack.busy) return
                 pageStack.push(Qt.resolvedUrl("NicknameDialog.qml"))
+                return
             }
-            nicknameChecked = true
+            backend.call("safeStatus", {}, function(ok, safe) {
+                if (!ok || firstRunDone || !firstRunFree()) return
+                // With an app lock the app has been in use for a while, and turning Safe on needs
+                // the PIN: Settings has it, and the reminder says so.
+                if (safe.askSetup && !safeSetupAsked && !(window.lockInfo && window.lockInfo.lock)) {
+                    safeSetupAsked = true
+                    askSafeSetup()
+                    return
+                }
+                firstRunDone = true
+                window.askUpdateCheck()
+            })
+        })
+    }
+    function firstRunFree() {
+        return status === PageStatus.Active && !window.stackHeld && !pageStack.busy
+    }
+    function askSafeSetup() {
+        var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"), { firstRun: true })
+        dialog.accepted.connect(function() {
+            if (dialog.skip) {
+                backend.call("safeDeclineSetup", {})
+                return
+            }
+            backend.call("safeEnable", { password: dialog.password, pin: "" }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            })
         })
     }
 
@@ -243,10 +274,8 @@ Page {
     onStatusChanged: {
         if (status === PageStatus.Active) {
             if (wasActive) reload()
-            // The main list's first showing, after setup or unlocking: the one-time update question.
-            else if (mainList) window.askUpdateCheck()
             wasActive = true
-            if (mainList && !nicknameChecked) askNickname()
+            if (mainList && !firstRunDone) firstRunSteps()
             // Contacts are attached: swipe left (forward indicator top right), like Jolla apps.
             if (mainList && pageStack.nextPage(page) === null) pageStack.pushAttached(Qt.resolvedUrl("ContactsPage.qml"))
         }

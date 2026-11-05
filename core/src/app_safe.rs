@@ -239,6 +239,10 @@ fn safe_warning_days(
     Some((now - last_upload.unwrap_or(first_failure)) / (24 * 60 * 60)).filter(|days| *days > 0)
 }
 
+/// A new ID without any backup: the first reminder after a month, then every three months.
+const BACKUP_REMINDER_FIRST: i64 = 30 * 24 * 60 * 60;
+const BACKUP_REMINDER_AGAIN: i64 = 90 * 24 * 60 * 60;
+
 impl App {
     pub(crate) fn safe_check_password(password: &str) -> Value {
         let result = match safe::check_password(password) {
@@ -272,6 +276,43 @@ impl Shared {
         Ok(self.store.setting(key)?.and_then(|v| v.parse().ok()))
     }
 
+    /// An ID was just created: it is on this phone only. Asks once about Threema Safe (the
+    /// chat list, `askSetup` in the status), and reminds until some backup exists.
+    pub(crate) fn note_new_identity(&self) -> Result<(), ApiError> {
+        self.store.set_setting(keys::SAFE_SETUP_UNANSWERED, "ask")?;
+        self.store.set_setting(
+            keys::BACKUP_REMINDER_AT,
+            &(now() + BACKUP_REMINDER_FIRST).to_string(),
+        )?;
+        Ok(())
+    }
+
+    /// `safeDeclineSetup`: the user chose to go on without Threema Safe. The reminder stays.
+    pub(crate) fn safe_decline_setup(&self) -> Result<Value, ApiError> {
+        self.store.delete_setting(keys::SAFE_SETUP_UNANSWERED)?;
+        self.safe_status()
+    }
+
+    /// Some backup of the ID exists now: nothing to remind of any more.
+    pub(crate) fn note_backup_made(&self) -> Result<(), ApiError> {
+        self.store.delete_setting(keys::BACKUP_REMINDER_AT)?;
+        Ok(())
+    }
+
+    /// Is a reminder due at `now`? Then the next one is set.
+    fn backup_reminder_due(&self, now: i64) -> Result<bool, ApiError> {
+        let due = self
+            .setting_i64(keys::BACKUP_REMINDER_AT)?
+            .is_some_and(|at| at <= now);
+        if due {
+            self.store.set_setting(
+                keys::BACKUP_REMINDER_AT,
+                &(now + BACKUP_REMINDER_AGAIN).to_string(),
+            )?;
+        }
+        Ok(due)
+    }
+
     /// See [`safe_warning_days`]; `None` too with Safe off.
     fn safe_warning(&self) -> Result<Option<i64>, ApiError> {
         if self.store.setting(keys::SAFE_MASTER_KEY)?.is_none() {
@@ -294,6 +335,8 @@ impl Shared {
             .unwrap_or(Value::Null);
         Ok(json!({
             "enabled": key.is_some(),
+            "askSetup": key.is_none()
+                && self.store.setting(keys::SAFE_SETUP_UNANSWERED)?.is_some(),
             "server": key.as_ref().map(server::base_url),
             "lastBackup": self.setting_i64(keys::SAFE_LAST_UPLOAD)?,
             "lastError": self.store.setting(keys::SAFE_LAST_ERROR)?,
@@ -337,9 +380,11 @@ impl Shared {
             keys::SAFE_LAST_ERROR,
             keys::SAFE_FIRST_FAILURE,
             keys::SAFE_SIZE,
+            keys::SAFE_SETUP_UNANSWERED,
         ] {
             self.store.delete_setting(k)?;
         }
+        self.note_backup_made()?;
         // On from here, also if the first upload fails below: the window's warning goes by this.
         self.note_ui_events(&["safeChanged"]);
         self.safe_upload(true).await?;
@@ -1181,6 +1226,9 @@ impl Shared {
         if uploaded || before != after || self.safe_warning().ok().flatten().is_some() {
             round.events.push("safeChanged");
         }
+        if self.backup_reminder_due(now()).unwrap_or(false) {
+            round.events.push("backupReminder");
+        }
         round.licensed = true;
         round
     }
@@ -1836,6 +1884,71 @@ mod tests {
         app.connection_state.set("connecting");
         app.run_restore_setup().await;
         assert!(inits_to(&mut rx).is_empty(), "the connection too");
+    }
+
+    #[test]
+    fn a_new_id_is_asked_about_safe_until_it_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let asked = |app: &App| app.safe_status().unwrap()["askSetup"].clone();
+        // Restored or older IDs aren't asked.
+        assert_eq!(asked(&app), false);
+        app.note_new_identity().unwrap();
+        assert_eq!(asked(&app), true);
+        app.safe_decline_setup().unwrap();
+        assert_eq!(asked(&app), false);
+
+        // Turned on some other way: no more question either.
+        app.note_new_identity().unwrap();
+        app.store
+            .set_setting(keys::SAFE_MASTER_KEY, &"00".repeat(64))
+            .unwrap();
+        assert_eq!(asked(&app), false);
+    }
+
+    #[test]
+    fn a_new_id_without_a_backup_is_reminded_now_and_then() {
+        const DAY: i64 = 24 * 60 * 60;
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        // Restored or older IDs: never.
+        assert!(!app.backup_reminder_due(now() + 1000 * DAY).unwrap());
+
+        app.note_new_identity().unwrap();
+        assert!(!app.backup_reminder_due(now() + 29 * DAY).unwrap());
+        let first = now() + 31 * DAY;
+        assert!(app.backup_reminder_due(first).unwrap());
+        assert!(!app.backup_reminder_due(first + 89 * DAY).unwrap());
+        assert!(app.backup_reminder_due(first + 90 * DAY).unwrap());
+
+        // Declining Safe doesn't end it; a backup does.
+        app.safe_decline_setup().unwrap();
+        assert!(app.backup_reminder_due(first + 1000 * DAY).unwrap());
+        app.note_backup_made().unwrap();
+        assert!(!app.backup_reminder_due(first + 9000 * DAY).unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_exported_id_backup_ends_the_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        app.note_new_identity().unwrap();
+        // Refused: nothing was made.
+        assert!(
+            app.export_identity_backup(Zeroizing::new("short".into()))
+                .await
+                .is_err()
+        );
+        assert!(
+            app.store
+                .setting(keys::BACKUP_REMINDER_AT)
+                .unwrap()
+                .is_some()
+        );
+        app.export_identity_backup(Zeroizing::new("long enough here".into()))
+            .await
+            .unwrap();
+        assert_eq!(app.store.setting(keys::BACKUP_REMINDER_AT).unwrap(), None);
     }
 
     #[test]

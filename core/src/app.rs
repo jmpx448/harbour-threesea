@@ -147,6 +147,7 @@ pub enum Command {
     },
     /// Try the rest of a restored backup's import (contacts, groups, lists) now.
     SafeRetryImport,
+    SafeDeclineSetup,
     /// Look into an Android data backup (ZIP) on the device: format version, whether it
     /// belongs to the running identity, and what it holds. Local only; nothing is imported.
     AndroidBackupInspect {
@@ -1852,6 +1853,7 @@ impl App {
                 })
                 .await
             }
+            Command::SafeDeclineSetup => self.safe_decline_setup(),
             Command::SafeCheckPassword { password } => Ok(Self::safe_check_password(&password)),
             Command::SafeStatus => self.safe_status(),
             Command::SafeEnable { password, pin } => {
@@ -2835,6 +2837,7 @@ impl Shared {
             server_group: server_group.to_string(),
         })?;
         self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
+        self.note_new_identity()?;
         tracing::info!("identity created");
         Ok(json!({ "identity": identity.to_string() }))
     }
@@ -2900,7 +2903,10 @@ impl Shared {
         Ok(())
     }
 
-    async fn export_identity_backup(&self, password: Zeroizing<String>) -> Result<Value, ApiError> {
+    pub(crate) async fn export_identity_backup(
+        &self,
+        password: Zeroizing<String>,
+    ) -> Result<Value, ApiError> {
         if password.chars().count() < MIN_BACKUP_PASSWORD_LENGTH {
             return Err(ApiError::PasswordTooShort);
         }
@@ -2917,6 +2923,7 @@ impl Shared {
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+        self.note_backup_made()?;
         Ok(json!({ "backup": backup }))
     }
 }

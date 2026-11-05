@@ -129,6 +129,7 @@ ApplicationWindow {
     function checkSafeWarning() {
         backend.call("safeStatus", {}, function(ok, status) {
             if (!ok) return
+            if (status.enabled) clearNotification("backupReminder")
             var days = status.warningDays || 0
             if (days === 0) {
                 safeWarningShown = 0
@@ -2154,6 +2155,11 @@ ApplicationWindow {
                 window.actionsSent()
             } else if (name === "safeChanged") {
                 window.checkSafeWarning()
+            } else if (name === "backupReminder") {
+                //% "Back up your Threema ID"
+                window.plainNotification("backupReminder", qsTrId("threesea-la-backup-reminder"),
+                                         //% "A backup brings your ID, contacts and groups back on a new phone. Tap to set up Threema Safe."
+                                         qsTrId("threesea-la-backup-reminder-body"), false, "showSafe")
             } else if (name === "safeServerCopyLeft") {
                 // From here: the user may have left the Safe page during the wait.
                 //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."

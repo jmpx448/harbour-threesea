@@ -2705,7 +2705,17 @@ mod export_tests {
         ] {
             std::fs::write(name(stays), b"x").unwrap();
         }
+        app.store
+            .set_setting(crate::store::keys::BACKUP_REMINDER_AT, "1")
+            .unwrap();
         let done = run_export(&app, folder.path(), 0).await;
+        // It holds the ID: no more reminders to make a backup.
+        assert_eq!(
+            app.store
+                .setting(crate::store::keys::BACKUP_REMINDER_AT)
+                .unwrap(),
+            None
+        );
         let mut left: Vec<String> = std::fs::read_dir(folder.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
