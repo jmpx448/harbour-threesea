@@ -31,6 +31,11 @@ qrcode = { version = "=0.14.1", default-features = false }
 rqrr = { version = "=0.11.0", default-features = false }
 libthreema = { path = "../third_party/libthreema/lib" }
 
+# How much room a backup folder's storage has (statvfs, safe API; std has none, and libc directly
+# would need unsafe). Goes into the shipped binary with errno, both new there (until now rustix
+# was only a test dependency, through tempfile). Over libc, which every target here has.
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "use-libc"] }
+
 # Runtime + HTTPS. Same families libthreema's own CLI uses (tokio, reqwest, rustls); TLS via rustls
 # with the ring provider (no system OpenSSL on the network path), our own verifier does pinning.
 tokio = { version = "1.52", default-features = false, features = ["rt", "macros", "sync", "time", "net", "io-util"] }

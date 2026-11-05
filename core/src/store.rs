@@ -335,6 +335,8 @@ pub mod keys {
     pub const ANDROID_EXPORT_INTERVAL: &str = "android_export_interval";
     pub const ANDROID_EXPORT_KEEP: &str = "android_export_keep";
     pub const ANDROID_EXPORT_LAST: &str = "android_export_last";
+    /// When the schedule last started a backup, whatever became of it.
+    pub const ANDROID_EXPORT_ATTEMPT: &str = "android_export_attempt";
     pub const ANDROID_EXPORT_ERROR: &str = "android_export_error";
     /// What the pending Safe import did (JSON counts: imported, skipped and why), for the
     /// status page.

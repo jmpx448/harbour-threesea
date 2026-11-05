@@ -2000,6 +2000,9 @@ mod history_tests {
 }
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How long the schedule waits after starting a backup that didn't succeed. A backup costs minutes
+/// of decrypting and encrypting all media, and what made it fail rarely changes within the hour.
+const SCHEDULE_RETRY_MS: i64 = 6 * 60 * 60 * 1000;
 /// How long a running export may take to stop: it looks at the flag every megabyte.
 const EXPORT_STOP_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -2116,6 +2119,7 @@ impl App {
             keep,
             done,
             cancel: std::sync::Arc::clone(&self.android_export_cancel),
+            free_space: crate::android_backup::export::free_bytes,
         };
         tokio::task::spawn_local(job.run());
         Ok(json!({ "started": true }))
@@ -2157,16 +2161,30 @@ impl App {
             Some("weekly") => 7 * DAY_MS,
             _ => return,
         };
-        let last: i64 = self
-            .store
-            .setting(keys::ANDROID_EXPORT_LAST)
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        if crate::messages::now_ms() - last < period {
+        // Maintenance comes by every hour, also while a long backup is running: not a failure.
+        if self.android_export.as_ref().is_some_and(|done| !done.get()) {
             return;
         }
+        let time = |key: &str| -> i64 {
+            self.store
+                .setting(key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+        let now = crate::messages::now_ms();
+        // A time ahead of now (the clock was off) holds nothing back.
+        let within = |at: i64, span: i64| (0..span).contains(&(now - at));
+        if within(time(keys::ANDROID_EXPORT_LAST), period)
+            || within(time(keys::ANDROID_EXPORT_ATTEMPT), SCHEDULE_RETRY_MS)
+        {
+            return;
+        }
+        // Stored before it starts: an attempt that ends with the app being killed counts too.
+        let _ = self
+            .store
+            .set_setting(keys::ANDROID_EXPORT_ATTEMPT, &now.to_string());
         if let Err(error) = self.android_backup_export(None, None) {
             tracing::warn!(kind = error.kind(), "scheduled backup not started");
             let _ = self
@@ -2186,7 +2204,9 @@ mod export_tests {
         tests::{app_with_identity, fixture},
     };
     use crate::{
-        android_backup::export::{Export, backup_file_name, is_backup_file_name},
+        android_backup::export::{
+            Export, FreeSpace, KEEP_FREE_BYTES, backup_file_name, free_bytes, is_backup_file_name,
+        },
         app::App,
         media::MediaPart,
     };
@@ -2213,8 +2233,28 @@ mod export_tests {
             keep,
             done: std::rc::Rc::new(std::cell::Cell::new(false)),
             cancel: std::sync::Arc::default(),
+            // How much the test machine has free says nothing here.
+            free_space: |_| None,
         };
         (job, events_rx)
+    }
+
+    /// Runs the job and returns the kind of its failure.
+    async fn failed_kind(
+        app: &App,
+        job: Export,
+        mut events: tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>,
+    ) -> String {
+        job.run().await;
+        let mut kind = String::new();
+        while let Ok(event) = events.try_recv() {
+            let json = event.to_json(&app.store, true);
+            if json["event"] == "androidExportDone" {
+                assert_eq!(json["ok"], false, "{json}");
+                kind = json["kind"].as_str().unwrap().to_owned();
+            }
+        }
+        kind
     }
 
     async fn run_export(app: &App, directory: &std::path::Path, keep: usize) -> Value {
@@ -2366,17 +2406,8 @@ mod export_tests {
         let dir = tempfile::tempdir().unwrap();
         let app = app_with_identity(dir.path(), [7; 32]);
         let gone = dir.path().join("gone");
-        let (job, mut events) = export_job(&app, &gone, 3);
-        job.run().await;
-        let mut kind = Value::Null;
-        while let Ok(event) = events.try_recv() {
-            let json = event.to_json(&app.store, true);
-            if json["event"] == "androidExportDone" {
-                assert_eq!(json["ok"], false);
-                kind = json["kind"].clone();
-            }
-        }
-        assert_eq!(kind, "backupWrite");
+        let (job, events) = export_job(&app, &gone, 3);
+        assert_eq!(failed_kind(&app, job, events).await, "backupWrite");
         assert_eq!(
             app.store
                 .setting(crate::store::keys::ANDROID_EXPORT_ERROR)
@@ -2498,6 +2529,131 @@ mod export_tests {
         ];
         expected.sort();
         assert_eq!(left, expected);
+    }
+
+    /// Too little room for what the last backup took: nothing is even started, and the older
+    /// backup stays. The first backup has nothing to go by, so it starts.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_backup_that_wont_fit_doesnt_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path(), [7; 32]);
+        let some_room: FreeSpace = |_| Some(KEEP_FREE_BYTES + 100_000);
+
+        let (mut job, events) = export_job(&app, folder.path(), 1);
+        job.free_space = some_room;
+        job.run().await;
+        drop(events);
+        let count = || std::fs::read_dir(folder.path()).unwrap().count();
+        assert_eq!(count(), 1, "the first one fits");
+
+        let older = folder.path().join("threema-backup-20231114-221320.zip");
+        std::fs::write(&older, vec![0; 200_000]).unwrap();
+        let mut newest = std::fs::read_dir(folder.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>();
+        newest.sort();
+        std::fs::write(newest.last().unwrap(), vec![0; 200_000]).unwrap();
+        let (mut job, events) = export_job(&app, folder.path(), 1);
+        job.free_space = some_room;
+        assert_eq!(failed_kind(&app, job, events).await, "backupNoRoom");
+        assert_eq!(count(), 2, "nothing written, nothing rotated away");
+    }
+
+    /// The storage fills up on the way: the backup stops short of filling it, and takes back what
+    /// it wrote.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_backup_stops_before_the_disk_is_full() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path(), [7; 32]);
+        let (mut job, events) = export_job(&app, folder.path(), 1);
+        job.free_space = |_| {
+            let calls = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(if calls < 3 { u64::MAX } else { KEEP_FREE_BYTES })
+        };
+        assert_eq!(failed_kind(&app, job, events).await, "backupNoRoom");
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn free_space_of_a_real_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        assert!(free_bytes(folder.path()).is_some());
+        assert_eq!(free_bytes(&folder.path().join("gone")), None);
+    }
+
+    /// A schedule that keeps failing tries again every few hours, not with every maintenance run,
+    /// each of them minutes of work on a disk that may be full.
+    #[test]
+    fn a_failing_schedule_waits_before_it_tries_again() {
+        use crate::store::keys;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let gone = folder.path().join("gone");
+        for (key, value) in [
+            (keys::ANDROID_EXPORT_DIR, gone.to_str().unwrap()),
+            (keys::ANDROID_EXPORT_PASSWORD, "long enough"),
+            (keys::ANDROID_EXPORT_INTERVAL, "daily"),
+        ] {
+            app.store.set_setting(key, value).unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+            let finished = async |app: &App| {
+                let done = app.android_export.clone().expect("a backup started");
+                while !done.get() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                done
+            };
+            app.android_export_scheduled();
+            let first = finished(&app).await;
+            assert_eq!(
+                app.store
+                    .setting(keys::ANDROID_EXPORT_ERROR)
+                    .unwrap()
+                    .as_deref(),
+                Some("backupWrite")
+            );
+
+            app.android_export_scheduled();
+            let same = app.android_export.clone().unwrap();
+            assert!(std::rc::Rc::ptr_eq(&first, &same), "too early to try again");
+
+            // Hours later it does.
+            let hours_ago = crate::messages::now_ms() - 7 * 60 * 60 * 1000;
+            app.store
+                .set_setting(keys::ANDROID_EXPORT_ATTEMPT, &hours_ago.to_string())
+                .unwrap();
+            app.android_export_scheduled();
+            let second = finished(&app).await;
+            assert!(!std::rc::Rc::ptr_eq(&first, &second));
+        });
+    }
+
+    /// Maintenance coming by during a long backup is not a failed attempt.
+    #[test]
+    fn the_schedule_leaves_a_running_backup_alone() {
+        use crate::store::keys;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        app.store
+            .set_setting(keys::ANDROID_EXPORT_INTERVAL, "daily")
+            .unwrap();
+        app.android_export = Some(std::rc::Rc::new(std::cell::Cell::new(false)));
+        app.android_export_scheduled();
+        assert_eq!(app.store.setting(keys::ANDROID_EXPORT_ERROR).unwrap(), None);
+        assert_eq!(
+            app.store.setting(keys::ANDROID_EXPORT_ATTEMPT).unwrap(),
+            None
+        );
     }
 
     #[test]

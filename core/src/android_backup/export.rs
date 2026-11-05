@@ -109,6 +109,43 @@ pub struct Export {
     /// Set true to give up (the ID is being removed): the partial file goes, nothing else is
     /// touched. Atomic: the blocking thread writing an entry looks at it too.
     pub cancel: Arc<AtomicBool>,
+    /// How much a folder's storage has free (`free_bytes`).
+    pub free_space: FreeSpace,
+}
+
+/// How many bytes can be written below a folder; `None` when that can't be told.
+pub type FreeSpace = fn(&std::path::Path) -> Option<u64>;
+
+/// What a backup leaves free on its storage. The chats are often stored there too, and what can't
+/// be written then is a message that just came in.
+pub const KEEP_FREE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// How many bytes an ordinary app can write below `path`.
+#[must_use]
+pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    let stat = rustix::fs::statvfs(path).ok()?;
+    Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+/// Refuses what would leave less than `KEEP_FREE_BYTES` on the folder's storage.
+fn check_room(free_space: FreeSpace, folder: &std::path::Path, bytes: u64) -> Result<(), ApiError> {
+    match free_space(folder) {
+        Some(free) if free < bytes.saturating_add(KEEP_FREE_BYTES) => Err(ApiError::BackupNoRoom),
+        _ => Ok(()),
+    }
+}
+
+/// The size of the newest backup in the folder: the best guess of how much the next one needs.
+fn last_backup_size(directory: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_str().is_some_and(is_backup_file_name))
+        .max_by_key(std::fs::DirEntry::file_name)
+        .and_then(|entry| entry.metadata().ok())
+        .map_or(0, |metadata| metadata.len())
 }
 
 type Writer = zip::ZipWriter<std::fs::File>;
@@ -237,8 +274,12 @@ impl Export {
         let temporary = self.directory.join(format!("{name}.part"));
         let create = temporary.clone();
         let folder = self.directory.clone();
+        let free_space = self.free_space;
         let writer = tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
             remove_leftovers(&folder);
+            // Before minutes of decrypting and encrypting all media for nothing. Older backups
+            // only go after the new one stands, so they can't make room for it.
+            check_room(free_space, &folder, last_backup_size(&folder))?;
             let file = std::fs::File::create(&create).map_err(|e| write_error(&e))?;
             Ok(zip::ZipWriter::new(file))
         })
@@ -327,7 +368,9 @@ impl Export {
         }
         let password = self.password.clone();
         let cancel = Arc::clone(&self.cancel);
+        let (free_space, folder) = (self.free_space, self.directory.clone());
         tokio::task::spawn_blocking(move || -> Result<Writer, ApiError> {
+            check_room(free_space, &folder, data.len() as u64)?;
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
                 .with_aes_encryption(zip::AesMode::Aes256, &password);
@@ -598,6 +641,7 @@ impl Export {
                 // Decrypt and re-encrypt on the blocking thread.
                 let media_store = Arc::clone(&self.media);
                 let password = self.password.clone();
+                let (free_space, folder) = (self.free_space, self.directory.clone());
                 let (returned, written) =
                     tokio::task::spawn_blocking(move || -> (Writer, Result<bool, ApiError>) {
                         let mut writer = writer;
@@ -608,6 +652,7 @@ impl Export {
                             else {
                                 return Ok(false);
                             };
+                            check_room(free_space, &folder, data.len() as u64)?;
                             let options = zip::write::SimpleFileOptions::default()
                                 .compression_method(zip::CompressionMethod::Deflated)
                                 .with_aes_encryption(zip::AesMode::Aes256, &password);

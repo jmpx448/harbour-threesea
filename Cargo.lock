@@ -2302,6 +2302,7 @@ dependencies = [
  "rmpv",
  "rqrr",
  "rusqlite",
+ "rustix",
  "rustls",
  "rustls-webpki",
  "scrypt",
