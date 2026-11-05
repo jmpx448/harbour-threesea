@@ -179,8 +179,36 @@ pub fn user_agent() -> String {
 
 /// HTTPS client restricted to Threema hosts with certificate pinning.
 /// Android's "IPv6 for messages" off: Threema's IPv4-only hosts instead of the dual-stack ones
-/// (`ds-apip`, `ds-blobp-…`, `ds.g-…`) that libthreema and we use by default.
+/// (`ds-apip`, `ds-blobp-…`, `ds.g-…`) that libthreema and we use by default, and only IPv4
+/// addresses of any other host ([`for_ip_version`]).
 pub static IPV4_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Of a host's addresses, those the IP version setting allows.
+pub(crate) fn for_ip_version(
+    addresses: impl IntoIterator<Item = std::net::SocketAddr>,
+    ipv4_only: bool,
+) -> Vec<std::net::SocketAddr> {
+    addresses
+        .into_iter()
+        .filter(|address| !(ipv4_only && address.is_ipv6()))
+        .collect()
+}
+
+/// Host names for HTTPS, following [`IPV4_ONLY`] for hosts `server_url` doesn't map: the mirror of
+/// a device group, a group call's server, Threema Safe.
+struct IpVersionResolver;
+
+impl reqwest::dns::Resolve for IpVersionResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let found = tokio::net::lookup_host((name.as_str(), 0)).await?;
+            let ipv4_only = IPV4_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+            let addresses: reqwest::dns::Addrs =
+                Box::new(for_ip_version(found, ipv4_only).into_iter());
+            Ok(addresses)
+        })
+    }
+}
 
 /// `url` (or a bare host name) for the IP version chosen in [`IPV4_ONLY`]: the dual-stack hosts
 /// lose their `ds-` / `ds.` prefix. Other hosts (Threema Safe, …) stay as they are.
@@ -511,6 +539,7 @@ impl HttpsClient {
             .https_only(true)
             .connect_timeout(CONNECT_TIMEOUT)
             .tcp_user_timeout(TCP_USER_TIMEOUT)
+            .dns_resolver(std::sync::Arc::new(IpVersionResolver))
             // Stopping hands the redirect back as the response: an unexpected status for callers.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
@@ -854,6 +883,24 @@ mod tests {
         assert!(!redirect_allowed("https://threema.com/", MAX_REDIRECTS));
         assert!(!redirect_allowed("https://example.com/", 0));
         assert!(!redirect_allowed("https://threema.ch.example.com/", 0));
+    }
+
+    #[test]
+    fn ipv4_only_keeps_only_ipv4_addresses() {
+        let v4: std::net::SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let v6: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        assert_eq!(for_ip_version([v6, v4], false), [v6, v4]);
+        assert_eq!(for_ip_version([v6, v4], true), [v4]);
+        assert!(for_ip_version([v6], true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_resolver_finds_addresses() {
+        use reqwest::dns::{Name, Resolve};
+        use std::str::FromStr;
+        let name = Name::from_str("127.0.0.1").unwrap();
+        let found: Vec<_> = IpVersionResolver.resolve(name).await.unwrap().collect();
+        assert_eq!(found, ["127.0.0.1:0".parse().unwrap()]);
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub(crate) async fn connect_tcp(endpoints: &[(&str, u16)]) -> io::Result<TcpStre
             Err(_) => last_error = Some(io::ErrorKind::TimedOut.into()),
         }
     }
+    let ipv4_only = crate::https::IPV4_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+    let addresses = crate::https::for_ip_version(addresses, ipv4_only);
     first_to_connect(addresses, last_error, TcpStream::connect).await
 }
 

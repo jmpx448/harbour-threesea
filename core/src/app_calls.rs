@@ -50,7 +50,7 @@ fn patcher(video: bool) -> SdpPatcher {
 /// GStreamer names the codec `OPUS` in its SDP; Android's SdpPatcher (ours too) looks for
 /// `opus` and would reject the call.
 fn local_sdp(sdp: &str) -> String {
-    sdp.replace(" OPUS/48000", " opus/48000")
+    sdp_for_ip_version(sdp, ipv4_only()).replace(" OPUS/48000", " opus/48000")
 }
 
 impl App {
@@ -88,7 +88,9 @@ impl App {
                     let video = video && self.video_calls_enabled();
                     self.call_media = CallMedia::default();
                     let mut patcher = patcher(video);
-                    match patcher.patch(SdpKind::RemoteOffer, &sdp) {
+                    match patcher
+                        .patch(SdpKind::RemoteOffer, &sdp_for_ip_version(&sdp, ipv4_only()))
+                    {
                         Ok(sdp) => {
                             self.call_patcher = Some(patcher);
                             let private = self.store.is_private(&peer).unwrap_or(true);
@@ -111,10 +113,12 @@ impl App {
                 }
                 Effect::Ringing => self.emit_call(json!({ "event": "callRinging" })),
                 Effect::RemoteAnswer { sdp, video } => {
-                    let patched = self
-                        .call_patcher
-                        .as_mut()
-                        .map(|patcher| patcher.patch(SdpKind::RemoteAnswer, &sdp));
+                    let patched = self.call_patcher.as_mut().map(|patcher| {
+                        patcher.patch(
+                            SdpKind::RemoteAnswer,
+                            &sdp_for_ip_version(&sdp, ipv4_only()),
+                        )
+                    });
                     match patched {
                         Some(Ok(sdp)) => self.emit_call(json!({
                             "event": "callAnswer",
@@ -515,6 +519,22 @@ fn for_ip_version(mut candidates: Vec<Candidate>, ipv4_only: bool) -> Vec<Candid
     candidates
 }
 
+/// The same for candidates written into a session description.
+fn sdp_for_ip_version(sdp: &str, ipv4_only: bool) -> String {
+    if !ipv4_only {
+        return sdp.to_owned();
+    }
+    sdp.split_inclusive('\n')
+        .filter(|line| {
+            !(line.starts_with("a=candidate:")
+                && line
+                    .split_ascii_whitespace()
+                    .nth(4)
+                    .is_some_and(|address| address.contains(':')))
+        })
+        .collect()
+}
+
 /// The TURN servers with their addresses instead of host names: inside Sailjail libnice can't
 /// resolve names (GLib's resolver fails there, our own lookups work), so the engine gets IPs.
 /// IPv6 addresses only if IPv6 is on (Settings → Advanced). A name that doesn't resolve stays.
@@ -552,6 +572,17 @@ async fn resolve_turn_urls(urls: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_off_keeps_ipv6_candidates_out_of_a_description() {
+        let sdp = "v=0\r\na=candidate:1 1 udp 1 192.0.2.1 5 typ host\r\n\
+                   a=candidate:2 1 udp 1 2001:db8::1 5 typ host\r\na=setup:actpass\r\n";
+        assert_eq!(sdp_for_ip_version(sdp, false), sdp);
+        assert_eq!(
+            sdp_for_ip_version(sdp, true),
+            "v=0\r\na=candidate:1 1 udp 1 192.0.2.1 5 typ host\r\na=setup:actpass\r\n"
+        );
+    }
 
     #[test]
     fn ipv6_off_keeps_ipv6_candidates_out() {
