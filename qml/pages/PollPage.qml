@@ -18,6 +18,8 @@ Dialog {
     // identity -> display name; members (groups) to show who hasn't voted.
     property var names: ({})
     property var members: []
+    // The chat's names of those who voted, for someone who has left the group since.
+    property var formerNames: ({})
 
     // The poll message changed by our vote or closing (the chat updates its bubble).
     signal changed(var message)
@@ -52,7 +54,7 @@ Dialog {
             //% "You"
             return qsTrId("threesea-la-you")
         }
-        return names[identity] || identity
+        return names[identity] || formerNames[identity] || identity
     }
 
     function votersOf(choice) {

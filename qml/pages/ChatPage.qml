@@ -183,11 +183,37 @@ Page {
     }
 
     function memberName(identity) {
-        var members = contact.members || []
+        // Not before the group is here: everyone would count as gone.
+        if (!contact.members) return identity
+        var members = contact.members
         for (var i = 0; i < members.length; ++i) {
             if (members[i].identity === identity) return members[i].displayName
         }
+        return formerMemberName(identity)
+    }
+
+    // Someone who left a group stays in its history: their name, from the contact the core keeps
+    // of them, asked once each (their ID until it is here, and if there is no such contact).
+    property var formerNames: ({})
+    function formerMemberName(identity) {
+        var known = formerNames[identity]
+        if (known !== undefined) return known
+        formerNames[identity] = identity
+        askFormerName(identity)
         return identity
+    }
+    function askFormerName(identity) {
+        backend.call("contact", { identity: identity }, function(ok, result) {
+            var names = page.formerNames
+            names[identity] = ok ? result.displayName : identity
+            // Assigned for the bindings that show it.
+            page.formerNames = names
+        })
+    }
+    // On a page that keeps them current, also when they come a moment later. From here: a bubble
+    // can go while the page it opened stays.
+    function bindPollNames(target, property, poll) {
+        target[property] = Qt.binding(function() { return page.pollNames(poll) })
     }
 
     // Nothing of the chat is shown until its messages came (a private chat needs the PIN).
@@ -1798,6 +1824,7 @@ Page {
                 page.typing = data.typing
                 typingTimeout.restart()
             } else if (name === "contactsChanged" || name === "groupsChanged") {
+                for (var former in page.formerNames) page.askFormerName(former)
                 page.loadContact()
             } else if (name === "privateChanged" && data.identity === page.identity) {
                 page.markedPrivate = data.private
@@ -2760,13 +2787,15 @@ Page {
                 onForwardRequested: pageStack.push(Qt.resolvedUrl("SharePage.qml"),
                                                    { forwardMessage: model.id, text: Fmt.preview(messages.get(index)) })
                 onPollRequested: {
-                    if (model.body.state === 1) {
-                        pageStack.push(Qt.resolvedUrl("PollResultsPage.qml"),
-                                       { poll: model.body, names: page.pollNames(model.body) })
+                    var body = model.body
+                    if (body.state === 1) {
+                        var results = pageStack.push(Qt.resolvedUrl("PollResultsPage.qml"), { poll: body })
+                        page.bindPollNames(results, "names", body)
                         return
                     }
                     var pollPage = pageStack.push(Qt.resolvedUrl("PollPage.qml"),
-                                                  { messageId: model.id, conversation: page.identity, poll: model.body })
+                                                  { messageId: model.id, conversation: page.identity, poll: body })
+                    page.bindPollNames(pollPage, "formerNames", body)
                     var messageId = model.id
                     pollPage.changed.connect(function(message) { page.addMessage(message) })
                     pollPage.voteRequested.connect(function(choices) {
