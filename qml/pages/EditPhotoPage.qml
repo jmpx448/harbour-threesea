@@ -12,6 +12,8 @@ Dialog {
 
     // The photo to work on.
     property string path
+    // The frame stays a square (profile and group pictures).
+    property bool square
 
     // Turned clockwise, in steps of 90° (`rotation` itself is Item's own).
     property int turn: 0
@@ -31,12 +33,12 @@ Dialog {
         backend.editPhoto(dialog.path, crop(), dialog.turn, callback)
     }
 
-    // The whole picture again.
+    // The whole picture again, or the largest square in its middle.
     function reset() {
-        frame.x = 0
-        frame.y = 0
-        frame.width = view.width
-        frame.height = view.height
+        frame.width = square ? Math.min(view.width, view.height) : view.width
+        frame.height = square ? frame.width : view.height
+        frame.x = (view.width - frame.width) / 2
+        frame.y = (view.height - frame.height) / 2
     }
 
     SilicaFlickable {
@@ -54,6 +56,7 @@ Dialog {
                 onClicked: { dialog.turn = (dialog.turn + 270) % 360; dialog.reset() }
             }
             MenuItem {
+                visible: !dialog.square
                 //% "Whole picture"
                 text: qsTrId("threesea-me-photo-whole")
                 onClicked: dialog.reset()
@@ -184,6 +187,22 @@ Dialog {
                             onPositionChanged: {
                                 var point = mapToItem(view, mouse.x, mouse.y)
                                 var least = Theme.itemSizeExtraSmall
+                                if (dialog.square) {
+                                    // The opposite corner stays, the side follows the finger as
+                                    // far as the picture has room.
+                                    var fixedX = parent.atRight ? frame.x : frame.x + frame.width
+                                    var fixedY = parent.atBottom ? frame.y : frame.y + frame.height
+                                    var wanted = Math.max(parent.atRight ? point.x - fixedX : fixedX - point.x,
+                                                          parent.atBottom ? point.y - fixedY : fixedY - point.y)
+                                    var room = Math.min(parent.atRight ? view.width - fixedX : fixedX,
+                                                        parent.atBottom ? view.height - fixedY : fixedY)
+                                    var side = Math.min(room, Math.max(least, wanted))
+                                    frame.width = side
+                                    frame.height = side
+                                    frame.x = parent.atRight ? fixedX : fixedX - side
+                                    frame.y = parent.atBottom ? fixedY : fixedY - side
+                                    return
+                                }
                                 if (parent.atRight) {
                                     var right = Math.max(frame.x + least,
                                                          Math.min(view.width, point.x))

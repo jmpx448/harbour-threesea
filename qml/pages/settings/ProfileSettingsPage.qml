@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
-import Sailfish.Pickers 1.0
 import "../../components"
 import "../../components/Errors.js" as Errors
 import "../../components/Verification.js" as Verification
@@ -108,11 +107,10 @@ Page {
             }
         }
 
-        Component {
-            id: profilePicturePicker
-            ImagePickerPage {
-                onSelectedContentPropertiesChanged: page.setPicture(selectedContentProperties.filePath)
-            }
+        PictureChooser {
+            id: pictureChooser
+            host: page
+            onChosen: page.setPicture(path)
         }
 
         Column {
@@ -181,7 +179,12 @@ Page {
                           ? qsTrId("threesea-la-change-profile-picture")
                           //% "Set profile picture"
                           : qsTrId("threesea-la-set-profile-picture")
-                    onClicked: pageStack.push(profilePicturePicker)
+                    onClicked: pictureChooser.pick()
+                }
+                MenuItem {
+                    //% "Take photo"
+                    text: qsTrId("threesea-me-take-picture")
+                    onClicked: pictureChooser.shoot()
                 }
                 MenuItem {
                     visible: page.profile.pictureVersion > 0

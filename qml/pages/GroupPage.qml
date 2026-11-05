@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
-import Sailfish.Pickers 1.0
 import harbour.threesea 1.0
 import "../components"
 import "../components/Errors.js" as Errors
@@ -95,11 +94,23 @@ Page {
 
     RemorsePopup { id: remorse }
 
-    Component {
-        id: picturePicker
-        ImagePickerPage {
-            onSelectedContentPropertiesChanged: page.setPicture(selectedContentProperties.filePath)
+    ContextMenu {
+        id: pictureMenu
+        MenuItem {
+            //% "Choose picture"
+            text: qsTrId("threesea-me-choose-picture")
+            onClicked: pictureChooser.pick()
         }
+        MenuItem {
+            text: qsTrId("threesea-me-take-picture")
+            onClicked: pictureChooser.shoot()
+        }
+    }
+
+    PictureChooser {
+        id: pictureChooser
+        host: page
+        onChosen: page.setPicture(path)
     }
 
     SilicaListView {
@@ -147,7 +158,8 @@ Page {
                 visible: page.group.isCreator === true && !page.group.left
                 //% "Set picture"
                 text: qsTrId("threesea-me-set-picture")
-                onClicked: pageStack.push(picturePicker)
+                // Once the pulley has closed: the menu opens in the list it belongs to.
+                onDelayedClick: pictureMenu.open(listView.headerItem.menuHost)
             }
             MenuItem {
                 visible: page.group.isCreator === true && !page.group.left
@@ -162,6 +174,7 @@ Page {
 
         header: Column {
             width: parent.width
+            property alias menuHost: pictureMenuHost
             ProfileHeader {
                 pinned: page.group.pinned === true
                 onPinToggled: backend.call("setPinned", { identity: page.identity, pinned: !pinned },
@@ -176,6 +189,12 @@ Page {
                              : qsTrId("threesea-la-member-count", page.group.members.length + 1)
                 source: page.group.pictureVersion > 0
                         ? "image://threesea/group/" + page.identity + "?" + page.group.pictureVersion : ""
+            }
+            // Where the picture's menu opens, right under the card.
+            Item {
+                id: pictureMenuHost
+                width: parent.width
+                height: pictureMenu.height
             }
             SectionHeader {
                 text: qsTrId("threesea-se-chat")

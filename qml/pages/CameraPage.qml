@@ -14,6 +14,8 @@ Page {
     // Swiping away would throw the video away: the shutter stops it first.
     backNavigation: !recording
 
+    // For a profile or group picture: no switching to video.
+    property bool photoOnly
     property bool videoMode
     // A video the shutter stopped, on its way to the chat.
     property string pendingPath
@@ -156,6 +158,7 @@ Page {
 
         IconButton {
             anchors.verticalCenter: parent.verticalCenter
+            visible: !page.photoOnly
             enabled: !page.recording
             icon.source: page.videoMode ? "image://theme/icon-camera-camera-mode" : "image://theme/icon-camera-video"
             onClicked: page.videoMode = !page.videoMode
