@@ -32,7 +32,10 @@ use libthreema::{
         },
         fs::{self as fs_protocol, FsSessionStore as _, FsStatus},
         message::task::{
-            incoming::{IncomingMessageInstruction, IncomingMessageLoop, IncomingMessageResponse},
+            incoming::{
+                IncomingMessageInstruction, IncomingMessageLoop, IncomingMessageResponse,
+                IncomingMessageTask,
+            },
             outgoing::{
                 encode_message_body, encode_outgoing_contact_message,
                 encode_outgoing_contact_message_encapsulated, encode_outgoing_fs_control_message,
@@ -2401,6 +2404,9 @@ impl<'a> Session<'a> {
                 })
             }
         };
+        // Nothing is awaited from here on: what this message writes, the ratchet of its session and
+        // its nonces, makes one commit. If that fails, nothing goes out and the ratchet is as it was.
+        let step = self.setup.store.step().map_err(storage_error)?;
         if use_fs {
             let (inner_type, inner_data) = encode_message_body(&body);
             let group_identity = if let OutgoingMessageBody::Group(group) = &body {
@@ -2437,6 +2443,7 @@ impl<'a> Session<'a> {
                 // unsent; everyone else's, and everything incoming, must not depend on it.
                 Err(error) => {
                     tracing::warn!(%error, "cannot encapsulate; message not sent");
+                    step.commit().map_err(storage_error)?;
                     return Ok(None);
                 }
             }
@@ -2470,6 +2477,7 @@ impl<'a> Session<'a> {
                 nonce,
             ),
         };
+        step.commit().map_err(storage_error)?;
         match encoded {
             Ok(payload) => {
                 payloads.push(payload);
@@ -3945,7 +3953,7 @@ impl<'a> Session<'a> {
         let (sender, message_id) = (message.sender_identity.to_string(), message.id.0);
         let mut task = self.e2e.handle_incoming_message(message);
         let result = loop {
-            match task.poll(self.e2e.context()).map_err(e2e_error)? {
+            match self.poll_incoming(&mut task)? {
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::FetchSender(
                     lookup,
                 )) => {
@@ -4015,6 +4023,28 @@ impl<'a> Session<'a> {
                 .map_err(storage_error)?;
         }
         Ok(result.outgoing_message_ack)
+    }
+
+    /// One go of libthreema's task for an incoming message, up to what it has to wait for: its
+    /// writes (the message, its nonce, the ratchet of its session) make one commit, so a backlog
+    /// doesn't sync the flash for each of them. They stand or fall together, and it all comes
+    /// again from the server if they fall: nothing is announced then.
+    fn poll_incoming(
+        &mut self,
+        task: &mut IncomingMessageTask,
+    ) -> Result<IncomingMessageLoop, ConnectionError> {
+        let announced = self.events.borrow().len();
+        let store = Rc::clone(&self.setup.store);
+        let step = store.step().map_err(storage_error)?;
+        let polled = task.poll(self.e2e.context()).map_err(e2e_error);
+        let polled = polled.and_then(|polled| {
+            step.commit().map_err(storage_error)?;
+            Ok(polled)
+        });
+        if polled.is_err() {
+            self.events.borrow_mut().truncate(announced);
+        }
+        polled
     }
 
     /// Look up group members we have no contact for (`app_groups::resolve_members`) and send
@@ -5391,6 +5421,95 @@ mod sync_order_tests {
                 .is_some()
         );
         assert_eq!(setup.store.message_count(CREATOR).unwrap(), 2);
+    }
+
+    /// Counts the store's commits from here on.
+    fn count_commits(store: &Store) -> Arc<std::sync::atomic::AtomicU32> {
+        let commits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = Arc::clone(&commits);
+        store.conn.commit_hook(Some(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        }));
+        commits
+    }
+
+    /// A backlog shouldn't sync the flash for each thing a message writes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_message_writes_makes_one_commit() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let message = from_creator(&setup, 1, "hi");
+        let commits = count_commits(&setup.store);
+
+        session.run_incoming_task(message).await.unwrap();
+
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert!(setup.store.has_nonce(&[1; 24]).unwrap());
+    }
+
+    /// And it stands or falls as a whole: without its nonce nothing of a message is kept or
+    /// announced, and it comes again as if it had never been here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_that_fails_halfway_leaves_nothing() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let message = from_creator(&setup, 1, "hi");
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON nonces
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+
+        assert!(session.run_incoming_task(message).await.is_err());
+
+        assert!(!setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
+        assert!(session.events.borrow().is_empty());
+        assert!(setup.store.conn.is_autocommit(), "no step left open");
+
+        setup
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        let again = from_creator(&setup, 1, "hi");
+        session.run_incoming_task(again).await.unwrap();
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 1);
+        assert!(!session.events.borrow().is_empty());
+    }
+
+    /// Sending with forward security: the session, its ratchet and the nonces of what goes out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_an_encapsulated_message_writes_makes_one_commit() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let mut contact = setup.store.contact(CREATOR).unwrap().unwrap();
+        contact.feature_mask = libthreema::common::FeatureMask(
+            libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+        );
+        setup.store.upsert_contact(&contact).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let commits = count_commits(&setup.store);
+
+        let sent = session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!sent.is_empty());
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(setup.store.conn.is_autocommit());
     }
 
     #[tokio::test(flavor = "current_thread")]

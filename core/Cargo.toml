@@ -89,6 +89,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
 
 [dev-dependencies]
+# The same rusqlite: tests count commits with its commit hook.
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher", "hooks"] }
 tempfile = "3"
 # The same tokio, its clock under the tests' control.
 tokio = { version = "1.52", default-features = false, features = ["test-util"] }
