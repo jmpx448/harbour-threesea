@@ -1779,7 +1779,17 @@ impl<'a> Session<'a> {
             }
             _ => Transport::Direct(Self::connect_direct(setup).await?),
         };
+        Self::log_in(setup, tx, transport, multi_device, fs_disabled).await
+    }
 
+    /// The session over a transport that has just reached its server, to the end of the handshake.
+    async fn log_in(
+        setup: &'a ConnectionSetup,
+        tx: &'a mpsc::UnboundedSender<FromConnection>,
+        transport: Transport,
+        multi_device: Option<crate::multidevice::Properties>,
+        fs_disabled: bool,
+    ) -> Result<Session<'a>, ConnectionError> {
         let client_key = ClientKey::from(*setup.client_key);
         let (csp, client_hello) = CspProtocol::new(
             CspProtocolContextInit {
@@ -4702,6 +4712,9 @@ fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
 }
 
 #[cfg(test)]
+mod pipeline_tests;
+
+#[cfg(test)]
 mod fs_status_tests {
     use super::*;
 
@@ -5337,7 +5350,7 @@ mod sync_order_tests {
     const USER: &str = "USER0001";
     const CREATOR: &str = "ABCD1234";
 
-    fn app() -> (tempfile::TempDir, App) {
+    pub(super) fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let app = App::new(
             &StartConfig {

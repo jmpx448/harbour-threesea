@@ -58,6 +58,20 @@ pub enum Inbound {
 pub enum Transport {
     Direct(TcpStream),
     Mediator(Box<Mediator>),
+    #[cfg(test)]
+    Scripted(Box<ScriptedWire>),
+}
+
+#[cfg(test)]
+type Written = Box<dyn FnMut(&[u8]) -> Result<(), TransportError>>;
+
+/// A test's fake server where the socket would be. A write reaches the server within the call, so
+/// it can look at the store as it was when those bytes went out, and no clock or socket is
+/// involved in what the test sees.
+#[cfg(test)]
+pub struct ScriptedWire {
+    pub written: Written,
+    pub inbound: tokio::sync::mpsc::UnboundedReceiver<Result<Vec<u8>, TransportError>>,
 }
 
 impl Transport {
@@ -66,6 +80,8 @@ impl Transport {
             match self {
                 Self::Direct(stream) => Ok(stream.write_all(frame).await?),
                 Self::Mediator(mediator) => mediator.send(D2mOutgoing::Proxy(frame.to_vec())).await,
+                #[cfg(test)]
+                Self::Scripted(wire) => (wire.written)(frame),
             }
         })
         .await
@@ -78,6 +94,10 @@ impl Transport {
                 "not connected through the mediator".into(),
             )),
             Self::Mediator(mediator) => within_write_limit(mediator.send(payload)).await,
+            #[cfg(test)]
+            Self::Scripted(_) => Err(TransportError::D2m(
+                "not connected through the mediator".into(),
+            )),
         }
     }
 
@@ -92,6 +112,11 @@ impl Transport {
                 Ok(Inbound::Csp(buffer[..length].to_vec()))
             }
             Self::Mediator(mediator) => mediator.read().await,
+            #[cfg(test)]
+            Self::Scripted(wire) => match wire.inbound.recv().await {
+                Some(read) => read.map(Inbound::Csp),
+                None => Err(TransportError::Closed),
+            },
         }
     }
 
