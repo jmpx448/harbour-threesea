@@ -9,6 +9,7 @@ var table = {
     "pages/GroupPage.qml": { identity: "g:ABCD1234:0102030405060708" },
     "pages/DistributionListPage.qml": { identity: "d:1" },
     "pages/ImageViewerPage.qml": { identity: "ABCD1234", messageId: 5 },
+    "pages/SafePasswordDialog.qml": { firstRun: true },
     "pages/MemberPickerDialog.qml": { askName: true, title: "New group", acceptText: "Create" },
     "pages/PollPage.qml": { messageId: 12, conversation: "ABCD1234",
                             poll: { id: 1, creator: "AAAAAAAA", description: "When?", multiple: false, announce: true,
