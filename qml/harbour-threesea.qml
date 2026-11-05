@@ -524,11 +524,19 @@ ApplicationWindow {
     }
     // Forwarding and sending to several chats go on after the page that asked is gone.
     SendInTurn { id: sendInTurn }
-    function forwardInTurn(messages, identities, caption, hidePrivateChats) {
-        sendInTurn.forward(messages, identities, caption, hidePrivateChats)
+    function forwardInTurn(messages, identities, caption, hidden) {
+        sendInTurn.forward(messages, identities, caption, hidden)
     }
-    function shareInTurn(files, text, identities, hidePrivateChats) {
-        sendInTurn.share(files, text, identities, hidePrivateChats)
+    function shareInTurn(files, text, identities, hidden) {
+        sendInTurn.share(files, text, identities, hidden)
+    }
+    // All that is done. With the window closed and no wish to keep running this run was only still
+    // here for that: it ends the way one for a notification's action does, once the server has what
+    // is on its way.
+    function sentInTurn() {
+        if (Qt.application.state === Qt.ApplicationActive) return
+        actionsCame = true
+        leaveAfterActions()
     }
     // The answer to a file sent from a chat. Made here, not on the chat page: the answer may come
     // after that page has gone, when nothing of the page can be relied on to run, and a refused
@@ -1520,6 +1528,7 @@ ApplicationWindow {
     // gone (takeOver() catches a promise that stayed).
     function appEnding() {
         lockedNotificationLater.stop()
+        sendInTurn.sayWhatIsLost()
         sayWhatIsOnItsWay()
         var kept = NotificationActions.allRepliesKept()
         var lost = NotificationActions.drop()
@@ -1643,6 +1652,7 @@ ApplicationWindow {
         forgetNotifications()
         NotificationActions.drop()
         repliesOnTheirWay = ({})
+        sendInTurn.clear()
         actionsCame = false
         actionsRunning = 0
         actionsSendLimit.stop()

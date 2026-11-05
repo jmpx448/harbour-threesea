@@ -894,15 +894,15 @@ QtObject {
                 backend.results["conversations"] = { conversations: [] }
                 backend.refused["draft"] = "locked"
                 var share = push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }], text: "hello" })
-                share.open("ABCD1234")
-                share.open("ABCD1234")
+                share.choose(["ABCD1234"], ["Sam"])
+                share.choose(["ABCD1234"], ["Sam"])
             }, 800],
             [function() {
                 checkStack("conversations share unlock")
                 check("private chats", page("unlock").privateChats, true)
                 stack.pop(undefined, PageStackAction.Immediate)
                 checkStack("conversations share")
-                page("share").open("ABCD1234")
+                page("share").choose(["ABCD1234"], ["Sam"])
             }, 800],
             [function() {
                 checkStack("conversations share unlock")
@@ -920,20 +920,20 @@ QtObject {
             [function() {
                 backend.results["conversations"] = { conversations: [] }
                 backend.results["contact"] = { blocked: true }
-                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).open("ABCD1234")
+                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).choose(["ABCD1234"], ["Sam"])
             }, 200],
             [function() {
                 checkStack("conversations share")
                 check("nothing asked of the chat", countSent("draft"), 0)
                 backend.results["contact"] = { invalid: true }
-                page("share").open("ABCD1234")
+                page("share").choose(["ABCD1234"], ["Sam"])
             }, 200],
             [function() {
                 checkStack("conversations share")
                 check("still nothing", countSent("draft"), 0)
                 // Another chat takes it.
                 backend.results["contact"] = {}
-                page("share").open("BCDE2345")
+                page("share").choose(["BCDE2345"], ["Ada"])
             }, 200],
             [function() {
                 checkStack("conversations chat")
@@ -945,7 +945,7 @@ QtObject {
             [function() {
                 backend.results["conversations"] = { conversations: [] }
                 backend.refused["draft"] = "locked"
-                push("pages/RealSharePage.qml", { forwardMessage: 7 }).open("ABCD1234")
+                push("pages/RealSharePage.qml", { forwardItems: [{ id: 7, kind: "text", caption: "" }] }).choose(["ABCD1234"], ["Sam"])
             }, 800],
             [function() {
                 checkStack("conversations share unlock")
@@ -961,7 +961,7 @@ QtObject {
             [function() { ready(false) }, 100],
             [function() {
                 backend.results["conversations"] = { conversations: [] }
-                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).open("ABCD1234")
+                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).choose(["ABCD1234"], ["Sam"])
             }, 800],
             [function() {
                 checkStack("conversations chat")
@@ -974,7 +974,7 @@ QtObject {
             [function() {
                 backend.results["conversations"] = { conversations: [] }
                 backend.hold("draft")
-                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).open("ABCD1234")
+                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).choose(["ABCD1234"], ["Sam"])
                 window.lockNow()
                 backend.release("draft")
             }, 800],
@@ -1311,6 +1311,97 @@ QtObject {
                 checkStack("conversations chatPin")
                 check("still nothing", handedOver, "")
                 check("entry cleared", entryOf(stack.currentPage).pin, "")
+            }, 0],
+        ],
+        // The core has shown the private chats, and what wanted them can't follow while something is
+        // on top: they are hidden again, as nobody would do that later if the X is what comes next.
+        privateChatPinAnsweredUnderCall: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.hold("unlock")
+                var pinPage = push("pages/RealUnlockPage.qml", { privateChats: true })
+                pinPage.objectName = "chatPin"
+                pinPage.unlocked.connect(function() { handedOver = "chat" })
+                var entry = entryOf(pinPage)
+                entry._pin = "1234"
+                entry.accept()
+                push("pages/PlainPage.qml")
+            }, 100],
+            [function() {
+                check("nothing hidden yet", countSent("lock"), 0)
+                backend.release("unlock")
+            }, 100],
+            [function() {
+                check("nothing follows", handedOver, "")
+                check("hidden again", countSent("lock"), 1)
+            }, 0],
+        ],
+        // Several chats, one hidden: the PIN once, the hidden one first, hidden again right after its
+        // step and not after everything, and what came earlier doesn't hold that up.
+        severalChatsOneHidden: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                root.kept = []
+                backend.results["forwardMessages"] = function(args) {
+                    root.kept.push(args.identity + "/" + args.messages[0] + " after " + countSent("lock") + " locks")
+                    return { errors: [] }
+                }
+                backend.hold("forwardMessages")
+                // Under way already, with one more to come.
+                window.forwardInTurn([1, 2], ["AAAAAAAA"], undefined, [])
+                backend.refused["draft"] = "locked"
+                var share = push("pages/RealSharePage.qml", { forwardItems: [{ id: 7, kind: "text", caption: "" }] })
+                share.choose(["BCDE2345", "ABCD1234"], ["Ada", "Sam"])
+            }, 800],
+            [function() {
+                checkStack("conversations share unlock")
+                check("only what ran before", countSent("forwardMessages"), 1)
+                // A PIN for both, though only this one is hidden.
+                backend.refused["draft"] = undefined
+                stack.currentPage.unlocked("1234")
+                check("keeps the process", backend.sendingInTurn, true)
+                backend.release("forwardMessages")
+            }, 300],
+            [function() {
+                check("order", root.kept.join(", "),
+                      "AAAAAAAA/1 after 0 locks, BCDE2345/7 after 0 locks, ABCD1234/7 after 0 locks, "
+                      + "AAAAAAAA/2 after 1 locks")
+                check("process let go", backend.sendingInTurn, false)
+            }, 0],
+        ],
+        // Blocked among several: nothing goes, and the picker comes back without it.
+        severalChatsOneBlocked: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                backend.results["contacts"] = { contacts: [] }
+                backend.results["contact"] = function(args) { return { blocked: args.identity === "ABCD1234" } }
+                var share = push("pages/RealSharePage.qml", { text: "hello", selected: ["ABCD1234", "BCDE2345", "CDEF3456"] })
+                share.choose(["ABCD1234", "BCDE2345", "CDEF3456"], ["Sam", "Ada", "Bob"])
+            }, 800],
+            [function() {
+                check("every one looked at", countSent("contact"), 3)
+                check("nothing asked of the chats", countSent("draft"), 0)
+                check("nothing sent", countSent("sendText"), 0)
+                check("the picker is back", stack.currentPage.toString().indexOf("ChatPickerDialog") === 0, true)
+                check("without it", JSON.stringify(stack.currentPage.selected), JSON.stringify(["BCDE2345", "CDEF3456"]))
+            }, 0],
+        ],
+        // What is under way when the data goes doesn't hold up what comes after it.
+        sendingInTurnSurvivesDataRemoval: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.hold("forwardMessages")
+                window.forwardInTurn([1], ["AAAAAAAA"], undefined, [])
+            }, 50],
+            [function() {
+                check("under way", countSent("forwardMessages"), 1)
+                window.dataRemoved(false)
+                check("process let go", backend.sendingInTurn, false)
+                window.forwardInTurn([2], ["BBBBBBBB"], undefined, [])
+                check("next goes at once", countSent("forwardMessages"), 2)
+                check("to", backend.lastArgs["forwardMessages"].identity, "BBBBBBBB")
             }, 0],
         ],
         // A running call's page survives closing the private chat beneath it.

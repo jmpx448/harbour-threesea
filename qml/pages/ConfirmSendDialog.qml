@@ -11,6 +11,8 @@ Dialog {
     // The chats, by name.
     property string names
     property bool forwarding
+    // What goes along, by name.
+    property var fileNames: []
     // A caption or message, to change or take away.
     property bool askContent
     property string content
@@ -44,6 +46,15 @@ Dialog {
                        ? qsTrId("threesea-la-confirm-forward-to")
                        //% "Send to %1"
                        : qsTrId("threesea-la-confirm-send-to")).arg(dialog.names)
+            }
+
+            Label {
+                visible: dialog.fileNames.length > 0
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                color: Theme.secondaryHighlightColor
+                text: dialog.fileNames.join("\n")
             }
 
             TextArea {

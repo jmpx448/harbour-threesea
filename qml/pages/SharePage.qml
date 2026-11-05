@@ -25,8 +25,6 @@ Page {
     property var targets: []
     // The forward's own caption, once the user has been asked: nothing for what the messages have.
     property var caption
-    // A private chat among them was unlocked for this, so it is hidden again after it.
-    property bool unlockedHere: false
 
     // A tap waits for the core's answer below: one at a time.
     property bool opening: false
@@ -46,16 +44,30 @@ Page {
     }
 
     // A blocked contact or a revoked ID has no input to take this, and the core would refuse it:
-    // said here, with the content still on this page for another chat. (Left groups aren't in the
-    // list.)
+    // said here, before anything goes, with the content still on this page for another chat. Among
+    // several, all of them are looked at and the rest comes back to be chosen again. (Left groups
+    // aren't in the list.)
     function choose(identities, names) {
         if (opening || identities.length === 0) return
         opening = true
+        var refused = []
+        var refusedNames = []
+        var why = ""
         function check(at) {
             if (at >= identities.length) {
                 page.opening = false
-                page.targets = identities
-                page.confirm(names)
+                if (refused.length === 0) {
+                    page.targets = identities
+                    page.confirm(names)
+                } else if (identities.length === 1) {
+                    Notices.show(why, Notice.Long, Notice.Center)
+                } else {
+                    page.selected = page.selected.filter(function(other) { return refused.indexOf(other) < 0 })
+                    //% "Nothing was sent. Blocked or revoked, and taken off the choice: %1"
+                    Notices.show(qsTrId("threesea-la-share-refused-several").arg(refusedNames.join(", ")),
+                                 Notice.Long, Notice.Center)
+                    page.chooseSeveral()
+                }
                 return
             }
             if (identities[at].indexOf("g:") === 0 || identities[at].indexOf("d:") === 0) {
@@ -64,14 +76,12 @@ Page {
             }
             backend.call("contact", { identity: identities[at] }, function(ok, result) {
                 if (ok && (result.invalid === true || result.blocked === true)) {
-                    page.opening = false
-                    page.selected = page.selected.filter(function(other) { return other !== identities[at] })
-                    var why = result.invalid === true ? qsTrId("threesea-la-revoked-input")
-                                                      : qsTrId("threesea-la-blocked-input")
-                    Notices.show(identities.length > 1 ? names[at] + ": " + why : why, Notice.Long, Notice.Center)
-                } else {
-                    check(at + 1)
+                    refused.push(identities[at])
+                    refusedNames.push(names[at])
+                    why = result.invalid === true ? qsTrId("threesea-la-revoked-input")
+                                                  : qsTrId("threesea-la-blocked-input")
                 }
+                check(at + 1)
             })
         }
         check(0)
@@ -96,7 +106,8 @@ Page {
             askContent: oneFile || !forwarding,
             content: shown,
             contentIsCaption: oneFile || files.length > 0,
-            askCaptions: withCaptions
+            askCaptions: withCaptions,
+            fileNames: forwarding ? [] : files.map(function(file) { return file.name })
         })
         dialog.accepted.connect(function() {
             if (oneFile) {
@@ -125,15 +136,26 @@ Page {
 
     // A private chat hidden right now takes nothing: the PIN comes first, above this page, so
     // that its X comes back to this choice with the content still here. `draft` answers `locked`
-    // for such a chat and changes nothing. One PIN shows them all.
+    // for such a chat and changes nothing. All are asked first, as they are to be hidden again as
+    // soon as they have what is for them; one PIN shows them all.
     function openTargets() {
         if (opening) return
         opening = true
         var identities = targets
+        var hidden = []
         function check(at) {
             if (at >= identities.length) {
                 page.opening = false
-                page.deliver()
+                if (hidden.length === 0) {
+                    page.deliver(hidden)
+                    return
+                }
+                var unlock = pageStack.push(Qt.resolvedUrl("UnlockPage.qml"), {
+                    privateChats: true,
+                    //% "Private chats"
+                    title: qsTrId("threesea-he-private-chats")
+                })
+                unlock.unlocked.connect(function() { page.deliver(hidden) })
                 return
             }
             backend.call("draft", { identity: identities[at] }, function(ok, result, kind) {
@@ -142,40 +164,27 @@ Page {
                     page.opening = false
                     return
                 }
-                if (ok || kind !== "locked") {
-                    check(at + 1)
-                    return
-                }
-                page.opening = false
-                var unlock = pageStack.push(Qt.resolvedUrl("UnlockPage.qml"), {
-                    privateChats: true,
-                    //% "Private chats"
-                    title: qsTrId("threesea-he-private-chats")
-                })
-                unlock.unlocked.connect(function() {
-                    page.unlockedHere = true
-                    page.deliver()
-                })
+                if (!ok && kind === "locked") hidden.push(identities[at])
+                check(at + 1)
             })
         }
         check(0)
     }
 
-    // Called from this page or from the PIN's above it.
-    function deliver() {
+    // Called from this page or from the PIN's above it. `hidden`: those of the chats the PIN showed.
+    function deliver(hidden) {
         // Several: everything goes from here, without a chat, and the user is back where this began.
-        var hide = unlockedHere
-        unlockedHere = false
         if (targets.length > 1) {
-            if (forwarding) window.forwardInTurn(forwardIds(), targets, caption, hide)
-            else window.shareInTurn(files, text, targets, hide)
+            if (forwarding) window.forwardInTurn(forwardIds(), targets, caption, hidden)
+            else window.shareInTurn(files, text, targets, hidden)
             pageStack.pop(pageStack.previousPage(page))
             return
         }
         var identity = targets[0]
         if (forwarding) {
-            // In order; this page is gone before the replies come.
-            window.forwardInTurn(forwardIds(), targets, caption, false)
+            // In order; this page is gone before the replies come. The chat that opens is the one
+            // the PIN was for, and leaving it hides it again.
+            window.forwardInTurn(forwardIds(), targets, caption, [])
             // Back to where the selection started, then into the target chat.
             var chats = pageStack.find(function(p) { return p.objectName === "conversations" })
             if (chats) pageStack.pop(chats, PageStackAction.Immediate)

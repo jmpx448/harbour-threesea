@@ -55,6 +55,18 @@ QtObject {
             waiting.push({ cmd: cmd, args: args, callback: callback })
         }
         function lockWithFilesOnTheirWay() { call("lock") }
+        // What SendInTurn handed over, and an answer for each.
+        property var filesSent: []
+        function sendFile(identity, path, photo, caption, callback) {
+            filesSent.push(identity)
+            call("sendFile", { identity: identity, path: path, caption: caption }, callback)
+        }
+        function sendVideo(identity, path, frame, seconds, caption, callback) {
+            sendFile(identity, path, false, caption, callback)
+        }
+        property bool sendingInTurn: false
+        function setSendingInTurn(sending) { sendingInTurn = sending }
+        function sharedFileKind(path) { return path.indexOf("/own/") === 0 ? "own" : "picture" }
         function hold(cmd) { held[cmd] = true }
         function release(cmd) { held[cmd] = false }
         function refreshContacts() { }
