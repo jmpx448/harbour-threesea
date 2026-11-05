@@ -478,7 +478,7 @@ FullscreenContentPage {
                     icon.source: "image://theme/" + (!item.here ? Fmt.fileIcon("", item.body.fileState) : "icon-l-play")
                     onClicked: {
                         if (item.here) page.playVideo(model.id)
-                        else backend.call("downloadFile", { message: model.id })
+                        else window.messageOut.download(model.id)
                     }
                 }
 

@@ -3115,7 +3115,7 @@ Page {
                         // Other apps can only open what's in Downloads (our copies are encrypted).
                         page.saveFile(model.id, true)
                     } else if (file.fileState !== 1) {
-                        backend.call("downloadFile", { message: model.id })
+                        window.messageOut.download(model.id)
                     }
                 }
                 onDeleteRequested: {

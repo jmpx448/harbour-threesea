@@ -178,7 +178,7 @@ Page {
 
     function open(id, kind, body, outgoing) {
         if (body.fileState !== 2) {
-            if (body.fileState !== 1) backend.call("downloadFile", { message: id })
+            if (body.fileState !== 1) window.messageOut.download(id)
         } else if ((kind === "image" || kind === "gif") && Fmt.isPicture(body.mediaType)) {
             pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), { identity: identity, messageId: id, newestFirst: true,
                                                                    animated: kind === "gif" })

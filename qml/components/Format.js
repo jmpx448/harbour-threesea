@@ -174,6 +174,16 @@ function copyText(kind, text, body, mentions) {
     return ""
 }
 
+// How a tapped download stands, by the file's state in a change of its message. The thumbnail starts
+// first, so a change can still show the file's old state: nothing counts until it has been seen
+// running. `running`: it has been. Gives "waiting", "running", "failed" or "ended".
+function downloadStep(running, fileState) {
+    if (fileState === 1) return "running"
+    if (fileState === 2) return "ended"
+    if (!running) return "waiting"
+    return fileState === 3 ? "failed" : "ended"
+}
+
 function escapeHtml(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
 }
