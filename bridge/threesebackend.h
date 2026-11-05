@@ -74,12 +74,12 @@ class ThreeseBackend : public QObject
     Q_PROPERTY(bool addressBookSync READ addressBookSync WRITE setAddressBookSync NOTIFY notificationSettingsChanged)
     // Last address book match (ms since epoch), 0: never.
     Q_PROPERTY(double addressBookSyncedAt READ addressBookSyncedAt WRITE setAddressBookSyncedAt
-                   NOTIFY notificationSettingsChanged)
+                   NOTIFY addressBookSyncedAtChanged)
     // The SDK emulator's software renderer blends translucent colours with alpha squared; QML
     // compensates (Theme.rgba alpha -> sqrt(alpha)) so the look matches a device.
     Q_PROPERTY(bool emulator READ emulator CONSTANT)
     // Android's "Auto-play animated images" (GIFs play in the chat by themselves). Device-local.
-    Q_PROPERTY(bool autoPlayGifs READ autoPlayGifs WRITE setAutoPlayGifs NOTIFY notificationSettingsChanged)
+    Q_PROPERTY(bool autoPlayGifs READ autoPlayGifs WRITE setAutoPlayGifs NOTIFY autoPlayGifsChanged)
     // Enter sends the message (Shift+Enter: new line); off: the other way round. Device-local.
     Q_PROPERTY(bool enterToSend READ enterToSend WRITE setEnterToSend NOTIFY notificationSettingsChanged)
     // Sent videos (Android's video size): 0 original, 1 small (480 px), 2 medium (848 px).
@@ -95,11 +95,11 @@ class ThreeseBackend : public QObject
     // earpiece. Device-local; the Lite flavour has no sensor permission, so it has no effect.
     Q_PROPERTY(bool earToPlay READ earToPlay WRITE setEarToPlay NOTIFY notificationSettingsChanged)
     // Emoji as Threema's pictures (Twemoji, bundled) instead of the system font. Device-local.
-    Q_PROPERTY(bool threemaEmoji READ threemaEmoji WRITE setThreemaEmoji NOTIFY notificationSettingsChanged)
+    Q_PROPERTY(bool threemaEmoji READ threemaEmoji WRITE setThreemaEmoji NOTIFY threemaEmojiChanged)
     // Messages of only 1–3 emoji are shown at double size (Android's default). Device-local.
-    Q_PROPERTY(bool biggerEmojis READ biggerEmojis WRITE setBiggerEmojis NOTIFY notificationSettingsChanged)
+    Q_PROPERTY(bool biggerEmojis READ biggerEmojis WRITE setBiggerEmojis NOTIFY biggerEmojisChanged)
     // Size of the message text in chats (Android's "font size"): 0 small, 1 normal, 2 large.
-    Q_PROPERTY(int chatFontSize READ chatFontSize WRITE setChatFontSize NOTIFY notificationSettingsChanged)
+    Q_PROPERTY(int chatFontSize READ chatFontSize WRITE setChatFontSize NOTIFY chatFontSizeChanged)
     // Picture behind the messages in every chat (Android's wallpaper); "": none. Device-local.
     Q_PROPERTY(QString wallpaper READ wallpaper WRITE setWallpaper NOTIFY notificationSettingsChanged)
     // Full flavour: a systemd user service starts the app in the background at login.
@@ -145,7 +145,7 @@ public:
     void setAddressBookSyncedAt(double at)
     {
         QSettings().setValue(QStringLiteral("addressBookSyncedAt"), at);
-        emit notificationSettingsChanged();
+        emit addressBookSyncedAtChanged();
     }
     void setNotificationPreview(bool preview);
     int imageSize() const { return QSettings().value(QStringLiteral("imageSize"), 1600).toInt(); }
@@ -154,18 +154,11 @@ public:
         QSettings().setValue(QStringLiteral("imageSize"), side);
         emit notificationSettingsChanged();
     }
-    bool threemaEmoji() const { return QSettings().value(QStringLiteral("threemaEmoji"), true).toBool(); }
-    void setThreemaEmoji(bool threema)
-    {
-        QSettings().setValue(QStringLiteral("threemaEmoji"), threema);
-        emit notificationSettingsChanged();
-    }
-    bool biggerEmojis() const { return QSettings().value(QStringLiteral("biggerEmojis"), true).toBool(); }
-    void setBiggerEmojis(bool bigger)
-    {
-        QSettings().setValue(QStringLiteral("biggerEmojis"), bigger);
-        emit notificationSettingsChanged();
-    }
+    // These four are read per bubble while a chat scrolls: from members, not the settings file.
+    bool threemaEmoji() const { return m_threemaEmoji; }
+    void setThreemaEmoji(bool threema);
+    bool biggerEmojis() const { return m_biggerEmojis; }
+    void setBiggerEmojis(bool bigger);
     bool soundChats() const { return QSettings().value(QStringLiteral("soundChats"), true).toBool(); }
     void setSoundChats(bool on)
     {
@@ -208,12 +201,8 @@ public:
         QSettings().setValue(QStringLiteral("videoSize"), qBound(0, size, 2));
         emit notificationSettingsChanged();
     }
-    int chatFontSize() const { return qBound(0, QSettings().value(QStringLiteral("chatFontSize"), 1).toInt(), 2); }
-    void setChatFontSize(int size)
-    {
-        QSettings().setValue(QStringLiteral("chatFontSize"), qBound(0, size, 2));
-        emit notificationSettingsChanged();
-    }
+    int chatFontSize() const { return m_chatFontSize; }
+    void setChatFontSize(int size);
     QString wallpaper() const { return QSettings().value(QStringLiteral("wallpaper")).toString(); }
     void setWallpaper(const QString &path)
     {
@@ -239,12 +228,8 @@ public:
         QSettings().setValue(QStringLiteral("earToPlay"), on);
         emit notificationSettingsChanged();
     }
-    bool autoPlayGifs() const { return QSettings().value(QStringLiteral("autoPlayGifs"), true).toBool(); }
-    void setAutoPlayGifs(bool play)
-    {
-        QSettings().setValue(QStringLiteral("autoPlayGifs"), play);
-        emit notificationSettingsChanged();
-    }
+    bool autoPlayGifs() const { return m_autoPlayGifs; }
+    void setAutoPlayGifs(bool play);
     bool enterToSend() const { return QSettings().value(QStringLiteral("enterToSend"), true).toBool(); }
     void setEnterToSend(bool send)
     {
@@ -369,6 +354,11 @@ signals:
     void keepRunningChanged();
     void logLevelChanged();
     void notificationSettingsChanged();
+    void addressBookSyncedAtChanged();
+    void threemaEmojiChanged();
+    void biggerEmojisChanged();
+    void chatFontSizeChanged();
+    void autoPlayGifsChanged();
     void dataEncryptionChanged();
     // The PIN was accepted: calls and players stop now, the core can take a while.
     void dataRemovalStarted();
@@ -391,6 +381,8 @@ private slots:
                       const QString &error);
 
 private:
+    // The settings the bubbles read, from the settings file.
+    void loadBubbleSettings();
     static void onCoreMessage(void *userData, const char *json);
     void startCore(QByteArray key);
     // A 512 px square JPEG as the attachment; with `safeCopy` also Threema Safe's 400 px, q=60
@@ -412,6 +404,10 @@ private:
 
     QJSEngine *m_engine;
     ThreeseaCore *m_core = nullptr;
+    bool m_threemaEmoji = true;
+    bool m_biggerEmojis = true;
+    int m_chatFontSize = 1;
+    bool m_autoPlayGifs = true;
     // Guards m_core against image loader threads while the core starts and stops.
     mutable QReadWriteLock m_coreLock;
     SecretStore *m_secrets;

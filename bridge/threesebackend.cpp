@@ -84,6 +84,7 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     , m_contacts(new ContactListModel(this))
     , m_voiceRecorder(new VoiceRecorder(this))
 {
+    loadBubbleSettings();
     m_unreadTimer.setSingleShot(true);
     m_unreadTimer.setInterval(50);
     connect(&m_unreadTimer, &QTimer::timeout, this, [this]() {
@@ -442,8 +443,8 @@ void ThreeseBackend::finishDataRemoval()
     m_unlockedAtStart = false;
 
     // All of them, the device's own too: chat IDs in the notification tokens, the address book
-    // opt-in (the next ID is asked again), the wallpaper. Getters read them live, so the signals
-    // below bring the UI along.
+    // opt-in (the next ID is asked again), the wallpaper. Most getters read them live, so the
+    // signals below bring the UI along.
     {
         QSettings settings;
         const QVariant pending = settings.value(RemovalPendingKey);
@@ -451,6 +452,7 @@ void ThreeseBackend::finishDataRemoval()
         settings.setValue(RemovalPendingKey, pending);
         settings.sync();
     }
+    loadBubbleSettings();
     applyQtLogLevel();
     QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
 
@@ -467,6 +469,7 @@ void ThreeseBackend::finishDataRemoval()
     emit keepRunningChanged();
     emit logLevelChanged();
     emit notificationSettingsChanged();
+    emit addressBookSyncedAtChanged();
     emit dataEncryptionChanged();
     if (!removed) {
         // A new key couldn't open what stayed. The user can try again, or the next start does.
@@ -1086,6 +1089,68 @@ void ThreeseBackend::refresh()
 bool ThreeseBackend::notificationsEnabled() const
 {
     return QSettings().value(QStringLiteral("notifications"), true).toBool();
+}
+
+void ThreeseBackend::loadBubbleSettings()
+{
+    const QSettings settings;
+    const bool threema = settings.value(QStringLiteral("threemaEmoji"), true).toBool();
+    const bool bigger = settings.value(QStringLiteral("biggerEmojis"), true).toBool();
+    const int size = qBound(0, settings.value(QStringLiteral("chatFontSize"), 1).toInt(), 2);
+    const bool play = settings.value(QStringLiteral("autoPlayGifs"), true).toBool();
+    if (threema != m_threemaEmoji) {
+        m_threemaEmoji = threema;
+        emit threemaEmojiChanged();
+    }
+    if (bigger != m_biggerEmojis) {
+        m_biggerEmojis = bigger;
+        emit biggerEmojisChanged();
+    }
+    if (size != m_chatFontSize) {
+        m_chatFontSize = size;
+        emit chatFontSizeChanged();
+    }
+    if (play != m_autoPlayGifs) {
+        m_autoPlayGifs = play;
+        emit autoPlayGifsChanged();
+    }
+}
+
+void ThreeseBackend::setThreemaEmoji(bool threema)
+{
+    if (threema != m_threemaEmoji) {
+        QSettings().setValue(QStringLiteral("threemaEmoji"), threema);
+        m_threemaEmoji = threema;
+        emit threemaEmojiChanged();
+    }
+}
+
+void ThreeseBackend::setBiggerEmojis(bool bigger)
+{
+    if (bigger != m_biggerEmojis) {
+        QSettings().setValue(QStringLiteral("biggerEmojis"), bigger);
+        m_biggerEmojis = bigger;
+        emit biggerEmojisChanged();
+    }
+}
+
+void ThreeseBackend::setChatFontSize(int size)
+{
+    size = qBound(0, size, 2);
+    if (size != m_chatFontSize) {
+        QSettings().setValue(QStringLiteral("chatFontSize"), size);
+        m_chatFontSize = size;
+        emit chatFontSizeChanged();
+    }
+}
+
+void ThreeseBackend::setAutoPlayGifs(bool play)
+{
+    if (play != m_autoPlayGifs) {
+        QSettings().setValue(QStringLiteral("autoPlayGifs"), play);
+        m_autoPlayGifs = play;
+        emit autoPlayGifsChanged();
+    }
 }
 
 void ThreeseBackend::setNotificationsEnabled(bool enabled)
