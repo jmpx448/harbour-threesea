@@ -23,7 +23,7 @@ SupportsMultipleFiles=true
 
 [X-Sailjail]
 # The Full flavour appends Sensors (voice messages at the ear; not Harbour-allowed, spec).
-Permissions=Internet;Secrets;Pictures;Videos;Music;Documents;Downloads;MediaIndexing;Microphone;Camera;Contacts;Location
+Permissions=Internet;Secrets;Pictures;Videos;Music;Documents;Downloads;RemovableMedia;MediaIndexing;Microphone;Camera;Contacts;Location
 OrganizationName=org.threesea
 ApplicationName=harbour-threesea
 ExecDBus=harbour-threesea
