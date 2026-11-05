@@ -2432,6 +2432,58 @@ fn a_group_setup_reaches_the_browser_as_receiver_then_chat() {
     assert!(position("receiver", &key) < position("conversation", &key));
 }
 
+/// A hidden private chat stays out of search on each of its ways (few hits, a list of them to walk
+/// with, a common word, a query too short for the index), and its hits don't use up the limit
+/// (§7.8). Unlocked, it is found.
+#[test]
+fn search_shows_no_hidden_private_chat_on_any_of_its_ways() {
+    let (_dir, mut app) = fixture();
+    let step = app.store.step().unwrap();
+    // Plenty of each word in a chat that shows, older than all in the private one.
+    for n in 0..3000u64 {
+        let body = if n < 1500 { "common middle" } else { "common" };
+        app.store
+            .insert_incoming("CCCCCCCC", 1000 + n, "text", body, 1000)
+            .unwrap();
+    }
+    app.store
+        .insert_incoming("CCCCCCCC", 1, "text", "rarest zq", 1000)
+        .unwrap();
+    for n in 0..150u64 {
+        app.store
+            .insert_incoming(
+                "BBBBBBBB",
+                10_000 + n,
+                "text",
+                "common middle rarest zq",
+                5000,
+            )
+            .unwrap();
+    }
+    step.commit().unwrap();
+    app.store.set_private("BBBBBBBB", true).unwrap();
+
+    let chats = |app: &App, query: &str, identity: Option<&str>| -> HashSet<String> {
+        app.search_messages(query, identity).unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["conversation"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let only_shown = HashSet::from(["CCCCCCCC".to_owned()]);
+    let private = HashSet::from(["BBBBBBBB".to_owned()]);
+    app.unlocked = false;
+    for query in ["rarest", "middle", "common", "zq"] {
+        assert_eq!(chats(&app, query, None), only_shown, "{query}");
+        assert!(chats(&app, query, Some("BBBBBBBB")).is_empty(), "{query}");
+    }
+    app.unlocked = true;
+    for query in ["rarest", "middle", "common", "zq"] {
+        assert_eq!(chats(&app, query, Some("BBBBBBBB")), private, "{query}");
+    }
+}
+
 /// A message coming in tells the browser of its chat; the others stay as they were, with no picture
 /// to read, scale and encode for those ending in one. Only a session that has the list gets any of
 /// this.

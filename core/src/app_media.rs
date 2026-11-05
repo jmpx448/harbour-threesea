@@ -4162,7 +4162,7 @@ mod tests {
         assert!(app.store.message(kept.id).unwrap().is_some());
         let found = app
             .store
-            .search_messages("harbour", None, 10, |_| None)
+            .search_messages("harbour", None, 10, |_| true, |_| None)
             .unwrap();
         assert_eq!(found.len(), 1, "the search index survived");
     }

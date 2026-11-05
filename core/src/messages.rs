@@ -481,9 +481,14 @@ pub type MediaCursor = (i64, i64);
 /// File messages with their [`media_kind`].
 pub type MediaPage = Vec<(Message, &'static str)>;
 
-/// More than this many candidates from the search index: the text is common, and walking the
-/// messages from the newest on soon comes to enough hits.
-const SEARCH_CANDIDATES_MAX: usize = 1000;
+/// Up to this many candidates from the search index are sorted, about a millisecond per thousand on
+/// a desktop, as much as the walk below takes for this many. Lower in tests, as is the next, which
+/// go through all the ways.
+const SEARCH_SORTED_MAX: usize = if cfg!(test) { 1000 } else { 10_000 };
+/// Up to this many are kept in a list to check rows against while walking the messages from the
+/// newest on, which stops at the limit. More than that, of either the index's hits or messages with
+/// mentions: the text is so common that the walk comes to enough hits without any list.
+const SEARCH_IDS_MAX: usize = if cfg!(test) { 2000 } else { 50_000 };
 /// The kinds search looks at.
 const SEARCHED_KINDS: &str = "kind IN ('text', 'file', 'location', 'poll')";
 
@@ -496,24 +501,24 @@ fn search_order(in_chat: bool) -> &'static str {
     }
 }
 
+/// How a walk through the messages narrows them down in SQL, with what it binds.
+const SEARCH_WALK_IN_LIST: &str = "AND id IN (SELECT value FROM json_each(?))";
+/// For a query too short for the search index. Messages with mentions always pass: names aren't in
+/// the body.
+const SEARCH_WALK_LIKE: &str = "AND (body LIKE ? ESCAPE '\\' OR body LIKE '%@[%')";
+
 /// All messages from the newest on, in the order an index has them, so that nothing has to be
-/// sorted first and stopping at the limit saves the rest. `liked`: a query too short for the search
-/// index, narrowed down by SQL (messages with mentions always pass: names aren't in the body).
-/// Binds the chat, if `in_chat`, then the pattern, if `liked`.
-fn search_walk(in_chat: bool, liked: bool) -> String {
+/// sorted first and stopping at the limit saves the rest. Binds the chat, if `in_chat`, then what
+/// `narrowed` takes.
+fn search_walk(in_chat: bool, narrowed: &str) -> String {
     let (index, chat) = if in_chat {
         ("messages_position", "conversation = ? AND")
     } else {
         ("messages_by_time", "")
     };
-    let like = if liked {
-        "AND (body LIKE ? ESCAPE '\\' OR body LIKE '%@[%')"
-    } else {
-        ""
-    };
     format!(
         "SELECT {} FROM messages INDEXED BY {index}
-         WHERE {chat} {SEARCHED_KINDS} {like}
+         WHERE {chat} {SEARCHED_KINDS} {narrowed}
          ORDER BY {}",
         columns(),
         search_order(in_chat)
@@ -1148,6 +1153,7 @@ impl Store {
         query: &str,
         conversation: Option<&str>,
         limit: u32,
+        listed: impl Fn(&str) -> bool,
         names: impl Fn(&str) -> Option<String>,
     ) -> Result<Vec<(Message, String)>, StoreError> {
         let escaped = query
@@ -1161,32 +1167,39 @@ impl Store {
         let candidates = if short {
             None
         } else {
-            self.search_candidates(query)?
-                .map(|ids| serde_json::to_string(&ids).unwrap_or_default())
+            self.search_candidates(query)?.map(|ids| {
+                (
+                    serde_json::to_string(&ids).unwrap_or_default(),
+                    ids.len() <= SEARCH_SORTED_MAX,
+                )
+            })
         };
+        let in_chat = conversation.is_some();
+        // In the order they are bound.
         let mut args: Vec<&str> = Vec::new();
-        let sql = if let Some(ids) = &candidates {
-            args.push(ids);
-            let chat = if conversation.is_some() {
-                "AND conversation = ?"
-            } else {
-                ""
-            };
-            format!(
-                "SELECT {} FROM messages
-                 WHERE {SEARCHED_KINDS} AND id IN (SELECT value FROM json_each(?)) {chat}
-                 ORDER BY {}",
-                columns(),
-                search_order(conversation.is_some())
-            )
-        } else {
-            search_walk(conversation.is_some(), short)
+        let sql = match &candidates {
+            Some((ids, few)) if *few => {
+                args.push(ids);
+                // Not by the chat's index: that would walk the chat to avoid sorting these few.
+                let chat = if in_chat { "AND +conversation = ?" } else { "" };
+                format!(
+                    "SELECT {} FROM messages
+                     WHERE {SEARCHED_KINDS} AND id IN (SELECT value FROM json_each(?)) {chat}
+                     ORDER BY {}",
+                    columns(),
+                    search_order(in_chat)
+                )
+            }
+            Some(_) => search_walk(in_chat, SEARCH_WALK_IN_LIST),
+            None => search_walk(in_chat, if short { SEARCH_WALK_LIKE } else { "" }),
         };
         if let Some(conversation) = conversation {
             args.push(conversation);
         }
-        if short {
-            args.push(&pattern);
+        match &candidates {
+            Some((ids, few)) if !*few => args.push(ids),
+            None if short => args.push(&pattern),
+            _ => {}
         }
         let mut statement = self.conn.prepare(&sql)?;
         // Row by row: what follows stops at the limit, and a walk with it.
@@ -1220,6 +1233,8 @@ impl Store {
             if let Some(hit) = fields
                 .into_iter()
                 .find(|f| with_names(f).to_lowercase().contains(&needle))
+                // Here, not afterwards: a hidden chat's hits would use up the limit.
+                && listed(&message.conversation)
             {
                 found.push((message, hit));
                 if found.len() >= limit as usize {
@@ -1230,21 +1245,44 @@ impl Store {
         Ok(found)
     }
 
-    /// What the search index holds for `query`, and every message with a mention; `None` if that is
-    /// more than [`SEARCH_CANDIDATES_MAX`]. Stops there: telling those apart costs little, sorting
-    /// them all would cost as much as the search of a rare word costs nothing.
+    /// What the search index holds for `query`, and every message with a mention; `None` if either
+    /// is more than [`SEARCH_IDS_MAX`]. Stops reading there.
     fn search_candidates(&self, query: &str) -> Result<Option<Vec<i64>>, StoreError> {
         // A quoted phrase: the trigram tokenizer matches it as a substring, case-insensitive.
         let phrase = format!("\"{}\"", query.replace('"', "\"\""));
-        let mut statement = self.conn.prepare(
-            "SELECT rowid FROM messages_search WHERE messages_search MATCH ?1
-             UNION ALL SELECT id FROM messages WHERE body LIKE '%@[%'
-             LIMIT ?2",
+        let mut ids = self.ids_up_to_max(
+            "SELECT rowid FROM messages_search WHERE messages_search MATCH ?1 LIMIT ?2",
+            &[&phrase],
         )?;
+        let mentions = self.ids_up_to_max(
+            "SELECT id FROM messages INDEXED BY messages_mentions WHERE body LIKE '%@[%' LIMIT ?1",
+            &[],
+        )?;
+        let (Some(found), Some(mentions)) = (ids.as_mut(), mentions) else {
+            return Ok(None);
+        };
+        found.extend(mentions);
+        Ok(ids)
+    }
+
+    /// The ids a statement finds, `None` if more than [`SEARCH_IDS_MAX`]. Takes `args`, then its
+    /// limit.
+    fn ids_up_to_max(
+        &self,
+        sql: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Option<Vec<i64>>, StoreError> {
+        let limit = SEARCH_IDS_MAX + 1;
+        let args: Vec<&dyn rusqlite::ToSql> = args
+            .iter()
+            .copied()
+            .chain([&limit as &dyn rusqlite::ToSql])
+            .collect();
+        let mut statement = self.conn.prepare(sql)?;
         let ids: Vec<i64> = statement
-            .query_map(params![phrase, SEARCH_CANDIDATES_MAX + 1], |row| row.get(0))?
+            .query_map(&*args, |row| row.get(0))?
             .collect::<Result<_, _>>()?;
-        Ok((ids.len() <= SEARCH_CANDIDATES_MAX).then_some(ids))
+        Ok((ids.len() <= SEARCH_IDS_MAX).then_some(ids))
     }
 
     pub fn set_starred(&self, id: i64, starred: bool) -> Result<Option<Message>, StoreError> {
@@ -1810,9 +1848,13 @@ mod tests {
         let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
         let hits = |query: &str| -> Vec<i64> {
             store
-                .search_messages(query, None, 50, |id| {
-                    (id == "0000ANNA").then(|| "Anna".into())
-                })
+                .search_messages(
+                    query,
+                    None,
+                    50,
+                    |_| true,
+                    |id| (id == "0000ANNA").then(|| "Anna".into()),
+                )
                 .unwrap()
                 .into_iter()
                 .map(|(m, _)| m.id)
@@ -1892,7 +1934,7 @@ mod tests {
         let names = |id: &str| (id == "00000BOB").then(|| "Bob".to_owned());
         let search = |query: &str, conversation: Option<&str>| {
             store
-                .search_messages(query, conversation, 10, names)
+                .search_messages(query, conversation, 10, |_| true, names)
                 .unwrap()
         };
         let ids = |found: Vec<(Message, String)>| {
@@ -2721,90 +2763,113 @@ mod tests {
         );
     }
 
-    /// A common word: too many candidates to sort, so a walk from the newest on, which finds what
-    /// the index would have found, in the same order, and sorts nothing.
+    /// However many hits a word has, it comes to the same in the same order: few are sorted, more
+    /// are checked against a list on the walk from the newest on, and a common word needs no list.
+    /// Neither of the walks sorts, and messages with mentions always count.
     #[test]
-    fn search_of_a_common_word_walks_from_the_newest_on() {
+    fn search_comes_to_the_same_however_common_the_word() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
         let step = store.step().unwrap();
-        for n in 0..=SEARCH_CANDIDATES_MAX as u64 {
+        for n in 0..=SEARCH_IDS_MAX as u64 {
+            // More than can be sorted of the one, more than can be listed of the other.
+            let body = if n <= SEARCH_SORTED_MAX as u64 {
+                "COMMON word in the middle"
+            } else {
+                "COMMON word"
+            };
             store
-                .insert_incoming("00000ANN", 100 + n, "text", "COMMON word", 100 + n as i64)
+                .insert_incoming("00000ANN", 100 + n, "text", body, 100 + n as i64)
                 .unwrap();
         }
+        let newest = SEARCH_IDS_MAX as u64 + 100;
         // The newest of all, by the sender's clock; rows are in arrival order.
-        store
-            .insert_incoming("00000BOB", 1, "text", "a common Word", 5000)
-            .unwrap();
-        store
-            .insert_incoming("00000BOB", 2, "text", "Hi @[00000CAT]", 4000)
-            .unwrap();
-        store
-            .insert_incoming("00000BOB", 3, "text", "nothing here", 6000)
-            .unwrap();
-        store
-            .insert_incoming("00000BOB", 4, "file", r#"{"name":"common.pdf"}"#, 3000)
-            .unwrap();
-        // Ann's newest of hers arrived before Bob's, with an older date than the text just below.
+        let far_ahead = 2 * SEARCH_IDS_MAX as i64;
+        for (id, body, kind, at) in [
+            (
+                1,
+                "a common Word, rare, in the middle",
+                "text",
+                far_ahead + 3,
+            ),
+            (2, "Hi @[00000CAT]", "text", far_ahead + 2),
+            (3, "nothing here", "text", far_ahead + 4),
+            (
+                4,
+                r#"{"name":"common rare middle.pdf"}"#,
+                "file",
+                far_ahead + 1,
+            ),
+        ] {
+            store
+                .insert_incoming("00000BOB", id, kind, body, at)
+                .unwrap();
+        }
         step.commit().unwrap();
         let search = |query: &str, chat, limit| {
             store
-                .search_messages(query, chat, limit, |id| {
-                    (id == "00000CAT").then(|| "Common Cat".to_owned())
-                })
+                .search_messages(
+                    query,
+                    chat,
+                    limit,
+                    |_| true,
+                    |id| (id == "00000CAT").then(|| "Common Rare Middle Cat".to_owned()),
+                )
                 .unwrap()
                 .iter()
                 .map(|(m, hit)| (m.message_id, hit.clone()))
                 .collect::<Vec<_>>()
         };
-        assert!(
-            store.search_candidates("common").unwrap().is_none(),
-            "this test is about the walk"
-        );
-        let found = search("common", None, 4);
+        let ids = |found: Vec<(u64, String)>| found.iter().map(|f| f.0).collect::<Vec<_>>();
+        let listed = |query: &str| store.search_candidates(query).unwrap().map(|ids| ids.len());
+        assert_eq!(listed("common"), None, "no list");
+        assert!(listed("middle").unwrap() > SEARCH_SORTED_MAX, "a long list");
+        assert!(listed("rare").unwrap() <= SEARCH_SORTED_MAX, "a short one");
+
+        // By time, across kinds, a mention by name; what's in the index and what isn't.
+        assert_eq!(ids(search("common", None, 3)), [1, 2, 4]);
+        assert_eq!(ids(search("middle", None, 3)), [1, 2, 4]);
+        assert_eq!(ids(search("RARE", None, 3)), [1, 2, 4]);
+        assert_eq!(search("middle", None, 3)[1].1, "Hi @[00000CAT]", "raw");
+        assert_eq!(ids(search("common", None, 4))[3], newest);
         assert_eq!(
-            found.iter().map(|f| f.0).collect::<Vec<_>>(),
-            [1, 2, 4, 100 + SEARCH_CANDIDATES_MAX as u64],
-            "by time, across kinds, mentions by name"
+            ids(search("middle", None, 4))[3],
+            100 + SEARCH_SORTED_MAX as u64,
+            "the newest of those that have it"
         );
-        assert_eq!(found[1].1, "Hi @[00000CAT]", "the hit is raw");
-        // One chat: its history order, here the order of arrival.
-        let found = search("common", Some("00000BOB"), 10);
-        assert_eq!(
-            found.iter().map(|f| f.0).collect::<Vec<_>>(),
-            [4, 2, 1],
-            "the walk ends where the chat does"
-        );
+
+        // One chat: its history order, here the order of arrival, and the walk ends with it.
+        for word in ["common", "middle", "rare"] {
+            assert_eq!(ids(search(word, Some("00000BOB"), 10)), [4, 2, 1], "{word}");
+            assert!(search(word, Some("00000DAN"), 3).is_empty());
+        }
         assert_eq!(search("common", Some("00000ANN"), 3).len(), 3);
-        assert!(search("common", Some("00000DAN"), 3).is_empty());
-
-        // The same chat with a rarer word takes the index's way and comes out alike.
-        assert!(store.search_candidates("nothing").unwrap().is_some());
-        assert_eq!(search("NOTHING", Some("00000BOB"), 10)[0].0, 3);
-        assert_eq!(search("NOTHING", None, 10)[0].0, 3);
+        assert_eq!(search("middle", Some("00000ANN"), 3).len(), 3);
         // Too short for the index.
-        assert_eq!(search("Wo", Some("00000BOB"), 1)[0].0, 1);
-        assert_eq!(search("wo", None, 1)[0].0, 1);
+        assert_eq!(ids(search("Wo", Some("00000BOB"), 1)), [1]);
+        assert_eq!(ids(search("wo", None, 1)), [1]);
 
-        // What makes stopping worth it: neither way sorts first.
-        for (in_chat, liked) in [(false, false), (true, false), (false, true), (true, true)] {
+        // What makes stopping worth it: no way sorts first.
+        for (in_chat, narrowed, arg) in [
+            (false, "", None),
+            (true, "", None),
+            (false, SEARCH_WALK_LIKE, Some("%wo%")),
+            (true, SEARCH_WALK_LIKE, Some("%wo%")),
+            (false, SEARCH_WALK_IN_LIST, Some("[1,2]")),
+            (true, SEARCH_WALK_IN_LIST, Some("[1,2]")),
+        ] {
+            let args = in_chat.then_some("00000BOB").into_iter().chain(arg);
             // At the top level: the reactions column has a sorted subquery of its own.
             let plan: Vec<(i64, String)> = store
                 .conn
                 .prepare(&format!(
                     "EXPLAIN QUERY PLAN {}",
-                    search_walk(in_chat, liked)
+                    search_walk(in_chat, narrowed)
                 ))
                 .unwrap()
-                .query_map(
-                    rusqlite::params_from_iter(
-                        ["00000BOB", "%wo%"]
-                            .into_iter()
-                            .take(usize::from(in_chat) + usize::from(liked)),
-                    ),
-                    |row| Ok((row.get(1)?, row.get(3)?)),
-                )
+                .query_map(rusqlite::params_from_iter(args), |row| {
+                    Ok((row.get(1)?, row.get(3)?))
+                })
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();
@@ -2815,6 +2880,26 @@ mod tests {
                 "{plan:?}"
             );
         }
+    }
+
+    /// A chat's hits that aren't to be listed don't use up the limit.
+    #[test]
+    fn search_leaves_out_what_is_not_listed_before_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        store
+            .insert_incoming("00000BOB", 1, "text", "needle", 1)
+            .unwrap();
+        for n in 2..5 {
+            store
+                .insert_incoming("00000ANN", n, "text", "needle", n as i64)
+                .unwrap();
+        }
+        let found = store
+            .search_messages("needle", None, 1, |chat| chat != "00000ANN", |_| None)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0.conversation, "00000BOB");
     }
 
     /// The lookups go by their indexes, and those follow every change: rows come in and go out of
@@ -3077,14 +3162,14 @@ mod tests {
         assert_eq!(edited.edited_at, Some(5));
         assert_eq!(
             store
-                .search_messages("right", None, 10, |_| None)
+                .search_messages("right", None, 10, |_| true, |_| None)
                 .unwrap()
                 .len(),
             1
         );
         assert!(
             store
-                .search_messages("old", None, 10, |_| None)
+                .search_messages("old", None, 10, |_| true, |_| None)
                 .unwrap()
                 .is_empty()
         );
@@ -3208,7 +3293,7 @@ mod bench {
         time("search, no match", &|| {
             assert!(
                 store
-                    .search_messages("zzzz", None, 50, |_| None)
+                    .search_messages("zzzz", None, 50, |_| true, |_| None)
                     .unwrap()
                     .is_empty()
             );
@@ -3216,14 +3301,16 @@ mod bench {
         time("search, 50 hits of many", &|| {
             assert_eq!(
                 store
-                    .search_messages("chat 99", None, 50, |_| None)
+                    .search_messages("chat 99", None, 50, |_| true, |_| None)
                     .unwrap()
                     .len(),
                 50
             );
         });
         time("search, 2 characters (scan)", &|| {
-            store.search_messages("zz", None, 50, |_| None).unwrap();
+            store
+                .search_messages("zz", None, 50, |_| true, |_| None)
+                .unwrap();
         });
     }
 }

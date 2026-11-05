@@ -930,9 +930,14 @@ impl App {
         };
         let results: Vec<Value> = self
             .store
-            .search_messages(query, conversation.as_deref(), 100, names)?
+            .search_messages(
+                query,
+                conversation.as_deref(),
+                100,
+                |chat| self.listable(chat),
+                names,
+            )?
             .iter()
-            .filter(|(message, _)| self.listable(&message.conversation))
             .map(|(message, hit)| {
                 let mut json = self.result_json(message);
                 json["snippet"] = hit.as_str().into();
