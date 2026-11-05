@@ -599,6 +599,9 @@ impl App {
             contacts = contacts_summary["added"].as_i64().unwrap_or(0),
             groups = groups_summary["added"].as_i64().unwrap_or(0),
             pictures = contact_pictures + group_pictures,
+            nonces = csp_nonces + d2d_nonces,
+            nonces_skipped = data.nonces_skipped,
+            invalid_rows = data.invalid_rows,
             "Android backup metadata imported"
         );
         Ok(json!({

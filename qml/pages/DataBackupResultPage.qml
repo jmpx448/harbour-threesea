@@ -19,8 +19,6 @@ Page {
     readonly property int pictures: !imported ? 0
                                     : imported.pictures.contacts + imported.pictures.groups
                                       + (imported.pictures.own ? 1 : 0)
-    readonly property int nonces: imported && imported.nonces
-                                  ? imported.nonces.csp + imported.nonces.d2d : 0
     readonly property bool noncesMissing: !!imported && !!imported.nonces
                                           && imported.nonces.missing === true
     readonly property int existing: (imported ? imported.contacts.existing + imported.groups.existing
@@ -32,6 +30,22 @@ Page {
         for (var category in summary.unsupported) sum += summary.unsupported[category]
         return sum
     }
+    readonly property int keyConflicts: imported ? imported.contacts.keyConflicts : 0
+    readonly property int groupsLeftOut: imported ? imported.groups.skippedDeleted
+                                                    + imported.groups.skippedUnknownCreator : 0
+    readonly property int chatsLeftOut: summary ? summary.skippedChats + summary.keyConflictChats : 0
+    readonly property int chatsTooLarge: summary ? summary.tooLargeChats : 0
+    readonly property int entriesLeftOut: (imported ? imported.invalidRows + imported.pictures.skipped : 0)
+                                          + (summary ? summary.invalidRows + summary.keyConflictRows : 0)
+    readonly property int localAvatars: imported ? imported.pictures.localAvatarsNotImported : 0
+    readonly property int collisions: summary ? summary.collisions : 0
+    readonly property int reactionsLeftOut: summary ? summary.reactionsUnmatched : 0
+    readonly property int mediaMissing: summary ? summary.mediaMissing : 0
+    readonly property int mediaFailed: summary ? summary.mediaFailed : 0
+    // Anything above zero: the headline must not say the whole backup arrived.
+    readonly property int notImported: keyConflicts + groupsLeftOut + chatsLeftOut + chatsTooLarge
+                                       + entriesLeftOut + localAvatars + collisions + reactionsLeftOut
+                                       + mediaMissing + mediaFailed + unsupported
 
     SilicaFlickable {
         anchors.fill: parent
@@ -62,8 +76,11 @@ Page {
                       : page.stopped
                         //% "What is imported stays. Import the backup again to continue where it stopped."
                         ? qsTrId("threesea-la-data-backup-resume-hint")
-                        //% "The backup is imported. Everything already on this device stayed as it was."
-                        : qsTrId("threesea-la-data-backup-imported")
+                        : page.notImported > 0
+                          //% "The backup is imported, except for what is listed below. Everything already on this device stayed as it was."
+                          ? qsTrId("threesea-la-data-backup-imported-except")
+                          //% "The backup is imported. Everything already on this device stayed as it was."
+                          : qsTrId("threesea-la-data-backup-imported")
             }
 
             Label {
@@ -110,13 +127,6 @@ Page {
                 value: page.pictures
             }
 
-            DetailItem {
-                visible: page.nonces > 0
-                //% "Replay protection entries"
-                label: qsTrId("threesea-la-android-backup-nonces")
-                value: page.nonces
-            }
-
             Label {
                 visible: page.noncesMissing
                 x: Theme.horizontalPageMargin
@@ -124,15 +134,29 @@ Page {
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.secondaryHighlightColor
-                //% "This backup holds no replay protection entries. Protection covers what this device receives from now on."
-                text: qsTrId("threesea-la-data-backup-nonces-missing")
+                //% "This backup has no list of the messages already received. Messages sent again are recognised from what this device receives from now on."
+                text: qsTrId("threesea-la-data-backup-received-list-missing")
             }
 
             DetailItem {
-                visible: page.imported !== null && page.imported.contacts.keyConflicts > 0
-                //% "Conflicting keys"
-                label: qsTrId("threesea-la-android-backup-key-conflicts")
-                value: page.imported ? page.imported.contacts.keyConflicts : 0
+                visible: page.keyConflicts > 0
+                //% "Contacts with a different key (kept as here)"
+                label: qsTrId("threesea-la-data-backup-key-conflicts")
+                value: page.keyConflicts
+            }
+
+            DetailItem {
+                visible: page.localAvatars > 0
+                //% "Pictures chosen for contacts on the other device, left out"
+                label: qsTrId("threesea-la-data-backup-local-avatars")
+                value: page.localAvatars
+            }
+
+            DetailItem {
+                visible: page.groupsLeftOut > 0
+                //% "Groups left out"
+                label: qsTrId("threesea-la-data-backup-groups-left-out")
+                value: page.groupsLeftOut
             }
 
             SectionHeader {
@@ -184,17 +208,66 @@ Page {
             }
 
             DetailItem {
+                visible: page.summary !== null && page.summary.unsent > 0
+                //% "Messages that were never sent (kept as failed)"
+                label: qsTrId("threesea-la-data-backup-unsent")
+                value: page.summary ? page.summary.unsent : 0
+            }
+
+            DetailItem {
+                visible: page.chatsLeftOut > 0
+                //% "Chats left out"
+                label: qsTrId("threesea-la-data-backup-chats-left-out")
+                value: page.chatsLeftOut
+            }
+
+            DetailItem {
+                visible: page.chatsTooLarge > 0
+                //% "Chats too large to import"
+                label: qsTrId("threesea-la-data-backup-chats-too-large")
+                value: page.chatsTooLarge
+            }
+
+            DetailItem {
                 visible: page.unsupported > 0
-                //% "Not supported yet"
-                label: qsTrId("threesea-la-android-import-unsupported")
+                //% "Messages left out"
+                label: qsTrId("threesea-la-data-backup-messages-left-out")
                 value: page.unsupported
             }
 
             DetailItem {
-                visible: page.summary !== null && page.summary.mediaFailed > 0
+                visible: page.collisions > 0
+                //% "Messages here from another sender (kept as here)"
+                label: qsTrId("threesea-la-data-backup-collisions")
+                value: page.collisions
+            }
+
+            DetailItem {
+                visible: page.reactionsLeftOut > 0
+                //% "Reactions left out"
+                label: qsTrId("threesea-la-data-backup-reactions-left-out")
+                value: page.reactionsLeftOut
+            }
+
+            DetailItem {
+                visible: page.entriesLeftOut > 0
+                //% "Entries left out"
+                label: qsTrId("threesea-la-data-backup-entries-left-out")
+                value: page.entriesLeftOut
+            }
+
+            DetailItem {
+                visible: page.mediaMissing > 0
+                //% "Media not in the backup"
+                label: qsTrId("threesea-la-data-backup-media-missing")
+                value: page.mediaMissing
+            }
+
+            DetailItem {
+                visible: page.mediaFailed > 0
                 //% "Media not imported"
                 label: qsTrId("threesea-la-android-import-media-failed")
-                value: page.summary ? page.summary.mediaFailed : 0
+                value: page.mediaFailed
             }
 
             DetailItem {

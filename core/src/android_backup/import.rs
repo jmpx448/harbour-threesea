@@ -244,7 +244,10 @@ impl HistoryImport {
             Ok(summary) => {
                 tracing::info!(
                     chats = summary.chats,
+                    skipped = summary.skipped_chats,
                     too_large = summary.too_large_chats,
+                    key_conflicts = summary.key_conflict_chats + summary.key_conflict_rows,
+                    invalid_rows = summary.invalid_rows,
                     imported = summary.imported,
                     existing = summary.existing,
                     media = summary.media_files,
