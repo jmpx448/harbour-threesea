@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import harbour.threesea 1.0
+import "../../components"
 import "../../components/Errors.js" as Errors
 import "../../components/Format.js" as Fmt
 
@@ -151,6 +152,9 @@ Page {
         id: list
         anchors.fill: parent
         model: sessionRows
+
+        // The hint in the header appears with the first browser.
+        StayAtTop { target: list }
 
         PullDownMenu {
             visible: page.webOn

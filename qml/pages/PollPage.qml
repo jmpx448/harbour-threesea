@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import "../components"
 import "../components/Errors.js" as Errors
 
 // A poll as a Silica dialog: set the choices (switches; single choice replaces, multiple toggles),
@@ -127,6 +128,9 @@ Dialog {
         id: list
         anchors.fill: parent
         model: page.poll.choices || []
+
+        // The DialogHeader's height arrives after the header's first layout.
+        StayAtTop { target: list }
 
         // Silica opens a menu with nothing in it too.
         PullDownMenu {
