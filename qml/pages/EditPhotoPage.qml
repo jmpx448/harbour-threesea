@@ -3,28 +3,32 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components/Format.js" as Fmt
 
-// Cut and turn a photo before it is sent (Android's editor, without the drawing). Accepting
-// writes a new picture into the app's capture folder and hands back its path; the original is
-// never changed.
+// Cut and turn a photo before it is sent (Android's editor, without the drawing). Whoever opened
+// it calls save() when it is accepted, for a new picture in the app's capture folder; the original
+// is never changed.
 Dialog {
     id: dialog
     allowedOrientations: Orientation.All
 
-    // The photo to work on, and the result once the dialog was accepted.
+    // The photo to work on.
     property string path
-    property string editedPath
 
     // Turned clockwise, in steps of 90° (`rotation` itself is Item's own).
     property int turn: 0
     readonly property bool sideways: turn % 180 !== 0
 
-    canAccept: frame.width > Theme.itemSizeExtraSmall && frame.height > Theme.itemSizeExtraSmall
+    // Only once the picture is there: reset() sizes the frame then.
+    canAccept: frame.width > 0 && frame.height > 0
 
-    onAccepted: {
-        // The frame's place inside the picture as it is shown, as fractions of it.
-        var crop = Qt.rect(frame.x / view.width, frame.y / view.height,
-                           frame.width / view.width, frame.height / view.height)
-        dialog.editedPath = backend.editPhoto(dialog.path, crop, dialog.turn)
+    // The frame's place inside the picture as it is shown, as fractions of it.
+    function crop() {
+        return Qt.rect(frame.x / view.width, frame.y / view.height,
+                       frame.width / view.width, frame.height / view.height)
+    }
+
+    // See ThreeseBackend::editPhoto for `callback`.
+    function save(callback) {
+        backend.editPhoto(dialog.path, crop(), dialog.turn, callback)
     }
 
     // The whole picture again.

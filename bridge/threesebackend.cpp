@@ -23,7 +23,6 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QThreadPool>
-#include <QTransform>
 #include <QUrl>
 
 #include <threesea_core.h>
@@ -694,40 +693,40 @@ QString ThreeseBackend::captureFile(const QString &extension) const
             .arg(extension);
 }
 
-QString ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rotation) const
+void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rotation, const QJSValue &callback)
 {
     const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
-    // With the EXIF rotation applied, like the preview (Qt Quick does it) and FilePreparer:
-    // without it a camera photo would be cut in the wrong place and come out sideways.
-    QImageReader reader(local);
-    reader.setAutoTransform(true);
-    QImage image = reader.read();
-    if (image.isNull()) {
-        qWarning("photo could not be read for editing");
-        return QString();
-    }
-    if (rotation % 360 != 0) {
-        QTransform turn;
-        turn.rotate(rotation);
-        image = image.transformed(turn, Qt::SmoothTransformation);
-    }
-    // The crop comes in fractions of the turned picture, so it survives any scaling the view did.
-    const QRect cut = QRect(qRound(crop.x() * image.width()), qRound(crop.y() * image.height()),
-                            qRound(crop.width() * image.width()), qRound(crop.height() * image.height()))
-            .intersected(image.rect());
-    if (cut.width() < 1 || cut.height() < 1) {
-        return QString();
-    }
-    if (cut != image.rect()) {
-        image = image.copy(cut);
-    }
-    const QString out = captureFile(QStringLiteral("jpg"));
-    // High quality: what is sent is re-encoded once more by FilePreparer.
-    if (!image.save(out, "JPEG", 95)) {
-        qWarning("edited photo could not be written");
-        return QString();
-    }
-    return out;
+    const quint64 id = m_nextId++;
+    m_keyWork.insert(id, [this, callback](const QByteArray &result) {
+        const QString out = QString::fromUtf8(result);
+        QJSValue answer;
+        if (callback.isCallable()) {
+            answer = QJSValue(callback).call(QJSValueList() << out);
+        }
+        if (!out.isEmpty() && !(answer.isString() && answer.toString() == out)) {
+            removeCapture(out);
+        }
+    });
+    // A camera photo takes seconds to decode, turn and encode.
+    QThreadPool::globalInstance()->start(new Task([this, id, local, crop, rotation]() {
+        // With the EXIF rotation applied, like the preview (Qt Quick does it) and FilePreparer:
+        // without it a camera photo would be cut in the wrong place and come out sideways.
+        QImageReader reader(local);
+        reader.setAutoTransform(true);
+        const QImage image = reader.read();
+        const QImage result = image.isNull() ? QImage() : PhotoEdit::edited(image, crop, rotation);
+        QString out;
+        if (image.isNull()) {
+            qWarning("photo could not be read for editing");
+        } else if (!result.isNull()) {
+            out = captureFile(PhotoEdit::extensionFor(result));
+            if (!PhotoEdit::write(result, out)) {
+                qWarning("edited photo could not be written");
+                out.clear();
+            }
+        }
+        emit keyWorkDone(id, out.toUtf8());
+    }));
 }
 
 void ThreeseBackend::removeTempSources(quint64 id, const QJSValue &callbackAnswer)

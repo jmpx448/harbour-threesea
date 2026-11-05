@@ -87,6 +87,58 @@ void metadataStaysBehind(const QString &dir)
     check(!sentPng.isEmpty() && !sentPng.contains(Secret), "FilePreparer: nothing of a PNG's text");
 }
 
+// Left half red, right half blue; with `transparent` the top half of it see-through.
+QImage halves(bool transparent)
+{
+    QImage image(40, 20, transparent ? QImage::Format_ARGB32 : QImage::Format_RGB32);
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const QRgb colour = x < 20 ? qRgb(255, 0, 0) : qRgb(0, 0, 255);
+            image.setPixel(x, y, transparent && y < 10 ? qRgba(qRed(colour), 0, qBlue(colour), 0) : colour);
+        }
+    }
+    return image;
+}
+
+void turnsAndCuts()
+{
+    const QImage whole = PhotoEdit::edited(halves(false), QRectF(0, 0, 1, 1), 0);
+    check(whole.size() == QSize(40, 20), "whole picture keeps its size");
+
+    // Turned clockwise, the left half comes to the top.
+    const QImage turned = PhotoEdit::edited(halves(false), QRectF(0, 0, 1, 1), 90);
+    check(turned.size() == QSize(20, 40), "turned sideways");
+    check(qRed(turned.pixel(10, 5)) == 255 && qBlue(turned.pixel(10, 35)) == 255, "turned clockwise");
+
+    // The cut is in fractions of the turned picture.
+    const QImage cut = PhotoEdit::edited(halves(false), QRectF(0, 0, 1, 0.5), 90);
+    check(cut.size() == QSize(20, 20) && qBlue(cut.pixel(10, 10)) == 0, "cut after turning");
+
+    check(PhotoEdit::edited(halves(false), QRectF(0, 0, 0, 0), 0).isNull(), "nothing left: nothing");
+}
+
+void transparencyStays(const QString &dir)
+{
+    const QImage result = PhotoEdit::edited(halves(true), QRectF(0, 0, 1, 1), 90);
+    check(result.hasAlphaChannel(), "editing keeps transparency");
+    check(PhotoEdit::extensionFor(result) == QLatin1String("png"), "a transparent picture is a PNG");
+    check(PhotoEdit::extensionFor(halves(false)) == QLatin1String("jpg"), "an opaque one a JPEG");
+
+    const QString path = dir + QStringLiteral("/edited.png");
+    check(PhotoEdit::write(result, path), "edited picture written");
+    const QImage back(path);
+    // The top half, now on the right: see-through; the other half opaque.
+    check(qAlpha(back.pixel(15, 20)) == 0, "see-through after writing");
+    check(qAlpha(back.pixel(5, 20)) == 255, "opaque after writing");
+
+    check(!PhotoEdit::write(result, dir + QStringLiteral("/no/such/folder/edited.png")), "failing to write says so");
+
+    QImage marked = halves(false);
+    marked.setText(QStringLiteral("Comment"), QString::fromLatin1(Secret));
+    check(PhotoEdit::edited(marked, QRectF(0, 0, 1, 1), 0).textKeys().isEmpty(), "edited: no text left");
+    check(PhotoEdit::edited(marked, QRectF(0, 0, 0.5, 1), 90).textKeys().isEmpty(), "edited and cut: no text left");
+}
+
 }
 
 int main(int argc, char **argv)
@@ -94,6 +146,8 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
     QTemporaryDir dir;
     metadataStaysBehind(dir.path());
+    turnsAndCuts();
+    transparencyStays(dir.path());
     if (failures == 0) {
         std::printf("photoedit: passed\n");
     }

@@ -328,10 +328,12 @@ public:
     Q_INVOKABLE QString captureFile(const QString &extension) const;
     Q_INVOKABLE bool removeCapture(const QString &path) const;
     // A picked photo turned by `rotation` (0, 90, 180, 270 degrees clockwise) and cut to `crop`
-    // — a rectangle in fractions (0..1) of the turned picture — written as a new capture.
-    // Returns its path, empty if the picture could not be read or written. EXIF data (the
+    // — a rectangle in fractions (0..1) of the turned picture — written as a new capture, a PNG
+    // if it has transparency. Off the GUI thread: `callback(path)` gets its path, empty if the
+    // picture could not be read or written, and returns that path to keep the file; anything
+    // else, such as the error of a function whose page has gone, removes it. EXIF data (the
     // camera's GPS!) stays behind with the original, as it does for everything we send.
-    Q_INVOKABLE QString editPhoto(const QString &path, const QRectF &crop, int rotation) const;
+    Q_INVOKABLE void editPhoto(const QString &path, const QRectF &crop, int rotation, const QJSValue &callback);
     // Keep a GIF from the device as a favourite (`addGifFavourite`).
     Q_INVOKABLE void addGifFavourite(const QString &path, const QJSValue &callback = QJSValue());
     VoiceRecorder *voiceRecorder() const;

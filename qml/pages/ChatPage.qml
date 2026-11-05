@@ -1160,32 +1160,36 @@ Page {
         attachments = list
         refocus.restart()
     }
+    // Edits on their way (off the GUI thread): nothing is sent until their copies are in place.
+    property int editsRunning: 0
     // Cut and turn a picked photo (EditPhotoPage); the edited copy takes its place.
     function editAttachment(index) {
         var file = page.attachments[index]
         if (!file || !file.photo) return
         var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"), { path: file.path })
         editor.accepted.connect(function() {
-            if (!editor.editedPath) {
-                //% "The photo could not be edited."
-                Notices.show(qsTrId("threesea-la-edit-photo-failed"), Notice.Long, Notice.Center)
-                return
-            }
-            // By its path, not by the index: what is attached may have changed meanwhile.
-            var list = page.attachments.slice()
-            var at = -1
-            for (var i = 0; i < list.length; ++i) {
-                if (list[i].path === file.path) at = i
-            }
-            if (at < 0) {
-                // It was dropped while the editor was open: don't leave the copy behind.
-                backend.removeCapture(editor.editedPath)
-                return
-            }
-            // The original stays where it is; a capture of ours it replaces is removed.
-            backend.removeCapture(list[at].path)
-            list[at] = { path: editor.editedPath, photo: true, name: file.name, video: false }
-            page.attachments = list
+            page.editsRunning++
+            editor.save(function(editedPath) {
+                page.editsRunning--
+                if (!editedPath) {
+                    //% "The photo could not be edited."
+                    Notices.show(qsTrId("threesea-la-edit-photo-failed"), Notice.Long, Notice.Center)
+                    return ""
+                }
+                // By its path, not by the index: what is attached may have changed meanwhile.
+                var list = page.attachments.slice()
+                var at = -1
+                for (var i = 0; i < list.length; ++i) {
+                    if (list[i].path === file.path) at = i
+                }
+                // It was dropped meanwhile: the copy doesn't stay behind.
+                if (at < 0) return ""
+                // The original stays where it is; a capture of ours it replaces is removed.
+                backend.removeCapture(list[at].path)
+                list[at] = { path: editedPath, photo: true, name: file.name, video: false }
+                page.attachments = list
+                return editedPath
+            })
         })
     }
 
@@ -1618,7 +1622,7 @@ Page {
     function send() {
         // The keyboard may still hold the last word as a prediction.
         Qt.inputMethod.commit()
-        if (sendingText) return
+        if (sendingText || editsRunning > 0) return
         if (recordingHere) {
             recordingRemorse.cancel()
             if (voiceRecorder.held) sendRecording(voiceRecorder.duration)
@@ -2560,10 +2564,15 @@ Page {
                             // Android app's editor is opened from its preview.
                             MouseArea {
                                 anchors.fill: parent
-                                enabled: modelData.photo === true
+                                enabled: modelData.photo === true && page.editsRunning === 0
                                 onClicked: page.editAttachment(index)
                             }
                         }
+                    }
+                    BusyIndicator {
+                        anchors.centerIn: attachmentPreview
+                        size: BusyIndicatorSize.Small
+                        running: page.editsRunning > 0
                     }
                     Label {
                         visible: page.attachments.length === 1
@@ -2939,13 +2948,14 @@ Page {
                         source: "image://theme/" + (page.canRecord ? "icon-m-mic" : "icon-m-send")
                                 + "?" + (sendArea.pressed || page.recordingHere ? Theme.highlightColor : Theme.primaryColor)
                         opacity: (input.text.trim().length > 0 || page.attachment || page.canRecord
-                                  || page.recordingHere) && !page.sendingText ? 1.0 : Theme.opacityLow
+                                  || page.recordingHere) && !page.sendingText && page.editsRunning === 0
+                                 ? 1.0 : Theme.opacityLow
                     }
                     MouseArea {
                         id: sendArea
                         anchors.fill: parent
                         enabled: (input.text.trim().length > 0 || page.attachment || page.canRecord
-                                  || page.recordingHere) && !page.sendingText
+                                  || page.recordingHere) && !page.sendingText && page.editsRunning === 0
                         onClicked: page.send()
                     }
                 }
