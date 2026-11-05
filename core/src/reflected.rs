@@ -367,11 +367,16 @@ pub fn apply(
                     let count = store.note_reflected_left_out()?;
                     tracing::warn!(count, "too many reflected messages wait, this one left out");
                 } else {
+                    // Asked for once per sender: a burst must not be one request per message, let
+                    // alone one wait. The note is what later tries go by.
+                    let first = !store.has_reflected_waiting(sender.as_str())?;
                     store.keep_reflected(sender.as_str(), &message.encode_to_vec())?;
                     store.owe_member_lookups(&[sender.to_string()])?;
-                    events
-                        .borrow_mut()
-                        .push(CoreEvent::UnknownMembers(vec![sender.to_string()]));
+                    if first {
+                        events
+                            .borrow_mut()
+                            .push(CoreEvent::UnknownMembers(vec![sender.to_string()]));
+                    }
                 }
                 return Ok(());
             };
@@ -1694,5 +1699,27 @@ mod tests {
         store.upsert_contact(&contact).unwrap();
         apply_sealed(&store, &stranger_text(2, vec![2; 24]), &Rc::default());
         assert_eq!(store.conversation_messages("C0C0C0C0", 5).unwrap().len(), 1);
+    }
+
+    /// More from the same stranger: kept, with no further lookup to wait for.
+    #[test]
+    fn only_a_senders_first_waiting_message_asks_for_them() {
+        let (_dir, store) = with_identity();
+        let asked = |id| {
+            let events: EventSink = Rc::default();
+            apply_sealed(
+                &store,
+                &stranger_text(id, vec![u8::try_from(id).unwrap(); 24]),
+                &events,
+            );
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, CoreEvent::UnknownMembers(_)))
+        };
+        assert!(asked(1));
+        assert!(!asked(2));
+        assert_eq!(store.reflected_waiting().unwrap().len(), 2);
+        assert_eq!(store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
     }
 }

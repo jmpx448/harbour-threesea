@@ -185,8 +185,9 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   they are on the block list (ADR 0019); a reflected group-setup raises nobody, a group sync decides.
   One from someone with no contact at all (what would make a contact, or what is said in a group we
   have; never someone on the block list) is acknowledged and kept in `reflected_waiting`, with the
-  lookup owed like a group member's: a directory that rests or fails holds up neither the mediator's
-  queue nor the message. It is applied once they have a contact, and dropped if the directory says
+  lookup owed like a group member's, asked for once per sender. A directory that rests holds up
+  nothing; one that fails or doesn't answer within 10 s holds up that one lookup, and isn't asked
+  again on that connection, only at the next login or the hourly try. It is applied once they have a contact, and dropped if the directory says
   the ID doesn't exist. Android discards these. Read updates that came meanwhile aren't kept for it.
   At most 1000 wait, the oldest stay. One beyond that is acknowledged and only on the other devices;
   it is logged with a count and the count shows on the linked devices page, for good (no content,

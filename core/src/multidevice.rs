@@ -222,6 +222,14 @@ impl Store {
         Ok(count)
     }
 
+    pub fn has_reflected_waiting(&self, sender: &str) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM reflected_waiting WHERE sender = ?1)",
+            [sender],
+            |row| row.get(0),
+        )?)
+    }
+
     /// What is kept, oldest first: (id, sender, message).
     pub fn reflected_waiting(&self) -> Result<Vec<(i64, String, Vec<u8>)>, StoreError> {
         let mut statement = self

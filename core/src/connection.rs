@@ -1594,6 +1594,8 @@ struct Session<'a> {
     next_reflect_id: u32,
     /// Outgoing messages reflected on this connection: (conversation, message id).
     reflected: std::collections::HashSet<(String, u64)>,
+    /// A lookup of group members or senders failed or took too long on this connection.
+    directory_unanswering: bool,
     /// The nonces told to the other devices for messages still to be encoded: (receiver, message
     /// id).
     planned_nonces: RefCell<std::collections::HashMap<(String, u64), Nonce>>,
@@ -1825,6 +1827,7 @@ impl<'a> Session<'a> {
             backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            directory_unanswering: false,
             planned_nonces: RefCell::default(),
             csp,
             e2e,
@@ -4271,19 +4274,32 @@ impl<'a> Session<'a> {
     /// Look up group members we have no contact for (`app_groups::resolve_members`) and send
     /// whatever waited for them.
     async fn resolve_members(&mut self, identities: &[String]) -> Result<(), ConnectionError> {
+        let setup = self.setup;
+        let lookup = crate::app_groups::resolve_members(
+            &setup.https,
+            &setup.config,
+            &setup.store,
+            identities,
+        );
+        self.resolve_members_by(identities, lookup).await
+    }
+
+    /// [`Self::resolve_members`] with the directory's part given. Failed or too slow, it isn't asked
+    /// again on this connection, as this holds up what comes next: what it was for stays noted for
+    /// the login's and maintenance's tries.
+    async fn resolve_members_by(
+        &mut self,
+        identities: &[String],
+        lookup: impl core::future::Future<Output = Option<crate::app_groups::ResolvedMembers>>,
+    ) -> Result<(), ConnectionError> {
         if let Err(error) = self.setup.store.owe_member_lookups(identities) {
             tracing::warn!(%error, "noting group members to look up failed");
         }
-        if self.setup.store.directory_resting() {
+        if self.setup.store.directory_resting() || self.directory_unanswering {
             return Ok(());
         }
-        let lookup = crate::app_groups::resolve_members(
-            &self.setup.https,
-            &self.setup.config,
-            &self.setup.store,
-            identities,
-        );
         let Ok(Some(resolved)) = tokio::time::timeout(MEMBER_LOOKUP_LIMIT, lookup).await else {
+            self.directory_unanswering = true;
             return Ok(());
         };
         if resolved.synced {
@@ -5949,6 +5965,7 @@ mod sync_order_tests {
             backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            directory_unanswering: false,
             planned_nonces: RefCell::default(),
             csp,
             e2e,
@@ -6769,6 +6786,58 @@ mod sync_order_tests {
             setup.store.picture_distribution(CREATOR, false).unwrap(),
             crate::profile_pictures::Distribution::Delete
         ));
+    }
+
+    /// A directory that hangs or fails is given one chance on a connection: the next sender's
+    /// lookup holds up nothing and costs no request, and what they were for stays owed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_hanging_directory_holds_up_one_lookup_per_connection() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let asked = core::cell::Cell::new(0);
+        let hanging = || async {
+            asked.set(asked.get() + 1);
+            core::future::pending::<Option<crate::app_groups::ResolvedMembers>>().await
+        };
+        let start = tokio::time::Instant::now();
+        session
+            .resolve_members_by(&["C0C0C0C0".to_owned()], hanging())
+            .await
+            .unwrap();
+        assert_eq!(start.elapsed(), MEMBER_LOOKUP_LIMIT);
+        session
+            .resolve_members_by(&["D0D0D0D0".to_owned()], hanging())
+            .await
+            .unwrap();
+        assert_eq!(start.elapsed(), MEMBER_LOOKUP_LIMIT);
+        assert_eq!(asked.get(), 1);
+        assert_eq!(
+            setup.store.owed_member_lookups().unwrap(),
+            ["C0C0C0C0", "D0D0D0D0"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_failing_directory_takes_one_request_per_connection() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let asked = core::cell::Cell::new(0);
+        let failing = || async {
+            asked.set(asked.get() + 1);
+            None
+        };
+        for identity in ["C0C0C0C0", "D0D0D0D0", "E0E0E0E0"] {
+            session
+                .resolve_members_by(&[identity.to_owned()], failing())
+                .await
+                .unwrap();
+        }
+        assert_eq!(asked.get(), 1);
+        assert_eq!(setup.store.owed_member_lookups().unwrap().len(), 3);
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
