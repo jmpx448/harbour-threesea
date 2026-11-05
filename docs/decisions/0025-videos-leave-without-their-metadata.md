@@ -40,9 +40,11 @@ own streams are not looked into, nor is an `mdat` outside any track's samples, n
 inner boxes (`avcC` and the like) beyond their vendor and encoder name fields.
 
 Pictures from Threema Web follow the same rule, as nothing prepares them on the way like the chat's
-FilePreparer: JPEG and PNG are made anew (`web/images.rs`), a WebP loses all but its picture and
-animation (`core/src/webp.rs`, a list of what stays too), and one that can't be read isn't sent. A
-GIF goes as it is, as on the phone and on Android. A picture received as media and forwarded goes
-through the same, and is refused (`pictureKeepsMetadata`) if it can't; our own passed it when they
-first left, so a list's copies and forwards of our own aren't made anew. Those sent from Threema Web
-before this are the exception that remains.
+FilePreparer: JPEG and PNG are made anew (`web/images.rs`), a WebP keeps only its picture or animation
+(`core/src/webp.rs`, a list of what stays too), and one that can't be read isn't sent. A GIF goes as it
+is, as on the phone and on Android. A picture forwarded as media goes through the same, ours too, since
+one may have come from a linked device, at its own size as on Android, and is refused
+(`pictureKeepsMetadata`) if it can't: whichever its label says, what the bytes are decides. That costs
+one JPEG generation per forward, not per list member, whose copies are the list's. A thumbnail forwarded
+is made anew or left behind. A video mislabelled by its sender as neither `video/` nor a picture passes
+as a file would.
