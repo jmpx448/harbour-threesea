@@ -24,7 +24,7 @@ Page {
     objectName: "chat"
 
     // Selecting messages: the chat stays as it is, taps select bubbles, a panel at the bottom
-    // deletes or forwards them.
+    // deletes, forwards, copies, saves or shares them.
     property bool selecting: false
     property var selected: ({})
     readonly property int selectedCount: {
@@ -54,6 +54,26 @@ Page {
             if (selected[m.id]) list.push(m)
         }
         return list
+    }
+    // What the selection can do as one. Any deleted message leaves only deleting (no action takes it).
+    readonly property var selectionActions: selectedCount > 0 ? Fmt.selectionActions(selectedMessages())
+                                                              : Fmt.selectionActions([])
+    function copySelected() {
+        var list = selectedMessages()
+        var text = []
+        for (var i = 0; i < list.length; ++i) {
+            text.push(Fmt.copyText(list[i].kind, list[i].text, list[i].body, list[i].mentions))
+        }
+        endSelection()
+        Clipboard.text = text.join("\n")
+        //% "Copied"
+        Notices.show(qsTrId("threesea-la-copied"), Notice.Short, Notice.Center)
+    }
+    function selectedIds() {
+        var list = selectedMessages()
+        var ids = []
+        for (var i = 0; i < list.length; ++i) ids.push(list[i].id)
+        return ids
     }
     function forwardable(m) {
         return m.kind === "text" || m.kind === "location"
@@ -3171,6 +3191,29 @@ Page {
                 verticalCenter: parent.verticalCenter
             }
             spacing: Theme.paddingLarge
+            IconButton {
+                enabled: page.selectionActions.copy
+                icon.source: "image://theme/icon-m-clipboard"
+                onClicked: page.copySelected()
+            }
+            IconButton {
+                enabled: page.selectionActions.save
+                icon.source: "image://theme/icon-m-downloads"
+                onClicked: {
+                    var ids = page.selectedIds()
+                    page.endSelection()
+                    window.messageOut.saveFiles(ids)
+                }
+            }
+            IconButton {
+                enabled: page.selectionActions.shareText
+                icon.source: "image://theme/icon-m-share"
+                onClicked: {
+                    var one = page.selectedMessages()[0]
+                    page.endSelection()
+                    window.messageOut.shareText(Fmt.copyText(one.kind, one.text, one.body, one.mentions))
+                }
+            }
             IconButton {
                 enabled: page.selectedCount > 0
                 icon.source: "image://theme/icon-m-delete"

@@ -174,6 +174,19 @@ function copyText(kind, text, body, mentions) {
     return ""
 }
 
+// What a selection of messages can do as one, by Android's rules: each action only if every message
+// qualifies, and only one message's text is shared.
+function selectionActions(messages) {
+    var copy = messages.length > 0
+    var save = messages.length > 0
+    for (var i = 0; i < messages.length; ++i) {
+        var m = messages[i]
+        if (copyText(m.kind, m.text, m.body, m.mentions).length === 0) copy = false
+        if (!(m.kind === "file" && !!m.body && m.body.fileState === 2)) save = false
+    }
+    return { copy: copy, save: save, shareText: messages.length === 1 && copy }
+}
+
 // How a tapped download stands, by the file's state in a change of its message. The thumbnail starts
 // first, so a change can still show the file's old state: nothing counts until it has been seen
 // running. `running`: it has been. Gives "waiting", "running", "failed" or "ended".

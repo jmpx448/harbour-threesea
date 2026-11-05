@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import Sailfish.Share 1.0
+import "Errors.js" as Errors
 import "Format.js" as Fmt
 
 // What leaves a chat on the user's word: text to another app over the system's share dialog, files
@@ -25,6 +26,25 @@ Item {
         action.mimeType = "text/plain"
         action.resources = [{ name: "message.txt", data: text, type: "text/plain" }]
         action.trigger()
+    }
+
+    // One by one in the core's turn; one word at the end.
+    function saveFiles(ids) {
+        var left = ids.length
+        var saved = 0
+        var problem = ""
+        function answered(ok, result, kind, message) {
+            if (ok) saved++
+            else problem = Errors.text(kind, message)
+            if (--left > 0) return
+            Notices.show(problem.length > 0 ? problem
+                         //% "Saved %n file(s) to Downloads"
+                         : qsTrId("threesea-la-saved-n-downloads", saved),
+                         problem.length > 0 ? Notice.Long : Notice.Short, Notice.Center)
+        }
+        for (var i = 0; i < ids.length; ++i) {
+            backend.call("saveFile", { message: ids[i], directory: StandardPaths.download }, answered)
+        }
     }
 
     ShareAction { id: action }

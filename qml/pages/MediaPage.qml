@@ -9,6 +9,7 @@ import "../components/Format.js" as Fmt
 // (photos, GIFs, videos, voice messages, audio, files; pull-down "Show", a dialog accepted by
 // swipe, saved for all chats). Tap: view, play or open (downloading first if needed); long press:
 // show in chat, save to Downloads, stop a download, delete (on this device, with a remorse timer).
+// Pull-down "Select": taps select tiles, a panel at the bottom saves or deletes them.
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -47,6 +48,56 @@ Page {
     property var rowOf: ({})
     property var oldestKey
 
+    property bool selecting: false
+    property var selected: ({})
+    // Selecting everything takes all pages, as they come.
+    property bool selectingAll: false
+    readonly property int selectedCount: {
+        var n = 0
+        for (var id in selected) if (selected[id]) n++
+        return n
+    }
+    function toggleSelected(id) {
+        var map = selected
+        map[id] = !map[id]
+        selected = map
+    }
+    function selectAll() {
+        selectFrom(0)
+    }
+    // From this row on: what arrives later is selected too, what was taken out since stays out.
+    function selectFrom(row) {
+        var map = selected
+        for (var i = row; i < media.count; ++i) map[media.get(i).id] = true
+        selected = map
+        selectingAll = nextPage.length > 0
+        loadMore()
+    }
+    function endSelection() {
+        selecting = false
+        selectingAll = false
+        selected = {}
+    }
+    // What is selected and still among the rows, as they are now.
+    function selectedRows() {
+        var rows = []
+        for (var i = 0; i < media.count; ++i) {
+            var row = media.get(i)
+            if (selected[row.id]) rows.push({ id: row.id, messageId: row.messageId, outgoing: row.outgoing,
+                                              body: JSON.parse(row.body) })
+        }
+        return rows
+    }
+    function selectedIds() {
+        return selectedRows().map(function(row) { return row.id })
+    }
+    readonly property bool selectionHere: {
+        if (selectedCount === 0) return false
+        var rows = selectedRows()
+        for (var i = 0; i < rows.length; ++i) if (rows[i].body.fileState !== 2) return false
+        return rows.length > 0
+    }
+
     function load() {
         var asked = ++generation
         loading = true
@@ -61,6 +112,8 @@ Page {
             media.update(result.messages)
             page.nextPage = result.next || ""
             grid.loadMoreIfNear()
+            // A reload took the place of a page on its way.
+            if (page.selectingAll) page.loadMore()
         })
     }
 
@@ -73,8 +126,10 @@ Page {
             if (asked !== page.generation) return
             page.loadingMore = false
             if (!ok) return
+            var first = media.count
             media.add(result.messages)
             page.nextPage = result.next || ""
+            if (page.selectingAll) page.selectFrom(first)
         })
     }
 
@@ -223,6 +278,22 @@ Page {
         })
     }
 
+    // Several: one look at what is left, after the last.
+    function removeAll(rows) {
+        var left = rows.length
+        var problem = ""
+        function answered(ok, result, kind, message) {
+            if (!ok) problem = Errors.text(kind, message)
+            if (--left > 0) return
+            if (problem.length > 0) Notices.show(problem, Notice.Long, Notice.Center)
+            page.load()
+        }
+        for (var i = 0; i < rows.length; ++i) {
+            backend.call("deleteMessage", { identity: identity, messageId: rows[i].messageId, outgoing: rows[i].outgoing,
+                                             everyone: false }, answered)
+        }
+    }
+
     function showInChat(id) {
         var chat = pageStack.find(function(p) { return p.objectName === "chat" && p.identity === page.identity })
         if (chat) {
@@ -236,6 +307,8 @@ Page {
     SilicaGridView {
         id: grid
         anchors.fill: parent
+        anchors.bottomMargin: selectionPanel.visibleSize
+        clip: true
         model: media
         // Jolla Gallery's grid: as many columns as fit Theme.itemSizeHuge.
         readonly property real cellSize: Math.floor(width / Math.max(1, Math.floor(width / Theme.itemSizeHuge)))
@@ -249,14 +322,32 @@ Page {
         onContentYChanged: loadMoreIfNear()
         onContentHeightChanged: loadMoreIfNear()
 
-        // Only worth it with more than one kind, or when the saved choice (it is for all chats)
-        // leaves this chat's only kind out: the way back.
         PullDownMenu {
-            visible: page.presentKinds.length > 1 || (grid.count === 0 && page.presentKinds.length > 0)
+            visible: grid.count > 0 || page.presentKinds.length > 0
             MenuItem {
+                // Only worth it with more than one kind, or when the saved choice (it is for all
+                // chats) leaves this chat's only kind out: the way back.
+                visible: page.presentKinds.length > 1 || (grid.count === 0 && page.presentKinds.length > 0)
                 //% "Show"
                 text: qsTrId("threesea-me-media-show")
                 onClicked: page.chooseKinds()
+            }
+            MenuItem {
+                visible: page.selecting
+                text: qsTrId("threesea-me-cancel-selection")
+                onClicked: page.endSelection()
+            }
+            MenuItem {
+                visible: page.selecting && grid.count > 0
+                //% "Select all"
+                text: qsTrId("threesea-me-select-all")
+                onClicked: page.selectAll()
+            }
+            MenuItem {
+                visible: !page.selecting && grid.count > 0
+                //% "Select"
+                text: qsTrId("threesea-me-select")
+                onClicked: page.selecting = true
             }
         }
 
@@ -276,7 +367,11 @@ Page {
             readonly property bool playing: voicePlayer.messageId === model.id && voicePlayer.playing
             width: grid.cellWidth
             contentHeight: grid.cellHeight
-            onClicked: page.open(model.id, model.kind, body, model.outgoing)
+            highlighted: down || menuOpen || (page.selecting && page.selected[model.id] === true)
+            onClicked: {
+                if (page.selecting) page.toggleSelected(model.id)
+                else page.open(model.id, model.kind, body, model.outgoing)
+            }
 
             Rectangle {
                 anchors.fill: parent
@@ -361,7 +456,9 @@ Page {
                 }
             }
 
-            menu: Component {
+            menu: page.selecting ? null : tileMenu
+            Component {
+                id: tileMenu
                 ContextMenu {
                     MenuItem {
                         //% "Show in chat"
@@ -405,5 +502,62 @@ Page {
         }
 
         VerticalScrollDecorator {}
+    }
+
+    RemorsePopup { id: selectionRemorse }
+
+    // Like the chat's selection panel.
+    DockedPanel {
+        id: selectionPanel
+        width: parent.width
+        height: Theme.itemSizeLarge
+        dock: Dock.Bottom
+        open: page.selecting
+
+        Label {
+            anchors {
+                left: parent.left
+                leftMargin: Theme.horizontalPageMargin
+                right: selectionButtons.left
+                rightMargin: Theme.paddingMedium
+                verticalCenter: parent.verticalCenter
+            }
+            truncationMode: TruncationMode.Fade
+            text: page.selectedCount > 0
+                  ? qsTrId("threesea-he-n-selected", page.selectedCount)
+                  //% "Tap to select"
+                  : qsTrId("threesea-la-select-media-hint")
+            color: Theme.highlightColor
+            font.pixelSize: Theme.fontSizeSmall
+        }
+        Row {
+            id: selectionButtons
+            anchors {
+                right: parent.right
+                rightMargin: Theme.horizontalPageMargin - Theme.paddingMedium
+                verticalCenter: parent.verticalCenter
+            }
+            spacing: Theme.paddingLarge
+            IconButton {
+                enabled: page.selectionHere
+                icon.source: "image://theme/icon-m-downloads"
+                onClicked: {
+                    var ids = page.selectedIds()
+                    page.endSelection()
+                    window.messageOut.saveFiles(ids)
+                }
+            }
+            IconButton {
+                enabled: page.selectedCount > 0
+                icon.source: "image://theme/icon-m-delete"
+                onClicked: {
+                    var rows = page.selectedRows()
+                    page.endSelection()
+                    selectionRemorse.execute(qsTrId("threesea-la-deleting-messages", rows.length), function() {
+                        page.removeAll(rows)
+                    })
+                }
+            }
+        }
     }
 }
