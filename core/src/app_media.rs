@@ -1268,6 +1268,8 @@ impl App {
             .message(id)?
             .filter(|message| message.kind == "file" && message.outgoing)
             .ok_or_else(|| ApiError::Internal("no such file".into()))?;
+        let (_, conversation) = self.readable_conversation(&message.conversation)?;
+        conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
         let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
         if body["uploadState"].as_i64() == Some(STATE_FAILED) {
             self.store.forget_transfer_tries(id, UPLOAD_RETRY)?;
@@ -1927,6 +1929,31 @@ mod tests {
         )
         .unwrap();
         (dir, app)
+    }
+
+    #[test]
+    fn a_failed_upload_is_not_retried_in_a_chat_that_sends_nothing() {
+        use libthreema::protobuf::d2d_sync::contact::ActivityState;
+        let (_dir, mut app) = app();
+        let mut contact = crate::contacts::test_contact("ABCD1234");
+        app.store.upsert_contact(&contact).unwrap();
+        let body = json!({ "uploadState": STATE_FAILED }).to_string();
+        let id = app
+            .store
+            .insert_outgoing("ABCD1234", 1, "file", &body)
+            .unwrap()
+            .id;
+
+        let mut settings = app.app_settings().unwrap();
+        settings.blocked_contacts = vec!["ABCD1234".into()];
+        app.save_app_settings(&settings).unwrap();
+        assert_eq!(app.retry_upload(id).unwrap_err().kind(), "contactBlocked");
+
+        settings.blocked_contacts.clear();
+        app.save_app_settings(&settings).unwrap();
+        contact.activity_state = ActivityState::Invalid;
+        app.store.upsert_contact(&contact).unwrap();
+        assert_eq!(app.retry_upload(id).unwrap_err().kind(), "contactRevoked");
     }
 
     /// A received file message whose parts wait on the server, with this blob key.

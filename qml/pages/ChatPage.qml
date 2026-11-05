@@ -79,7 +79,15 @@ Page {
     readonly property bool blocked: !isGroup && !isList && contact.blocked === true
     // The ID was revoked (found by the directory check): nobody to write to any more.
     readonly property bool revoked: !isGroup && !isList && contact.invalid === true
+    // Nothing goes out from here. All that would send something goes by this, and by the two below
+    // for calls: the core refuses the same (check_writable), but only after the work is done.
     readonly property bool readOnly: groupLeft || blocked || revoked
+    readonly property bool canCall: !readOnly && calls.supported && !isGroup && !isList
+                                    && window.appSettings.threemaCalls !== false
+    readonly property bool groupCallsOn: isGroup && groupCalls.supported
+                                         && window.appSettings.groupCalls !== false
+    // A linked device can block someone while the panel is open here.
+    onReadOnlyChanged: if (readOnly) emojiPanelOpen = false
     property bool typing: false
     property string stickyDay: ""
     // Editing one of our messages in the input box (its message id), "" when writing a new one.
@@ -883,7 +891,7 @@ Page {
     // The "@…" being typed before the cursor, or null.
     property var mentionQuery: null
     function updateMentionQuery() {
-        if (!isGroup || !inputField || recordingHere) {
+        if (!isGroup || !inputField || recordingHere || readOnly) {
             mentionQuery = null
             return
         }
@@ -1961,9 +1969,8 @@ Page {
                 }
             }
             MenuItem {
-                visible: !page.selecting && page.isGroup && !page.groupCallRunning && !page.readOnly
-                         && groupCalls.supported && window.appSettings.threemaCalls !== false
-                         && window.appSettings.groupCalls !== false
+                visible: !page.selecting && page.groupCallsOn && !page.groupCallRunning && !page.readOnly
+                         && window.appSettings.threemaCalls !== false
                 enabled: groupCalls.state === "idle" && calls.state === "idle"
                 //% "Start group call"
                 text: qsTrId("threesea-me-start-group-call")
@@ -1973,27 +1980,23 @@ Page {
                 }
             }
             MenuItem {
-                visible: !page.selecting && page.isGroup && page.groupCallRunning && !page.inGroupCall
-                         && groupCalls.supported && window.appSettings.groupCalls !== false
+                visible: !page.selecting && page.groupCallsOn && page.groupCallRunning && !page.inGroupCall
+                         && !page.readOnly
                 enabled: groupCalls.state === "idle" && calls.state === "idle"
                 //% "Join group call"
                 text: qsTrId("threesea-me-join-group-call")
                 onClicked: page.openGroupCall()
             }
             MenuItem {
-                visible: !page.selecting && !page.readOnly && calls.supported
-                         && window.appSettings.threemaCalls !== false
-                         && page.identity.length === 8 && page.contact.canCall === true
+                visible: !page.selecting && page.canCall && page.contact.canCall === true
                 enabled: calls.state === "idle"
                 //% "Call"
                 text: qsTrId("threesea-me-call")
                 onClicked: calls.start(page.identity)
             }
             MenuItem {
-                visible: !page.selecting && !page.readOnly && calls.supported
-                         && window.appSettings.threemaCalls !== false
-                         && window.appSettings.videoCalls !== false
-                         && page.identity.length === 8 && page.contact.canVideoCall === true
+                visible: !page.selecting && page.canCall && window.appSettings.videoCalls !== false
+                         && page.contact.canVideoCall === true
                 enabled: calls.state === "idle"
                 //% "Video call"
                 text: qsTrId("threesea-me-video-call")
@@ -2006,6 +2009,8 @@ Page {
         // bottom edge is dimmed then, like a list's pulley that only shows at the end.
         PushUpMenu {
             id: pushUpMenu
+            // Whatever is picked here goes out with a send, and there is none.
+            visible: !page.readOnly
             enabled: listView.atYEnd && !page.selecting
             opacity: enabled ? 1.0 : Theme.opacityFaint
             Behavior on opacity { FadeAnimation { } }
@@ -2138,8 +2143,7 @@ Page {
             anchors.top: chatHeader.bottom
             width: parent.width
             height: visible ? Theme.itemSizeMedium : 0
-            visible: page.isGroup && groupCalls.supported && window.appSettings.groupCalls !== false
-                     && (page.groupCallRunning || page.inGroupCall)
+            visible: page.groupCallsOn && ((page.groupCallRunning && !page.readOnly) || page.inGroupCall)
             enabled: page.inGroupCall || (groupCalls.state === "idle" && calls.state === "idle")
             onClicked: page.openGroupCall()
 
@@ -2443,7 +2447,8 @@ Page {
                     id: editBar
                     y: parent.gap + attachmentBar.height
                     width: parent.width
-                    height: page.editingMessageId !== "" ? cancelEdit.height : 0
+                    // A read-only chat has no input to edit in. What it was stays, for an unblock.
+                    height: page.editingMessageId !== "" && !page.readOnly ? cancelEdit.height : 0
                     visible: height > 0
 
                     Label {
@@ -2524,7 +2529,7 @@ Page {
                     id: quoteBar
                     y: parent.gap + attachmentBar.height + editBar.height
                     width: parent.width
-                    height: page.quoting ? Math.max(cancelQuote.height, quoteColumn.height) : 0
+                    height: page.quoting && !page.readOnly ? Math.max(cancelQuote.height, quoteColumn.height) : 0
                     visible: height > 0
 
                     Rectangle {
@@ -2755,6 +2760,7 @@ Page {
                 showUnread: model.id === page.unreadMarkerId
                 anyReaction: page.contact.reactions !== false
                 canReact: !page.isList
+                readOnly: page.readOnly
                 senderName: page.isGroup && !model.outgoing && model.sender ? page.memberName(model.sender) : ""
                 canEdit: page.contact.canEdit === true
                 noAgeLimit: page.contact.isNotes === true
@@ -2794,7 +2800,8 @@ Page {
                         return
                     }
                     var pollPage = pageStack.push(Qt.resolvedUrl("PollPage.qml"),
-                                                  { messageId: model.id, conversation: page.identity, poll: body })
+                                                  { messageId: model.id, conversation: page.identity, poll: body,
+                                                    readOnly: page.readOnly })
                     page.bindPollNames(pollPage, "formerNames", body)
                     var messageId = model.id
                     pollPage.changed.connect(function(message) { page.addMessage(message) })
@@ -2807,7 +2814,7 @@ Page {
                 onClosePollRequested: page.run("closePoll", { message: model.id })
                 onFileRequested: {
                     var file = model.body
-                    if (model.outgoing && file.uploadState === 3) {
+                    if (model.outgoing && file.uploadState === 3 && !page.readOnly) {
                         backend.call("retryUpload", { message: model.id })
                     } else if (file.fileState === 2 && String(file.mediaType).indexOf("audio/") === 0
                                && file.rendering !== "file") {

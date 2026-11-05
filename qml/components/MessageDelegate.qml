@@ -34,6 +34,9 @@ ListItem {
     property bool canDelete: false
     // Distribution lists: the quoted message would not be in the receivers' chats.
     property bool canQuote: true
+    // A blocked contact, a revoked ID or a group we left: nothing goes out, so what would send
+    // something isn't offered. Reactions already there stay as they are.
+    property bool readOnly: false
 
     // Selecting messages (chat pulley → Select messages): taps select, no menu, and a selected
     // bubble stays lit like a pressed one.
@@ -143,9 +146,10 @@ ListItem {
             id: contextMenu
             readonly property bool canDeleteEveryone: item.outgoing && !item.isDeleted && !item.isPoll
                                                       && !item.unsent && item.canDelete && item.recent
+                                                      && !item.readOnly
             Row {
                 id: reactionRow
-                visible: item.canReact && !item.isStatus && !item.isDeleted
+                visible: item.canReact && !item.readOnly && !item.isStatus && !item.isDeleted
                 width: parent.width
                 // Threema's quick reactions, then any other emoji (Android's "+").
                 readonly property var quick: item.anyReaction
@@ -203,7 +207,7 @@ ListItem {
                                           ? qsTrId("threesea-me-unstar-short")
                                           //% "Star"
                                           : qsTrId("threesea-me-star") })
-                    if (item.canQuote && !item.isStatus && !item.isDeleted && !item.isPoll)
+                    if (item.canQuote && !item.readOnly && !item.isStatus && !item.isDeleted && !item.isPoll)
                         //% "Quote"
                         list.push({ id: "quote", icon: "icon-m-message-reply", text: qsTrId("threesea-me-quote") })
                     return list
@@ -228,7 +232,7 @@ ListItem {
                 text: qsTrId("threesea-me-edit")
                 // Nobody can have it yet: simply changed. Otherwise, like a sent one, it takes an
                 // edit message, as someone may have it (the core's edit_message).
-                visible: item.outgoing && model.kind === "text"
+                visible: item.outgoing && !item.readOnly && model.kind === "text"
                          && ((model.state === 0 && !model.writtenOut)
                              || (model.state !== 4 && item.canEdit && item.recent))
                 onClicked: item.editRequested()
@@ -249,7 +253,7 @@ ListItem {
             MenuItem {
                 //% "Close poll"
                 text: qsTrId("threesea-me-close-poll")
-                visible: item.myOpenPoll
+                visible: item.myOpenPoll && !item.readOnly
                 onClicked: item.closePollRequested()
             }
             MenuItem {
@@ -658,7 +662,7 @@ ListItem {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    enabled: !item.selectionMode
+                    enabled: !item.selectionMode && !item.readOnly
                     onClicked: item.toggleReaction(modelData.emoji)
                 }
             }

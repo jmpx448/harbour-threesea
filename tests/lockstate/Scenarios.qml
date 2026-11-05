@@ -518,6 +518,32 @@ QtObject {
                 check("text", chat.inputField.text, "hello")
             }, 0],
         ],
+        // A blocked contact or a revoked ID takes nothing: the content stays here for another chat.
+        shareToBlockedChat: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["conversations"] = { conversations: [] }
+                backend.results["contact"] = { blocked: true }
+                push("pages/RealSharePage.qml", { files: [{ path: "/made/up.jpg", name: "up.jpg" }] }).open("ABCD1234")
+            }, 200],
+            [function() {
+                checkStack("conversations share")
+                check("nothing asked of the chat", countSent("draft"), 0)
+                backend.results["contact"] = { invalid: true }
+                page("share").open("ABCD1234")
+            }, 200],
+            [function() {
+                checkStack("conversations share")
+                check("still nothing", countSent("draft"), 0)
+                // Another chat takes it.
+                backend.results["contact"] = {}
+                page("share").open("BCDE2345")
+            }, 200],
+            [function() {
+                checkStack("conversations chat")
+                check("files", page("chat").attached.length, 1)
+            }, 0],
+        ],
         forwardToPrivateChat: [
             [function() { ready(false) }, 100],
             [function() {

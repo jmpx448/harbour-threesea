@@ -29,6 +29,27 @@ Page {
     function open(identity) {
         if (opening) return
         opening = true
+        if (identity.indexOf("g:") === 0 || identity.indexOf("d:") === 0) {
+            openWritable(identity)
+            return
+        }
+        // A blocked contact or a revoked ID has no input to take this, and the core would refuse
+        // it: said here, with the content still on this page for another chat. (Left groups aren't
+        // in the list.)
+        backend.call("contact", { identity: identity }, function(ok, result) {
+            if (ok && result.invalid === true) {
+                page.opening = false
+                Notices.show(qsTrId("threesea-la-revoked-input"), Notice.Long, Notice.Center)
+            } else if (ok && result.blocked === true) {
+                page.opening = false
+                Notices.show(qsTrId("threesea-la-blocked-input"), Notice.Long, Notice.Center)
+            } else {
+                page.openWritable(identity)
+            }
+        })
+    }
+
+    function openWritable(identity) {
         backend.call("draft", { identity: identity }, function(ok, result, kind) {
             page.opening = false
             // The app locked or a call came in meanwhile: this stays for when they are over.

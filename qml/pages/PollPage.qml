@@ -15,6 +15,8 @@ Dialog {
     // The conversation (contact id or group key), for member names.
     property string conversation
     property var poll: ({})
+    // A chat where nothing goes out: the poll can be looked at, not voted in or closed.
+    property bool readOnly: false
     // identity -> display name; members (groups) to show who hasn't voted.
     property var names: ({})
     property var members: []
@@ -39,7 +41,7 @@ Dialog {
         for (var i = 0; i < selection.length; ++i) if (myVote.map(Number).indexOf(selection[i]) < 0) return false
         return true
     }
-    canAccept: !closed && !sameAsVote()
+    canAccept: !closed && !readOnly && !sameAsVote()
     // The chat sends it: this dialog is gone before the reply arrives.
     onAccepted: voteRequested(selection.slice())
     readonly property bool countsKnown: closed || poll.announce === true || mine
@@ -127,7 +129,7 @@ Dialog {
         model: page.poll.choices || []
 
         PullDownMenu {
-            visible: !page.closed
+            visible: !page.closed && !page.readOnly
             MenuItem {
                 visible: page.mine
                 //% "Close poll"
@@ -199,7 +201,7 @@ Dialog {
             text: modelData.name
             automaticCheck: false
             checked: page.selection.indexOf(Number(modelData.id)) >= 0
-            enabled: !page.closed
+            enabled: !page.closed && !page.readOnly
             description: page.countsKnown
                          ? [qsTrId("threesea-la-poll-votes", page.count(modelData))]
                                .concat(choiceVoters.length > 0 ? [choiceVoters.map(page.nameOf).join(", ")] : [])
