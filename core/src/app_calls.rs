@@ -465,7 +465,8 @@ impl App {
         }));
     }
 
-    /// `callState`: `{call: {identity, callId, phase, video, startedAt, acceptedAt} | null}`.
+    /// What the tests check of the running call.
+    #[cfg(test)]
     pub(crate) fn call_state(&self) -> Value {
         json!({ "call": self.calls.current.as_ref().map(|call| json!({
             "identity": call.peer,

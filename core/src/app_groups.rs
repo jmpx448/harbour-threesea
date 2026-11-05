@@ -135,18 +135,6 @@ impl Shared {
     }
 }
 
-impl App {
-    pub(crate) fn groups_json(&self) -> Result<Value, ApiError> {
-        let mut list = Vec::new();
-        for group in self.store.groups()? {
-            let mut value = self.group_json(&group)?;
-            value["title"] = json!(self.group_title(&group));
-            list.push(value);
-        }
-        Ok(json!({ "groups": list }))
-    }
-}
-
 impl Shared {
     pub(crate) fn group_info(&self, key: &str) -> Result<Value, ApiError> {
         let group = self.store.group(key)?.ok_or(ApiError::GroupNotFound)?;

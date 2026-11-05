@@ -1006,13 +1006,21 @@ async fn core_commands_respect_hidden_private_chats() {
         json!({"id": 1, "cmd": "message", "message": message.id}),
         json!({"id": 2, "cmd": "setStarred", "message": message.id, "starred": true}),
         json!({"id": 3, "cmd": "draft", "identity": "BBBBBBBB"}),
-        json!({"id": 4, "cmd": "forwardMessage", "message": message.id, "identity": "CCCCCCCC"}),
     ] {
         let reply = app.handle(&request.to_string()).await;
         assert!(!reply.contains("PRIVATE"), "{request}: {reply}");
         let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(reply["error"]["kind"], "locked", "{request}");
     }
+    // Forwarding counts its failures instead of answering with one.
+    let request = json!({"id": 4, "cmd": "forwardMessages", "messages": [message.id],
+        "identity": "CCCCCCCC"});
+    let reply = app.handle(&request.to_string()).await;
+    assert!(!reply.contains("PRIVATE"), "{reply}");
+    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(reply["result"]["forwarded"], 0, "{reply}");
+    assert_eq!(reply["result"]["failed"], 1, "{reply}");
+    assert_eq!(reply["result"]["errors"], json!(["locked"]), "{reply}");
     assert!(
         app.store
             .conversation_messages("CCCCCCCC", 10)

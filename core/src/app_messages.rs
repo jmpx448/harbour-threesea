@@ -653,10 +653,6 @@ impl App {
         json!({})
     }
 
-    pub(crate) fn connection_json(&self) -> Value {
-        json!({ "state": self.connection_state.get() })
-    }
-
     /// The chat list, the archive or (`private`, unlocked only) the private chats. Private chats
     /// are only ever in their own list.
     pub(crate) fn conversations_json(

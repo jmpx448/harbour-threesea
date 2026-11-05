@@ -954,7 +954,7 @@ mod tests {
                             attachments: vec![Zeroizing::new(b"jpeg".to_vec())],
                         },
                         request(json!({"id": 2, "cmd": "removeGroupPicture", "key": key})),
-                        request(json!({"id": 3, "cmd": "connectionState"})),
+                        request(json!({"id": 3, "cmd": "lockStatus"})),
                     ],
                     |said| replied(said, 3),
                 )
@@ -980,7 +980,7 @@ mod tests {
                             json!({"id": 1, "cmd": "checkLicense", "licenseKey": "ABCDE-12345"}),
                         ),
                         request(json!({"id": 2, "cmd": "status"})),
-                        request(json!({"id": 3, "cmd": "connectionState"})),
+                        request(json!({"id": 3, "cmd": "lockStatus"})),
                         request(json!({"id": 4, "cmd": "revocationStatus", "cached": true})),
                     ],
                     |said| replied(said, 2) && replied(said, 3) && replied(said, 4),
@@ -1051,7 +1051,7 @@ mod tests {
                 assert!(held.is_none());
                 assert!(replied(&said.lock().unwrap(), 1));
 
-                tx.send(request(json!({"id": 2, "cmd": "connectionState"})))
+                tx.send(request(json!({"id": 2, "cmd": "lockStatus"})))
                     .unwrap();
                 let held = answer_first_status(&mut app, &mut rx, &emit).await;
                 assert!(held.is_some(), "it comes back for after the clean-up");

@@ -2377,7 +2377,7 @@ fn save_target(directory: &std::path::Path, name: &str, data: &[u8]) -> std::pat
 }
 
 impl App {
-    /// `forwardMessage`: send a text or file message again, to another chat (Android's
+    /// `forwardMessages`, for one: send a text or file message again, to another chat (Android's
     /// "Forward"). Quotes are dropped (the quoted message is not in that chat); files are
     /// uploaded again with a new key, since blobs are deleted once downloaded.
     /// `caption`: what a file goes with instead of its own; empty for none.
@@ -2390,7 +2390,7 @@ impl App {
         self.copy_message(id, identity, true, caption).await
     }
 
-    /// `forwardMessage`, and a list's copy for a member. `clean`: a picture is made fit to leave
+    /// A forwarded message, and a list's copy for a member. `clean`: a picture is made fit to leave
     /// first (ADR 0025), as what its file says isn't known, ours included: one may have come from a
     /// linked device. It keeps its size, as on Android. A thumbnail, which comes from the sender
     /// too, is made anew or left behind, as the protocol leaves it optional.

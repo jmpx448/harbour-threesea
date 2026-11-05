@@ -452,8 +452,6 @@ pub enum Command {
     CancelTransfer {
         message: i64,
     },
-    /// All groups.
-    Groups,
     /// One group (`key`: its conversation key).
     Group {
         key: String,
@@ -548,14 +546,6 @@ pub enum Command {
         identity: String,
         offset: i64,
     },
-    /// Send a message (text or file) again to another chat; returns the new message.
-    ForwardMessage {
-        message: i64,
-        identity: String,
-        /// What a file goes with instead of its own caption; empty for none.
-        #[serde(default)]
-        caption: Option<String>,
-    },
     /// The unsent text of a chat's input (empty: none), with its mentions as `@[ID]` and the
     /// message it quotes (message id, hex), kept like Android's drafts; returned as `draft` and
     /// `draftMentions` in `conversations` and by `draft`. A send of the same text takes it away.
@@ -602,13 +592,13 @@ pub enum Command {
         #[serde(default)]
         identity: Option<String>,
     },
-    /// Several, in the given order: `{forwarded, failed, errors, failedMembers}`, `errors` being the
-    /// kinds of error that came up, each once, `failedMembers` how many of a list's members a file
-    /// didn't reach.
+    /// Send messages (text or file) again to another chat, in the given order: `{forwarded, failed,
+    /// errors, failedMembers}`, `errors` being the kinds of error that came up, each once,
+    /// `failedMembers` how many of a list's members a file didn't reach.
     ForwardMessages {
         messages: Vec<i64>,
         identity: String,
-        /// As for `ForwardMessage`, for each of them.
+        /// What a file goes with instead of its own caption; empty for none.
         #[serde(default)]
         caption: Option<String>,
     },
@@ -792,7 +782,6 @@ pub enum Command {
         call_id: u32,
         candidates: Vec<crate::calls::Candidate>,
     },
-    CallState,
     CallConnected {
         #[serde(default)]
         relayed: bool,
@@ -1000,8 +989,6 @@ pub enum Command {
     EmptyConversation {
         identity: String,
     },
-    /// Current connection state.
-    ConnectionState,
     /// "Connect now": reconnect now if disconnected, also while a server asked us to stay away.
     Reconnect,
     /// The same without the user asking: timer, network change, back in the app.
@@ -2187,7 +2174,6 @@ impl App {
             Command::MarkRead { identity } => self.mark_read(&identity),
             Command::SetTyping { identity, typing } => self.set_typing(&identity, typing),
             Command::DownloadFile { message } => self.download_file(message),
-            Command::Groups => self.groups_json(),
             Command::Group { key } => self.group_info(&key),
             Command::CreateGroup { name, members } => self.create_group(&name, &members),
             Command::RenameGroup { key, name } => self.rename_group(&key, &name),
@@ -2250,14 +2236,6 @@ impl App {
                     Ok(json!({ "changed": changed }))
                 })
                 .await
-            }
-            Command::ForwardMessage {
-                message,
-                identity,
-                caption,
-            } => {
-                // Boxed: all the commands' futures together must fit the stack.
-                Box::pin(self.forward_message(message, &identity, caption)).await
             }
             Command::SetDraft {
                 identity,
@@ -2554,7 +2532,6 @@ impl App {
                 call_id,
                 candidates,
             } => Ok(self.call_candidates(call_id, candidates)),
-            Command::CallState => Ok(self.call_state()),
             Command::CallConnected { relayed } => Ok(self.call_connected(relayed)),
             Command::CallChannel { data } => self.call_channel(&data),
             Command::CallCapture { device, on } => self.call_capture(&device, on),
@@ -2723,7 +2700,6 @@ impl App {
                     .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
                 Ok(json!({}))
             }
-            Command::ConnectionState => Ok(self.connection_json()),
             Command::Reconnect => Ok(self.connect_now()),
             Command::Wake => Ok(self.wake_connection()),
         }
@@ -4626,7 +4602,7 @@ mod tests {
                     .is_none()
             );
             assert_eq!(stored_messages(&app, "IJKL9012"), 1, "not stored yet");
-            let next = from_ui(&mut app, json!({"id": 4, "cmd": "connectionState"})).await;
+            let next = from_ui(&mut app, json!({"id": 4, "cmd": "lockStatus"})).await;
             assert_eq!(next.unwrap()["ok"], true);
 
             let finished = done.recv().await.unwrap();
@@ -4964,8 +4940,6 @@ mod tests {
             json!({"cmd": "quotedMessage", "identity": "ABCD1234", "messageId": "0000000000000001"}),
             json!({"cmd": "markRead", "identity": "ABCD1234"}),
             json!({"cmd": "sendText", "identity": "ABCD1234", "text": "x"}),
-            json!({"cmd": "forwardMessage", "message": plain, "identity": "ABCD1234"}),
-            json!({"cmd": "forwardMessage", "message": message, "identity": "IJKL9012"}),
             json!({"cmd": "deleteConversation", "identity": "ABCD1234"}),
         ] {
             let mut request = request;
@@ -4973,6 +4947,18 @@ mod tests {
             let reply = call(&mut app, request.clone());
             assert_eq!(reply["error"]["kind"], "locked", "{request}: {reply}");
             assert!(!reply.to_string().contains("secret words"), "{reply}");
+        }
+        // Forwarding counts its failures instead of answering with one, in both directions.
+        for (forwarded, target) in [(plain, "ABCD1234"), (message, "IJKL9012")] {
+            let before = stored_messages(&app, target);
+            let request = json!({"id": 4, "cmd": "forwardMessages", "messages": [forwarded],
+                "identity": target});
+            let reply = call(&mut app, request);
+            assert_eq!(reply["result"]["forwarded"], 0, "{reply}");
+            assert_eq!(reply["result"]["failed"], 1, "{reply}");
+            assert_eq!(reply["result"]["errors"], json!(["locked"]), "{reply}");
+            assert!(!reply.to_string().contains("secret words"), "{reply}");
+            assert_eq!(stored_messages(&app, target), before, "nothing arrived");
         }
         // The chat list doesn't show it, and nothing used up the pass.
         let list = app.conversations_json(false, false).unwrap();
