@@ -1621,6 +1621,11 @@ mod tests {
         );
         assert_eq!(field(&buckets[1], "emoji"), Some(&Value::from("❤️")));
         assert_eq!(status_text("groupRenamed|Club"), "Group renamed to Club.");
+        assert_eq!(
+            status_text("groupCallStarted|Ann"),
+            "Ann started a group call."
+        );
+        assert_eq!(status_text("groupCallEnded"), "The group call ended.");
 
         // The newest page, then the older rest.
         let (args, data) = app.web_messages(1, "BBBBBBBB", None).unwrap();
