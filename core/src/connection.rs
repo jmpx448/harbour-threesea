@@ -1598,6 +1598,9 @@ struct Session<'a> {
     next_reflect_id: u32,
     /// Outgoing messages reflected on this connection: (conversation, message id).
     reflected: std::collections::HashSet<(String, u64)>,
+    /// Our picture (`None`: its removal) on its way to a contact: (receiver, message id).
+    pictures_awaiting_ack:
+        std::collections::HashMap<(String, u64), Option<libthreema::common::BlobId>>,
     /// A lookup of group members or senders failed or took too long on this connection.
     directory_unanswering: bool,
     /// The nonces told to the other devices for messages still to be encoded: (receiver, message
@@ -1831,6 +1834,7 @@ impl<'a> Session<'a> {
             backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            pictures_awaiting_ack: std::collections::HashMap::new(),
             directory_unanswering: false,
             planned_nonces: RefCell::default(),
             csp,
@@ -2118,6 +2122,14 @@ impl<'a> Session<'a> {
     /// on beside the connection, and they get the picture when it is done.
     async fn distribute_picture(&mut self, receiver: &str) -> Result<(), ConnectionError> {
         use crate::profile_pictures::{Distribution, OWN_PICTURE};
+        // On its way to them: a burst of messages doesn't send it again.
+        if self
+            .pictures_awaiting_ack
+            .keys()
+            .any(|(to, _)| to == receiver)
+        {
+            return Ok(());
+        }
         // Not even recorded as sent: they get it if they are unblocked.
         if !crate::providers::may_receive(&self.setup.store, &self.setup.config, receiver, false)
             .map_err(storage_error)?
@@ -2165,25 +2177,39 @@ impl<'a> Session<'a> {
         };
         let created_at = crate::messages::now_ms();
         let message_id = MessageId::random().0;
-        let body = Outgoing::Contact(body);
+        // Encoded first: what can't go out (a broken session) must not reach the other devices,
+        // which would take a removal as done, and with a new id at every message.
         let receivers = [receiver.to_owned()];
-        self.reflect_outgoing(receiver, message_id, created_at, &body, &receivers)
-            .await?;
+        let nonces = if self.multi_device.is_some() {
+            self.plan_nonces(message_id, &receivers)?
+        } else {
+            Vec::new()
+        };
         let payloads = self
-            .encode(receiver, message_id, created_at, body)
+            .encode(
+                receiver,
+                message_id,
+                created_at,
+                Outgoing::Contact(body.clone()),
+            )
             .await?
             .unwrap_or_default();
-        let any = !payloads.is_empty();
+        if payloads.is_empty() {
+            self.planned_nonces
+                .borrow_mut()
+                .remove(&(receiver.to_owned(), message_id));
+            return Ok(());
+        }
+        let body = Outgoing::Contact(body);
+        self.reflect_outgoing_under(receiver, message_id, created_at, &body, nonces)
+            .await?;
         for payload in payloads {
             self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
                 .await?;
         }
-        // Only now: a connection lost on the way must not leave it noted as sent.
-        if any {
-            store
-                .picture_sent(receiver, blob_id.as_ref())
-                .map_err(storage_error)?;
-        }
+        // Noted as sent when the server has it. A connection lost before that: the next one sends it.
+        self.pictures_awaiting_ack
+            .insert((receiver.to_owned(), message_id), blob_id);
         Ok(())
     }
 
@@ -3310,7 +3336,8 @@ impl<'a> Session<'a> {
     }
 
     /// Our outgoing message for the other devices (Android: `reflectMessage` before sending).
-    /// Once per message and connection. `receivers`: who it goes to now, whose nonces go along.
+    /// Once per message and connection. `receivers`: who it goes to now, whose nonces go along
+    /// (picked here).
     async fn reflect_outgoing(
         &mut self,
         conversation: &str,
@@ -3318,6 +3345,27 @@ impl<'a> Session<'a> {
         created_at: i64,
         body: &Outgoing,
         receivers: &[String],
+    ) -> Result<(), ConnectionError> {
+        if self.multi_device.is_none()
+            || self
+                .reflected
+                .contains(&(conversation.to_owned(), message_id))
+        {
+            return Ok(());
+        }
+        let nonces = self.plan_nonces(message_id, receivers)?;
+        self.reflect_outgoing_under(conversation, message_id, created_at, body, nonces)
+            .await
+    }
+
+    /// [`Self::reflect_outgoing`] with the nonces picked already.
+    async fn reflect_outgoing_under(
+        &mut self,
+        conversation: &str,
+        message_id: u64,
+        created_at: i64,
+        body: &Outgoing,
+        nonces: Vec<Vec<u8>>,
     ) -> Result<(), ConnectionError> {
         use libthreema::protobuf::d2d::{OutgoingMessage, envelope::Content};
         if self.multi_device.is_none()
@@ -3345,7 +3393,6 @@ impl<'a> Session<'a> {
             }
         };
         let (message_type, data) = encode_message_body(&outgoing_body);
-        let nonces = self.plan_nonces(message_id, receivers)?;
         self.reflect(Content::OutgoingMessage(OutgoingMessage {
             conversation: Some(conversation_id),
             message_id,
@@ -4052,6 +4099,14 @@ impl<'a> Session<'a> {
                 self.awaiting_ack
                     .retain(|(to, id)| !(*to == receiver && *id == ack.id.0));
                 let store = &self.setup.store;
+                if let Some(blob_id) = self
+                    .pictures_awaiting_ack
+                    .remove(&(receiver.clone(), ack.id.0))
+                {
+                    store
+                        .picture_sent(&receiver, blob_id.as_ref())
+                        .map_err(storage_error)?;
+                }
                 store
                     .outbox_remove(&receiver, ack.id.0)
                     .map_err(storage_error)?;
@@ -5978,6 +6033,7 @@ mod sync_order_tests {
             backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            pictures_awaiting_ack: std::collections::HashMap::new(),
             directory_unanswering: false,
             planned_nonces: RefCell::default(),
             csp,
@@ -6795,6 +6851,7 @@ mod sync_order_tests {
         }
         assert!(session.distribute_picture(CREATOR).await.is_err());
         // It didn't get out, so it isn't noted as sent.
+        assert!(session.pictures_awaiting_ack.is_empty());
         assert!(matches!(
             setup.store.picture_distribution(CREATOR, false).unwrap(),
             crate::profile_pictures::Distribution::Delete
@@ -6905,6 +6962,53 @@ mod sync_order_tests {
         session.apply_waiting_reflected().await.unwrap();
         assert_eq!(session.held.len(), 1);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// What can't be encoded (here: no contact to encode for) reaches no other device, where a
+    /// removal would count as done: no attempt to reflect shows on this socket. Nothing is noted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_picture_message_that_cant_go_out_is_not_reflected() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        session.distribute_picture("C0C0C0C0").await.unwrap();
+        assert!(session.planned_nonces.borrow().is_empty());
+        assert!(session.pictures_awaiting_ack.is_empty());
+        assert!(matches!(
+            setup.store.picture_distribution("C0C0C0C0", false).unwrap(),
+            crate::profile_pictures::Distribution::Delete
+        ));
+    }
+
+    /// The server has it only when it says so: until then it isn't noted as sent, and a burst of
+    /// messages doesn't send it again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn our_picture_counts_as_sent_at_the_servers_ack() {
+        use crate::profile_pictures::Distribution;
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        session
+            .pictures_awaiting_ack
+            .insert((CREATOR.to_owned(), 7), None);
+        session.distribute_picture(CREATOR).await.unwrap();
+        assert_eq!(session.pictures_awaiting_ack.len(), 1);
+        assert!(matches!(
+            setup.store.picture_distribution(CREATOR, false).unwrap(),
+            Distribution::Delete
+        ));
+        ack(&mut session, CREATOR, 7).await;
+        assert!(session.pictures_awaiting_ack.is_empty());
+        assert!(matches!(
+            setup.store.picture_distribution(CREATOR, false).unwrap(),
+            Distribution::None
+        ));
     }
 
     /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
