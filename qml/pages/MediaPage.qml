@@ -36,13 +36,60 @@ Page {
     // The kinds this chat has (filters for the others would show nothing).
     readonly property var presentKinds: allKinds.filter(function(k) { return counts[k] > 0 })
 
+    // The gallery comes page by page while scrolling. `load` gets what is shown so far anew, when
+    // what is in it changes; `generation` tells whose answer is still wanted.
+    readonly property int pageSize: 60
+    property string nextPage
+    property bool loading
+    property bool loadingMore
+    property int generation
+    // The row of a message by its id, and the history position of the last row.
+    property var rowOf: ({})
+    property var oldestKey
+
     function load() {
-        backend.call("chatMedia", { identity: identity }, function(ok, result) {
+        var asked = ++generation
+        loading = true
+        loadingMore = false
+        backend.call("chatMedia", { identity: identity, limit: Math.max(pageSize, media.count) },
+                     function(ok, result) {
+            if (asked !== page.generation) return
+            page.loading = false
             if (!ok) return
             page.kinds = result.kinds
             page.counts = result.counts
             media.update(result.messages)
+            page.nextPage = result.next || ""
+            grid.loadMoreIfNear()
         })
+    }
+
+    function loadMore() {
+        if (nextPage.length === 0 || loading || loadingMore) return
+        var asked = generation
+        loadingMore = true
+        backend.call("chatMedia", { identity: identity, limit: pageSize, before: nextPage },
+                     function(ok, result) {
+            if (asked !== page.generation) return
+            page.loadingMore = false
+            if (!ok) return
+            media.add(result.messages)
+            page.nextPage = result.next || ""
+        })
+    }
+
+    // One message changed: its row takes that over. Whether anything else has to be got anew: a
+    // message that went, one that belongs among the rows and isn't there yet.
+    function applyChange(message) {
+        var row = rowOf[message.id]
+        if (row === undefined) {
+            return message.kind === "deleted"
+                    || (message.kind === "file" && (nextPage.length === 0 || message.sortKey > oldestKey))
+        }
+        if (message.kind !== "file") return true
+        var body = JSON.stringify(message.body)
+        if (media.get(row).body !== body) media.setProperty(row, "body", body)
+        return false
     }
 
     function chooseKinds() {
@@ -59,14 +106,23 @@ Page {
 
     Component.onCompleted: load()
 
+    // A file arriving is several events.
+    Timer {
+        id: reload
+        interval: 200
+        onTriggered: page.load()
+    }
+
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "messageAdded" && data.message.conversation === page.identity) {
-                page.load()
+            if (name === "messageAdded") {
+                if (data.message.conversation === page.identity && data.message.kind === "file") reload.restart()
             } else if (name === "messagesChanged") {
                 for (var i = 0; i < data.messages.length; ++i) {
-                    if (data.messages[i].conversation === page.identity) return page.load()
+                    if (data.messages[i].conversation === page.identity && page.applyChange(data.messages[i])) {
+                        reload.restart()
+                    }
                 }
             }
         }
@@ -77,13 +133,19 @@ Page {
     ListModel {
         id: media
 
+        function row(message) {
+            return { id: message.id, kind: message.mediaKind, body: JSON.stringify(message.body),
+                     messageId: message.messageId, outgoing: message.outgoing }
+        }
+
         function update(messages) {
+            var rows = {}
             for (var i = 0; i < messages.length; ++i) {
-                var message = { id: messages[i].id, kind: messages[i].mediaKind,
-                                body: JSON.stringify(messages[i].body),
-                                messageId: messages[i].messageId, outgoing: messages[i].outgoing }
+                var message = row(messages[i])
+                rows[message.id] = i
                 if (i < count) {
-                    if (get(i).id !== message.id || get(i).body !== message.body || get(i).kind !== message.kind) {
+                    var shown = get(i)
+                    if (shown.id !== message.id || shown.body !== message.body || shown.kind !== message.kind) {
                         set(i, message)
                     }
                 } else {
@@ -91,6 +153,16 @@ Page {
                 }
             }
             if (count > messages.length) remove(messages.length, count - messages.length)
+            page.rowOf = rows
+            if (messages.length > 0) page.oldestKey = messages[messages.length - 1].sortKey
+        }
+
+        function add(messages) {
+            for (var i = 0; i < messages.length; ++i) {
+                page.rowOf[messages[i].id] = count
+                append(row(messages[i]))
+            }
+            if (messages.length > 0) page.oldestKey = messages[messages.length - 1].sortKey
         }
     }
 
@@ -169,6 +241,12 @@ Page {
         cellWidth: cellSize
         cellHeight: cellSize
         cacheBuffer: 1000
+
+        function loadMoreIfNear() {
+            if (originY + contentHeight - contentY - height < 2 * height) page.loadMore()
+        }
+        onContentYChanged: loadMoreIfNear()
+        onContentHeightChanged: loadMoreIfNear()
 
         // Only worth it with more than one kind, or when the saved choice (it is for all chats)
         // leaves this chat's only kind out: the way back.

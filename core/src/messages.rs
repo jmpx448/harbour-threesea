@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Message storage: 1:1 conversations, delivery states, used nonces.
 
+use std::collections::HashMap;
+
 use rusqlite::{OptionalExtension as _, Row, params};
 use serde_json::{Value, json};
 
@@ -287,8 +289,8 @@ pub(crate) const MIGRATION_NO_RECEIPTS: &str = "
     ALTER TABLE messages ADD COLUMN no_receipts INTEGER NOT NULL DEFAULT 0;";
 
 /// Indexes for what is looked for often and is rarely there: what waits to go out, what waits to
-/// come, what is starred, whose acknowledgement a message waits for; and search's walk through all
-/// chats, newest first. Partial ones stay small. The
+/// come, what is starred, whose acknowledgement a message waits for; search's walk through all
+/// chats, newest first; a chat's media. Partial ones stay small. The
 /// queries name them (`INDEXED BY`), since a term that is a bound parameter can't select a partial
 /// index; so a query that stops matching its index fails at once instead of scanning. A body that
 /// is no JSON must not fail its write: `json_valid` comes first. 0 and 1 in here are
@@ -304,6 +306,7 @@ pub(crate) const MIGRATION_LOOKUP_INDEXES: &str = "
                  OR json_extract(body, '$.fileState') = 0);
     CREATE INDEX messages_starred ON messages (created_at, id) WHERE starred = 1;
     CREATE INDEX messages_by_time ON messages (created_at, id);
+    CREATE INDEX messages_media ON messages (conversation, sort_key, id) WHERE kind = 'file';
     CREATE INDEX pending_receivers_by_receiver ON pending_receivers (receiver, message_id);";
 
 const _: () = assert!(OutgoingState::Pending as i64 == 0 && INCOMING_UNREAD == 0);
@@ -449,10 +452,14 @@ pub fn location_message(body: &str) -> Option<libthreema::model::message::Locati
 /// media), `audio` (sent as a file) or `file`. `body` is the stored file JSON.
 pub fn media_kind(body: &str) -> &'static str {
     let value: Value = serde_json::from_str(body).unwrap_or_default();
-    let media_type = value["mediaType"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    kind_of_media(
+        value["mediaType"].as_str().unwrap_or_default(),
+        value["rendering"] == "file",
+    )
+}
+
+fn kind_of_media(media_type: &str, rendered_as_file: bool) -> &'static str {
+    let media_type = media_type.to_ascii_lowercase();
     if media_type == "image/gif" {
         "gif"
     } else if media_type.starts_with("image/") {
@@ -460,15 +467,19 @@ pub fn media_kind(body: &str) -> &'static str {
     } else if media_type.starts_with("video/") {
         "video"
     } else if media_type.starts_with("audio/") {
-        if value["rendering"] == "file" {
-            "audio"
-        } else {
-            "voice"
-        }
+        if rendered_as_file { "audio" } else { "voice" }
     } else {
         "file"
     }
 }
+
+/// All kinds, in the filter's order.
+pub const MEDIA_KINDS: [&str; 6] = ["image", "gif", "video", "voice", "audio", "file"];
+
+/// Where a page of a chat's media continues: the history position of the row before it.
+pub type MediaCursor = (i64, i64);
+/// File messages with their [`media_kind`].
+pub type MediaPage = Vec<(Message, &'static str)>;
 
 /// More than this many candidates from the search index: the text is common, and walking the
 /// messages from the newest on soon comes to enough hits.
@@ -508,9 +519,6 @@ fn search_walk(in_chat: bool, liked: bool) -> String {
         search_order(in_chat)
     )
 }
-
-/// All kinds, in the filter's order.
-pub const MEDIA_KINDS: [&str; 6] = ["image", "gif", "video", "voice", "audio", "file"];
 
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1259,27 +1267,65 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The file messages of a conversation whose [`media_kind`] is in `kinds`, newest first:
-    /// the chat's media gallery (Android's `mediagallery`).
+    /// A page of the file messages of a conversation whose [`media_kind`] is in `kinds`, newest
+    /// first, each with its kind: the chat's media gallery (Android's `mediagallery`). `before`
+    /// goes on from where a page ended; `true`: there is more. Rows of other kinds are passed over
+    /// here, so a page costs about as much whatever the filter, as long as it finds its rows.
     pub fn conversation_media(
         &self,
         conversation: &str,
         kinds: &[&str],
-    ) -> Result<Vec<Message>, StoreError> {
+        before: Option<MediaCursor>,
+        limit: usize,
+    ) -> Result<(MediaPage, bool), StoreError> {
+        let mut page = Vec::new();
+        if limit == 0 {
+            return Ok((page, false));
+        }
+        let (key, id) = before.unwrap_or((i64::MAX, i64::MAX));
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE conversation = ?1 AND kind = 'file'
+            "SELECT {} FROM messages INDEXED BY messages_media
+             WHERE conversation = ?1 AND kind = 'file' AND (sort_key, id) < (?2, ?3)
              ORDER BY sort_key DESC, id DESC",
             columns()
         ))?;
-        let rows = statement.query_map(params![conversation], from_row)?;
-        let mut media = Vec::new();
+        let rows = statement.query_map(params![conversation, key, id], from_row)?;
         for message in rows {
             let message = message?;
-            if kinds.contains(&media_kind(&message.body)) {
-                media.push(message);
+            let kind = media_kind(&message.body);
+            if kinds.contains(&kind) {
+                if page.len() == limit {
+                    return Ok((page, true));
+                }
+                page.push((message, kind));
             }
         }
-        Ok(media)
+        Ok((page, false))
+    }
+
+    /// How many file messages of a conversation there are of each [`media_kind`] it has.
+    pub fn conversation_media_counts(
+        &self,
+        conversation: &str,
+    ) -> Result<HashMap<&'static str, i64>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT CASE WHEN json_valid(body) THEN json_extract(body, '$.mediaType') END,
+                    CASE WHEN json_valid(body) THEN json_extract(body, '$.rendering') END,
+                    count(*)
+             FROM messages INDEXED BY messages_media
+             WHERE conversation = ?1 AND kind = 'file'
+             GROUP BY 1, 2",
+        )?;
+        let mut rows = statement.query([conversation])?;
+        let mut counts = HashMap::new();
+        while let Some(row) = rows.next()? {
+            // Whatever isn't text in these fields counts as absent, as in `media_kind`.
+            let media_type = row.get_ref(0)?.as_str().unwrap_or_default();
+            let rendering = row.get_ref(1)?.as_str().unwrap_or_default();
+            let kind = kind_of_media(media_type, rendering == "file");
+            *counts.entry(kind).or_insert(0) += row.get::<_, i64>(2)?;
+        }
+        Ok(counts)
     }
 
     /// Mark incoming messages of a conversation as read; returns their message ids.
@@ -2597,24 +2643,82 @@ mod tests {
         store
             .insert_outgoing("00000BOB", 10, "file", &file("image/png", "media"))
             .unwrap();
-        let kinds: Vec<&str> = store
-            .conversation_media("ECHOECHO", &MEDIA_KINDS)
-            .unwrap()
-            .iter()
-            .map(|m| media_kind(&m.body))
-            .collect();
+        let page = |kinds: &[&str], before, limit| {
+            store
+                .conversation_media("ECHOECHO", kinds, before, limit)
+                .unwrap()
+        };
+        let (all, more) = page(&MEDIA_KINDS, None, 10);
         assert_eq!(
-            kinds,
+            all.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
             ["file", "audio", "voice", "video", "gif", "image"],
             "newest first"
         );
-        let picked: Vec<i64> = store
-            .conversation_media("ECHOECHO", &["image", "video"])
-            .unwrap()
-            .iter()
-            .map(|m| m.id)
-            .collect();
-        assert_eq!(picked, vec![ids[2], ids[0]]);
+        assert!(!more);
+        for (message, kind) in &all {
+            assert_eq!(media_kind(&message.body), *kind);
+        }
+        let (picked, more) = page(&["image", "video"], None, 10);
+        assert_eq!(
+            picked.iter().map(|(m, _)| m.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[0]]
+        );
+        assert!(!more);
+
+        // Page by page, with what comes between them passed over.
+        let (first, more) = page(&["file", "voice", "image"], None, 2);
+        assert_eq!(
+            first.iter().map(|(m, _)| m.id).collect::<Vec<_>>(),
+            vec![ids[5], ids[3]]
+        );
+        assert!(more);
+        let last = &first[1].0;
+        let cursor = Some((last.sort_key, last.id));
+        let (second, more) = page(&["file", "voice", "image"], cursor, 2);
+        assert_eq!(
+            second.iter().map(|(m, _)| m.id).collect::<Vec<_>>(),
+            vec![ids[0]]
+        );
+        assert!(!more);
+        // The row a page ended on may be gone by then.
+        store.remove_message(last.id).unwrap();
+        let (second, _) = page(&["file", "voice", "image"], cursor, 2);
+        assert_eq!(second[0].0.id, ids[0]);
+        assert!(page(&MEDIA_KINDS, None, 0).0.is_empty());
+
+        // Counted without reading them: the same as `media_kind` for anything at all in the field.
+        store
+            .insert_outgoing("ECHOECHO", 11, "file", "no json")
+            .unwrap();
+        store
+            .insert_outgoing("ECHOECHO", 12, "file", r#"{"mediaType":5,"rendering":7}"#)
+            .unwrap();
+        store
+            .insert_outgoing(
+                "ECHOECHO",
+                13,
+                "file",
+                r#"{"mediaType":"AUDIO/x","rendering":1}"#,
+            )
+            .unwrap();
+        let counts = store.conversation_media_counts("ECHOECHO").unwrap();
+        let mut by_hand: HashMap<&str, i64> = HashMap::new();
+        for (message, kind) in page(&MEDIA_KINDS, None, 100).0 {
+            assert_eq!(media_kind(&message.body), kind);
+            *by_hand.entry(kind).or_insert(0) += 1;
+        }
+        assert_eq!(counts, by_hand);
+        assert_eq!(
+            counts["file"],
+            2 + 1,
+            "the PDF was removed above? no: voice was"
+        );
+        assert!(
+            store
+                .conversation_media_counts("00000ANN")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A common word: too many candidates to sort, so a walk from the newest on, which finds what
@@ -2839,7 +2943,8 @@ mod tests {
                 .execute_batch(
                     "DROP INDEX messages_pending; DROP INDEX messages_uploading;
                      DROP INDEX messages_media_to_come; DROP INDEX messages_starred;
-                     DROP INDEX messages_by_time; DROP INDEX pending_receivers_by_receiver;
+                     DROP INDEX messages_by_time; DROP INDEX messages_media;
+                     DROP INDEX pending_receivers_by_receiver;
                      DROP TABLE awaiting_reflection;
                      ALTER TABLE messages DROP COLUMN written_out;
                      DROP TABLE picture_restored; DROP TABLE synced_pictures;

@@ -530,12 +530,17 @@ pub enum Command {
     Draft {
         identity: String,
     },
-    /// A chat's media gallery, newest first: `{messages (with mediaKind), kinds, counts}`.
-    /// `kinds` filters (default: the saved filter, see `setMediaKinds`).
+    /// A page of a chat's media gallery, newest first: `{messages (with mediaKind), kinds, counts,
+    /// next}`. `kinds` filters (default: the saved filter, see `setMediaKinds`); `before` is the
+    /// `next` of the page before.
     ChatMedia {
         identity: String,
         #[serde(default)]
         kinds: Option<Vec<String>>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        before: Option<String>,
     },
     /// The media gallery's filter (kinds of `MEDIA_KINDS`), saved for all chats like Android.
     SetMediaKinds {
@@ -2003,7 +2008,12 @@ impl App {
                 quote,
             } => self.set_draft(&identity, &text, quote.as_deref()),
             Command::Draft { identity } => self.draft(&identity),
-            Command::ChatMedia { identity, kinds } => self.chat_media(&identity, kinds),
+            Command::ChatMedia {
+                identity,
+                kinds,
+                limit,
+                before,
+            } => self.chat_media(&identity, kinds, limit, before.as_deref()),
             Command::SetMediaKinds { kinds } => {
                 let kinds: Vec<&str> = crate::messages::MEDIA_KINDS
                     .into_iter()
@@ -3764,7 +3774,7 @@ mod tests {
         assert_eq!(long["messages"].as_array().unwrap().len(), 20);
 
         // The pictures and the voice message are on the device, not on a server.
-        let media = app.chat_media("DEMO0006", None).unwrap();
+        let media = app.chat_media("DEMO0006", None, None, None).unwrap();
         let ids: Vec<i64> = media["messages"]
             .as_array()
             .unwrap()

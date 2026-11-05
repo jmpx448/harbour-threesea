@@ -13,7 +13,7 @@ ValueButton {
     property int count
 
     function load() {
-        backend.call("chatMedia", { identity: identity }, function(ok, result) {
+        backend.call("chatMedia", { identity: identity, limit: 0 }, function(ok, result) {
             if (!ok) return
             var total = 0
             for (var kind in result.counts) total += result.counts[kind]
@@ -28,13 +28,25 @@ ValueButton {
     onIdentityChanged: if (identity.length > 0) load()
     onClicked: pageStack.push(Qt.resolvedUrl("../pages/MediaPage.qml"), { identity: identity, name: name })
 
+    // A file arriving changes its message several times.
+    Timer {
+        id: reload
+        interval: 500
+        onTriggered: root.load()
+    }
+
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "messageAdded" && data.message.conversation === root.identity) root.load()
-            else if (name === "messagesChanged") {
+            if (name === "messageAdded") {
+                if (data.message.conversation === root.identity && data.message.kind === "file") reload.restart()
+            } else if (name === "messagesChanged") {
                 for (var i = 0; i < data.messages.length; ++i) {
-                    if (data.messages[i].conversation === root.identity) return root.load()
+                    var message = data.messages[i]
+                    if (message.conversation === root.identity
+                            && (message.kind === "file" || message.kind === "deleted")) {
+                        return reload.restart()
+                    }
                 }
             }
         }

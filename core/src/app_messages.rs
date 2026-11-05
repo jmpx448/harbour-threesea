@@ -81,6 +81,9 @@ impl Conversation {
 /// How long removing the ID waits for the connection to send a call's end.
 const CONNECTION_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// A page of the media gallery when the UI doesn't say how many it wants.
+const MEDIA_PAGE: u32 = 60;
+
 impl App {
     /// The conversation `identity` (a Threema ID or a group key) refers to, with its key.
     pub(crate) fn conversation(&self, identity: &str) -> Result<(String, Conversation), ApiError> {
@@ -102,14 +105,17 @@ impl App {
         Ok((id, Conversation::Contact(contact)))
     }
 
-    /// `chatMedia`: the gallery with each message's kind, the active filter and how many of
-    /// each kind there are (the UI hides filters for kinds the chat doesn't have).
+    /// `chatMedia`: a page of the gallery with each message's kind, the active filter, where the
+    /// next page starts (`next`, none at the end) and, on a first page, how many of each kind
+    /// there are (the UI hides filters for kinds the chat doesn't have). A `limit` of 0: just that.
     pub(crate) fn chat_media(
         &self,
         identity: &str,
         kinds: Option<Vec<String>>,
+        limit: Option<u32>,
+        before: Option<&str>,
     ) -> Result<Value, ApiError> {
-        use crate::messages::{MEDIA_KINDS, media_kind};
+        use crate::messages::MEDIA_KINDS;
         let key = self.readable_conversation(identity)?.0;
         let saved = self.store.setting(keys::MEDIA_KINDS)?;
         let wanted: Vec<String> = kinds.unwrap_or_else(|| match saved {
@@ -120,21 +126,39 @@ impl App {
                 .collect(),
             None => MEDIA_KINDS.iter().map(|k| (*k).to_owned()).collect(),
         });
-        let all = self.store.conversation_media(&key, &MEDIA_KINDS)?;
-        let mut counts = serde_json::Map::new();
-        for kind in MEDIA_KINDS {
-            let n = all.iter().filter(|m| media_kind(&m.body) == kind).count();
-            counts.insert(kind.to_owned(), json!(n));
-        }
-        let shown: Vec<_> = all
+        let cursor = before
+            .map(|cursor| {
+                cursor
+                    .split_once(':')
+                    .and_then(|(key, id)| Some((key.parse().ok()?, id.parse().ok()?)))
+                    .ok_or_else(|| ApiError::Internal("invalid position".into()))
+            })
+            .transpose()?;
+        let shown: Vec<&str> = MEDIA_KINDS
             .into_iter()
-            .filter(|m| wanted.iter().any(|w| w == media_kind(&m.body)))
+            .filter(|kind| wanted.iter().any(|w| w == kind))
             .collect();
-        let mut messages = self.store.messages_json(&shown);
-        for (json, message) in messages.iter_mut().zip(&shown) {
-            json["mediaKind"] = json!(media_kind(&message.body));
+        let limit = limit.unwrap_or(MEDIA_PAGE) as usize;
+        let (page, more) = self.store.conversation_media(&key, &shown, cursor, limit)?;
+        let next = page
+            .last()
+            .filter(|_| more)
+            .map(|(last, _)| format!("{}:{}", last.sort_key, last.id));
+        let (page, page_kinds): (Vec<_>, Vec<_>) = page.into_iter().unzip();
+        let mut messages = self.store.messages_json(&page);
+        for (json, kind) in messages.iter_mut().zip(page_kinds) {
+            json["mediaKind"] = json!(kind);
         }
-        Ok(json!({ "messages": messages, "kinds": wanted, "counts": counts }))
+        let mut reply = json!({ "messages": messages, "kinds": wanted, "next": next });
+        if before.is_none() {
+            let found = self.store.conversation_media_counts(&key)?;
+            let mut counts = serde_json::Map::new();
+            for kind in MEDIA_KINDS {
+                counts.insert(kind.to_owned(), json!(found.get(kind).unwrap_or(&0)));
+            }
+            reply["counts"] = counts.into();
+        }
+        Ok(reply)
     }
 
     /// Reading a private chat needs the app unlocked (ADR 0009).
@@ -1561,6 +1585,61 @@ mod tests {
     use crate::{app::StartConfig, contacts::test_contact, store::StoredIdentity};
 
     const PEER: &str = "ABCD1234";
+
+    /// The gallery page by page: `next` leads through all of it, the filter is the core's, and the
+    /// counts come with a first page whatever it shows.
+    #[test]
+    fn the_gallery_comes_in_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        app.store.upsert_contact(&test_contact(PEER)).unwrap();
+        for n in 0..5u64 {
+            let media_type = if n == 2 { "video/mp4" } else { "image/png" };
+            let body = json!({ "mediaType": media_type }).to_string();
+            app.store
+                .insert_incoming(PEER, n + 1, "file", &body, 1)
+                .unwrap();
+        }
+        let ids = |page: &Value| -> Vec<u64> {
+            page["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| u64::from_str_radix(m["messageId"].as_str().unwrap(), 16).unwrap())
+                .collect()
+        };
+
+        let first = app.chat_media(PEER, None, Some(2), None).unwrap();
+        assert_eq!(ids(&first), [5, 4]);
+        assert_eq!(first["counts"]["image"], 4);
+        assert_eq!(first["counts"]["video"], 1);
+        assert_eq!(first["counts"]["gif"], 0);
+        assert_eq!(first["messages"][0]["mediaKind"], "image");
+
+        let next = first["next"].as_str().unwrap();
+        let second = app.chat_media(PEER, None, Some(2), Some(next)).unwrap();
+        assert_eq!(ids(&second), [3, 2]);
+        assert!(second.get("counts").is_none());
+        let next = second["next"].as_str().unwrap();
+        let last = app.chat_media(PEER, None, Some(2), Some(next)).unwrap();
+        assert_eq!(ids(&last), [1]);
+        assert!(last["next"].is_null());
+
+        let videos = Some(vec!["video".to_owned()]);
+        let filtered = app.chat_media(PEER, videos, Some(2), None).unwrap();
+        assert_eq!(ids(&filtered), [3]);
+        assert!(filtered["next"].is_null());
+        assert_eq!(filtered["counts"]["image"], 4);
+
+        let counts = app.chat_media(PEER, None, Some(0), None).unwrap();
+        assert!(ids(&counts).is_empty());
+        assert_eq!(counts["counts"]["image"], 4);
+
+        assert!(
+            app.chat_media(PEER, None, Some(2), Some("nonsense"))
+                .is_err()
+        );
+    }
 
     fn app(dir: &std::path::Path) -> App {
         let app = App::new(
