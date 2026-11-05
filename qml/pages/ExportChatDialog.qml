@@ -57,8 +57,8 @@ Dialog {
                 //% "Password"
                 label: qsTrId("threesea-la-password")
                 errorHighlight: !dialog.canAccept
-                //% "At least 8 characters. With a password the messages and files in the archive are encrypted (AES-256), and any ZIP program asks for it when opening them; the names of the files stay readable. Empty: no password."
-                description: qsTrId("threesea-la-export-chat-password-hint")
+                //% "At least 8 characters. With a password the messages and files in the archive are encrypted with AES-256, and it opens in ZIP programs with AES support, such as 7-Zip; the names of the files stay readable. Empty: not encrypted, anyone who gets the file can read it."
+                description: qsTrId("threesea-la-export-chat-password-note")
                 EnterKey.iconSource: "image://theme/icon-m-enter-accept"
                 EnterKey.enabled: dialog.canAccept
                 EnterKey.onClicked: dialog.accept()
