@@ -95,18 +95,20 @@ void quitOnTerm(QObject *parent)
     ::sigaction(SIGTERM, &action, nullptr);
 }
 
-// If an instance is already running (possibly without a window, see below), ask it to show
-// itself and return true.
-bool activateRunningInstance()
+// Whether an instance owns the name (possibly without a window, see below).
+bool instanceRunning()
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
-    if (!bus.interface() || !bus.interface()->isServiceRegistered(QString::fromLatin1(DBusInterface::serviceName()))) {
-        return false;
-    }
+    return bus.interface() && bus.interface()->isServiceRegistered(QString::fromLatin1(DBusInterface::serviceName()));
+}
+
+// Asks the running instance to show itself. Says whether it answered.
+bool activateRunningInstance()
+{
     QDBusMessage call = QDBusMessage::createMethodCall(
         QString::fromLatin1(DBusInterface::serviceName()), QString::fromLatin1(DBusInterface::objectPath()),
         QString::fromLatin1(DBusInterface::interfaceName()), QStringLiteral("activate"));
-    return bus.call(call, QDBus::Block, 3000).type() == QDBusMessage::ReplyMessage;
+    return QDBusConnection::sessionBus().call(call, QDBus::Block, 3000).type() == QDBusMessage::ReplyMessage;
 }
 
 } // namespace
@@ -147,8 +149,11 @@ int main(int argc, char *argv[])
     QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope,
                        QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation));
 
-    if (activateRunningInstance()) {
-        return 0;
+    // One process for the store: two would log in with the same ID and throw each other out, and
+    // each would empty the other's captures. So this one ends also if the other is busy and doesn't
+    // answer in time; it may still act on the call.
+    if (instanceRunning()) {
+        return activateRunningInstance() ? 0 : 1;
     }
     quitOnTerm(app.data());
     ThreeseBackend::applyQtLogLevel();
@@ -282,7 +287,14 @@ int main(int argc, char *argv[])
     showUnlessCalled.start(2000);
     // Own the D-Bus name only now: when the launcher started us via D-Bus activation, its
     // activate()/openChat() call is queued by the bus until then and must reach the loaded UI.
-    dbus->registerOnBus();
+    if (!dbus->registerOnBus()) {
+        // Another instance got the name while this one was loading. The core starts in the event
+        // loop, so nothing of the store has been touched here.
+        if (instanceRunning()) {
+            activateRunningInstance();
+        }
+        return 1;
+    }
     const int result = app->exec();
 
     // The event loop has ended, so the window doesn't draw any more. The name stays until the
