@@ -3,13 +3,17 @@
 //! addresses and phone numbers from the device's address book are normalised and hashed
 //! (HMAC-SHA256 with Threema's fixed keys); only the hashes go to the directory, which answers
 //! with the Threema IDs linked to them. Found people become contacts named as in the address
-//! book, server verified (two dots).
+//! book, server verified (two dots). Only one-to-one matches count, as on Android
+//! (`AndroidContactMatcher`): with an ID that different people's entries claim, or a person with
+//! several IDs, we can't say whose it is, and the name could go to the wrong person.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use data_encoding::BASE64;
 use hmac::{Hmac, Mac as _};
 use sha2::Sha256;
+
+use crate::directory::MatchedIdentity;
 
 /// HMAC keys from Threema Android (`APIConnector.EMAIL_HMAC_KEY` / `MOBILENO_HMAC_KEY`).
 const EMAIL_HMAC_KEY: [u8; 32] = [
@@ -33,6 +37,16 @@ pub struct Entry {
     pub emails: Vec<String>,
     #[serde(default)]
     pub phones: Vec<String>,
+}
+
+impl Entry {
+    fn name(&self) -> (&str, &str) {
+        (self.first_name.trim(), self.last_name.trim())
+    }
+
+    fn is_nameless(&self) -> bool {
+        self.name() == ("", "")
+    }
 }
 
 fn hmac(key: &[u8; 32], data: &str) -> String {
@@ -344,26 +358,107 @@ pub fn phone_hash(normalized: &str) -> String {
     hmac(&MOBILE_HMAC_KEY, normalized)
 }
 
-/// All hashes of the entries, each mapped to the entry's index.
-pub fn hash_entries(
-    entries: &[Entry],
-    country: &str,
-) -> (HashMap<String, usize>, HashMap<String, usize>) {
-    let mut emails = HashMap::new();
-    let mut phones = HashMap::new();
+/// All hashes of the entries, each with the entries that have it.
+#[derive(Default)]
+pub struct Hashes {
+    pub emails: HashMap<String, Vec<usize>>,
+    pub phones: HashMap<String, Vec<usize>>,
+}
+
+pub fn hash_entries(entries: &[Entry], region: &str) -> Hashes {
+    let mut hashes = Hashes::default();
     for (index, entry) in entries.iter().enumerate() {
         for email in &entry.emails {
             for hash in email_hashes(email) {
-                emails.insert(hash, index);
+                hashes.emails.entry(hash).or_default().push(index);
             }
         }
         for phone in &entry.phones {
-            if let Some(normalized) = normalize_phone(phone, country) {
-                phones.insert(phone_hash(&normalized), index);
+            if let Some(normalized) = normalize_phone(phone, region) {
+                hashes
+                    .phones
+                    .entry(phone_hash(&normalized))
+                    .or_default()
+                    .push(index);
             }
         }
     }
-    (emails, phones)
+    hashes
+}
+
+/// An ID the directory found, and the one person in the address book it belongs to.
+pub struct Claim<'a> {
+    pub identity: String,
+    pub public_key: [u8; 32],
+    pub entry: &'a Entry,
+}
+
+/// The entry behind these, unless they are different people. The same name twice is one person
+/// (the same contact from two accounts), and an entry without a name says nothing against another.
+fn one_person(indexes: &BTreeSet<usize>, entries: &[Entry]) -> Option<usize> {
+    let mut person: Option<usize> = None;
+    for index in indexes {
+        let entry = entries.get(*index)?;
+        match person.and_then(|known| entries.get(known)) {
+            Some(known) if entry.is_nameless() || known.name() == entry.name() => {}
+            Some(known) if !known.is_nameless() => return None,
+            _ => person = Some(*index),
+        }
+    }
+    person
+}
+
+/// Who an entry is, when counting what a person matches: its name, or for an entry without one
+/// itself.
+fn person_of(entries: &[Entry], index: usize) -> Option<(&str, &str, Option<usize>)> {
+    let entry = entries.get(index)?;
+    let (first, last) = entry.name();
+    Some((first, last, entry.is_nameless().then_some(index)))
+}
+
+/// What the directory's answer means, per ID: it has a row per hash, so one ID can come twice.
+pub fn claims<'a>(
+    found: &[MatchedIdentity],
+    hashes: &Hashes,
+    entries: &'a [Entry],
+) -> Vec<Claim<'a>> {
+    let mut by_identity: BTreeMap<&str, (&[u8; 32], bool, BTreeSet<usize>)> = BTreeMap::new();
+    for row in found {
+        let (key, same_key, indexes) =
+            by_identity
+                .entry(&row.identity)
+                .or_insert((&row.public_key, true, BTreeSet::new()));
+        *same_key &= **key == row.public_key;
+        let by_email = row.email_hash.as_ref().and_then(|h| hashes.emails.get(h));
+        let by_phone = row.mobile_hash.as_ref().and_then(|h| hashes.phones.get(h));
+        indexes.extend(by_email.into_iter().chain(by_phone).flatten());
+    }
+    // A person with several IDs: one of them may be a number shared with someone else, and the
+    // name could go to the wrong person (Android drops them too).
+    let mut ids_of_person: BTreeMap<_, BTreeSet<&str>> = BTreeMap::new();
+    for (identity, (_, _, indexes)) in &by_identity {
+        for index in indexes {
+            if let Some(person) = person_of(entries, *index) {
+                ids_of_person.entry(person).or_default().insert(*identity);
+            }
+        }
+    }
+    by_identity
+        .iter()
+        .filter(|(_, (_, same_key, _))| *same_key)
+        .filter_map(|(identity, (key, _, indexes))| {
+            let index = one_person(indexes, entries)?;
+            let person = person_of(entries, index)?;
+            if ids_of_person.get(&person)?.len() > 1 {
+                return None;
+            }
+            Some(Claim {
+                identity: (*identity).to_owned(),
+                public_key: **key,
+                entry: entries.get(index)?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -722,6 +817,152 @@ mod tests {
         assert_eq!(international_phone("+41 123"), None);
         assert_eq!(international_phone("+41 79123456789012"), None);
         assert_eq!(international_phone(""), None);
+    }
+
+    fn entry(first_name: &str, phones: &[&str], emails: &[&str]) -> Entry {
+        Entry {
+            first_name: first_name.into(),
+            last_name: String::new(),
+            emails: emails.iter().map(ToString::to_string).collect(),
+            phones: phones.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn by_phone(identity: &str, number: &str) -> MatchedIdentity {
+        MatchedIdentity {
+            identity: identity.into(),
+            public_key: [7; 32],
+            email_hash: None,
+            mobile_hash: Some(phone_hash(number)),
+        }
+    }
+
+    fn by_email(identity: &str, address: &str) -> MatchedIdentity {
+        MatchedIdentity {
+            identity: identity.into(),
+            public_key: [7; 32],
+            email_hash: email_hashes(address).into_iter().next(),
+            mobile_hash: None,
+        }
+    }
+
+    fn claimed(entries: &[Entry], found: &[MatchedIdentity]) -> Vec<(String, String)> {
+        claims(found, &hash_entries(entries, "DE"), entries)
+            .into_iter()
+            .map(|claim| (claim.identity, claim.entry.first_name.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_number_two_people_share_names_nobody() {
+        let entries = [
+            entry("Anna", &["+49 30 1234567"], &[]),
+            entry("Ben", &["030 1234567"], &[]),
+            entry("Cleo", &["+49 171 1234567"], &[]),
+        ];
+        let found = [
+            by_phone("ABCD1234", "49301234567"),
+            by_phone("EFGH5678", "491711234567"),
+        ];
+        assert_eq!(
+            claimed(&entries, &found),
+            [("EFGH5678".to_owned(), "Cleo".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_address_and_a_number_of_two_people_name_nobody() {
+        let entries = [
+            entry("Anna", &[], &["same@example.com"]),
+            entry("Ben", &["+49 171 1234567"], &[]),
+        ];
+        let found = [
+            by_email("ABCD1234", "same@example.com"),
+            by_phone("ABCD1234", "491711234567"),
+        ];
+        assert!(claimed(&entries, &found).is_empty());
+    }
+
+    #[test]
+    fn one_person_written_down_twice_is_one_person() {
+        let entries = [
+            entry("Anna", &["+49 171 1234567"], &[]),
+            entry("Anna", &["0171 1234567"], &["anna@example.com"]),
+            entry("", &["+49 (0) 171 1234567"], &[]),
+        ];
+        let found = [
+            by_phone("ABCD1234", "491711234567"),
+            by_email("ABCD1234", "anna@example.com"),
+        ];
+        assert_eq!(
+            claimed(&entries, &found),
+            [("ABCD1234".to_owned(), "Anna".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_entry_matching_several_ids_names_nobody() {
+        // Her mobile, and a home number that is linked to someone else.
+        let entries = [
+            entry("Anna", &["+49 171 1234567", "+49 30 1234567"], &[]),
+            entry("Cleo", &["+49 171 7654321"], &[]),
+        ];
+        let found = [
+            by_phone("ABCD1234", "491711234567"),
+            by_phone("EFGH5678", "49301234567"),
+            by_phone("JKLM9012", "491717654321"),
+        ];
+        assert_eq!(
+            claimed(&entries, &found),
+            [("JKLM9012".to_owned(), "Cleo".to_owned())]
+        );
+    }
+
+    #[test]
+    fn one_person_written_down_twice_with_several_ids_names_nobody() {
+        let entries = [
+            entry("Anna", &["+49 171 1234567"], &[]),
+            entry("Anna", &["+49 30 1234567"], &[]),
+        ];
+        let found = [
+            by_phone("ABCD1234", "491711234567"),
+            by_phone("EFGH5678", "49301234567"),
+        ];
+        assert!(claimed(&entries, &found).is_empty());
+    }
+
+    #[test]
+    fn entries_without_a_name_are_each_their_own() {
+        // Two different ones are found, one with several IDs isn't.
+        let entries = [
+            entry("", &["+49 171 1234567"], &[]),
+            entry("", &["+49 171 7654321"], &[]),
+            entry("", &["+49 30 1234567", "+49 30 7654321"], &[]),
+        ];
+        let found = [
+            by_phone("ABCD1234", "491711234567"),
+            by_phone("EFGH5678", "491717654321"),
+            by_phone("JKLM9012", "49301234567"),
+            by_phone("NPQR3456", "49307654321"),
+        ];
+        assert_eq!(
+            claimed(&entries, &found),
+            [
+                ("ABCD1234".to_owned(), String::new()),
+                ("EFGH5678".to_owned(), String::new())
+            ]
+        );
+    }
+
+    #[test]
+    fn rows_that_say_different_keys_or_hashes_we_do_not_have_are_left_out() {
+        let entries = [entry("Anna", &["+49 171 1234567"], &["anna@example.com"])];
+        let mut other_key = by_email("ABCD1234", "anna@example.com");
+        other_key.public_key = [8; 32];
+        let found = [by_phone("ABCD1234", "491711234567"), other_key];
+        assert!(claimed(&entries, &found).is_empty());
+        let found = [by_phone("EFGH5678", "4917100000000")];
+        assert!(claimed(&entries, &found).is_empty());
     }
 
     #[test]

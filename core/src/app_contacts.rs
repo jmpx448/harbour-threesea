@@ -1166,9 +1166,8 @@ impl App {
     ) -> Result<Value, ApiError> {
         let own = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let client_key = ClientKey::from(*own.client_key);
-        let (emails, phones) =
-            crate::address_book::hash_entries(&entries, self.address_book_region()?);
-        if emails.is_empty() && phones.is_empty() {
+        let hashes = crate::address_book::hash_entries(&entries, self.address_book_region()?);
+        if hashes.emails.is_empty() && hashes.phones.is_empty() {
             return Ok(json!({ "matched": 0, "added": 0 }));
         }
         let token = match self.store.setting(keys::MATCH_TOKEN)? {
@@ -1181,8 +1180,8 @@ impl App {
                 token
             }
         };
-        let email_list: Vec<String> = emails.keys().cloned().collect();
-        let phone_list: Vec<String> = phones.keys().cloned().collect();
+        let email_list: Vec<String> = hashes.emails.keys().cloned().collect();
+        let phone_list: Vec<String> = hashes.phones.keys().cloned().collect();
         let found =
             match crate::directory::match_identities(&self.https, &token, &email_list, &phone_list)
                 .await
@@ -1205,20 +1204,9 @@ impl App {
                 }
             };
         let (mut matched, mut added) = (0, 0);
-        let excluded = self.app_settings()?.sync_excluded_ids;
-        for hit in found {
-            if hit.identity == own.threema_id || excluded.contains(&hit.identity) {
-                continue;
-            }
-            let Some(entry) = hit
-                .email_hash
-                .as_ref()
-                .and_then(|h| emails.get(h))
-                .or_else(|| hit.mobile_hash.as_ref().and_then(|h| phones.get(h)))
-                .and_then(|index| entries.get(*index))
-            else {
-                continue;
-            };
+        let claims = crate::address_book::claims(&found, &hashes, &entries);
+        for hit in self.claims_to_take(claims, &own.threema_id)? {
+            let entry = hit.entry;
             let (mut contact, fresh) = match self.store.contact(&hit.identity)? {
                 Some(contact) => (contact, false),
                 None => {
@@ -1254,6 +1242,18 @@ impl App {
         }
         tracing::info!(matched, added, "address book matched");
         Ok(json!({ "matched": matched, "added": added }))
+    }
+
+    /// Not the user themself, and not whoever they deleted or excluded: a deleted contact stays
+    /// deleted, however often the address book says otherwise, until added by hand.
+    fn claims_to_take<'a>(
+        &self,
+        mut claims: Vec<crate::address_book::Claim<'a>>,
+        own: &str,
+    ) -> Result<Vec<crate::address_book::Claim<'a>>, ApiError> {
+        let excluded = self.app_settings()?.sync_excluded_ids;
+        claims.retain(|claim| claim.identity != own && !excluded.contains(&claim.identity));
+        Ok(claims)
     }
 
     /// A contact the address book matched: named from it unless the user named them, server
@@ -1751,12 +1751,26 @@ mod contact_policy_tests {
         )
         .await;
         assert_eq!(excluded(&app), ["BBBBBBBB"]);
+        let entry = crate::address_book::Entry {
+            first_name: "Anna".into(),
+            last_name: String::new(),
+            emails: Vec::new(),
+            phones: Vec::new(),
+        };
+        let claim = || crate::address_book::Claim {
+            identity: "BBBBBBBB".into(),
+            public_key: [7; 32],
+            entry: &entry,
+        };
+        let taken = |app: &App| app.claims_to_take(vec![claim()], "ABCD1234").unwrap().len();
+        assert_eq!(taken(&app), 0);
         call(
             &mut app,
             json!({"cmd": "addContact", "identity": "BBBBBBBB"}),
         )
         .await;
         assert!(excluded(&app).is_empty());
+        assert_eq!(taken(&app), 1);
     }
 
     /// Someone out of the contact list who isn't excluded (a group member): back in it, and it

@@ -609,7 +609,11 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
 - Flow: `identity/match_token` (challenge response with the client key, token cached in the
   store and refreshed when the server rejects it), then `identity/match` with the hash lists.
 - Hits become contacts (verification level server-verified, acquired directly) named after the
-  address book entry if they have no name yet.
+  address book entry if they have no name yet. An ID claimed by different people's entries is left
+  alone, as Android does (`AndroidContactMatcher`); entries with the same name count as one person.
+  Android also drops an entry that matches several IDs; we add those, under the same name.
+  Whoever the user deleted is on the exclusion list and isn't brought back; adding them by hand
+  takes them off it.
 - Sailfish side: `org.nemomobile.contacts` PeopleModel in QML (Harbour-allowed, Sailjail
   permission `Contacts`), only when the user enables it in Settings; then at most daily.
 
