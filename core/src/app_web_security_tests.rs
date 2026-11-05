@@ -1972,3 +1972,49 @@ fn a_new_picture_reaches_the_browser_on_its_own() {
     app.web_refresh();
     assert!(receiver_updates(&sent_values(&mut rx)).is_empty());
 }
+
+/// Our nickname and picture changed from anywhere reach the browser: a nickname on its own leaves
+/// the picture alone there, and no nickname is our ID.
+#[test]
+fn the_browser_hears_of_our_profile_changing() {
+    use crate::{profile_pictures::OWN_PICTURE, store::keys};
+    let (_dir, mut app) = fixture();
+    let mut rx = browser(&mut app);
+    app.web_subscribe_profile(1);
+    app.web_refresh();
+    sent_values(&mut rx);
+    let update = |app: &mut App, rx: &mut UnboundedReceiver<ToWeb>| {
+        app.web_refresh();
+        let mut sent = sent_values(rx);
+        assert_eq!(sent.len(), 1);
+        let wire = sent.remove(0);
+        assert_eq!(
+            saltyrtc::field(&wire, "subType"),
+            Some(&Value::from("profile"))
+        );
+        saltyrtc::field(&wire, "data").unwrap().clone()
+    };
+    let nickname = |data: &Value| saltyrtc::field(data, "publicNickname").cloned().unwrap();
+
+    app.store.set_setting(keys::NICKNAME, "Someone").unwrap();
+    let data = update(&mut app, &mut rx);
+    assert_eq!(nickname(&data), Value::from("Someone"));
+    assert!(saltyrtc::field(&data, "avatar").is_none());
+
+    app.media.write_picture(OWN_PICTURE, &picture()).unwrap();
+    let data = update(&mut app, &mut rx);
+    assert_eq!(nickname(&data), Value::from("Someone"));
+    assert!(saltyrtc::field(&data, "avatar").is_some_and(Value::is_bin));
+
+    app.media.remove_picture(OWN_PICTURE);
+    let data = update(&mut app, &mut rx);
+    assert!(saltyrtc::field(&data, "avatar").is_some_and(Value::is_nil));
+
+    app.store.delete_setting(keys::NICKNAME).unwrap();
+    let data = update(&mut app, &mut rx);
+    assert_eq!(nickname(&data), Value::from("AAAAAAAA"));
+    assert!(saltyrtc::field(&data, "avatar").is_none());
+
+    app.web_refresh();
+    assert!(sent_values(&mut rx).is_empty(), "nothing more to tell");
+}

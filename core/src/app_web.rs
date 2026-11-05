@@ -762,9 +762,15 @@ impl App {
                 self.web_client_info()
                     .map(|data| arp::message("response", "clientInfo", None, Some(data)))
             }
-            ("request", "profile") => self
-                .web_profile()
-                .map(|data| arp::message("response", "profile", None, Some(data))),
+            ("request", "profile") => {
+                let reply = self
+                    .web_profile()
+                    .map(|data| arp::message("response", "profile", None, Some(data)));
+                if reply.is_ok() {
+                    self.web_subscribe_profile(session);
+                }
+                reply
+            }
             ("request", "receivers") => {
                 let reply = self
                     .web_receivers()

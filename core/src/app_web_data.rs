@@ -2,7 +2,8 @@
 //! Threema Web: the app's data in the app remote protocol's models (`schema/v2.yaml`:
 //! Contact, Group, DistributionList, Conversation, Message) and the updates the browser
 //! subscribed to (`update/conversation`, `update/messages`, `update/receiver`,
-//! `update/receivers`, `update/avatar`, `update/typing`). Private chats (ADR 0009) never reach
+//! `update/receivers`, `update/avatar`, `update/profile`, `update/alert`, `update/typing`).
+//! Private chats (ADR 0009) never reach
 //! the browser.
 //!
 //! What the browser holds of the receivers is compared with the store at every refresh, rather
@@ -28,6 +29,7 @@ use crate::{
     groups::Group,
     media::PictureStamp,
     messages::{Message, OutgoingState},
+    profile_pictures::OWN_PICTURE,
     providers::CoreEvent,
     web::{
         arp::{self, map},
@@ -59,6 +61,8 @@ pub(crate) struct Subscriptions {
     receivers: bool,
     /// The receivers as last sent, by ID.
     sent_receivers: HashMap<String, SentReceiver>,
+    /// Our profile as last sent, once it was asked for.
+    sent_profile: Option<SentProfile>,
     conversations: bool,
     /// Chats whose messages it shows: the newest message ID sent.
     chats: HashMap<String, i64>,
@@ -81,6 +85,13 @@ type LastMessage = (i64, i64, i64);
 struct SentReceiver {
     kind: &'static str,
     model: [u8; 32],
+    picture: Option<PictureStamp>,
+}
+
+/// Our profile as a browser has it.
+#[derive(Clone, PartialEq)]
+struct SentProfile {
+    nickname: Option<String>,
     picture: Option<PictureStamp>,
 }
 
@@ -794,6 +805,40 @@ impl App {
         subscriptions.sent_receivers = sent;
     }
 
+    /// `request/profile` was answered: the session gets the profile's changes.
+    pub(crate) fn web_subscribe_profile(&mut self, session: i64) {
+        if let Ok(profile) = self.web_current_profile() {
+            self.web
+                .subscriptions
+                .entry(session)
+                .or_default()
+                .sent_profile = Some(profile);
+        }
+    }
+
+    fn web_current_profile(&self) -> Result<SentProfile, ApiError> {
+        Ok(SentProfile {
+            nickname: self
+                .store
+                .setting(crate::store::keys::NICKNAME)?
+                .filter(|nickname| !nickname.is_empty()),
+            picture: self.media.picture_stamp(OWN_PICTURE),
+        })
+    }
+
+    /// `update/profile`: the nickname each time, our ID in its place when there is none (that is
+    /// what says "none" to the browser), and the picture only if it changed: without one there,
+    /// the browser keeps its own, and `nil` takes it away.
+    fn web_profile_update(&self, sent: &SentProfile, now: &SentProfile, user: &str) -> Value {
+        let nickname = now.nickname.as_deref().unwrap_or(user);
+        let mut fields = vec![("publicNickname", nickname.into())];
+        if sent.picture != now.picture {
+            let picture = self.web_own_picture();
+            fields.push(("avatar", picture.map_or(Value::Nil, Value::Binary)));
+        }
+        arp::message("update", "profile", None, Some(map(fields)))
+    }
+
     /// All receivers as the browser may know them. An error: what isn't known isn't sent.
     fn web_current_receivers(
         &self,
@@ -1023,6 +1068,7 @@ impl App {
                     + s.listed.len()
                     + usize::from(s.conversations)
                     + usize::from(s.receivers)
+                    + usize::from(s.sent_profile.is_some())
             })
             .sum::<usize>()
             + self.web.subscriptions.len();
@@ -1045,6 +1091,19 @@ impl App {
             receivers
         } else {
             Vec::new()
+        };
+        let profile = if self
+            .web
+            .subscriptions
+            .values()
+            .any(|s| s.sent_profile.is_some())
+        {
+            let Ok(profile) = self.web_current_profile() else {
+                return;
+            };
+            Some(profile)
+        } else {
+            None
         };
         self.web.refresh.last = Some(now);
         let user = identity.threema_id;
@@ -1111,6 +1170,12 @@ impl App {
                     ));
                 }
                 subscriptions.listed = listed;
+            }
+            if let (Some(sent), Some(profile)) = (&subscriptions.sent_profile, &profile)
+                && sent != profile
+            {
+                out.push((session, self.web_profile_update(sent, profile, &user)));
+                subscriptions.sent_profile = Some(profile.clone());
             }
             self.web.subscriptions.insert(session, subscriptions);
         }
