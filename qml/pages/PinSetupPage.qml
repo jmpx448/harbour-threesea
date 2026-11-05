@@ -56,7 +56,7 @@ Page {
                          //% "At least 4 digits"
                          : qsTrId("threesea-la-pin-hint")
         note: page.first.length === 0 && page.minimumLength > 4
-              //% "If you forget it, everything stored on this phone is lost."
+              //% "If you forget it, everything Threesea has stored on this phone is lost."
               ? qsTrId("threesea-la-data-passphrase-note") : ""
         onCanceled: pageStack.pop()
         onEntered: {

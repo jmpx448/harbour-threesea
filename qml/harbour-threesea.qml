@@ -960,14 +960,15 @@ ApplicationWindow {
     }
 
     // The chat server saw this Threema ID log in with another device's cookie (Android's
-    // rogue-device warning): someone else may be using the ID.
+    // rogue-device warning): someone else may be using the ID. Linked devices can't be the cause:
+    // a device group shares one cookie, handed over when linking.
     Notification {
         id: deviceCookieNotification
         appName: "Threesea"
         appIcon: "harbour-threesea"
         //% "Threema ID used on another device"
         summary: qsTrId("threesea-la-device-cookie-title")
-        //% "Threema's server noticed a connection from another device with your Threema ID. If that was you, on another phone or a linked device, you can ignore this. An ID works on one phone at a time: new messages go only to the phone that connected last. If it wasn't you, your private key may be compromised: protect this phone and its data, and create a new ID."
+        //% "Threema's server noticed a connection from another device with your Threema ID. If you recently used your ID on another phone, you can ignore this. An ID works on one phone at a time: new messages go only to the phone that connected last. If you didn't, your private key may be compromised: protect this phone and its data, and create a new ID."
         body: qsTrId("threesea-la-device-cookie-body")
         previewSummary: summary
         previewBody: body
