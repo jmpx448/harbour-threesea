@@ -155,7 +155,13 @@ pub struct MediaStore {
     hidden: std::sync::RwLock<Option<std::collections::HashSet<i64>>>,
     /// "Show profile pictures": whether the UI may read contacts' pictures. The same readers.
     contact_pictures_shown: std::sync::atomic::AtomicBool,
+    /// How many times a picture was written or removed since the app started.
+    picture_writes: std::sync::atomic::AtomicU64,
 }
+
+/// Tells one version of a picture's file from another, without reading it: its size and when it
+/// was written.
+pub type PictureStamp = (u64, Option<std::time::SystemTime>);
 
 const MEDIA_MAGIC: &[u8; 4] = b"3SM1";
 const NONCE_LENGTH: usize = 24;
@@ -174,6 +180,7 @@ impl MediaStore {
             key,
             hidden: std::sync::RwLock::new(None),
             contact_pictures_shown: std::sync::atomic::AtomicBool::new(true),
+            picture_writes: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -218,7 +225,25 @@ impl MediaStore {
     }
 
     pub fn write_picture(&self, name: &str, data: &[u8]) -> Result<(), MediaError> {
-        self.write_to(&self.picture_path(name), data)
+        let written = self.write_to(&self.picture_path(name), data);
+        self.picture_writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        written
+    }
+
+    /// `None`: there is no such picture.
+    #[must_use]
+    pub fn picture_stamp(&self, name: &str) -> Option<PictureStamp> {
+        let file = std::fs::metadata(self.picture_path(name)).ok()?;
+        Some((file.len(), file.modified().ok()))
+    }
+
+    /// Goes up whenever a picture is written or removed: a picture isn't in the database, so its
+    /// change count doesn't say.
+    #[must_use]
+    pub fn picture_writes(&self) -> u64 {
+        self.picture_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn read_picture(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, MediaError> {
@@ -247,6 +272,8 @@ impl MediaStore {
 
     pub fn remove_picture(&self, name: &str) {
         let _ = std::fs::remove_file(self.picture_path(name));
+        self.picture_writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn cipher(&self) -> XSalsa20Poly1305 {

@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Threema Web: the app's data in the app remote protocol's models (`schema/v2.yaml`:
 //! Contact, Group, DistributionList, Conversation, Message) and the updates the browser
-//! subscribed to (`update/conversation`, `update/messages`, `update/receivers`,
-//! `update/typing`). Private chats (ADR 0009) never reach the browser.
+//! subscribed to (`update/conversation`, `update/messages`, `update/receiver`,
+//! `update/receivers`, `update/avatar`, `update/typing`). Private chats (ADR 0009) never reach
+//! the browser.
+//!
+//! What the browser holds of the receivers is compared with the store at every refresh, rather
+//! than each command saying what it changed: contacts and groups change from many places (our
+//! UI, linked devices, incoming messages, backups).
 //!
 //! IDs: receivers by our keys (Threema ID, `g:…`, `d:…`), messages by their local row ID as a
 //! string, which also sorts them.
@@ -21,25 +26,39 @@ use crate::{
     distribution_lists::DistributionList,
     group_call_handshake::public_bytes,
     groups::Group,
+    media::PictureStamp,
     messages::{Message, OutgoingState},
     providers::CoreEvent,
-    web::arp::{self, map},
+    web::{
+        arp::{self, map},
+        images,
+    },
 };
 
 /// Messages per page.
 const PAGE: u32 = 50;
 
+/// More receivers of a type than this changed at once (an import, a sync): the browser gets their
+/// whole list in one message, not a message and a picture for each. That list makes it forget the
+/// pictures it has loaded, so it isn't for a few changes.
+pub(crate) const RECEIVER_UPDATES_MAX: usize = 20;
+
+const RECEIVER_KINDS: [&str; 3] = ["contact", "group", "distributionList"];
+
 /// When the browsers were last brought up to date.
 #[derive(Default)]
 pub(crate) struct RefreshState {
-    /// The store's change count and the subscriptions' shape at the last refresh.
-    last: Option<(u64, usize)>,
+    /// The store's change count, the subscriptions' shape and the picture writes at the last
+    /// refresh.
+    last: Option<(u64, usize, u64)>,
 }
 
 /// What a connected browser subscribed to, and what it has been sent.
 #[derive(Default)]
 pub(crate) struct Subscriptions {
     receivers: bool,
+    /// The receivers as last sent, by ID.
+    sent_receivers: HashMap<String, SentReceiver>,
     conversations: bool,
     /// Chats whose messages it shows: the newest message ID sent.
     chats: HashMap<String, i64>,
@@ -57,6 +76,41 @@ impl Subscriptions {
 /// A chat's newest message as far as its list entry shows it: id, last change, state (a state
 /// change, e.g. delivered, must reach the browser's chat list too).
 type LastMessage = (i64, i64, i64);
+
+/// A receiver as last sent to a browser.
+struct SentReceiver {
+    kind: &'static str,
+    model: [u8; 32],
+    picture: Option<PictureStamp>,
+}
+
+/// A receiver as it is now.
+struct CurrentReceiver {
+    kind: &'static str,
+    id: String,
+    value: Value,
+    model: [u8; 32],
+    /// The file of its picture, and that file's stamp, if there is a picture the browser may see.
+    picture: Option<(String, PictureStamp)>,
+}
+
+impl CurrentReceiver {
+    fn stamp(&self) -> Option<PictureStamp> {
+        self.picture.as_ref().map(|(_, stamp)| *stamp)
+    }
+
+    fn differs_from(&self, sent: &SentReceiver) -> bool {
+        sent.model != self.model || sent.picture != self.stamp()
+    }
+
+    fn as_sent(&self) -> SentReceiver {
+        SentReceiver {
+            kind: self.kind,
+            model: self.model,
+            picture: self.stamp(),
+        }
+    }
+}
 
 /// What of a chat's list entry the browser has to hear about when it changes.
 #[derive(Clone, PartialEq)]
@@ -728,7 +782,143 @@ impl App {
 
     /// `request/receivers` was answered: the session gets receiver updates.
     pub(crate) fn web_subscribe_receivers(&mut self, session: i64) {
-        self.web.subscriptions.entry(session).or_default().receivers = true;
+        let sent = self
+            .web_private_chats()
+            .and_then(|private| self.web_current_receivers(&private))
+            .unwrap_or_default()
+            .iter()
+            .map(|receiver| (receiver.id.clone(), receiver.as_sent()))
+            .collect();
+        let subscriptions = self.web.subscriptions.entry(session).or_default();
+        subscriptions.receivers = true;
+        subscriptions.sent_receivers = sent;
+    }
+
+    /// All receivers as the browser may know them. An error: what isn't known isn't sent.
+    fn web_current_receivers(
+        &self,
+        private: &HashSet<String>,
+    ) -> Result<Vec<CurrentReceiver>, ApiError> {
+        let shown = self.store.pictures_shown()?;
+        let mut current = Vec::new();
+        for kind in RECEIVER_KINDS {
+            for value in self.web_receivers_of(kind)? {
+                let id = crate::web::saltyrtc::field(&value, "id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let picture = Self::web_picture_name(&id, shown)
+                    .filter(|_| !private.contains(&id))
+                    .and_then(|name| {
+                        let stamp = self.media.picture_stamp(&name)?;
+                        Some((name, stamp))
+                    });
+                let mut encoded = Vec::new();
+                rmpv::encode::write_value(&mut encoded, &value)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+                current.push(CurrentReceiver {
+                    kind,
+                    id,
+                    value,
+                    model: Sha256::digest(&encoded).into(),
+                    picture,
+                });
+            }
+        }
+        Ok(current)
+    }
+
+    /// Bring what a browser knows of the receivers up to date: what was sent is in `sent`.
+    fn web_receiver_updates(
+        &self,
+        sent: &mut HashMap<String, SentReceiver>,
+        current: &[CurrentReceiver],
+    ) -> Vec<Value> {
+        let mut out = Vec::new();
+        for kind in RECEIVER_KINDS {
+            let now: Vec<&CurrentReceiver> = current.iter().filter(|r| r.kind == kind).collect();
+            let ids: HashSet<&str> = now.iter().map(|r| r.id.as_str()).collect();
+            let removed: Vec<String> = sent
+                .iter()
+                .filter(|(id, receiver)| receiver.kind == kind && !ids.contains(id.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let changed: Vec<&CurrentReceiver> = now
+                .iter()
+                .copied()
+                .filter(|r| sent.get(&r.id).is_none_or(|s| r.differs_from(s)))
+                .collect();
+            if changed.len() + removed.len() > RECEIVER_UPDATES_MAX {
+                let list = now.iter().map(|r| r.value.clone()).collect();
+                out.push(arp::message(
+                    "update",
+                    "receivers",
+                    Some(map(vec![("type", kind.into())])),
+                    Some(Value::Array(list)),
+                ));
+            } else {
+                for receiver in &changed {
+                    out.extend(self.web_receiver_update(sent.get(&receiver.id), receiver));
+                }
+                for id in &removed {
+                    out.push(receiver_update(
+                        kind,
+                        id,
+                        "removed",
+                        map(vec![("id", id.as_str().into())]),
+                    ));
+                }
+            }
+            for id in &removed {
+                sent.remove(id);
+            }
+            for receiver in changed {
+                sent.insert(receiver.id.clone(), receiver.as_sent());
+            }
+        }
+        out
+    }
+
+    /// What tells a browser of a receiver's change. Its picture on its own: a new receiver's the
+    /// browser asks for, when it shows the receiver.
+    fn web_receiver_update(
+        &self,
+        sent: Option<&SentReceiver>,
+        receiver: &CurrentReceiver,
+    ) -> Vec<Value> {
+        let Some(sent) = sent else {
+            return vec![receiver_update(
+                receiver.kind,
+                &receiver.id,
+                "new",
+                receiver.value.clone(),
+            )];
+        };
+        let mut updates = Vec::new();
+        if sent.model != receiver.model {
+            updates.push(receiver_update(
+                receiver.kind,
+                &receiver.id,
+                "modified",
+                receiver.value.clone(),
+            ));
+        }
+        if sent.picture != receiver.stamp() {
+            let picture = receiver.picture.as_ref().and_then(|(name, _)| {
+                let picture = self.media.read_picture(name).ok().flatten()?;
+                images::scaled_jpeg(&picture, images::AVATAR_LOW_MAX, 90)
+            });
+            updates.push(arp::message(
+                "update",
+                "avatar",
+                Some(map(vec![
+                    ("type", receiver.kind.into()),
+                    ("id", receiver.id.as_str().into()),
+                ])),
+                Some(picture.map_or(Value::Nil, Value::Binary)),
+            ));
+        }
+        updates
     }
 
     /// Something in the core changed: tell the subscribed browsers.
@@ -764,39 +954,6 @@ impl App {
                     }
                     for (key, data) in changed {
                         out.push((*session, messages_update(key, "modified", data)));
-                    }
-                }
-            }
-            CoreEvent::ContactsChanged
-            | CoreEvent::GroupsChanged
-            | CoreEvent::PrivateChanged { .. } => {
-                let kind = match event {
-                    CoreEvent::GroupsChanged => "group",
-                    CoreEvent::PrivateChanged { conversation, .. }
-                        if conversation.starts_with("g:") =>
-                    {
-                        "group"
-                    }
-                    CoreEvent::PrivateChanged { conversation, .. }
-                        if conversation.starts_with("d:") =>
-                    {
-                        "distributionList"
-                    }
-                    _ => "contact",
-                };
-                if let Ok(receivers) = self.web_receivers_of(kind) {
-                    for (session, subscriptions) in &self.web.subscriptions {
-                        if subscriptions.receivers {
-                            out.push((
-                                *session,
-                                arp::message(
-                                    "update",
-                                    "receivers",
-                                    Some(map(vec![("type", kind.into())])),
-                                    Some(Value::Array(receivers.clone())),
-                                ),
-                            ));
-                        }
                     }
                 }
             }
@@ -869,7 +1026,7 @@ impl App {
             })
             .sum::<usize>()
             + self.web.subscriptions.len();
-        let now = (self.store.changes(), shape);
+        let now = (self.store.changes(), shape, self.media.picture_writes());
         if self.web.refresh.last == Some(now) {
             return;
         }
@@ -881,43 +1038,58 @@ impl App {
         else {
             return;
         };
+        let receivers = if self.web.subscriptions.values().any(|s| s.receivers) {
+            let Ok(receivers) = self.web_current_receivers(&private) else {
+                return;
+            };
+            receivers
+        } else {
+            Vec::new()
+        };
         self.web.refresh.last = Some(now);
         let user = identity.threema_id;
         let mut out: Vec<(i64, Value)> = Vec::new();
         let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
         for session in sessions {
-            let Some(subscriptions) = self.web.subscriptions.get(&session) else {
+            let Some(mut subscriptions) = self.web.subscriptions.remove(&session) else {
                 continue;
             };
-            let chats: Vec<(String, i64)> = subscriptions
-                .chats
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            let mut newest_sent = Vec::new();
-            let mut revoked = Vec::new();
-            for (key, newest) in chats {
-                // Private now: the browser's view of it ends (S03).
-                if private.contains(&key) {
-                    revoked.push(key);
-                    continue;
+            // Private now: the browser's view of it ends (S03).
+            subscriptions.chats.retain(|key, _| !private.contains(key));
+            // In this order: a chat goes while the browser still knows its receiver, and comes
+            // when it knows it, as it ignores a conversation of a receiver it doesn't know.
+            if subscriptions.conversations {
+                let listed: HashSet<&String> = list.iter().map(|(key, ..)| key).collect();
+                for key in subscriptions.listed.keys().filter(|k| !listed.contains(*k)) {
+                    out.push((
+                        session,
+                        arp::message(
+                            "update",
+                            "conversation",
+                            Some(map(vec![("mode", "removed".into())])),
+                            Some(map(vec![
+                                ("type", receiver_type(key).into()),
+                                ("id", key.as_str().into()),
+                            ])),
+                        ),
+                    ));
                 }
+            }
+            if subscriptions.receivers {
+                let updates =
+                    self.web_receiver_updates(&mut subscriptions.sent_receivers, &receivers);
+                out.extend(updates.into_iter().map(|update| (session, update)));
+            }
+            for (key, newest) in &mut subscriptions.chats {
                 let new = self
                     .store
-                    .conversation_messages_after(&key, newest)
+                    .conversation_messages_after(key, *newest)
                     .unwrap_or_default();
                 if let Some(last) = new.last() {
-                    newest_sent.push((key.clone(), last.id));
+                    *newest = last.id;
                     let data = new.iter().map(|m| self.web_message(m, &user)).collect();
-                    out.push((session, messages_update(&key, "new", data)));
+                    out.push((session, messages_update(key, "new", data)));
                 }
-            }
-            let subscriptions = self.web.subscriptions.entry(session).or_default();
-            for (key, newest) in newest_sent {
-                subscriptions.chats.insert(key, newest);
-            }
-            for key in revoked {
-                subscriptions.chats.remove(&key);
             }
             if subscriptions.conversations {
                 let mut listed = HashMap::new();
@@ -938,26 +1110,9 @@ impl App {
                         ),
                     ));
                 }
-                for key in subscriptions
-                    .listed
-                    .keys()
-                    .filter(|key| !listed.contains_key(*key))
-                {
-                    out.push((
-                        session,
-                        arp::message(
-                            "update",
-                            "conversation",
-                            Some(map(vec![("mode", "removed".into())])),
-                            Some(map(vec![
-                                ("type", receiver_type(key).into()),
-                                ("id", key.as_str().into()),
-                            ])),
-                        ),
-                    ));
-                }
                 subscriptions.listed = listed;
             }
+            self.web.subscriptions.insert(session, subscriptions);
         }
         for (session, message) in out {
             self.send_web(session, message);
@@ -1001,6 +1156,19 @@ fn emoji_reactions(message: &Message, user: &str) -> Option<Value> {
                 .collect(),
         )
     })
+}
+
+fn receiver_update(kind: &str, id: &str, mode: &str, data: Value) -> Value {
+    arp::message(
+        "update",
+        "receiver",
+        Some(map(vec![
+            ("type", kind.into()),
+            ("id", id.into()),
+            ("mode", mode.into()),
+        ])),
+        Some(data),
+    )
 }
 
 fn messages_update(key: &str, mode: &str, data: Vec<Value>) -> Value {

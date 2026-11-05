@@ -98,10 +98,6 @@ fn private_groups_and_lists_stay_out_of_the_browser() {
         created_at: 1,
     };
     app.store.upsert_distribution_list(&list).unwrap();
-    let changed = |conversation: &str, private: bool| CoreEvent::PrivateChanged {
-        conversation: conversation.to_owned(),
-        private,
-    };
     let names = |app: &App| {
         (
             app.web_receivers_of("group").unwrap().len(),
@@ -109,6 +105,7 @@ fn private_groups_and_lists_stay_out_of_the_browser() {
         )
     };
     assert_eq!(names(&app), (1, 1));
+    app.web_refresh();
     wires(&mut rx);
 
     for (conversation, name) in [
@@ -116,17 +113,17 @@ fn private_groups_and_lists_stay_out_of_the_browser() {
         (list.key.as_str(), "TELLING LIST NAME"),
     ] {
         app.store.set_private(conversation, true).unwrap();
-        app.web_on_core_event(&changed(conversation, true));
+        app.web_refresh();
         let update = wires(&mut rx);
         assert_eq!(update.len(), 1, "one update for {conversation}");
-        assert!(update[0].contains("receivers") && !update[0].contains(name));
+        assert!(update[0].contains("removed") && !update[0].contains(name));
     }
     assert_eq!(names(&app), (0, 0));
     let everything = app.web_receivers().unwrap().to_string();
     assert!(!everything.contains("TELLING"));
 
     app.store.set_private(&key, false).unwrap();
-    app.web_on_core_event(&changed(&key, false));
+    app.web_refresh();
     assert!(wires(&mut rx)[0].contains("TELLING GROUP NAME"));
 
     app.store.set_private("BBBBBBBB", true).unwrap();
@@ -190,8 +187,8 @@ async fn unmarked_group_reaches_the_browser_as_receiver_first() {
             .position(|wire| wire.contains(subtype))
             .unwrap_or_else(|| panic!("{subtype} not sent: {sent:?}"))
     };
-    assert!(sent[position("\"receivers\"")].contains("TELLING GROUP NAME"));
-    assert!(position("\"receivers\"") < position("\"conversation\""));
+    assert!(sent[position("\"receiver\"")].contains("TELLING GROUP NAME"));
+    assert!(position("\"receiver\"") < position("\"conversation\""));
 }
 
 /// The private marks can't be read: the browser's lists are refused and nothing goes out, rather
@@ -1751,4 +1748,227 @@ fn the_browser_gets_our_own_picture() {
     let args = saltyrtc::field(&reply, "args").unwrap();
     assert_eq!(saltyrtc::field(args, "type"), Some(&Value::from("me")));
     assert_eq!(saltyrtc::field(args, "id"), Some(&Value::from("AAAAAAAA")));
+}
+
+/// The updates a browser got for receivers: (subtype, mode, ID).
+fn receiver_updates(sent: &[Value]) -> Vec<(String, String, String)> {
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).unwrap_or("").to_owned();
+    sent.iter()
+        .filter(|wire| {
+            ["receiver", "receivers", "avatar"]
+                .iter()
+                .any(|sub| saltyrtc::field(wire, "subType") == Some(&Value::from(*sub)))
+        })
+        .map(|wire| {
+            let args = saltyrtc::field(wire, "args").unwrap();
+            (
+                text(saltyrtc::field(wire, "subType")),
+                text(saltyrtc::field(args, "mode")),
+                text(saltyrtc::field(args, "id")),
+            )
+        })
+        .collect()
+}
+
+fn subscribed_browser(app: &mut App) -> UnboundedReceiver<ToWeb> {
+    app.store.set_lock(None).unwrap();
+    let mut rx = browser(app);
+    app.web_subscribe_receivers(1);
+    app.web_conversations(1).unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+    rx
+}
+
+/// A contact added on the phone, with a chat: the browser would drop a conversation of a receiver
+/// it doesn't know.
+#[test]
+fn a_contact_added_on_the_phone_reaches_the_browser_before_its_chat() {
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    app.store
+        .upsert_contact(&crate::contacts::test_contact("DDDDDDDD"))
+        .unwrap();
+    app.store
+        .insert_incoming("DDDDDDDD", 1, "text", "hi", 1)
+        .unwrap();
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    assert_eq!(
+        receiver_updates(&sent),
+        [(
+            "receiver".to_owned(),
+            "new".to_owned(),
+            "DDDDDDDD".to_owned()
+        )]
+    );
+    assert_eq!(
+        saltyrtc::field(&sent[0], "subType"),
+        Some(&Value::from("receiver"))
+    );
+    assert_eq!(conversation_updates(&sent)[0].0, "new");
+
+    // Nothing new: nothing to say.
+    app.store
+        .insert_incoming("DDDDDDDD", 2, "text", "again", 2)
+        .unwrap();
+    app.web_refresh();
+    assert!(receiver_updates(&sent_values(&mut rx)).is_empty());
+}
+
+/// A change on the phone reaches the browser as that one receiver: a whole list makes it forget
+/// every picture it has loaded.
+#[test]
+fn a_changed_contact_goes_to_the_browser_alone_and_a_removed_one_goes() {
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    let mut contact = crate::contacts::test_contact("BBBBBBBB");
+    contact.first_name = Some("Renamed".into());
+    app.store.upsert_contact(&contact).unwrap();
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    assert_eq!(
+        receiver_updates(&sent),
+        [(
+            "receiver".to_owned(),
+            "modified".to_owned(),
+            "BBBBBBBB".to_owned()
+        )]
+    );
+    assert!(format!("{:?}", sent[0]).contains("Renamed"));
+
+    app.store.delete_contact("BBBBBBBB").unwrap();
+    app.web_refresh();
+    assert_eq!(
+        receiver_updates(&sent_values(&mut rx)),
+        [(
+            "receiver".to_owned(),
+            "removed".to_owned(),
+            "BBBBBBBB".to_owned()
+        )]
+    );
+}
+
+/// Groups and lists made on the phone, and changes of a group, whichever way they come.
+#[test]
+fn groups_and_lists_made_on_the_phone_reach_the_browser() {
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    let group = app.create_group("A GROUP", &["BBBBBBBB".into()]).unwrap();
+    let key = group["key"].as_str().unwrap().to_owned();
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    assert_eq!(
+        receiver_updates(&sent)[0],
+        ("receiver".to_owned(), "new".to_owned(), key.clone())
+    );
+    let position = |sub: &str| {
+        sent.iter()
+            .position(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from(sub)))
+    };
+    assert!(position("receiver") < position("conversation"), "{sent:?}");
+
+    let list = crate::distribution_lists::DistributionList {
+        key: "d:00000000000000ff".into(),
+        name: "A LIST".into(),
+        members: vec!["BBBBBBBB".into()],
+        created_at: 1,
+    };
+    app.store.upsert_distribution_list(&list).unwrap();
+    app.web_refresh();
+    assert_eq!(
+        receiver_updates(&sent_values(&mut rx)),
+        [("receiver".to_owned(), "new".to_owned(), list.key.clone())]
+    );
+}
+
+/// A chat going private is gone from the browser's list before its receiver goes, and a private
+/// contact is marked hidden and loses its picture there.
+#[test]
+fn a_chat_going_private_leaves_the_browser_in_order() {
+    use crate::profile_pictures::contact_picture_name;
+    let (_dir, mut app) = fixture();
+    let group = app.create_group("A GROUP", &["BBBBBBBB".into()]).unwrap();
+    let key = group["key"].as_str().unwrap().to_owned();
+    let mut rx = subscribed_browser(&mut app);
+    app.store.set_private(&key, true).unwrap();
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    let position = |sub: &str| {
+        sent.iter()
+            .position(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from(sub)))
+            .unwrap()
+    };
+    assert!(position("conversation") < position("receiver"), "{sent:?}");
+    assert!(!format!("{sent:?}").contains("A GROUP"));
+
+    app.media
+        .write_picture(&contact_picture_name("BBBBBBBB"), &picture())
+        .unwrap();
+    app.web_refresh();
+    sent_values(&mut rx);
+    app.store.set_private("BBBBBBBB", true).unwrap();
+    app.web_refresh();
+    let sent = sent_values(&mut rx);
+    let model = sent
+        .iter()
+        .find(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from("receiver")))
+        .and_then(|wire| saltyrtc::field(wire, "data"))
+        .unwrap();
+    assert_eq!(saltyrtc::field(model, "visible"), Some(&Value::from(false)));
+    let avatar = sent
+        .iter()
+        .find(|wire| saltyrtc::field(wire, "subType") == Some(&Value::from("avatar")))
+        .and_then(|wire| saltyrtc::field(wire, "data"))
+        .unwrap();
+    assert!(avatar.is_nil());
+}
+
+/// An import changes more than a browser should get one by one.
+#[test]
+fn many_changes_at_once_reach_the_browser_as_the_whole_list() {
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    for n in 0..=crate::app_web_data::RECEIVER_UPDATES_MAX {
+        let id = format!("E{n:07}");
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(&id))
+            .unwrap();
+    }
+    app.web_refresh();
+    let updates = receiver_updates(&sent_values(&mut rx));
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].0, "receivers");
+    app.web_refresh();
+    assert!(sent_values(&mut rx).is_empty(), "and that was all of it");
+}
+
+/// A picture that arrives or goes reaches the browser small, without its receiver: the browser
+/// keeps the other pictures, and the picture isn't in the database, whose change count would tell.
+#[test]
+fn a_new_picture_reaches_the_browser_on_its_own() {
+    use crate::profile_pictures::contact_picture_name;
+    let (_dir, mut app) = fixture();
+    let mut rx = subscribed_browser(&mut app);
+    let name = contact_picture_name("BBBBBBBB");
+    let avatar = |rx: &mut UnboundedReceiver<ToWeb>, app: &mut App| {
+        app.web_refresh();
+        let sent = sent_values(rx);
+        assert_eq!(
+            receiver_updates(&sent),
+            [("avatar".to_owned(), String::new(), "BBBBBBBB".to_owned())]
+        );
+        saltyrtc::field(&sent[0], "data").unwrap().clone()
+    };
+
+    app.media.write_picture(&name, &picture()).unwrap();
+    assert!(avatar(&mut rx, &mut app).is_bin());
+    app.media.remove_picture(&name);
+    assert!(avatar(&mut rx, &mut app).is_nil());
+
+    // With pictures of contacts not to be shown, none goes out.
+    app.set_app_setting("showProfilePictures", false).unwrap();
+    app.media.write_picture(&name, &picture()).unwrap();
+    app.web_refresh();
+    assert!(receiver_updates(&sent_values(&mut rx)).is_empty());
 }

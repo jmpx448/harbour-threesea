@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Threema Web: contacts, groups, distribution lists and the profile, changed from the browser
 //! (`create/`, `update/`, `delete/` of `contact`, `group`, `distributionList`, `update/profile`,
-//! `request/groupSync`, `request/contactDetail`). Each runs our own commands, then tells our UI
-//! and the browsers (contacts/groups changed, `update/receivers` for lists).
+//! `request/groupSync`, `request/contactDetail`). Each runs our own commands, then tells our UI;
+//! the browsers hear of the change from the next refresh, like of any other.
 
 use rmpv::Value;
 use serde_json::json;
@@ -44,26 +44,12 @@ impl App {
             .find(|receiver| field(receiver, "id").and_then(Value::as_str) == Some(id))
     }
 
-    /// Tell our UI and the browsers that receivers of `kind` changed.
+    /// Tell our UI that receivers of `kind` changed.
     fn web_receivers_changed(&mut self, kind: &str) {
         let event = match kind {
             "contact" => CoreEvent::ContactsChanged,
             "group" => CoreEvent::GroupsChanged,
-            _ => {
-                if let Ok(lists) = self.web_receivers_of("distributionList") {
-                    let update = arp::message(
-                        "update",
-                        "receivers",
-                        Some(map(vec![("type", "distributionList".into())])),
-                        Some(Value::Array(lists)),
-                    );
-                    let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
-                    for session in sessions {
-                        self.send_web(session, update.clone());
-                    }
-                }
-                CoreEvent::Call(json!({ "event": "chatsChanged" }))
-            }
+            _ => CoreEvent::Call(json!({ "event": "chatsChanged" })),
         };
         let _ = self.media_events.send(event);
     }
