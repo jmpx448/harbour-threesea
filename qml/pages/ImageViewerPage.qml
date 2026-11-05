@@ -389,10 +389,18 @@ FullscreenContentPage {
                             startHeight = flickable.contentHeight
                         }
                         onPinchUpdated: {
-                            var scale = Math.max(1, Math.min(4 * flickable.width / startWidth, pinch.scale))
+                            // Between fitting the screen and four times that, from where it started.
+                            var scale = Math.max(flickable.width / startWidth,
+                                                 Math.min(4 * flickable.width / startWidth, pinch.scale))
                             flickable.resizeContent(startWidth * scale, startHeight * scale, pinch.center)
                         }
-                        onPinchFinished: flickable.returnToBounds()
+                        onPinchFinished: {
+                            // Almost back at fitting is fitting: a zoomed picture holds the swipes.
+                            if (flickable.contentWidth < 1.1 * flickable.width) {
+                                flickable.resizeContent(flickable.width, flickable.height, pinch.center)
+                            }
+                            flickable.returnToBounds()
+                        }
 
                         Image {
                             id: image
