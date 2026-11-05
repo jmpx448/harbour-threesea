@@ -101,7 +101,8 @@ messages (`voice_decode`), quotes and mentions (`message_text`). From files: the
 container (`backup_archive`), CSV tables (`backup_csv`) and their typed records and conversion
 (`backup_records`, with the seeds of `backup_csv`), Threema Safe (`safe_backup`), videos about to
 be sent (`video_clean`, `video_size`, with the seeds of `video_clean`). From the browser:
-Threema Web (`web_arp`, `web_chunks`, `web_images`). From the user's other devices: reflected
+Threema Web (`web_arp`, `web_chunks`, `web_images`), and WebP pictures it sends or that get
+forwarded (`webp_clean`). From the user's other devices: reflected
 messages (`d2d_envelope`). Scanned and pasted: `codes`, `contact_codes`. From GitHub, when the
 update check is on: `update_check`.
 
@@ -117,6 +118,6 @@ cargo +nightly fuzz run voice_decode fuzz/corpus/voice_decode fuzz/seeds/voice_d
 a PNG, the synthetic backup fixture and its tables, call signals, polls); without them the fuzzer
 stalls at the container headers. The voice seed is rewritten by
 `cargo test -p threesea-core --lib write_voice_seed -- --ignored`, the backup seeds by
-`write_backup_seeds`, the video seed by `write_video_seed`. Crashes land in `fuzz/artifacts/` (ignored by git). Where a seal stands in
+`write_backup_seeds`, the video seed by `write_video_seed`, the WebP seeds by `write_webp_seeds`. Crashes land in `fuzz/artifacts/` (ignored by git). Where a seal stands in
 front of a decoder, the target seals the input itself (`group_call_handshake`) or starts behind it
 (`d2d_envelope`).
