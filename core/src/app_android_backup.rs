@@ -2012,6 +2012,15 @@ impl App {
         use crate::store::keys;
         let number =
             |key: &str| -> Option<i64> { self.store.setting(key).ok().flatten()?.parse().ok() };
+        // Private chats count only while the private chats are open (ADR 0009).
+        let left_out = |key: &str, private_key: &str| {
+            let private = if self.unlocked {
+                number(private_key)
+            } else {
+                None
+            };
+            number(key).unwrap_or(0) + private.unwrap_or(0)
+        };
         Ok(json!({
             "directory": self.store.setting(keys::ANDROID_EXPORT_DIR)?,
             "interval": self.store.setting(keys::ANDROID_EXPORT_INTERVAL)?
@@ -2019,13 +2028,14 @@ impl App {
             "keep": number(keys::ANDROID_EXPORT_KEEP).unwrap_or(3),
             "lastBackup": number(keys::ANDROID_EXPORT_LAST),
             "lastError": self.store.setting(keys::ANDROID_EXPORT_ERROR)?,
-            // A private chat counts only while the private chats are open (ADR 0009).
-            "chatsLeftOut": number(keys::ANDROID_EXPORT_LEFT_OUT).unwrap_or(0)
-                + if self.unlocked {
-                    number(keys::ANDROID_EXPORT_LEFT_OUT_PRIVATE).unwrap_or(0)
-                } else {
-                    0
-                },
+            "chatsLeftOut": left_out(
+                keys::ANDROID_EXPORT_LEFT_OUT,
+                keys::ANDROID_EXPORT_LEFT_OUT_PRIVATE,
+            ),
+            "filesLeftOut": left_out(
+                keys::ANDROID_EXPORT_FILES_LEFT_OUT,
+                keys::ANDROID_EXPORT_FILES_LEFT_OUT_PRIVATE,
+            ),
             "passwordSet": self.store.setting(keys::ANDROID_EXPORT_PASSWORD)?.is_some(),
             "running": self.android_export.as_ref().is_some_and(|done| !done.get()),
         }))
@@ -2725,6 +2735,57 @@ mod export_tests {
                 .map(i64::cast_unsigned),
             expected.get(&list).copied()
         );
+    }
+
+    /// One file that can't be read costs that file, not the backup: it would fail the same way
+    /// every time. Said on the page, with a private chat's only while those are open.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unreadable_file_doesnt_fail_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path(), [7; 32]);
+        let body = serde_json::json!({
+            "rendering": "media", "mediaType": "image/jpeg", "name": "a.jpg", "size": 4,
+            "fileState": crate::app_media::STATE_LOCAL,
+        })
+        .to_string();
+        let mut files = Vec::new();
+        for (id, chat) in [(1, "B0B0B0B0"), (2, "C0C0C0C0")] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(chat))
+                .unwrap();
+            let message = app
+                .store
+                .insert_incoming(chat, id, "file", &body, 1_800_000_000_000)
+                .unwrap()
+                .unwrap();
+            app.media
+                .write(message.id, MediaPart::File, b"jpeg")
+                .unwrap();
+            files.push(message.id);
+        }
+        app.store.set_private("C0C0C0C0", true).unwrap();
+        // Damaged at rest: it doesn't decrypt any more.
+        let stored = std::fs::read_dir(dir.path().join("media"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                files.iter().any(|id| name.starts_with(&format!("{id}.")))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2);
+        for path in stored {
+            std::fs::write(path, b"not what was stored").unwrap();
+        }
+
+        let out = tempfile::tempdir().unwrap();
+        let done = run_export(&app, out.path(), 0).await;
+        assert_eq!(done["summary"]["skipped"]["filesUnreadable"], 1, "{done}");
+        assert_eq!(done["summary"]["mediaFiles"], 0);
+        assert_eq!(done["summary"]["messages"], 2);
+        assert_eq!(app.android_export_status().unwrap()["filesLeftOut"], 1);
+        app.unlocked = true;
+        assert_eq!(app.android_export_status().unwrap()["filesLeftOut"], 2);
     }
 
     /// Too little room for what the last backup took: nothing is even started, and the older

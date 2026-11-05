@@ -339,6 +339,10 @@ pub mod keys {
     pub const ANDROID_EXPORT_LEFT_OUT: &str = "android_export_left_out";
     /// The same for private chats, which `androidBackupExportStatus` adds only while they are open.
     pub const ANDROID_EXPORT_LEFT_OUT_PRIVATE: &str = "android_export_left_out_private";
+    /// How many media files the last backup couldn't read (`export::FILES_UNREADABLE`).
+    pub const ANDROID_EXPORT_FILES_LEFT_OUT: &str = "android_export_files_left_out";
+    /// The same for files of private chats.
+    pub const ANDROID_EXPORT_FILES_LEFT_OUT_PRIVATE: &str = "android_export_files_left_out_private";
     /// When the schedule last started a backup, whatever became of it.
     pub const ANDROID_EXPORT_ATTEMPT: &str = "android_export_attempt";
     pub const ANDROID_EXPORT_ERROR: &str = "android_export_error";

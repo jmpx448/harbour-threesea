@@ -97,16 +97,22 @@ pub struct ExportSummary {
     pub polls: usize,
     pub nonces: usize,
     /// Messages with no representation in the Android format yet (status lines, list polls).
-    /// Also whole chats, under `CHATS_WITHOUT_CONTACT`.
+    /// Also whole chats, under `CHATS_WITHOUT_CONTACT`, and files, under `FILES_UNREADABLE`.
     pub skipped: std::collections::BTreeMap<&'static str, usize>,
     /// Private chats without a contact row: never in what the page is told while they are hidden.
     #[serde(skip)]
     pub private_chats_left_out: usize,
+    /// The same for files of private chats that can't be read.
+    #[serde(skip)]
+    pub private_files_left_out: usize,
     pub removed_old_backups: usize,
 }
 
 /// In `ExportSummary::skipped`: chats that have no contact row, so no key to restore them with.
 pub const CHATS_WITHOUT_CONTACT: &str = "chatsWithoutContact";
+
+/// In `ExportSummary::skipped`: media files that are noted as on the device and can't be read.
+pub const FILES_UNREADABLE: &str = "filesUnreadable";
 
 /// Everything the export job owns.
 pub struct Export {
@@ -292,6 +298,15 @@ impl Export {
                 let _ = self.store.set_setting(
                     crate::store::keys::ANDROID_EXPORT_LEFT_OUT_PRIVATE,
                     &summary.private_chats_left_out.to_string(),
+                );
+                let files = summary.skipped.get(FILES_UNREADABLE).copied();
+                let _ = self.store.set_setting(
+                    crate::store::keys::ANDROID_EXPORT_FILES_LEFT_OUT,
+                    &files.unwrap_or(0).to_string(),
+                );
+                let _ = self.store.set_setting(
+                    crate::store::keys::ANDROID_EXPORT_FILES_LEFT_OUT_PRIVATE,
+                    &summary.private_files_left_out.to_string(),
                 );
                 self.emit(json!({
                     "event": "androidExportDone",
@@ -777,10 +792,9 @@ impl Export {
                     tokio::task::spawn_blocking(move || -> (Writer, Result<bool, ApiError>) {
                         let mut writer = writer;
                         let result = (|| {
-                            let Some(data) = media_store
-                                .read(row, part)
-                                .map_err(|e| ApiError::Internal(e.to_string()))?
-                            else {
+                            // One bad file must not fail this and every later backup; it is
+                            // counted below. Not being able to write, on the other hand, ends it.
+                            let Ok(Some(data)) = media_store.read(row, part) else {
                                 return Ok(false);
                             };
                             check_room(free_space, &folder, data.len() as u64)?;
@@ -805,6 +819,13 @@ impl Export {
                         summary.media_files += 1;
                     } else {
                         summary.thumbnails += 1;
+                    }
+                } else {
+                    tracing::warn!(row, "media file left out of the backup");
+                    if self.store.is_private(&conversation)? {
+                        summary.private_files_left_out += 1;
+                    } else {
+                        *summary.skipped.entry(FILES_UNREADABLE).or_default() += 1;
                     }
                 }
             }

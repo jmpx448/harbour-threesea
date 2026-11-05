@@ -360,6 +360,17 @@ Page {
                 text: qsTrId("threesea-la-android-export-left-out", page.exportStatus.chatsLeftOut || 0)
             }
 
+            Label {
+                visible: (page.exportStatus.filesLeftOut || 0) > 0
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.secondaryHighlightColor
+                //% "%n file(s) stayed out of the last backup: they could not be read on this phone."
+                text: qsTrId("threesea-la-android-export-files-left-out", page.exportStatus.filesLeftOut || 0)
+            }
+
             DetailItem {
                 visible: !!page.exportStatus.lastError
                 //% "Last attempt failed"
