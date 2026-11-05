@@ -64,6 +64,8 @@ pub(crate) struct DetachedWork {
     /// Replies still to come.
     pub(crate) replies_due: usize,
     pub(crate) maintenance_running: bool,
+    /// Work nobody waits for an answer to: a wake-up holds the device up for it.
+    pub(crate) quiet_running: usize,
 }
 
 impl Default for DetachedWork {
@@ -77,6 +79,7 @@ impl Default for DetachedWork {
             round: 0,
             replies_due: 0,
             maintenance_running: false,
+            quiet_running: 0,
         }
     }
 }
@@ -161,7 +164,9 @@ impl App {
         work: impl FnOnce(Rc<Shared>) -> Fut + 'static,
         finish: impl FnOnce(&mut App, T) + 'static,
     ) {
+        self.detached.quiet_running += 1;
         self.spawn_detached(lane, false, work, move |app, result| {
+            app.detached.quiet_running = app.detached.quiet_running.saturating_sub(1);
             finish(app, result);
             None
         });
@@ -181,6 +186,7 @@ impl App {
             work.task.abort();
         }
         self.detached.maintenance_running = false;
+        self.detached.quiet_running = 0;
     }
 
     /// Drops all of it, with what has finished and is still to be looked at: the ID is going, and
@@ -192,6 +198,7 @@ impl App {
         self.detached.round += 1;
         self.detached.replies_due = 0;
         self.detached.maintenance_running = false;
+        self.detached.quiet_running = 0;
     }
 }
 

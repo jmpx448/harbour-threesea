@@ -554,10 +554,11 @@ fn forget_stopped_connection(
     }
 }
 
-/// The connection is through with a wake-up: if transfers are running too, the device stays up for
-/// those (the window's limit holds either way).
+/// The connection is through with a wake-up: if transfers or a round of maintenance are running
+/// too, the device stays up for those (the window's limit holds either way). A device that sleeps
+/// halfway through a round would keep it going over many wake-ups, and what is in turn behind it.
 fn wake_settled(app: &mut App, emit: &Emit) {
-    app.wake_settled_held = !app.transfers.none_running();
+    app.wake_settled_held = !app.transfers.none_running() || app.detached.quiet_running > 0;
     if !app.wake_settled_held {
         emit(json!({"event": "wakeSettled"}).to_string());
     }
@@ -718,7 +719,8 @@ async fn run_loop(
             continue;
         }
         let transfer_retry_at = app.transfer_retry_at;
-        let wake_settled_held = app.wake_settled_held;
+        // Quiet work ending comes by as an event of its own, and this is looked at again after it.
+        let wake_settled_held = app.wake_settled_held && app.detached.quiet_running == 0;
         tokio::select! {
             request = rx.recv() => {
                 let Some(request) = request else { break };
@@ -950,6 +952,39 @@ mod tests {
                 .await;
                 assert!(asked.elapsed() < Duration::from_secs(2));
                 assert!(!replied(&said, 1), "that one is still waiting: {said:?}");
+            })
+            .await;
+    }
+
+    /// An overdue round starts with the wake-up, and the device stays up until it has ended.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_up_stays_for_a_round_of_maintenance_that_is_running() {
+        const ROUND: Duration = Duration::from_millis(100);
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let mut app = App::new(&start_config(dir.path()), &[1; 32]).unwrap();
+                let said = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let emit: Emit = {
+                    let said = Arc::clone(&said);
+                    Box::new(move |message| said.lock().unwrap().push(message))
+                };
+                app.detached_quietly(Lane::InTurn, |_| tokio::time::sleep(ROUND), |_, ()| {});
+                wake_settled(&mut app, &emit);
+                assert!(app.wake_settled_held);
+                assert!(said.lock().unwrap().is_empty());
+
+                let asked = Instant::now();
+                let settled =
+                    loop_said(&mut app, vec![json!({"id": 1, "cmd": "status"})], |said| {
+                        said.iter().any(|message| message.contains("wakeSettled"))
+                    })
+                    .await;
+                assert!(
+                    asked.elapsed() >= ROUND - Duration::from_millis(5),
+                    "{settled:?}"
+                );
+                assert!(!app.wake_settled_held);
             })
             .await;
     }
