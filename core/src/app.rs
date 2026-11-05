@@ -489,6 +489,14 @@ pub enum Command {
         #[serde(default)]
         address: Option<String>,
     },
+    /// Places from Threema's map server around a position: by name with `query`, else nearby.
+    /// Returns `{places: [{name, latitude, longitude, distance}]}`.
+    FindPlaces {
+        latitude: f64,
+        longitude: f64,
+        #[serde(default)]
+        query: Option<String>,
+    },
     /// Block (or unblock) a Threema ID: its messages are discarded and we cannot write to it.
     /// Returns the contact JSON if it is a contact, else `{}`.
     SetBlocked {
@@ -2179,6 +2187,16 @@ impl App {
                     "address": address,
                 }),
             ),
+            Command::FindPlaces {
+                latitude,
+                longitude,
+                query,
+            } => {
+                self.detached(Lane::Free, move |app| async move {
+                    crate::places::find(&app.https, latitude, longitude, query.as_deref()).await
+                })
+                .await
+            }
             Command::CreateDistributionList { name, members } => {
                 self.create_distribution_list(&name, &members)
             }

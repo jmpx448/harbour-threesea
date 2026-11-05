@@ -783,10 +783,26 @@ is muted (`never`, optionally until a time; Android offers 1/2/4/8/24/144 h, we 
 address) are received into the store as JSON and sent with `sendLocation`. On the wire there is
 one line after the coordinates for a place given by a single text, and decoders read it as the
 address, so a name alone goes out as the address (libthreema's encoder would drop it). The position comes
-from QtPositioning (Sailjail permission `Location`, Harbour-allowed). No map preview and no
-reverse geocoding: both need a tile or geocoding server outside Threema (§7.6). Received
-locations open as `geo:` links in an installed maps app (e.g. Pure Maps); the bubble shows the
-name, address and coordinates.
+from QtPositioning (Sailjail permission `Location`, Harbour-allowed). Received locations open as
+`geo:` links in an installed maps app (e.g. Pure Maps); the bubble shows the name, address and
+coordinates.
+
+Android's places come from Threema's own hosts, as in `app/build.gradle.kts` and
+`DefaultServerAddressProvider.kt`; `poi.threema.ch` falls under the `threema.ch` pins:
+
+- `GET https://poi.threema.ch/around/{lat}/{lon}/{radius}/` (radius 750): a JSON array of
+  `{id, name, lat, lon, <kind>}`. `<kind>` is one of `amenity`, `shop`, `tourism`, `sport`,
+  `leisure`, `natural`, `public_transport`, `aeroway`, `aerialway`, `highway`; Android drops entries
+  with none of them.
+- `GET https://poi.threema.ch/names/{lat}/{lon}/{query}/`: `{name, lat, lon, dist (m), …}`, from
+  3 characters on; Android drops entries without `dist`. No request for 0/0.
+- Coordinates with six decimals; the query percent-encoded as one segment of the path. Android sends
+  no authentication, only its user agent. These formats come from Android's parser
+  (`location/PoiRepository.kt`); a live answer hasn't been seen from here yet.
+
+Android's map style is `https://map.threema.ch/styles/threema/style.json`, drawn by MapLibre. The
+hosts of its tiles and fonts are named in that file only, not in the Android source. Addresses of a
+point come from the platform's `android.location.Geocoder`, not from Threema.
 
 ## Distribution lists
 

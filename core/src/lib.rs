@@ -60,6 +60,7 @@ pub mod messages;
 pub mod mp4;
 pub mod multidevice;
 pub mod pins;
+pub(crate) mod places;
 pub mod polls;
 pub mod profile_pictures;
 pub mod providers;
