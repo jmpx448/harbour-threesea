@@ -444,6 +444,7 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
     }
     let mut connection: Option<mpsc::UnboundedReceiver<FromConnection>> = app.ensure_connection();
     let mut media_events = app.take_media_events();
+    let mut file_work = app.take_file_work();
     let mut web_events = app.take_web_events();
     app.resume_media();
     // Downloads of contact and group pictures that never finished (kept descriptors).
@@ -457,7 +458,9 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
         tokio::select! {
             request = rx.recv() => {
                 let Some(request) = request else { break };
-                emit(app.handle_with(&request.json, request.attachments).await);
+                if let Some(reply) = app.handle_from_ui(&request.json, request.attachments).await {
+                    emit(reply);
+                }
                 for event in app.take_ui_events() {
                     emit(json!({ "event": event }).to_string());
                 }
@@ -528,6 +531,16 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
                     Some(FromConnection::WakeSettled) => wake_settled(&mut app, &emit),
                 }
             }
+            finished = async {
+                match file_work.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(finished) = finished {
+                    finish_file_work(&mut app, finished, &mut media_events, &emit).await;
+                }
+            }
             event = async {
                 match media_events.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -559,6 +572,31 @@ async fn run_loop(mut app: App, mut rx: mpsc::UnboundedReceiver<CoreRequest>, em
             _ = tick.tick() => run_maintenance(&mut app, &emit).await,
         }
     }
+    // Asked to stop: what was asked for before that still counts, as commands waiting in the queue
+    // do. A file sent just before closing the window must not be lost.
+    while app.file_work_running > 0 {
+        let Some(finished) = (match file_work.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }) else {
+            break;
+        };
+        finish_file_work(&mut app, finished, &mut media_events, &emit).await;
+    }
+}
+
+/// A command's work on a blocking thread is done: finish it like any command.
+async fn finish_file_work(
+    app: &mut App,
+    finished: crate::app_media::FinishedFileWork,
+    media_events: &mut Option<mpsc::UnboundedReceiver<CoreEvent>>,
+    emit: &Emit,
+) {
+    emit(app.finish_file_work(finished).await);
+    for event in app.take_ui_events() {
+        emit(json!({ "event": event }).to_string());
+    }
+    settle_command(app, media_events, emit);
 }
 
 #[cfg(test)]
@@ -676,6 +714,40 @@ mod tests {
         let _handle = CoreHandle::start(start_config(dir), Zeroizing::new(key), emit);
         let message = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         serde_json::from_str(&message).unwrap()
+    }
+
+    /// As a command waiting in the queue would be: a file sent just before closing the window
+    /// isn't lost while it is on its blocking thread.
+    #[test]
+    fn stopping_the_core_finishes_the_file_on_its_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = [1; 32];
+        {
+            let app = App::new(&start_config(dir.path()), &key).unwrap();
+            app.store
+                .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+                .unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let emit: Emit = Box::new(move |message| {
+            let _ = tx.lock().unwrap().send(message);
+        });
+        let handle =
+            CoreHandle::start(start_config(dir.path()), Zeroizing::new(key), emit).unwrap();
+        let request = json!({"id": 3, "cmd": "sendFile", "identity": "ABCD1234",
+                             "rendering": "file", "mediaType": "text/plain", "name": "a.txt"});
+        handle.send_with(request.to_string(), vec![Zeroizing::new(vec![1, 2, 3])]);
+        drop(handle);
+
+        let reply = loop {
+            let message = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+            let message: serde_json::Value = serde_json::from_str(&message).unwrap();
+            if message["reply"] == 3 {
+                break message;
+            }
+        };
+        assert_eq!(reply["result"]["kind"], "file", "{reply}");
     }
 
     #[test]

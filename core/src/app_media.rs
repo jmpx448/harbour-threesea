@@ -1091,6 +1091,174 @@ pub(crate) struct WritePass {
     pub(crate) expires: std::time::Instant,
 }
 
+/// A file to send, ready but for its message: encrypted and on the disk, as what it will be sent as.
+pub(crate) struct PreparedFile {
+    /// The message's body, without its `uploadState`.
+    body: Value,
+    caption: Option<String>,
+    file: media::SealedFile,
+    thumbnail: Option<media::SealedFile>,
+}
+
+/// Everything about a file to send that takes long, and needs no store: for a blocking thread.
+/// Reads it if it didn't come along, makes a voice recording Opus, takes a video's metadata off,
+/// and encrypts it. Nothing is left behind if this or the rest fails.
+fn prepare_file(
+    media: &MediaStore,
+    mut file: OutgoingFile,
+    attachments: Vec<Zeroizing<Vec<u8>>>,
+) -> Result<PreparedFile, ApiError> {
+    let mut attachments = attachments.into_iter();
+    let mut data = attachments.next().unwrap_or_default();
+    let thumbnail = attachments.next().filter(|thumbnail| !thumbnail.is_empty());
+    if data.is_empty() {
+        let path = file
+            .path
+            .as_deref()
+            .ok_or_else(|| ApiError::Internal("no file".into()))?;
+        let size = std::fs::metadata(path)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .len();
+        if size > media::MAX_BLOB_SIZE as u64 {
+            return Err(ApiError::FileTooLarge);
+        }
+        data = Zeroizing::new(std::fs::read(path).map_err(|e| ApiError::Internal(e.to_string()))?);
+    }
+    if file.encode.as_deref() == Some("opus") {
+        let (encoded, seconds) =
+            crate::voice::encode(&data).map_err(|e| ApiError::Internal(e.to_string()))?;
+        data = Zeroizing::new(encoded);
+        file.media_type = "audio/ogg".into();
+        file.duration = Some(seconds);
+        file.name = file.name.map(|name| match name.rsplit_once('.') {
+            Some((stem, _)) => format!("{stem}.ogg"),
+            None => format!("{name}.ogg"),
+        });
+    }
+    // Sent as media it is the picture that counts, not what the file says about itself, and
+    // the recipient gets told the real size. What can't be vouched for leaves only if the user
+    // said so, and then as what it is: a plain file, as it was picked.
+    if file.rendering == "media" && file.media_type.starts_with("video/") {
+        match crate::mp4::clean(&mut data) {
+            Ok(size) => {
+                if let Some((width, height)) = size {
+                    file.width = Some(width);
+                    file.height = Some(height);
+                }
+            }
+            Err(crate::mp4::NotCleanable) if file.keep_metadata => {
+                file.rendering = "file".to_owned();
+                file.width = None;
+                file.height = None;
+            }
+            Err(crate::mp4::NotCleanable) => return Err(ApiError::VideoKeepsMetadata),
+        }
+    }
+    if data.len() > media::MAX_BLOB_SIZE {
+        return Err(ApiError::FileTooLarge);
+    }
+    let name = generic_media_name(&file.rendering, &file.media_type)
+        .or(file.name)
+        .filter(|name| !name.is_empty());
+    if name
+        .as_ref()
+        .is_some_and(|name| name.len() > NAME_LENGTH_MAX)
+    {
+        return Err(ApiError::Internal("file name too long".into()));
+    }
+    let caption = file
+        .caption
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty());
+    if caption
+        .as_ref()
+        .is_some_and(|c| c.len() > CAPTION_LENGTH_MAX)
+    {
+        return Err(ApiError::MessageTooLong);
+    }
+    let body = json!({
+        "rendering": match file.rendering.as_str() {
+            "media" | "sticker" => file.rendering.as_str(),
+            _ => "file",
+        },
+        "mediaType": file.media_type,
+        "name": name,
+        "size": data.len(),
+        "caption": caption,
+        "width": file.width,
+        "height": file.height,
+        "duration": file.duration,
+        // Like Android: GIFs shown as media are marked animated (they play in the chat).
+        "animated": (file.media_type == "image/gif" && file.rendering == "media").then_some(true),
+        "thumbnail": thumbnail.is_some(),
+        "thumbnailMediaType": "image/jpeg",
+        "fileState": STATE_LOCAL,
+        "thumbnailState": if thumbnail.is_some() { STATE_LOCAL } else { STATE_FAILED },
+    });
+    let seal = |data| {
+        media
+            .seal(data)
+            .map_err(|error| ApiError::Internal(error.to_string()))
+    };
+    Ok(PreparedFile {
+        body,
+        caption,
+        file: seal(data)?,
+        thumbnail: thumbnail.map(seal).transpose()?,
+    })
+}
+
+/// What a command's work on a blocking thread brought back.
+pub(crate) enum FileWork {
+    Send {
+        identity: String,
+        prepared: Result<PreparedFile, ApiError>,
+    },
+    Save {
+        conversation: String,
+        saved: Result<Value, ApiError>,
+    },
+}
+
+/// That work, for the core loop to finish on its thread. No `work`: the blocking thread failed.
+pub(crate) struct FinishedFileWork {
+    request: u64,
+    work: Option<FileWork>,
+}
+
+/// A file on its way out of the store (see [`App::save_file`]).
+struct FileToSave {
+    name: Option<String>,
+    media_type: String,
+}
+
+/// The file's decrypted copy in `directory`; for a blocking thread.
+fn save_decrypted(
+    media: &MediaStore,
+    id: i64,
+    directory: &str,
+    file: &FileToSave,
+) -> Result<Value, ApiError> {
+    let data = media
+        .read(id, MediaPart::File)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::Internal("file not downloaded".into()))?;
+    let directory = std::path::Path::new(directory);
+    if !directory.is_dir() {
+        return Err(ApiError::Internal("no such directory".into()));
+    }
+    let name = safe_file_name(file.name.as_deref(), &file.media_type);
+    let target = save_target(directory, &name, &data);
+    if !target.exists() {
+        std::fs::write(&target, data.as_slice()).map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    let openable = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(crate::file_types::opens_externally);
+    Ok(json!({ "path": target.to_string_lossy(), "openable": openable }))
+}
+
 /// How many uploads and downloads are running. A wake-up holds the device up for them: a picture
 /// on a slow link would otherwise get the seconds the connection needs, wake-up after wake-up, and
 /// could run out of tries overnight.
@@ -1181,10 +1349,119 @@ impl App {
     }
 
     /// A file of a hidden private chat, under the pass: stored and sent, and all the answer tells
-    /// is what is wrong with what was sent. Anything about the chat reads as the lock.
-    pub(crate) fn send_file_under_pass(&mut self, file: OutgoingFile) -> Result<Value, ApiError> {
-        let (key, conversation) = self.conversation(&file.identity)?;
-        match self.store_outgoing_file(key, conversation, file) {
+    /// is what is wrong with what was sent.
+    pub(crate) async fn send_file_under_pass(
+        &mut self,
+        file: OutgoingFile,
+    ) -> Result<Value, ApiError> {
+        let identity = file.identity.clone();
+        let attachments = std::mem::take(&mut self.attachments);
+        let media = Arc::clone(&self.media);
+        let prepared = media::off_thread(move || prepare_file(&media, file, attachments))
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        self.finish_send_file(&identity, prepared).await
+    }
+
+    /// `sendFile`: store the file encrypted, show it right away, upload in the background; the
+    /// message is sent once the upload is done.
+    pub(crate) async fn send_file(&mut self, file: OutgoingFile) -> Result<Value, ApiError> {
+        let (_, conversation) = self.readable_conversation(&file.identity)?;
+        conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
+        self.send_file_under_pass(file).await
+    }
+
+    /// `sendFile` from the UI: the heavy part goes to a blocking thread and the commands behind it
+    /// don't wait. The answer comes when it is done ([`Self::finish_file_work`]).
+    pub(crate) fn send_file_in_background(
+        &mut self,
+        file: OutgoingFile,
+        under_pass: bool,
+    ) -> Result<Value, ApiError> {
+        if !under_pass {
+            let (_, conversation) = self.readable_conversation(&file.identity)?;
+            conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
+        }
+        let identity = file.identity.clone();
+        let attachments = std::mem::take(&mut self.attachments);
+        let media = Arc::clone(&self.media);
+        self.spawn_file_work(move || FileWork::Send {
+            identity,
+            prepared: prepare_file(&media, file, attachments),
+        });
+        Ok(json!({}))
+    }
+
+    /// `saveFile` from the UI, likewise.
+    pub(crate) fn save_file_in_background(
+        &mut self,
+        id: i64,
+        directory: String,
+    ) -> Result<Value, ApiError> {
+        let (conversation, file) = self.file_to_save(id)?;
+        let media = Arc::clone(&self.media);
+        self.spawn_file_work(move || FileWork::Save {
+            conversation,
+            saved: save_decrypted(&media, id, &directory, &file),
+        });
+        Ok(json!({}))
+    }
+
+    /// Start `work` on a blocking thread, one at a time: what was asked for first is in the chat
+    /// first. It holds a wake-up up, like the transfer it leads to.
+    fn spawn_file_work(&mut self, work: impl FnOnce() -> FileWork + Send + 'static) {
+        self.reply_later = true;
+        self.file_work_running += 1;
+        let request = self.current_request;
+        let done = self.file_work_done.clone();
+        let turn = Rc::clone(&self.file_work_turn);
+        tokio::task::spawn_local(self.transfers.track(async move {
+            let _turn = turn.acquire().await;
+            let work = media::off_thread(work).await.ok();
+            let _ = done.send(FinishedFileWork { request, work });
+        }));
+    }
+
+    /// The core thread's part of work that was on a blocking thread: the reply to its command.
+    pub(crate) async fn finish_file_work(&mut self, finished: FinishedFileWork) -> String {
+        self.file_work_running -= 1;
+        let outcome = match finished.work {
+            Some(FileWork::Send { identity, prepared }) => {
+                self.finish_send_file(&identity, prepared).await
+            }
+            // Hidden while it was being saved: the answer would name the file.
+            Some(FileWork::Save {
+                conversation,
+                saved,
+            }) => self.check_readable(&conversation).and(saved),
+            None => Err(ApiError::Internal("file work failed".into())),
+        };
+        self.reply(finished.request, None, outcome).await
+    }
+
+    /// Store a file that was prepared, whatever happened to its chat since. One hidden meanwhile
+    /// (the app locked while the file was on its way) takes it as under a pass: the file was sent
+    /// when it could be, and it is the answer that says nothing of the chat. Anything about the
+    /// chat reads as the lock.
+    async fn finish_send_file(
+        &mut self,
+        identity: &str,
+        prepared: Result<PreparedFile, ApiError>,
+    ) -> Result<Value, ApiError> {
+        let (key, conversation) = self.conversation(identity)?;
+        let hidden = self.check_readable(&key).is_err();
+        let stored = match prepared {
+            // A list's members get their copies by reading its own back, not while it is hidden.
+            Ok(_) if hidden && matches!(conversation, Conversation::List(_)) => {
+                Err(ApiError::Locked)
+            }
+            Ok(prepared) => self.store_prepared(key, conversation, prepared).await,
+            Err(error) => Err(error),
+        };
+        if !hidden {
+            return stored;
+        }
+        match stored {
             Ok(message) => {
                 if let Some(id) = message["id"].as_i64() {
                     self.media.hide(id);
@@ -1201,13 +1478,6 @@ impl App {
                 Err(ApiError::Locked)
             }
         }
-    }
-
-    /// `sendFile`: store the file encrypted, show it right away, upload in the background; the
-    /// message is sent once the upload is done.
-    pub(crate) fn send_file(&mut self, file: OutgoingFile) -> Result<Value, ApiError> {
-        let (identity, conversation) = self.readable_conversation(&file.identity)?;
-        self.store_outgoing_file(identity, conversation, file)
     }
 
     /// Whether a file about to be stored will fit a frame as a message once uploaded, with its
@@ -1227,103 +1497,24 @@ impl App {
             .is_some_and(|file| crate::connection::file_fits_a_frame(chat, file))
     }
 
-    fn store_outgoing_file(
+    async fn store_prepared(
         &mut self,
         identity: String,
         conversation: Conversation,
-        file: OutgoingFile,
+        prepared: PreparedFile,
     ) -> Result<Value, ApiError> {
         conversation.check_writable(&self.app_settings()?.blocked_contacts)?;
-        let mut attachments = std::mem::take(&mut self.attachments).into_iter();
-        let mut data = attachments.next().unwrap_or_default();
-        let thumbnail = attachments.next().filter(|thumbnail| !thumbnail.is_empty());
-        if data.is_empty() {
-            let path = file
-                .path
-                .as_deref()
-                .ok_or_else(|| ApiError::Internal("no file".into()))?;
-            let size = std::fs::metadata(path)
-                .map_err(|e| ApiError::Internal(e.to_string()))?
-                .len();
-            if size > media::MAX_BLOB_SIZE as u64 {
-                return Err(ApiError::FileTooLarge);
-            }
-            data =
-                Zeroizing::new(std::fs::read(path).map_err(|e| ApiError::Internal(e.to_string()))?);
-        }
-        let mut file = file;
-        if file.encode.as_deref() == Some("opus") {
-            let (encoded, seconds) =
-                crate::voice::encode(&data).map_err(|e| ApiError::Internal(e.to_string()))?;
-            data = Zeroizing::new(encoded);
-            file.media_type = "audio/ogg".into();
-            file.duration = Some(seconds);
-            file.name = file.name.map(|name| match name.rsplit_once('.') {
-                Some((stem, _)) => format!("{stem}.ogg"),
-                None => format!("{name}.ogg"),
-            });
-        }
-        // Sent as media it is the picture that counts, not what the file says about itself, and
-        // the recipient gets told the real size. What can't be vouched for leaves only if the user
-        // said so, and then as what it is: a plain file, as it was picked.
-        if file.rendering == "media" && file.media_type.starts_with("video/") {
-            match crate::mp4::clean(&mut data) {
-                Ok(size) => {
-                    if let Some((width, height)) = size {
-                        file.width = Some(width);
-                        file.height = Some(height);
-                    }
-                }
-                Err(crate::mp4::NotCleanable) if file.keep_metadata => {
-                    file.rendering = "file".to_owned();
-                    file.width = None;
-                    file.height = None;
-                }
-                Err(crate::mp4::NotCleanable) => return Err(ApiError::VideoKeepsMetadata),
-            }
-        }
-        if data.len() > media::MAX_BLOB_SIZE {
-            return Err(ApiError::FileTooLarge);
-        }
-        let name = generic_media_name(&file.rendering, &file.media_type)
-            .or(file.name)
-            .filter(|name| !name.is_empty());
-        if name
-            .as_ref()
-            .is_some_and(|name| name.len() > NAME_LENGTH_MAX)
-        {
-            return Err(ApiError::Internal("file name too long".into()));
-        }
-        let caption = file
-            .caption
-            .map(|c| c.trim().to_owned())
-            .filter(|c| !c.is_empty());
-        if caption
-            .as_ref()
-            .is_some_and(|c| c.len() > CAPTION_LENGTH_MAX)
-        {
-            return Err(ApiError::MessageTooLong);
-        }
-        let body = json!({
-            "rendering": match file.rendering.as_str() {
-                "media" | "sticker" => file.rendering.as_str(),
-                _ => "file",
-            },
-            "mediaType": file.media_type,
-            "name": name,
-            "size": data.len(),
-            "caption": caption,
-            "width": file.width,
-            "height": file.height,
-            "duration": file.duration,
-            // Like Android: GIFs shown as media are marked animated (they play in the chat).
-            "animated": (file.media_type == "image/gif" && file.rendering == "media").then_some(true),
-            "thumbnail": thumbnail.is_some(),
-            "thumbnailMediaType": "image/jpeg",
-            "fileState": STATE_LOCAL,
-            "thumbnailState": if thumbnail.is_some() { STATE_LOCAL } else { STATE_FAILED },
-            // A list's copy is not uploaded (each member's copy is).
-            "uploadState": if matches!(conversation, Conversation::List(_)) { STATE_LOCAL } else { STATE_LOADING },
+        let PreparedFile {
+            mut body,
+            caption,
+            file,
+            thumbnail,
+        } = prepared;
+        // A list's copy is not uploaded (each member's copy is).
+        body["uploadState"] = json!(if matches!(conversation, Conversation::List(_)) {
+            STATE_LOCAL
+        } else {
+            STATE_LOADING
         });
         if !Self::file_fits_a_frame(&identity, &body) {
             return Err(ApiError::MessageTooLong);
@@ -1337,10 +1528,9 @@ impl App {
         let mut key = Zeroizing::new([0_u8; 32]);
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, key.as_mut());
         let stored = (|| {
-            self.media.write(message.id, MediaPart::File, &data)?;
-            if let Some(thumbnail) = &thumbnail {
-                self.media
-                    .write(message.id, MediaPart::Thumbnail, thumbnail)?;
+            file.keep(&self.media, message.id, MediaPart::File)?;
+            if let Some(thumbnail) = thumbnail {
+                thumbnail.keep(&self.media, message.id, MediaPart::Thumbnail)?;
             }
             Ok::<_, media::MediaError>(())
         })();
@@ -1365,7 +1555,8 @@ impl App {
         let message = self.store.message(message.id)?.unwrap_or(message);
         if let Conversation::List(list) = &conversation {
             for member in self.list_receivers(list)? {
-                if let Err(error) = self.forward_message(message.id, &member) {
+                let forwarded = Box::pin(self.forward_message(message.id, &member)).await;
+                if let Err(error) = forwarded {
                     tracing::warn!(%error, "sending a list's file to a member failed");
                 }
             }
@@ -1942,7 +2133,11 @@ impl App {
     /// `forwardMessage`: send a text or file message again, to another chat (Android's
     /// "Forward"). Quotes are dropped (the quoted message is not in that chat); files are
     /// uploaded again with a new key, since blobs are deleted once downloaded.
-    pub(crate) fn forward_message(&mut self, id: i64, identity: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn forward_message(
+        &mut self,
+        id: i64,
+        identity: &str,
+    ) -> Result<Value, ApiError> {
         let message = self
             .store
             .message(id)?
@@ -1959,37 +2154,42 @@ impl App {
             }
             "file" => {
                 let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
-                let data = self
-                    .media
-                    .read(id, MediaPart::File)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?
-                    .ok_or(ApiError::FileNotDownloaded)?;
-                let thumbnail = self
-                    .media
-                    .read(id, MediaPart::Thumbnail)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?
-                    .unwrap_or_default();
-                self.attachments = vec![data, thumbnail];
+                let media = Arc::clone(&self.media);
+                let (data, thumbnail) = media::off_thread(move || {
+                    Ok::<_, media::MediaError>((
+                        media.read(id, MediaPart::File)?,
+                        media.read(id, MediaPart::Thumbnail)?,
+                    ))
+                })
+                .await
+                .and_then(|read| read)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                self.attachments = vec![
+                    data.ok_or(ApiError::FileNotDownloaded)?,
+                    thumbnail.unwrap_or_default(),
+                ];
                 let text = |field: &str| body[field].as_str().map(str::to_owned);
                 let dimension = |field: &str| {
                     body[field]
                         .as_u64()
                         .and_then(|value| u32::try_from(value).ok())
                 };
-                let result = self.send_file(OutgoingFile {
-                    identity: identity.to_owned(),
-                    path: None,
-                    name: text("name"),
-                    media_type: text("mediaType")
-                        .unwrap_or_else(|| "application/octet-stream".into()),
-                    caption: text("caption"),
-                    rendering: text("rendering").unwrap_or_else(|| "file".into()),
-                    width: dimension("width"),
-                    height: dimension("height"),
-                    duration: body["duration"].as_f64(),
-                    encode: None,
-                    keep_metadata: false,
-                });
+                let result = self
+                    .send_file(OutgoingFile {
+                        identity: identity.to_owned(),
+                        path: None,
+                        name: text("name"),
+                        media_type: text("mediaType")
+                            .unwrap_or_else(|| "application/octet-stream".into()),
+                        caption: text("caption"),
+                        rendering: text("rendering").unwrap_or_else(|| "file".into()),
+                        width: dimension("width"),
+                        height: dimension("height"),
+                        duration: body["duration"].as_f64(),
+                        encode: None,
+                        keep_metadata: false,
+                    })
+                    .await;
                 self.attachments.clear();
                 result
             }
@@ -1999,7 +2199,20 @@ impl App {
 
     /// `saveFile`: write a received or sent file, decrypted, to `directory` (the user's
     /// Downloads); returns the path. This is the only way media leave the encrypted store.
-    pub(crate) fn save_file(&mut self, id: i64, directory: &str) -> Result<Value, ApiError> {
+    pub(crate) async fn save_file(
+        &mut self,
+        id: i64,
+        directory: String,
+    ) -> Result<Value, ApiError> {
+        let (_, file) = self.file_to_save(id)?;
+        let media = Arc::clone(&self.media);
+        media::off_thread(move || save_decrypted(&media, id, &directory, &file))
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+    }
+
+    /// The chat and what the file is called, if it may leave.
+    fn file_to_save(&self, id: i64) -> Result<(String, FileToSave), ApiError> {
         let message = self
             .store
             .message(id)?
@@ -2007,29 +2220,11 @@ impl App {
             .ok_or_else(|| ApiError::Internal("no such file".into()))?;
         self.check_readable(&message.conversation)?;
         let body: Value = serde_json::from_str(&message.body).unwrap_or_default();
-        let data = self
-            .media
-            .read(id, MediaPart::File)
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-            .ok_or_else(|| ApiError::Internal("file not downloaded".into()))?;
-        let directory = std::path::Path::new(directory);
-        if !directory.is_dir() {
-            return Err(ApiError::Internal("no such directory".into()));
-        }
-        let name = safe_file_name(
-            body["name"].as_str(),
-            body["mediaType"].as_str().unwrap_or(""),
-        );
-        let target = save_target(directory, &name, &data);
-        if !target.exists() {
-            std::fs::write(&target, data.as_slice())
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
-        let openable = target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(crate::file_types::opens_externally);
-        Ok(json!({ "path": target.to_string_lossy(), "openable": openable }))
+        let file = FileToSave {
+            name: body["name"].as_str().map(str::to_owned),
+            media_type: body["mediaType"].as_str().unwrap_or("").to_owned(),
+        };
+        Ok((message.conversation, file))
     }
 }
 
@@ -2200,6 +2395,12 @@ mod tests {
             .build()
             .unwrap()
             .block_on(job.keep(&app.store, &app.media, events, fetched))
+    }
+
+    /// Runs `command` in a set of its own: the upload it spawns last goes with the set, without
+    /// having run, so nothing goes to the network.
+    async fn in_own_set<F: Future>(command: F) -> F::Output {
+        tokio::task::LocalSet::new().run_until(command).await
     }
 
     fn auto_save(store: &Store, message: i64, data: &[u8], pictures: &std::path::Path) {
@@ -3182,7 +3383,9 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let reply = app.send_file(file("media", "video/mp4", false)).unwrap();
+                let reply = in_own_set(app.send_file(file("media", "video/mp4", false)))
+                    .await
+                    .unwrap();
                 let (body, bytes) = stored(&app, &reply);
                 for secret in fixture::SECRETS {
                     assert!(!contains(&bytes, secret));
@@ -3202,7 +3405,9 @@ mod tests {
                 assert_eq!(body["size"], bytes.len());
 
                 // Sent as a file, it is the user's file, unchanged.
-                let reply = app.send_file(file("file", "video/mp4", false)).unwrap();
+                let reply = in_own_set(app.send_file(file("file", "video/mp4", false)))
+                    .await
+                    .unwrap();
                 let (body, bytes) = stored(&app, &reply);
                 assert_eq!(bytes, recording);
                 assert_eq!(body["rendering"], "file");
@@ -3210,7 +3415,9 @@ mod tests {
 
                 // A photo sent as media says nothing with its name either.
                 std::fs::write(&source, b"\xff\xd8\xff").unwrap();
-                let reply = app.send_file(file("media", "image/jpeg", false)).unwrap();
+                let reply = in_own_set(app.send_file(file("media", "image/jpeg", false)))
+                    .await
+                    .unwrap();
                 assert_eq!(stored(&app, &reply).0["name"], "image.jpg");
             })
             .await;
@@ -3303,7 +3510,7 @@ mod tests {
             .write(received.id, MediaPart::File, b"\x1aE\xdf\xa3")
             .unwrap();
         assert!(matches!(
-            app.forward_message(received.id, "CCCCCCCC"),
+            in_own_set(app.forward_message(received.id, "CCCCCCCC")).await,
             Err(ApiError::VideoKeepsMetadata)
         ));
     }
@@ -3375,7 +3582,9 @@ mod tests {
 
         let source = app.store.conversation_messages("BBBBBBBB", 1).unwrap()[0].id;
         archive(&app, "EEEEEEEE");
-        app.forward_message(source, "EEEEEEEE").unwrap();
+        in_own_set(app.forward_message(source, "EEEEEEEE"))
+            .await
+            .unwrap();
         assert!(back(&app, "EEEEEEEE"), "forward");
 
         // Ends without yielding: the upload's task doesn't run, so nothing goes to the network.
@@ -3384,7 +3593,7 @@ mod tests {
         local
             .run_until(async {
                 app.attachments = vec![Zeroizing::new(b"bytes".to_vec())];
-                app.send_file(OutgoingFile {
+                in_own_set(app.send_file(OutgoingFile {
                     identity: "FFFFFFFF".to_owned(),
                     path: None,
                     name: Some("a.bin".to_owned()),
@@ -3396,7 +3605,8 @@ mod tests {
                     duration: None,
                     encode: None,
                     keep_metadata: false,
-                })
+                }))
+                .await
                 .unwrap();
             })
             .await;

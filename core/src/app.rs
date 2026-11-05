@@ -1371,6 +1371,21 @@ pub struct App {
     pub(crate) write_pass: Option<crate::app_media::WritePass>,
     /// Binary attachments of the request being handled (e.g. `sendFile`: file, thumbnail).
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
+    /// From the UI, in the core loop: `sendFile` and `saveFile` don't hold up the commands behind
+    /// them. Others asking the same (Threema Web) need the answer in place.
+    pub(crate) file_work_in_background: bool,
+    /// The request being handled.
+    pub(crate) current_request: u64,
+    /// The command handled went to a blocking thread: its reply comes later.
+    pub(crate) reply_later: bool,
+    /// How many of those are still to be finished.
+    pub(crate) file_work_running: usize,
+    /// One at a time.
+    pub(crate) file_work_turn: std::rc::Rc<tokio::sync::Semaphore>,
+    pub(crate) file_work_done:
+        tokio::sync::mpsc::UnboundedSender<crate::app_media::FinishedFileWork>,
+    file_work_done_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>>,
     /// Contacts the request being handled changed beyond what its command says of itself, such as
     /// making them direct, for the other devices.
     pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
@@ -1451,6 +1466,7 @@ impl App {
     ) -> Result<Self, ApiError> {
         std::fs::create_dir_all(&start.data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
         let (media_events, media_events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (file_work_done, file_work_done_rx) = tokio::sync::mpsc::unbounded_channel();
         let store = Store::open_with(&start.data_dir.join("threesea.db"), db_key, upgrading)
             .map(std::rc::Rc::new)
             .map_err(|error| ApiError::store_failed(&error))?;
@@ -1479,6 +1495,13 @@ impl App {
             media_events_rx: Some(media_events_rx),
             write_pass: None,
             attachments: Vec::new(),
+            file_work_in_background: false,
+            current_request: 0,
+            reply_later: false,
+            file_work_running: 0,
+            file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),
+            file_work_done,
+            file_work_done_rx: Some(file_work_done_rx),
             made_direct: std::cell::RefCell::default(),
             new_contacts: std::cell::RefCell::default(),
             unarchived: std::cell::RefCell::default(),
@@ -1605,6 +1628,12 @@ impl App {
         self.media_events_rx.take()
     }
 
+    pub(crate) fn take_file_work(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>> {
+        self.file_work_done_rx.take()
+    }
+
     /// Remember events the current command caused, for [`Self::take_ui_events`].
     pub(crate) fn note_ui_events(&mut self, events: &[&'static str]) {
         for event in events {
@@ -1631,6 +1660,19 @@ impl App {
         reply
     }
 
+    /// [`Self::handle_with`] for the UI's requests in the core loop. `None`: the command's heavy
+    /// part went to a blocking thread, and [`Self::finish_file_work`] replies when it is done.
+    pub(crate) async fn handle_from_ui(
+        &mut self,
+        request_json: &str,
+        attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
+    ) -> Option<String> {
+        self.file_work_in_background = true;
+        let reply = self.handle_with(request_json, attachments).await;
+        self.file_work_in_background = false;
+        (!std::mem::take(&mut self.reply_later)).then_some(reply)
+    }
+
     /// Parse and execute one request; returns the reply JSON.
     pub async fn handle(&mut self, request_json: &str) -> String {
         let request: Request = match serde_json::from_str(request_json) {
@@ -1647,7 +1689,21 @@ impl App {
             }
         };
         let change = sync_change(&self.store, &request.command);
+        self.current_request = request.id;
         let outcome = self.execute(request.command).await;
+        if self.reply_later {
+            return String::new();
+        }
+        self.reply(request.id, change, outcome).await
+    }
+
+    /// What follows a command, whatever became of it, and its reply JSON.
+    pub(crate) async fn reply(
+        &mut self,
+        request: u64,
+        change: Option<crate::app_multidevice::SyncChange>,
+        outcome: Result<Value, ApiError>,
+    ) -> String {
         let new_contacts = self.new_contacts.take();
         if !new_contacts.is_empty() {
             let change = crate::app_multidevice::SyncChange::NewContacts(new_contacts);
@@ -1667,14 +1723,14 @@ impl App {
                 if let Some(change) = change {
                     self.reflect_change(change, &result).await;
                 }
-                json!({"reply": request.id, "ok": true, "result": result})
+                json!({"reply": request, "ok": true, "result": result})
             }
             Err(error) => {
                 if matches!(error, ApiError::RateLimited) {
                     self.store.rest_directory_calls();
                 }
                 tracing::info!(kind = error.kind(), "command failed");
-                json!({"reply": request.id, "ok": false,
+                json!({"reply": request, "ok": false,
                     "error": {"kind": error.kind(), "message": error.to_string()}})
             }
         }
@@ -1938,7 +1994,7 @@ impl App {
                 Ok(json!({ "changed": changed }))
             }
             Command::ForwardMessage { message, identity } => {
-                self.forward_message(message, &identity)
+                self.forward_message(message, &identity).await
             }
             Command::SetDraft {
                 identity,
@@ -1996,7 +2052,7 @@ impl App {
             Command::ForwardMessages { messages, identity } => {
                 let (mut forwarded, mut failed) = (0, 0);
                 for message in messages {
-                    match self.forward_message(message, &identity) {
+                    match self.forward_message(message, &identity).await {
                         Ok(_) => forwarded += 1,
                         Err(error) => {
                             tracing::warn!(%error, "forwarding failed");
@@ -2078,14 +2134,23 @@ impl App {
                     keep_metadata,
                 };
                 // Only this command: nothing else that ends in sending a file uses a pass.
-                if self.take_write_pass(&file.identity) {
-                    self.send_file_under_pass(file)
+                let under_pass = self.take_write_pass(&file.identity);
+                if self.file_work_in_background {
+                    self.send_file_in_background(file, under_pass)
+                } else if under_pass {
+                    self.send_file_under_pass(file).await
                 } else {
-                    self.send_file(file)
+                    self.send_file(file).await
                 }
             }
             Command::RetryUpload { message } => self.retry_upload(message),
-            Command::SaveFile { message, directory } => self.save_file(message, &directory),
+            Command::SaveFile { message, directory } => {
+                if self.file_work_in_background {
+                    self.save_file_in_background(message, directory)
+                } else {
+                    self.save_file(message, directory).await
+                }
+            }
             Command::EditMessage {
                 identity,
                 message_id,
@@ -2193,7 +2258,7 @@ impl App {
             Command::SendGifFavourite {
                 identity,
                 favourite,
-            } => self.send_gif_favourite(identity, favourite),
+            } => self.send_gif_favourite(identity, favourite).await,
             Command::UpdateSettings => self.update_settings_json(),
             Command::SetUpdateCheck { enabled } => {
                 if !self.update_check_built {
@@ -4063,6 +4128,278 @@ mod tests {
 
     fn stored_messages(app: &App, identity: &str) -> usize {
         app.store.conversation_messages(identity, 10).unwrap().len()
+    }
+
+    /// A request as the core loop handles it; `None` while its reply is still to come.
+    async fn from_ui(app: &mut App, request: serde_json::Value) -> Option<serde_json::Value> {
+        let attachments = vec![vec![1_u8, 2, 3].into()];
+        let reply = app
+            .handle_from_ui(&request.to_string(), attachments)
+            .await?;
+        Some(serde_json::from_str(&reply).unwrap())
+    }
+
+    fn file_request(id: u64, identity: &str, name: &str) -> serde_json::Value {
+        json!({"id": id, "cmd": "sendFile", "identity": identity, "rendering": "file",
+               "mediaType": "text/plain", "name": name, "caption": ""})
+    }
+
+    #[test]
+    fn a_file_from_the_ui_holds_up_no_command_behind_it() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "IJKL9012", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            assert_eq!(stored_messages(&app, "IJKL9012"), 1, "not stored yet");
+            let next = from_ui(&mut app, json!({"id": 4, "cmd": "connectionState"})).await;
+            assert_eq!(next.unwrap()["ok"], true);
+
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["reply"], 3);
+            assert_eq!(reply["result"]["kind"], "file", "{reply}");
+            let id = reply["result"]["id"].as_i64().unwrap();
+            assert_eq!(stored_messages(&app, "IJKL9012"), 2);
+            let stored = app.media.read(id, crate::media::MediaPart::File);
+            assert_eq!(stored.unwrap().unwrap().as_slice(), [1, 2, 3]);
+            assert_eq!(app.file_work_running, 0);
+        }));
+    }
+
+    #[test]
+    fn files_from_the_ui_are_stored_in_the_order_they_came() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            for (id, name) in [(3, "first.txt"), (4, "second.txt"), (5, "third.txt")] {
+                assert!(
+                    from_ui(&mut app, file_request(id, "IJKL9012", name))
+                        .await
+                        .is_none()
+                );
+            }
+            // All of them before the first finishes, whose upload would go to the network.
+            let finished = [
+                done.recv().await.unwrap(),
+                done.recv().await.unwrap(),
+                done.recv().await.unwrap(),
+            ];
+            for (finished, id) in finished.into_iter().zip([3, 4, 5]) {
+                let reply: serde_json::Value =
+                    serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+                assert_eq!(reply["reply"], id, "{reply}");
+            }
+        }));
+    }
+
+    /// Refused at once: there is nothing to wait for.
+    #[test]
+    fn a_file_from_the_ui_for_a_hidden_chat_is_refused_as_ever() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let local = tokio::task::LocalSet::new();
+        let reply = rt()
+            .block_on(local.run_until(from_ui(&mut app, file_request(3, "EFGH5678", "a.txt"))))
+            .unwrap();
+        assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        assert_eq!(stored_messages(&app, "EFGH5678"), 1);
+    }
+
+    /// Under a pass, too, it goes to the blocking thread, and the answer tells nothing.
+    #[test]
+    fn a_file_under_a_pass_from_the_ui_answers_as_under_a_pass() {
+        let (_dir, mut app) = app_with_write_pass(1);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "ABCD1234", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["result"], json!({}));
+        }));
+        assert_eq!(
+            app.store
+                .conversation_messages("ABCD1234", 10)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// The app is locked while a file is on its way: it was sent while it could be, and it counts,
+    /// but the answer says nothing of the chat and the UI's readers don't get at it.
+    #[test]
+    fn a_chat_hidden_while_a_file_was_on_its_way_stays_hidden() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "ABCD1234", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["result"], json!({}), "not a word of the chat");
+        }));
+        let messages = app.store.conversation_messages("ABCD1234", 10).unwrap();
+        assert_eq!(messages.len(), 2);
+        let file = messages
+            .iter()
+            .find(|message| message.kind == "file")
+            .unwrap();
+        assert!(!app.media.shown(file.id), "the readers stay out");
+    }
+
+    /// A list's members get their copies by reading its own back, which a hidden one refuses.
+    #[test]
+    fn a_list_hidden_while_a_file_was_on_its_way_refuses_it() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let list = app
+            .store
+            .create_distribution_list("List", vec!["IJKL9012".to_owned()])
+            .unwrap()
+            .key;
+        let private = json!({"id": 4, "cmd": "setPrivate", "identity": list, "private": true});
+        assert_eq!(call(&mut app, private)["ok"], true);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(5, &list, "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let lock = from_ui(&mut app, json!({"id": 6, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+        assert_eq!(stored_messages(&app, &list), 0);
+    }
+
+    /// A contact removed while its file was prepared: nothing of the file stays on the disk.
+    #[test]
+    fn a_file_whose_chat_went_meanwhile_leaves_nothing() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "IJKL9012", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let finished = done.recv().await.unwrap();
+            app.store.delete_contact("IJKL9012").unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], false, "{reply}");
+        }));
+        let left = std::fs::read_dir(dir.path().join("media")).unwrap().count();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn saving_a_file_from_the_ui_answers_when_it_is_written() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let message = app
+            .store
+            .insert_incoming(
+                "IJKL9012",
+                2,
+                "file",
+                &json!({"name": "a.txt", "mediaType": "text/plain"}).to_string(),
+                1,
+            )
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media
+            .write(message, crate::media::MediaPart::File, b"content")
+            .unwrap();
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": downloads});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(from_ui(&mut app, request).await.is_none());
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["reply"], 3);
+            let path = reply["result"]["path"].as_str().unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), b"content");
+        }));
+    }
+
+    /// Saved just as the chat was hidden: the answer would name the file.
+    #[test]
+    fn a_file_saved_as_its_chat_is_hidden_is_not_named() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let message = app
+            .store
+            .insert_incoming(
+                "ABCD1234",
+                2,
+                "file",
+                &json!({"name": "a.txt", "mediaType": "text/plain"}).to_string(),
+                1,
+            )
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media
+            .write(message, crate::media::MediaPart::File, b"content")
+            .unwrap();
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": dir.path()});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(from_ui(&mut app, request).await.is_none());
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
     }
 
     /// With a pass running nothing but the counted files gets through: the chat is hidden from
