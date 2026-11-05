@@ -798,3 +798,573 @@ network to 3G if it can, or find a weak signal, and use a video that takes more 
    "did not answer". If that happens online, report it: the log has the network error's kind.
 10. Lock the app with the place list open, wait, and unlock (app lock on).
     - Expect: the location indicator goes off while locked, and old coordinates don't flash on return.
+
+---
+
+# Added 2026-11-05 (what the fixes after the audit of 2026-11-04 leave to a phone)
+
+Short: what to do, then what you should see. Some need a second phone with Threema, Threema for
+Desktop linked, or Threema Web open in a browser; it says so. The emulator can take the ones that
+need neither a sensor nor a real network.
+
+## Writing and sending
+
+1. Paste over 6000 bytes of text and send; the same with an over-long caption on a photo.
+   - Expect: a notice; the text (and the photo with its caption) stays, also after reopening the
+     chat. Sending normally empties the input at once, the keyboard stays, the button doesn't flicker.
+2. Pick a photo, then Edit an earlier message and send.
+   - Expect: the message is edited; the photo stays picked with its caption back in the input.
+3. Quote, then attach a file.
+   - Expect: the quote bar goes; with a file picked the bubble menu has no Quote, and still lays out well.
+4. Open a chat that has a draft.
+   - Expect: the other side sees no "typing"; typing for real still sends it.
+5. In a group, type a mention, leave, come back, send.
+   - Expect: it arrives as a mention; the chat list's draft preview shows @Name.
+6. Type, wait a second, kill the app (`kill` over SSH).
+   - Expect: the text is back when the chat opens again.
+7. With a photo picked, or recording, or a recording held: try the back swipe.
+   - Expect: nothing happens, and the page doesn't look stuck; after the X it can be left. Picked
+     capture, then a notification tap to another chat: the discard notice shows.
+8. Quote, type, leave, come back.
+   - Expect: text and quote bar are back, and the keyboard doesn't open by itself.
+9. Film a video, send, go back within a second; then the same in a private chat opened from a
+   notification.
+   - Expect: it arrives once, with its caption, and nothing is left in the capture cache; the
+     private chat asks for the PIN when opened again.
+10. Group chat → group page → a member's chat → back twice, then have a group message arrive.
+    - Expect: the quiet in-app sound for it.
+11. Type a draft, delete the contact (or group) from its page, write to them again later.
+    - Expect: the input is empty.
+12. Type in front of many emoji in the input.
+    - Expect: the pictures stay in place and aligned, no lag.
+13. Landscape: open the emoji panel with the smiley and with a bubble's +, turn the phone with it
+    open, then open it in portrait after a landscape keyboard.
+    - Expect: messages and input stay visible, the switch from keyboard to panel doesn't jump.
+14. Emoji panel: search, pick from the results, use the skin-tone menu in the two-row grid; close it
+    with a swipe down and with the keyboard button; the same when adding a reaction.
+    - Expect: keyboard and panel lay out well and the input keeps the focus.
+15. Bold, italic and struck-through messages, also with links and emoji.
+    - Expect: link colour, emoji alignment and the time's place look right.
+16. The attachment menu on a small phone and in landscape.
+    - Note whether six items fit well; the user decides whether six stay.
+
+## Reading a chat
+
+1. Emulator: in the ECHOECHO chat, more than a screenful, at the newest end with the keyboard
+   closed, long-press the newest bubble and (a) tap the dimmed area, (b) choose Copy, (c) tap a quick
+   reaction. Then scroll a few screens back and repeat (a).
+   - Expect: after about a second the input and the microphone are fully in view and the bubble is
+     where it was; scrolled back, the view doesn't move.
+2. React to, or get a read receipt for, a message far back.
+   - Expect: it stays in its place and the view doesn't move.
+3. Scrolled back, with and without the keyboard, have a message arrive.
+   - Expect: the view stays, a "New message" notice shows, the keyboard stays; typing or tapping
+     the input brings you to the newest. The chat list shows it unread when you leave.
+4. Minimise on an open chat, receive several messages, come back (also over the attached details
+   page).
+   - Expect: the unread line at the top of the view.
+5. Tap a quote of a message older than what is loaded, and one whose message was deleted.
+   - Expect: the first opens there and lights up; the second says "Message not available".
+6. A search hit far back in a long chat.
+   - Expect: it opens quickly; scrolling forward reaches the newest.
+7. Scroll back, leave, reopen.
+   - Expect: the same place (on a tall screen too); with something unread, the line. Forward or
+     share into that chat: it opens at the input with the X in view.
+8. Edit or delete for everyone a message someone quoted.
+   - Expect: the quote changes at once, also when the original is out of the loaded part.
+9. Landscape, keyboard open, in a chat whose last message was yesterday.
+   - Expect: the day band says Yesterday.
+10. Leave a busy chat open for a long time.
+    - Expect: memory stays flat.
+10a. Full: a voice message downloads while its chat is open; raise the phone to the ear.
+    - Expect: it starts.
+11. Flick through a chat with many photos, also ones without size or thumbnail.
+    - Expect: thumbnails while moving, sharp pictures soon after it stops, no flash or jump in
+      height at the swap.
+12. Delete a message, load older pages, receive new ones.
+    - Expect: day headers and bubble runs stay right; a GIF stops when scrolled out and plays when back.
+13. Chat background with a landscape and a portrait photo, in both orientations.
+    - Expect: sharp, filling the page.
+14. Change emoji style, text size and GIF playing in Settings with a chat open; then remove the ID.
+    - Expect: the chat follows at once; after removing the ID they are back at their defaults.
+15. First opening of the smileys and people tabs; the app's start on a phone.
+    - Expect: the tiles appear without popping in one by one, no hitch at the first emoji shown.
+
+## Message actions
+
+1. Tap and use the menu on a failed text, poll and file.
+   - Expect: it goes again; recipient and linked device show one message.
+2. Stop a large upload and a large download on a real network.
+   - Expect: data really stops flowing; the viewer has no stop item.
+3. Tap a cleaned-up file that the server no longer has.
+   - Expect: one notice.
+4. Select messages: the five icons and the fading count on a small screen and in German; Select all
+   over several pages; save and delete many.
+5. Share a message's text through the share dialog.
+   - Expect: the text arrives in the chosen app.
+6. Long press, by real touch, on a reaction chip (also in a group with former members), on a starred
+   row, and on a quote.
+   - Expect: who reacted (chip), Remove star (starred list), the bubble's menu (quote), each with
+     its highlight.
+7. A blocked contact's chat and a left group: long press, chips, the poll page.
+   - Expect: only what such a chat can do, no push-up menu.
+8. A distribution list: long press a message.
+   - Expect: no reaction row.
+9. Remove a link on your profile.
+   - Expect: the remorse shows on the profile page after the dialog closed.
+10. Tap a received file named like `Invoice #12.pdf`.
+    - Expect: it opens in Documents.
+11. A chat with polls: the banner and the polls page; tap a row to vote, Show in chat.
+    - Expect: the banner's count follows.
+
+## With another app on the other side
+
+1. Notes group: react with a heart, edit an old note, delete one; with Desktop linked too.
+   - Expect: each change reaches Desktop; Delete for everyone only then.
+2. Edit a message while the connection drops in the middle of sending.
+   - Expect: you and the other side end up with the same text.
+3. Edit a message that quotes another, towards Android.
+   - Expect: no quote marker in their bubble; the quote stays.
+4. An Android contact edits a photo's caption.
+   - Expect: the new text with Edited on the bubble.
+5. Only if an old client or a gateway is at hand: their picture, voice and video messages.
+   - Expect: they open.
+6. A thumbs up in a group with a member on an old client.
+   - Expect: it arrives there as an acknowledgement.
+7. Forward secrecy, with forward secrecy off or Desktop linked: a contact on an old app sends.
+   - Expect: their message comes again without forward secrecy.
+8. A contact links Desktop, later unlinks and writes.
+   - Expect: one "off" line, then plain messages that get delivered; after unlinking it comes back.
+9. Someone new writes first from Threema for Android.
+   - Expect: no security notice; their first receipt and your reply arrive.
+10. An Android member's group message after a lost session.
+    - Expect: Android offers to send it again.
+11. A chat with a forward secrecy session: the status lines read right. A backlog after being
+    offline, from such contacts: all arrive, no notices.
+
+## Media, viewer and pictures
+
+1. A real camera JPEG sent as a file.
+   - Expect: right in the bubble, the gallery and the viewer.
+2. Play a voice message from the media gallery, go back.
+   - Expect: the bubble no longer glows and at-the-ear playback skips it.
+3. A damaged picture in the viewer.
+   - Expect: a readable, centred label.
+4. Hide videos in one chat's gallery, then open a chat with only videos.
+   - Expect: the pull-down offers Show, and it brings them back.
+5. The picture viewer by real touch: swipe between pictures, swipe down for back, pinch and double
+   tap (zoom doesn't move the slideshow), pinch back to fit, the overlay in a light Ambience, big
+   photos, a video's play button and the way back, Show in chat from a chat and from the gallery,
+   opening it in a chat with thousands of pictures.
+6. Photos, stickers, profile pictures, GIFs and WebP from others, in chats and the gallery; a BMP or
+   HEIC sent as media.
+   - Expect: they show and play; the BMP or HEIC is a file row or its preview, and opens on a tap.
+7. A chat's gallery with several hundred media.
+   - Expect: scrolling loads more without a jump; thumbnails appear while downloading; delete removes
+     the row; a new file appears; the filter still works.
+8. Receive and send a video near 100 MiB; then send a file and lock; close the window right after
+   sending.
+   - Expect: the chat list and scrolling stay smooth, the connection stays up; memory on an older
+     phone with this and three large downloads stays bearable.
+9. Open a large video.
+   - Expect: the page at once with a busy indicator, then it plays; leaving meanwhile works; a call
+     or a lock during the read stops it.
+10. Draw on a photo: lines under the finger, text, turning; then "Draw on it" on a received picture,
+    with its countdown, cancelling it (back to the editor) and leaving a private chat during it; the
+    colour page returns to the editor.
+    - Expect: the sent picture looks like the preview.
+11. A large camera photo through the editor, and one taken in the camera page.
+    - Expect: a busy indicator over the attachment while it is edited.
+12. A profile picture and a group picture: from the gallery and with the camera, cut to a square;
+    on a bad connection for the group picture; an undecodable picture.
+    - Expect: an error notice on failure, the new picture at once on success.
+13. Forward a photo with a changed caption, and one with a mention.
+    - Expect: the caption arrives; the mention stays a mention.
+14. Share a picture and a video into two chats, and into several with a private chat among them;
+    close the window during it with "Keep running" off.
+    - Expect: thumbnails and lengths right; the PIN for the private chat, which is hidden again
+      afterwards; the rest still arrives, then the process ends; a failure with the window closed
+      shows a notification.
+15. Share a video and a GIF from Gallery.
+    - Expect: they play at the recipient, without metadata.
+16. Share a link from the Browser.
+    - Expect: offered once; the share page opens with the address; other apps' text still works.
+17. With a memory card: the file picker lists it, files on it can be attached, a data backup on it
+    imports.
+
+## Chat list, cover, contacts and search
+
+1. Type in each search field (search page, contacts, share page, member picker).
+   - Expect: the keyboard stays, rows narrow, the page rests at its top; found chats and contacts
+     open; picked members stay picked while filtered.
+2. A search result with joined emoji and a long text.
+   - Expect: pictures in place, the match highlighted, three lines.
+3. Lock now with a long grace time.
+   - Expect: the unlock page at once. Offline with a lock: New group is on the Contacts pulley.
+4. Mute and unmute from a chat's menu.
+   - Expect: the silent icon follows.
+5. The cover with something unread.
+   - Expect: both actions; the right one opens the chat. With the lock or "Hide content on the
+     cover" only the new message action.
+6. A chat pinned long ago.
+   - Expect: its date shows and the name still fits.
+7. The chat list itself.
+   - Note how the taller rows, larger pictures and three lines with emoji look; the user may prefer
+     two lines.
+8. With the window closed (Full) and the list hidden: messages, reads, renames.
+   - Expect: the cover's count and name follow; the list is current on coming back, with the newest
+     delivery icon. A chat marked private on a linked device while the app is in the background is
+     not shown on coming back.
+9. Delete a contact with a chat, from the list and from its page.
+   - Expect: the chat goes, the page returns past it, the cover's count falls.
+10. Edit the name of a blocked, pinned contact with a picture.
+    - Expect: the page keeps all of it.
+11. Contacts named with accents (an Ä, É, Ö), an emoji name and a name starting with a digit.
+    - Expect: the accented ones under their letter, one # section at the end.
+12. Tap a group member's picture.
+    - Expect: Add to contacts works, no Delete; after leaving the group, Delete is back.
+13. Show profile pictures off, then on.
+    - Expect: all lists and pages lose and regain the pictures at once, group call tiles too.
+14. Address book sync on: delete a matched contact, pull to refresh; then add it by hand.
+    - Expect: it stays away, then it stays.
+15. Settings → Privacy → Numbers without a country code: open it, choose, change.
+    - Expect: a page showing Automatic (+code); the choice is kept; a change starts a sync with its
+      notice.
+16. Change a matched contact's name in People and sync; rename it in Threesea and sync.
+    - Expect: the first follows, the second stays.
+17. An address book entry with only a company and a linked number.
+    - Expect: added under the company's name.
+18. First sync of a large address book; a manual sync offline.
+    - Expect: it finishes quickly; offline it says why.
+19. Add members to a group that already holds some or all contacts.
+    - Expect: no empty letters; a placeholder when everyone is in.
+20. New group and New distribution list with many contacts, also in landscape; both name dialogs in
+    landscape with the keyboard open.
+    - Expect: title and name field visible, keyboard on the name, Create reachable, the field
+      reachable.
+21. On a group page, pull down without flicking first.
+    - Expect: the menu with Leave group opens.
+22. During a member's or browser's removal countdown, let a contact or browser change arrive.
+    - Expect: undo still works.
+23. A 24-hour phone: Last active of a linked device.
+    - Expect: 24-hour time.
+24. Your own QR code with the phone sideways.
+    - Expect: the whole code shows and scans; the text below is reached by scrolling.
+25. The photo editor: pull down from its margins.
+    - Expect: the menu opens; dragging the frame and its grips works as before.
+26. Long press a joined group, a left group and a list in the chat list.
+    - Expect: the menu and its countdown read right for each.
+27. A German phone: older day headers.
+    - Expect: "Mittwoch, 14. Oktober".
+28. Without a camera (emulator): the QR page.
+    - Expect: only the middle text.
+29. Scan a contact's code whose key differs from the one stored.
+    - Expect: the longer notice reads fully.
+30. With a real directory: let the daily contact refresh run.
+    - Expect: `contacts refreshed` in the log; feature masks and states stay right.
+
+## Groups
+
+1. Be added to a group by someone who isn't a contact; then by someone on your block list.
+   - Expect: the group appears with them as a contact; from the blocked one nothing appears.
+2. Offline while a stranger sets up a group and writes in it.
+   - Expect: after reconnecting the group and all messages arrive.
+3. A group with a revoked ID in it: write.
+   - Expect: your text goes from clock to sent; with one member stuck, Delete for everyone appears.
+4. Offline: create a group and write; offline: write, then leave.
+   - Expect: the members get the text in both cases.
+5. Be removed by an Android creator.
+   - Expect: "You are no longer a member of this group."
+6. Add someone to a group with a picture; during a group call, add a member who can do group calls.
+   - Expect: they see the picture; they see the banner and can join.
+7. Block a member of a shared group, then write and rename.
+   - Expect: the text reaches the others, not them; the rename reaches them too.
+8. With "Block unknown senders" on, call someone who isn't a contact.
+   - Expect: the end screen gives the reason at once.
+9. A blocked contact writes with forward secrecy.
+   - Expect: no chat moves up, no status line.
+10. A chat with a revoked ID.
+    - Expect: "This Threema ID was revoked" in place of the input, no Call in the pulley.
+11. During a 1:1 call, open a group chat from its notification.
+    - Expect: the group call items and banner are off.
+
+## Linked devices (Threema for Desktop)
+
+1. Scan a contact's code, add a contact, delete one, run the address book sync, link and unlink a
+   number.
+   - Expect: each shows on Desktop; a revoked ID shows as revoked there.
+2. Import a data backup.
+   - Expect: its contacts and groups appear on Desktop, and a later message in such a group lands in it.
+3. With Privacy, the block list and the profile open on the phone, change the same on Desktop.
+   - Expect: the open page follows.
+4. A member sends a group sync request; add someone to a group with a picture.
+   - Expect: they get the picture (also Desktop's, if Desktop set it); a removed picture doesn't
+     come back.
+5. Drop the connection while Desktop changes a picture; set a picture offline on the phone.
+   - Expect: after reconnecting the other side has it; a contact you write to from Desktop gets the
+     phone's own picture.
+6. Desktop changes the members of someone else's group; Desktop leading, someone renames a group
+   or creates a new one.
+   - Expect: the creator stays on the phone and their messages arrive; the changes reach the phone
+     through Desktop alone, and the phone sends no answers.
+7. Close Desktop; meanwhile be added to a group with someone new, renamed, given a picture, leave
+   it, be removed from another. Reopen Desktop.
+   - Expect: Desktop shows all of it.
+8. Link Desktop with someone else's group, with a removed group, and with a left group whose
+   member's contact was deleted.
+   - Expect: linking works; the creator shows once; removed shows as removed, not left.
+9. Change members on the phone and on Desktop.
+   - Expect: each side shows the lines once.
+10. Delete a left group on the phone, and one on Desktop.
+    - Expect: it disappears on the other side.
+11. Desktop accepts what the phone reflects (nonces, receipts, pictures); messages still arrive.
+12. Delete a contact on the phone with Desktop leading; have them write.
+    - Expect: chat and contact come back on the phone.
+13. With Desktop leading and a chat open on the phone, the contact types.
+    - Expect: "typing" shows; nothing stale after logging in.
+14. Read a chat offline and reconnect; read a group and a chat with receipts off.
+    - Expect: the sender sees read where receipts are on; Desktop shows all of them read.
+15. Airplane mode while messages arrive, then back.
+    - Expect: the notification shows; the sender sees delivered after reconnecting; Desktop still
+      gets what came during the stalled link.
+16. Reply in an archived chat.
+    - Expect: it leaves the archive, here and on Desktop.
+
+## Threema Web (a real browser)
+
+1. On the phone: add a contact and a group, rename, block, make a chat private and back.
+   - Expect: the browser shows each at once.
+2. Delete messages and empty a chat on the phone.
+   - Expect: they leave the browser's open chat.
+3. A contact's new picture; your nickname and picture changed on the phone and in the browser.
+   - Expect: the browser follows, the other pictures stay; profile and edit pages show yours.
+4. Mute a chat; a group on mentions only.
+   - Expect: the icon in the browser, no desktop notification.
+5. Mark as unread on the phone; open that chat in the browser; read a chat in the browser, switch
+   away and back.
+   - Expect: the mark clears on the phone; the unread divider stays gone.
+6. Edit a contact's first name in the browser.
+7. A GIF, a photo sent as a file, a video and a voice message in the browser.
+   - Expect: the GIF plays, the file saves with its name, both lengths show; the message history
+     entry shows correct times.
+8. Send a JPEG from the browser to Android and to Threesea; a video, a GIF and an animated WebP;
+   forward a received picture; forward a HEIC; forward many pictures.
+   - Expect: upright, without EXIF, at the Image size setting; the rest plays; the refusal's alert
+     stays visible; the app stays responsive.
+9. Connect a browser (also after a push wake-up), a second one, dismiss and "Clear all".
+   - Expect: one notification, the count follows, it comes back once, stays under the app lock,
+     closes with the last browser, the switch and (Lite) the window; tapping it opens the sessions.
+10. Allowed servers: the list, its menu and remorse; with a self-hosted server, a renewed
+    certificate with a fresh scan and with a stored session woken by push: accept and decline.
+11. Delete a session.
+    - Expect: the browser forgets it.
+12. A real disconnect; the browser's network changing.
+    - Expect: a readable notice; the session waits and reconnects.
+13. The sessions page: hint and header; rename a session; Remove all with a browser connected, and
+    leaving the page during its countdown.
+    - Expect: the new name; the browser shows it was removed, the notification closes, the browsers
+      are removed even when you left.
+14. Threema Web open while messages come in.
+    - Expect: the chat list updates, thumbnails arrive, and the phone stays cooler than before.
+15. A real server notice, if one ever comes.
+    - Expect: it shows in the browser.
+
+## Notifications and alerts
+
+1. App lock on: let the grace time pass with a notification showing; then a new message.
+   - Expect: the notification turns into "Threesea is locked" without a sound; the new one alerts
+     with no name, text or Reply. The phone asleep through the grace: the text is gone within about
+     30 s of waking.
+2. Keep running off, app lock on: close the window.
+   - Expect: the text leaves Events.
+3. Passphrase on, `kill -9`, start.
+   - Expect: name and text gone before the passphrase.
+4. A reply typed on the lock screen, a new message in that chat, the grace ends, the phone unlocked.
+   - Note whether the reply waits for the PIN or says it wasn't sent.
+5. Reply from a notification after `pkill` and `pkill -9` before the PIN or passphrase.
+   - Expect: "Your reply was not sent", nothing promised.
+6. Reply to a blocked contact from a notification; the same while that chat has an edit open.
+   - Expect: a notification with the reason; the chat stays unread; the text is in the chat's input
+     after a tap (after the edit ends).
+7. The sender deletes or edits the shown message.
+   - Expect: the text changes without sound, vibration or banner; the next message alerts as usual.
+8. Restart with a notification showing, then a new message.
+   - Expect: it replaces the old one in place, and Reply works.
+9. A backlog after being offline; a busy group; a missed call right after a message; a new message
+   after dismissing a chat's notification.
+   - Expect: one sound for the backlog, one per burst in the group with count and text updating,
+     the missed call still alerts, the next message alerts again.
+10. A refused login or a server alert, with the window closed.
+    - Expect: the text under the chat list's header, a notification (phone in the pocket too), one
+      per text. Long texts fit the header.
+11. Two devices taking turns with one ID.
+    - Expect: the header's text, one alert only; the device cookie notification reads fully.
+12. The cover in each state.
+    - Note whether "Connecting" flickers on a phone that reconnects often.
+13. A storage problem while receiving (a nearly full disk).
+    - Expect: the notice and the chat list's line, gone again once storage works.
+
+## Connection, battery and transfers
+
+1. Leave Wi-Fi while connected; come out of a dead zone; unlock after a long sleep.
+   - Expect: Offline or reconnected within about 20 s; reconnected within seconds; and with the
+     screen off a network change keeps the device up through the login.
+2. The ID active on another device.
+   - Expect: no login from Threesea for 10 minutes on its own; Connect now still connects.
+3. Pocket test: a socket the network has dropped.
+   - Expect: back online within the same wake-up.
+4. A whole day: battery and awake time; a message with its notification still arrives within a
+   wake-up; a larger picture on a slow link finishes over several; the license check and Keep
+   messages still run overnight.
+5. A network that drops IPv6.
+   - Expect: connected over IPv4 after about 6 s. With IPv6 off on an IPv6 network, a 1:1 call
+     connects over IPv4.
+6. The blob server out of reach while the chat server works.
+   - Expect: messages go at once; contacts get your picture once it is reachable again.
+7. Send a large video, delete it during the upload, send another at once.
+   - Expect: the recipient gets only the second.
+8. A backlog of pictures after a long time offline.
+   - Expect: each downloads once, none turns failed.
+9. Clean up → media files, restart.
+   - Expect: nothing downloads again; tapping one fetches it.
+10. A group file you sent, fetched by a member long after another member did.
+    - Expect: it still downloads.
+11. A sent file.
+    - Expect: it goes out once its upload finishes.
+12. A stalled mobile link.
+    - Expect: the start page ends at once; notifications and ringing still arrive during a Threema
+      Safe backup, a linking attempt and a chat export; linking and joining a group call still work.
+      A sleeping Full phone with an overdue round stays up to the 45 s limit.
+13. Cold start with a long history, and the upgrade of a real database.
+14. Search for a common word in a long history.
+    - Expect: typing stays responsive and the keyboard stays.
+15. Import a backup with a large list of used nonces and a long chat while connected.
+    - Expect: the connection holds, Stop answers.
+
+## Start, storage, lock and the end of the process
+
+1. Decline or break Sailfish Secrets at the start.
+   - Expect: the page with the secrets text and a code; Try again recovers; closing ends the
+     process; a start in the background leaves a notification.
+2. Kill the app while Sailfish Secrets' confirmation prompt is showing at the start (Full: the
+   background instance after boot), then start it again.
+   - Expect: the prompt again, and the app starts once it is confirmed. Note anything else, such as
+     `secrets read` in the log with no prompt (docs/emulator.md has the emulator's case).
+3. A damaged database.
+   - Expect: the chat list, an unreadable chat and scrolling into a damaged part each say so once.
+4. Open with the phone's storage full.
+   - Expect: the full-storage text; Try again recovers after freeing space.
+5. Upgrade from 0.2.0 with a large store.
+   - Expect: a hint while it upgrades, gone once started.
+6. Encrypt stored data on and off.
+   - Expect: it works and asks for nothing extra.
+7. A start-up passphrase of digits only; and the PIN setup's note on the keypad and keyboard steps.
+   - Expect: title and wrong-code text fit their purpose; the note reads well.
+8. A PIN set with "Lock the app" off.
+   - Expect: Settings, Security and App lock read "PIN for private chats", and the value fits.
+9. Update with `rpm -U` while the app runs without a window, and with one; remove Lite while it
+   runs without a window.
+   - Expect: without a window it ends within minutes and a notification opens the new version;
+     with one it says so and ends when closed; after a removal the process is gone within about
+     35 s, with no notifications left. Note whether the launcher refuses a second start while the
+     old process lives.
+10. Keep running off, app not running: Reply on a left-over notification; once in flight mode.
+    - Expect: it sends and the process ends within seconds; in flight mode it says the reply goes
+      out at the next open, and it does.
+11. Swipe the window closed, and minimise it to the cover.
+    - Expect: closing ends (Keep running off) or keeps running; minimising never ends it.
+12. Keep running off: close during linking, and right after sending several photos.
+    - Expect: gone within about 6 s; the next tap starts normally; all photos and the last text are
+      there at the next start. A file taking over 3 s to prepare shows a notification.
+13. Remove the ID, with and without the passphrase, also killing the app during it, also with a full
+    disk.
+    - Expect: the app starts as new with a new database; a copy of the old file doesn't open; a kill
+      finishes at the next start; on failure Try again, and closing ends the process.
+14. After removing the ID.
+    - Expect: Events and the lock screen show nothing of the old ID; the settings are back at their
+      defaults; a new ID doesn't use the address book until switched on.
+15. Remove the ID with Desktop linked, online and in flight mode.
+    - Expect: online the desktop is unlinked; offline the ID goes, a notice says the desktop stays.
+16. Remove the ID during a data backup with large media, and during a 1:1 and a group call (Full).
+    - Expect: nothing (not even a `.part`) stays in the backup folder; calls end at once for both
+      sides; the next ID can call.
+17. The removal dialog in portrait and landscape.
+    - Expect: it reads well and scrolls.
+
+## Backups, Threema Safe and the ID
+
+1. Turn Threema Safe off online, then in flight mode (once staying on the page, once swiping back).
+   - Expect: online the backup is gone (a restore says not found); offline a notice both times, and
+     Safe is off.
+2. Restore a Threesea-written Safe backup on Android, and an Android one here.
+   - Expect: chats with contacts listed there; empty chats in order here, private ones only in the
+     private list.
+3. Restore with groups.
+   - Expect: Android members see the update; no wave of new chats or forward secrecy lines;
+     contacts' first messages arrive without a rejected re-send; pictures come back for contacts with
+     chats, with one request each.
+4. Change the linked number.
+   - Expect: "+new (not confirmed)"; cancelling leaves it not linked.
+5. Enable and disable Safe from Settings → Backup, and let an upload fail.
+   - Expect: the row follows on swiping back; "Last attempt failed" reads well. The change-password
+     dialog reads well.
+6. Create an ID.
+   - Expect: nickname, then Threema Safe, then the update question, one at a time. Enabling Safe with
+     no network: a notice, the row says Off and the question comes again next start. The reminder
+     notification, its tap to the Safe page (also with the app closed and with a PIN), and its
+     removal after a backup.
+6a. Threema Safe failing for over a week (no network to its server).
+    - Expect: a notification with the days since the last backup; its tap opens the Safe page (also
+      with the app closed, and with a PIN first); it goes after a successful backup, also after
+      "Back up now".
+7. On a phone with no ID: restore from a data backup.
+   - Expect: file picker, restore, progress over the chat list, results page, back to the chat list,
+     then the nickname question. Kill the app during the import: a hint at the next start, which
+     opens Data backup or can be dismissed.
+8. Find my ID on the Safe restore page, with a linked number and address.
+   - Expect: the ID lands in the field.
+9. Scan an ID backup's code at the first start; share a backup by e-mail, Messages and Bluetooth;
+   cancel the share sheet; scan one from Threema for Android.
+   - Expect: it goes as text and arrives intact; the Android one restores. Note what a cancelled
+     share leaves.
+10. Copy an ID; hold the ID on a contact or your profile; share it by SMS and e-mail.
+    - Expect: a "Copied" notice; the menu opens; the link arrives intact.
+11. Write message from a contact page opened on its own, and for a private chat's contact while
+    hidden.
+    - Expect: the chat opens; the PIN first for the private one.
+12. Both restore pages while working.
+    - Expect: the back swipe is blocked.
+13. The pull-down back to the license page, and a `threema://license` link on the setup page.
+    - Expect: the page, and the notice.
+14. After an ID backup restore.
+    - Expect: the nickname dialog once, also after the update question.
+15. Threema's verification SMS.
+    - Note whether Jolla Messages makes its link tappable, and whether a tap confirms the number.
+16. Restore an ID offline with the profile open.
+    - Expect: "Not checked yet", which changes when the connection returns.
+17. Data backup: create one with long rows on the result page; on a nearly full disk; reopen the
+    page during a backup; passwords that don't match; Daily with nothing set.
+    - Expect: "Import failed" or "no room" where it should; the progress bar on reopening; the
+      mismatch and the disabled choice look right; Daily stays Off with its text.
+18. Stop an import of a backup without media, import again, tap a file.
+    - Expect: it tries to download.
+19. A contact added by an import.
+    - Expect: edit and delete shortly after, when online.
+20. A backup with a skipped group.
+    - Expect: the result page's rows and headline say so.
+21. Clean up a lot of messages.
+    - Expect: the Messages figure drops, a busy label meanwhile; note the time and memory on armv7.
+22. Clean up with a pinned and a drafted chat.
+    - Expect: both stay listed, the draft in the input.
+23. Keep messages: pick 1 week (countdown, old value shown, cancel); 1 week then For good during the
+    countdown.
+    - Expect: unchanged after cancel; For good stays.
+24. The Clean up dialog's longer texts.
+    - Expect: they fit and read well.
+25. The chat list's day sections and times with real data.
+26. Check for updates now while offline.
+    - Expect: a notice; the daily check stays silent.
+27. Save the support package with Downloads missing or full; a failed photo and a failed recording.
+    - Expect: the fixed sentences, and the log line has the code.
+28. Settings → About.
+    - Expect: the two licence buttons open readable pages; the source link opens the browser.
