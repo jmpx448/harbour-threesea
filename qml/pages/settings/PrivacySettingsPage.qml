@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../../components"
+import "../../components/Errors.js" as Errors
 
 // Settings → Privacy: receipts, typing, unknown senders, blocked contacts, address book.
 Page {
@@ -83,6 +84,8 @@ Page {
                 enabled: backend.addressBookSync
                 //% "Exclusion list"
                 text: qsTrId("threesea-he-exclusion-list")
+                //% "Finding contacts from the address book will not add or rename these Threema IDs."
+                description: qsTrId("threesea-la-exclusion-list-description")
                 onClicked: pageStack.push(Qt.resolvedUrl("../BlockedContactsPage.qml"), { exclusion: true })
             }
 
@@ -138,12 +141,20 @@ Page {
             SettingsButton {
                 //% "Clear individual settings"
                 text: qsTrId("threesea-me-clear-contact-policies")
+                //% "The read receipt and typing indicator choices made on single contacts' pages go back to the settings above."
+                description: qsTrId("threesea-la-clear-contact-policies-description")
                 //% "Clearing individual settings"
                 onClicked: Remorse.popupAction(page, qsTrId("threesea-la-clearing-contact-policies"), function() {
-                    backend.call("clearContactPolicies", {}, function(ok, result) {
-                        if (ok && result.cleared === 0) {
+                    backend.call("clearContactPolicies", {}, function(ok, result, kind, message) {
+                        if (!ok) {
+                            Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        } else if (result.cleared === 0) {
                             //% "No contact has its own setting."
                             Notices.show(qsTrId("threesea-la-no-contact-policies"), Notice.Short, Notice.Center)
+                        } else {
+                            //% "Cleared for %n contact(s)"
+                            Notices.show(qsTrId("threesea-la-contact-policies-cleared", result.cleared),
+                                         Notice.Short, Notice.Center)
                         }
                     })
                 })

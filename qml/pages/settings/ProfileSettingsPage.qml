@@ -146,7 +146,7 @@ Page {
                         textRightMargin: 0
                         //% "Nickname"
                         label: qsTrId("threesea-la-nickname")
-                        //% "Shown to new contacts"
+                        //% "Shown to the people you write to"
                         placeholderText: qsTrId("threesea-la-nickname-placeholder")
                         font.pixelSize: Theme.fontSizeLarge
                         Component.onCompleted: backend.call("profile", {}, function(ok, result) {
@@ -227,7 +227,8 @@ Page {
                 property bool working: false
                 function refresh(cached) {
                     backend.call("revocationStatus", { cached: cached }, function(ok, result) {
-                        if (ok) revocationButton.status = result
+                        // The stored state never replaces what the server just said.
+                        if (ok && !(cached && revocationButton.status.checked)) revocationButton.status = result
                     })
                 }
                 Component.onCompleted: { refresh(true); refresh(false) }
@@ -242,8 +243,11 @@ Page {
                             ? qsTrId("threesea-la-revocation-set-at").arg(Format.formatDate(new Date(status.setAt), Formatter.DateMedium))
                             //% "Password set"
                             : qsTrId("threesea-la-revocation-set"))
-                         //% "No password set"
-                         : qsTrId("threesea-la-revocation-not-set")
+                         : status.checked
+                           //% "No password set"
+                           ? qsTrId("threesea-la-revocation-not-set")
+                           //% "Not checked yet"
+                           : qsTrId("threesea-la-revocation-not-checked")
                 enabled: !working
                 onClicked: window.pushWithPin(Qt.resolvedUrl("../RevocationPasswordDialog.qml"), {}, function(dialog) {
                     dialog.accepted.connect(function() {
