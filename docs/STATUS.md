@@ -146,7 +146,8 @@ Forward secrecy (1:1) done:
   official app's Init was accepted, its 4DH-encapsulated delivery receipts decrypted ("first 4DH
   message"), our encapsulated replies delivered and receipted, no Reject/Terminate.
 - Lessons: (1) feature masks go stale → contacts are refreshed from the directory daily and an
-  existing FS session counts as FS support; (2) "Block unknown senders" silently drops first
+  existing FS session counts as FS support (reversed since: ADR 0020, forward secrecy follows
+  the peer's announced features); (2) "Block unknown senders" silently drops first
   messages from strangers (works as designed, but tests must keep it off).
 
 Notifications (done early, Phase 4 item): one per chat, group title + "Sender: text", quick
@@ -1264,10 +1265,11 @@ Written down in `docs/release.md`.
 All 792 texts are translated, plurals included: `scripts/translations-fr.py` beside the German
 one, `translations/harbour-threesea-fr.ts` in the `.pro` and in
 `scripts/update-translations.sh`, and the built `harbour-threesea-fr.qm` is in the package
-(checked in the RPM's file list). Style: vouvoiement, French typography (narrow space before
-`: ; ! ?`, « quotes »), Threema's own terms (ID Threema, Threema Safe, confirmations de
-lecture, sondage, transférer, débloquer); "discussion" for a chat, as Threema's French
-interface has it.
+(checked in the RPM's file list). Style: vouvoiement, French typography (a non-breaking space
+before `: ; ! ? »` and after «, put in by `fill`), Threema's own terms (ID Threema, Threema Safe,
+accusés de lecture, sondage, transférer, débloquer); "discussion" for a chat, as Threema's
+French interface has it. (Corrected after the audit of 2026-11-04: an earlier version said
+"narrow space" and "confirmations de lecture".)
 
 The language cannot be seen in the emulator: its image carries only the C and POSIX locales
 (`locale -a`), so Qt's system locale can never become French — nor German, which is why that
