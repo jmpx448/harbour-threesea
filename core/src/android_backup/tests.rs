@@ -210,6 +210,64 @@ fn tampering_fails_the_entry() {
     assert_eq!(read_version(&mut archive).unwrap(), 27);
 }
 
+/// A ZIP64 end: its record (with `padding` bytes of extensible data), locator and end record.
+fn zip64_end(prefix: &[u8], entries: u64, padding: usize) -> Vec<u8> {
+    let mut file = prefix.to_vec();
+    let record = file.len() as u64;
+    file.extend_from_slice(b"PK\x06\x06");
+    file.extend_from_slice(&(44 + padding as u64).to_le_bytes());
+    file.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    file.extend_from_slice(&entries.to_le_bytes());
+    file.extend_from_slice(&entries.to_le_bytes());
+    file.extend_from_slice(&0_u64.to_le_bytes());
+    file.extend_from_slice(&0_u64.to_le_bytes());
+    file.extend_from_slice(&vec![0; padding]);
+    file.extend_from_slice(b"PK\x06\x07");
+    file.extend_from_slice(&0_u32.to_le_bytes());
+    file.extend_from_slice(&record.to_le_bytes());
+    file.extend_from_slice(&1_u32.to_le_bytes());
+    file.extend_from_slice(b"PK\x05\x06");
+    file.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+    file.extend_from_slice(&[0xff; 8]);
+    file.extend_from_slice(&[0, 0]);
+    file
+}
+
+fn open_bytes(bytes: &[u8]) -> Result<Archive, ArchiveError> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("crafted.zip");
+    std::fs::write(&path, bytes).unwrap();
+    Archive::open(&path, "test-password")
+}
+
+fn too_many(result: Result<Archive, ArchiveError>) -> bool {
+    matches!(result, Err(ArchiveError::Invalid(text)) if text.starts_with("too many entries"))
+}
+
+/// Refused from the end records alone: the zip crate would build all of them in memory first.
+#[test]
+fn the_entry_count_is_checked_before_the_central_directory_is_parsed() {
+    assert!(too_many(open_bytes(&zip64_end(&[], 2_000_000, 0))));
+    assert!(too_many(open_bytes(&zip64_end(&[1; 300], 2_000_000, 0))));
+    assert!(too_many(open_bytes(&zip64_end(&[], 2_000_000, 100))));
+    // A record that is only found by searching: the locator names an earlier position.
+    let mut hidden = zip64_end(&[0; 64], 2_000_000, 0);
+    let locator = hidden.len() - 42;
+    hidden[locator + 8..locator + 16].copy_from_slice(&0_u64.to_le_bytes());
+    assert!(too_many(open_bytes(&hidden)));
+    // Far from the end, past the first chunk of the search.
+    let mut far = zip64_end(&vec![0; 3 << 20], 2_000_000, 0);
+    let locator = far.len() - 42;
+    far[locator + 8..locator + 16].copy_from_slice(&0_u64.to_le_bytes());
+    assert!(too_many(open_bytes(&far)));
+
+    // Below the bound it isn't this check that speaks, and our own archives still open.
+    assert!(!too_many(open_bytes(&zip64_end(&[], 100, 0))));
+    assert!(!too_many(open_bytes(b"too short")));
+    assert!(!too_many(open_bytes(b"")));
+    assert!(Archive::open(&fixture("android-backup.zip"), "test-password").is_ok());
+}
+
 #[test]
 fn oversized_entries_are_bounded_while_reading() {
     let mut archive = Archive::open(&fixture("android-backup.zip"), "test-password").unwrap();
