@@ -21,6 +21,7 @@ Page {
     // The text searched for, once it is long enough to ask; else the list shows what is nearby.
     readonly property int minQueryChars: 3
     property string query
+    property string askedQuery
     property var nearby: []
     // How good a position the nearby list is from: 0 none yet, 1 an old one, 2 a recent one. Asked
     // again only for a better one: the position changes every second.
@@ -28,11 +29,20 @@ Page {
     property int requests: 0
     property Item searchFieldItem
 
-    onCenterChanged: askNearby()
-    Component.onCompleted: askNearby()
+    onCenterChanged: askPending()
+    Component.onCompleted: askPending()
 
     function centerRank() {
         return !center ? 0 : center.recent ? 2 : 1
+    }
+
+    // What couldn't be asked earlier, without a position or behind the lock.
+    function askPending() {
+        if (query.length > 0) {
+            if (query !== askedQuery && !searchDelay.running) ask()
+        } else {
+            askNearby()
+        }
     }
 
     // Not while asking, or after a failure until the user tries again.
@@ -45,6 +55,7 @@ Page {
         if (!center || window.locked) return
         var args = { latitude: center.latitude, longitude: center.longitude }
         if (query.length > 0) args.query = query
+        askedQuery = query
         var rank = centerRank()
         var request = ++requests
         waiting = true
@@ -94,7 +105,7 @@ Page {
 
     Connections {
         target: window
-        onLockedChanged: page.askNearby()
+        onLockedChanged: page.askPending()
     }
 
     SilicaListView {

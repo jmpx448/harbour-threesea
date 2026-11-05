@@ -81,6 +81,8 @@ Dialog {
         interval: 1000
         repeat: true
         running: positionSource.active
+        // At once when looking again: an old fix must not show from before a lock or a place.
+        triggeredOnStart: true
         // The wait counts while looking; a fix can't go out from behind a chosen place.
         onTriggered: {
             // No new fix for a while: where the kept one was taken says nothing about now.
