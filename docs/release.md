@@ -9,6 +9,12 @@ hand. `main` is where work happens; `release` only ever receives merges from `ma
    `Cargo.toml` (`[workspace.package] version`) and `harbour-threesea.pro` (`VERSION`), and add a
    section `## [<version>] - <date>` to `CHANGELOG.md` (it becomes the release notes).
    `scripts/release-version.sh --new-tag` checks all of this locally.
+   If the store's schema changed since the last release (`MIGRATIONS` in `core/src/store.rs` got
+   longer), keep the new release's schema as a fixture, so that every later version is tested
+   on a database with its data in it:
+   `THREESEA_SCHEMA_OUT=$PWD/core/tests/fixtures/store-schema-<version>.sql cargo test -p
+   threesea-core --lib write_a_releases_schema -- --ignored`, and add the version, its
+   migration count and the file to `RELEASED` in `core/src/store_upgrade_tests.rs`.
 2. Open a pull request from `main` into `release`. CI runs the checks and builds both flavours
    for i486 with the Sailfish SDK.
 3. Merge it. `.github/workflows/release.yml` then (only on `release`, also when started by hand):

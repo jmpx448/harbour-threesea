@@ -1324,3 +1324,7 @@ mod tests {
         assert!(store.identity().unwrap().is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "store_upgrade_tests.rs"]
+mod upgrade_tests;
