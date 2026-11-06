@@ -100,7 +100,7 @@ QtObject {
 
     function actionsOf(list) {
         var a = Fmt.selectionActions(list)
-        return [a.copy, a.save, a.shareText].join()
+        return [a.copy, a.save, a.shareFiles, a.shareText].join()
     }
 
     function checkMessageActions() {
@@ -117,18 +117,18 @@ QtObject {
         var captioned = { kind: "file", body: { fileState: 2, caption: "hi" } }
         var away = { kind: "file", body: { fileState: 0, caption: "hi" } }
         var deleted = { kind: "deleted" }
-        // copy, save, share text
-        check("selection, nothing", actionsOf([]), "false,false,false")
-        check("selection, a text", actionsOf([text]), "true,false,true")
-        check("selection, texts", actionsOf([text, text]), "true,false,false")
-        check("selection, a photo", actionsOf([photo]), "false,true,false")
-        check("selection, photos", actionsOf([photo, captioned]), "false,true,false")
-        check("selection, a captioned photo", actionsOf([captioned]), "true,true,true")
-        check("selection, captioned photos", actionsOf([captioned, captioned]), "true,true,false")
-        check("selection, a file not here", actionsOf([away]), "true,false,true")
-        check("selection, one of them not here", actionsOf([photo, away]), "false,false,false")
-        check("selection, text and photo", actionsOf([text, captioned]), "true,false,false")
-        check("selection, deleted among them", actionsOf([text, deleted]), "false,false,false")
+        // copy, save, share files, share text
+        check("selection, nothing", actionsOf([]), "false,false,false,false")
+        check("selection, a text", actionsOf([text]), "true,false,false,true")
+        check("selection, texts", actionsOf([text, text]), "true,false,false,false")
+        check("selection, a photo", actionsOf([photo]), "false,true,true,false")
+        check("selection, photos", actionsOf([photo, captioned]), "false,true,true,false")
+        check("selection, a captioned photo", actionsOf([captioned]), "true,true,true,false")
+        check("selection, captioned photos", actionsOf([captioned, captioned]), "true,true,true,false")
+        check("selection, a file not here", actionsOf([away]), "true,false,false,true")
+        check("selection, one of them not here", actionsOf([photo, away]), "false,false,false,false")
+        check("selection, text and photo", actionsOf([text, captioned]), "true,false,false,false")
+        check("selection, deleted among them", actionsOf([text, deleted]), "false,false,false,false")
 
         // A failed file with its thumbnail gone: thumbnail first, the file's old state seen.
         check("download, thumbnail first, file still away", Fmt.downloadStep(false, 0), "waiting")

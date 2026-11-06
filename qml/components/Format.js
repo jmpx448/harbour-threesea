@@ -208,7 +208,8 @@ function copyText(kind, text, body, mentions) {
 }
 
 // What a selection of messages can do as one, by Android's rules: each action only if every message
-// qualifies, and only one message's text is shared.
+// qualifies, and a file shares as a file, so several share only if all are files on the device;
+// only one message's text is shared.
 function selectionActions(messages) {
     var copy = messages.length > 0
     var save = messages.length > 0
@@ -217,7 +218,7 @@ function selectionActions(messages) {
         if (copyText(m.kind, m.text, m.body, m.mentions).length === 0) copy = false
         if (!(m.kind === "file" && !!m.body && m.body.fileState === 2)) save = false
     }
-    return { copy: copy, save: save, shareText: messages.length === 1 && copy }
+    return { copy: copy, save: save, shareFiles: save, shareText: !save && messages.length === 1 && copy }
 }
 
 // How a tapped download stands, by the file's state in a change of its message. The thumbnail starts

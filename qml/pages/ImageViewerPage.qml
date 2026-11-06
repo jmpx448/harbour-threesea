@@ -239,6 +239,7 @@ FullscreenContentPage {
     function act(what) {
         if (!currentItem) return
         if (what === "chat") showInChat(currentItem.message)
+        else if (what === "share") window.messageOut.shareFiles([currentItem.message])
         else save(currentItem.message, false)
     }
 
@@ -536,6 +537,7 @@ FullscreenContentPage {
                 var list = [{ id: "chat", icon: "icon-m-message", text: qsTrId("threesea-me-show-in-chat") }]
                 if (page.currentItem && page.currentItem.here) {
                     list.push({ id: "save", icon: "icon-m-downloads", text: qsTrId("threesea-me-save-downloads") })
+                    list.push({ id: "share", icon: "icon-m-share", text: qsTrId("threesea-me-share") })
                 }
                 return list
             }

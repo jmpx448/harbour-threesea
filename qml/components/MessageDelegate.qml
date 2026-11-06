@@ -260,7 +260,7 @@ ListItem {
             MenuItem {
                 //% "Share"
                 text: qsTrId("threesea-me-share")
-                visible: contextMenu.copyableText.length > 0
+                visible: contextMenu.copyableText.length > 0 || (item.isFile && model.body.fileState === 2)
                 onClicked: item.shareRequested()
             }
             MenuItem {

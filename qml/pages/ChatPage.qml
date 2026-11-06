@@ -3118,7 +3118,13 @@ Page {
                 onReactionsRequested: page.showDetails(messages.get(index))
                 onResendRequested: page.tell("resendMessage", { message: model.id })
                 onCancelTransferRequested: page.tell("cancelTransfer", { message: model.id })
-                onShareRequested: window.messageOut.shareText(Fmt.copyText(model.kind, model.text, model.body, model.mentions))
+                onShareRequested: {
+                    if (model.kind === "file" && model.body.fileState === 2) {
+                        window.messageOut.shareFiles([model.id])
+                    } else {
+                        window.messageOut.shareText(Fmt.copyText(model.kind, model.text, model.body, model.mentions))
+                    }
+                }
                 onForwardRequested: pageStack.push(Qt.resolvedUrl("SharePage.qml"),
                                                    { forwardItems: [page.forwardItem(messages.get(index))],
                                                      text: Fmt.preview(messages.get(index)) })
@@ -3226,12 +3232,15 @@ Page {
                 }
             }
             IconButton {
-                enabled: page.selectionActions.shareText
+                enabled: page.selectionActions.shareFiles || page.selectionActions.shareText
                 icon.source: "image://theme/icon-m-share"
                 onClicked: {
+                    var files = page.selectionActions.shareFiles
+                    var ids = page.selectedIds()
                     var one = page.selectedMessages()[0]
                     page.endSelection()
-                    window.messageOut.shareText(Fmt.copyText(one.kind, one.text, one.body, one.mentions))
+                    if (files) window.messageOut.shareFiles(ids)
+                    else window.messageOut.shareText(Fmt.copyText(one.kind, one.text, one.body, one.mentions))
                 }
             }
             IconButton {

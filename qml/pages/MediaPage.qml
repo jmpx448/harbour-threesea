@@ -8,8 +8,8 @@ import "../components/Format.js" as Fmt
 // Harbour-allowed, so the same layout with Silica). Like Android's gallery it filters by kind
 // (photos, GIFs, videos, voice messages, audio, files; pull-down "Show", a dialog accepted by
 // swipe, saved for all chats). Tap: view, play or open (downloading first if needed); long press:
-// show in chat, save to Downloads, stop a download, delete (on this device, with a remorse timer).
-// Pull-down "Select": taps select tiles, a panel at the bottom saves or deletes them.
+// show in chat, save to Downloads, share, stop a download, delete (on this device, with a remorse
+// timer). Pull-down "Select": taps select tiles, a panel at the bottom saves, shares or deletes them.
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -472,6 +472,11 @@ Page {
                         onClicked: page.save(model.id, false)
                     }
                     MenuItem {
+                        text: qsTrId("threesea-me-share")
+                        visible: tile.body.fileState === 2
+                        onClicked: window.messageOut.shareFiles([model.id])
+                    }
+                    MenuItem {
                         text: qsTrId("threesea-me-stop-download")
                         visible: tile.body.fileState === 1
                         onClicked: backend.call("cancelTransfer", { message: model.id })
@@ -545,6 +550,15 @@ Page {
                     var ids = page.selectedIds()
                     page.endSelection()
                     window.messageOut.saveFiles(ids)
+                }
+            }
+            IconButton {
+                enabled: page.selectionHere
+                icon.source: "image://theme/icon-m-share"
+                onClicked: {
+                    var ids = page.selectedIds()
+                    page.endSelection()
+                    window.messageOut.shareFiles(ids)
                 }
             }
             IconButton {

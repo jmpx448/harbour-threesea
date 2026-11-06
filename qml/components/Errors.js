@@ -113,6 +113,9 @@ function text(kind, message) {
     case "fileTooLarge":
         //% "Files can be at most 100 MB."
         return qsTrId("threesea-la-error-file-too-large")
+    case "shareTooLarge":
+        //% "That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes."
+        return qsTrId("threesea-la-error-share-too-large")
     case "videoKeepsMetadata":
         // Where nobody can be asked: the chat was left, or a message is forwarded.
         //% "A video was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file."

@@ -5,8 +5,8 @@ import Sailfish.Share 1.0
 import "Errors.js" as Errors
 import "Format.js" as Fmt
 
-// What leaves a chat on the user's word: text to another app over the system's share dialog, files
-// to Downloads. Also watches the downloads the user asked for, as only those are worth a word when
+// What leaves a chat on the user's word: files and text to another app over the system's share
+// dialog, files to Downloads. Also watches the downloads the user asked for, as only those are worth a word when
 // they fail. It stays with the window, so an answer finds it after its page has gone.
 Item {
     id: out
@@ -26,6 +26,19 @@ Item {
         action.mimeType = "text/plain"
         action.resources = [{ name: "message.txt", data: text, type: "text/plain" }]
         action.trigger()
+    }
+
+    // The core writes copies the dialog can read, in memory, and removes them again (ADR 0031).
+    function shareFiles(ids) {
+        backend.call("shareFiles", { messages: ids }, function(ok, result, kind, message) {
+            if (!ok) {
+                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                return
+            }
+            action.mimeType = result.mimeType
+            action.resources = result.files.map(function(path) { return Fmt.fileUrl(path) })
+            action.trigger()
+        })
     }
 
     // One by one in the core's turn; one word at the end.
