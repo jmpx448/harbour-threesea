@@ -76,12 +76,26 @@ Page {
         })
     }
 
-    // Removing them all didn't finish: try again later, or leave here alone. With another page on
-    // top the window tells of it, and this page offers it on the next failure.
+    // Every other device, then this one; on a failure the choice what next.
+    function removeAll() {
+        page.loading = true
+        backend.call("deactivateMultiDevice", {}, function(ok) {
+            page.load()
+            if (!ok) page.offerLeaving()
+        })
+    }
+
+    // Removing them all didn't finish: remove them first (again), or leave here alone, after
+    // which this device can't remove them any more. With another page on top the window tells
+    // of it, and this page offers it on the next failure.
     function offerLeaving() {
         if (pageStack.currentPage !== page) return
         var dialog = pageStack.push(Qt.resolvedUrl("LeaveDeviceGroupDialog.qml"))
         dialog.accepted.connect(function() {
+            if (!dialog.leave) {
+                page.removeAll()
+                return
+            }
             page.loading = true
             backend.call("deactivateMultiDevice", { leaveLocally: true }, function(ok, result, kind, message) {
                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
@@ -145,13 +159,7 @@ Page {
                 //% "Remove all linked devices"
                 text: qsTrId("threesea-me-remove-all-devices")
                 //% "Removing all linked devices"
-                onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-all-devices"), function() {
-                    page.loading = true
-                    backend.call("deactivateMultiDevice", {}, function(ok) {
-                        page.load()
-                        if (!ok) page.offerLeaving()
-                    })
-                })
+                onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-all-devices"), page.removeAll)
             }
             MenuItem {
                 //% "Link device"
