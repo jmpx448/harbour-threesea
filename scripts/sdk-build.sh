@@ -59,8 +59,11 @@ for ARCH in $ARCHES; do
       if [ "$ARCH" = i486 ]; then
         sed -i "s/^%bcond_with demo$/%bcond_without demo/" $B/rpm/harbour-threesea.spec
       fi
+      # The known rpmlint noise (rpm/harbour-threesea-rpmlintrc): mb2 runs rpmlint without -f,
+      # which then reads the one rpmlintrc beside the package.
+      mkdir -p $B/RPMS && cp $B/rpm/harbour-threesea-rpmlintrc $B/RPMS/
       cd $B && mb2 -t SailfishOS-$SFOS-$ARCH build >&2
-      tar cf - -C $B/RPMS .' | tar xf - -C "$OUT"
+      tar cf - -C $B/RPMS --exclude=harbour-threesea-rpmlintrc .' | tar xf - -C "$OUT"
 done
 # The flavour into the file names (harbour-threesea-0.1.0-1.aarch64.rpm →
 # harbour-threesea-full-0.1.0-1.aarch64.rpm), so both can sit side by side in a release.
