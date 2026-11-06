@@ -226,8 +226,9 @@ Rules:
 1. Only `libthreema`/`core` touch the identity's private key, message keys and plaintext message
    bodies at rest. Bounded exceptions (ADR 0009, 0012): the bridge holds the 32-byte database
    key in memory to start the core and to (un)wrap it; the Full call engines generate a per-call
-   DTLS key in C++ for WebRTC, wiped when the call ends; decrypted media pass through the UI's
-   readers in memory only (wiped buffers). Share (ADR 0031; user decision 2026-11-06: what is
+   DTLS key in C++ for WebRTC: the engine's own copy is wiped when the call ends, GStreamer's
+   copies of it are freed but not cleared; decrypted media pass through the UI's readers in
+   memory only (wiped buffers). Share (ADR 0031; user decision 2026-11-06: what is
    shared goes unencrypted to the other app anyway): on the user's word, the core writes a
    decrypted copy of the chosen files into a tmpfs folder (the system's temporary folder or
    `/dev/shm`, never the flash), owner only, private chats' files as `file.<ext>`, all copies
@@ -454,8 +455,7 @@ details in `docs/STATUS.md`.
 - Open: phone tests, all collected in `docs/voice-video-device-checklist.md` (calls, camera,
   battery, video, the media controls, and everything the audit's fixes left to a phone);
   German and French for the texts added or reworded since 0.2.0 (§6); the questions the
-  audit's packages left for the user (in `docs/STATUS.md`: the §7.1 wording for a call's
-  DTLS key, sharing media with other apps, a map, Qt's image cache); P01 for Threema Web's
+  audit's packages left for the user (in `docs/STATUS.md`: sharing media with other apps, a map, Qt's image cache); P01 for Threema Web's
   picture and contact commands (still wait in the core loop, ADR 0028); the OrganizationName
   (§11); Jolla Store and Chum packaging. Done 2026-10-28:
   fuzzing setup and first runs (`core/fuzz/`), indexed search. Done 2026-10-29 (user asked for
