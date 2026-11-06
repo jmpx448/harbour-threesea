@@ -13,7 +13,8 @@ import MapboxMap 1.0
 Item {
     id: root
 
-    // Where the map starts: {latitude, longitude}.
+    // Where the map starts: {latitude, longitude}. Taken once, the first time it is valid: a
+    // position that keeps coming in must not pull the map back while the user moves it.
     property var start: null
     property real startZoom: 16
     property bool privateChat: false
@@ -57,6 +58,14 @@ Item {
                                ? [QtPositioning.coordinate(marked.latitude, marked.longitude)] : [], [])
     }
 
+    property bool started: false
+    function begin() {
+        if (started || !valid(start)) return
+        started = true
+        map.center = QtPositioning.coordinate(start.latitude, start.longitude)
+        map.zoomLevel = startZoom
+    }
+    onStartChanged: begin()
     onPlacesChanged: showPlaces()
     onMarkedChanged: showMarked()
 
@@ -64,9 +73,8 @@ Item {
         id: map
         anchors.fill: parent
 
-        center: root.valid(root.start) ? QtPositioning.coordinate(root.start.latitude, root.start.longitude)
-                                       : QtPositioning.coordinate(0, 0)
-        zoomLevel: root.valid(root.start) ? root.startZoom : 1
+        center: QtPositioning.coordinate(0, 0)
+        zoomLevel: 1
         minimumZoomLevel: 0
         // Threema's tiles go to zoom 14 and are drawn larger beyond.
         maximumZoomLevel: 19
@@ -75,6 +83,7 @@ Item {
         cacheDatabaseMaximalSize: 20 * 1024 * 1024
 
         Component.onCompleted: {
+            root.begin()
             // One or the other: an empty style text would replace the URL's.
             if (root.styleJson.length > 0) styleJson = root.styleJson
             else styleUrl = root.styleUrl
