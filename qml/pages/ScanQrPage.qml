@@ -212,11 +212,17 @@ Page {
     }
 
     function verify(text, fromPicture) {
-        backend.call("verifyQrCode", { text: text }, function(ok, result, kind, message) {
+        // From a picture the core gives the middle level: the code may not have been seen in person.
+        backend.call("verifyQrCode", { text: text, picture: fromPicture === true }, function(ok, result, kind, message) {
             if (ok) {
                 page.busy = false
-                //% "%1 is verified"
-                Notices.show(qsTrId("threesea-la-qr-verified").arg(result.displayName), Notice.Short, Notice.Center)
+                if (result.verification === 2) {
+                    //% "%1 is verified"
+                    Notices.show(qsTrId("threesea-la-qr-verified").arg(result.displayName), Notice.Short, Notice.Center)
+                } else {
+                    //% "The code in the picture matches %1's key. For full verification, scan their code with the camera, in person."
+                    Notices.show(qsTrId("threesea-la-qr-verified-picture").arg(result.displayName), Notice.Long, Notice.Center)
+                }
                 backend.refreshContacts()
                 page.verified(result)
                 closeWhenIdle.start()

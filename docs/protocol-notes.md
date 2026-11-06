@@ -719,7 +719,10 @@ while they are hidden.
   none. Scanning it: the key must equal the stored (or, for a new contact, the directory's) key
   → verification level _fully verified_; a new contact is added as direct contact.
 - Generated with `qrcode`, decoded with `rqrr` (pure Rust); the camera viewfinder is grabbed
-  (`VideoOutput.grabToImage`) every 600 ms and decoded as greyscale; a picture works too.
+  (`VideoOutput.grabToImage`) every 600 ms and decoded as greyscale; a picture works too, but
+  gives only the middle level (_server verified_, never lowering a contact's): a picture may
+  have come from anywhere, and _fully verified_ means the code was scanned in person. Android
+  has no picture option (`QRScannerActivity`, camera only).
 - Every scanned text goes through `qrKind` first (`qr_kind` in `core/src/app.rs`). The contacts
   page's scanner takes any kind, as Android's `AddContactActivity` does. Deliberately stricter
   here: a Threema Web code always asks what it grants before it pairs, and a link to an ID (no

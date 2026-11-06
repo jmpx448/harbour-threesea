@@ -635,9 +635,12 @@ pub enum Command {
     },
     /// Our contact QR code.
     MyQrCode,
-    /// A scanned contact QR code: verify (and add) the contact.
+    /// A scanned contact QR code: verify (and add) the contact. `picture`: taken from a
+    /// picture, not the camera (the middle level only).
     VerifyQrCode {
         text: String,
+        #[serde(default)]
+        picture: bool,
     },
     /// What a scanned QR code is and whether it can be used (docs/ffi.md).
     QrKind {
@@ -2422,11 +2425,10 @@ impl App {
                 })
                 .await
             }
-            Command::VerifyQrCode { text } => {
-                self.detached(
-                    Lane::Free,
-                    |app| async move { app.verify_qr_code(&text).await },
-                )
+            Command::VerifyQrCode { text, picture } => {
+                self.detached(Lane::Free, move |app| async move {
+                    app.verify_qr_code(&text, picture).await
+                })
                 .await
             }
             Command::QrKind { text } => self.classify_qr(&text),
