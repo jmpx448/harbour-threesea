@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The map renderer, pinned (sourced by scripts/maplibre/*.sh). The same versions Sailfish Chum
+# builds for Pure Maps (sailfishos:chum qmaplibregl, mapboxgl-qml).
+# rinigus/pkg-maplibre-gl-native tag 3.0.0+git2: maplibre/maplibre-native-qt 3.0.0 (d929c78,
+# BSD-2-Clause) with maplibre-native as its submodule, plus four Sailfish patches (curl for
+# downloads, Qt 5.6 build fixes).
+QMAPLIBRE_VERSION=3.0.0+git2
+PKG_MAPLIBRE_COMMIT=b0f203d517135c60c30ca99c6e8c2e0a5af5b4d1
+# rinigus/mapbox-gl-qml tag 3.2.1 (LGPL-3.0): the QML item "MapboxMap".
+MAPBOX_GL_QML_VERSION=3.2.1
+MAPBOX_GL_QML_COMMIT=426eb3de463cdde60f9949e8beb4080b9a017c75
