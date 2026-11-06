@@ -58,5 +58,7 @@ is told so. It could start itself in the background, as Full's script does. That
 a Lite app may do so in the Jolla Store is not known, and a tap brings it back.
 
 The first tap on the icon, a notification or a link right after an update only ends the old process
-and leaves a notification; the next tap, on it or the icon, opens what the first was for. Until the
+and leaves a notification; the next tap, on it or the icon, opens what the first was for. A link
+goes into that notification whole, so a compose link's text sits in Lipstick's notification store
+until the notification is tapped or dismissed, as the link itself was handed to us in plain. Until the
 window is closed, pages loaded from the new package can still meet the old binary.
