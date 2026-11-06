@@ -777,7 +777,8 @@ void ThreeseBackend::dropHeldPictures()
     }
 }
 
-void ThreeseBackend::sendHeldPicture(int held, const QString &identity, const QJSValue &callback)
+void ThreeseBackend::sendHeldPicture(int held, const QString &identity, const QString &caption,
+                                     const QJSValue &callback)
 {
     const quint64 id = m_nextId++;
     if (m_core || m_ending) {
@@ -795,7 +796,8 @@ void ThreeseBackend::sendHeldPicture(int held, const QString &identity, const QJ
     request.insert(QStringLiteral("id"), static_cast<double>(id));
     request.insert(QStringLiteral("cmd"), QStringLiteral("sendFile"));
     request.insert(QStringLiteral("identity"), identity);
-    request.insert(QStringLiteral("caption"), QString());
+    // The core checks it as any file's caption: refused if the message wouldn't fit a frame.
+    request.insert(QStringLiteral("caption"), caption);
     request.insert(QStringLiteral("rendering"), QStringLiteral("media"));
     m_filesPreparing.insert(id, identity);
     m_wipeWhenPrepared.insert(id);

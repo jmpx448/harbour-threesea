@@ -1234,15 +1234,17 @@ Page {
         })
     }
 
-    // Draw on the picture of a message and send it to this chat, in two taps as on Android. It goes
-    // from memory, not as an attachment, which would need a plain copy on disk (ADR 0029). A swipe
-    // is quickly done, so sending and leaving with something drawn both go through a remorse, and
-    // taking that back returns to the editor as it was.
+    // Draw on the picture of a message and send it to this chat, in two taps as on Android, with
+    // the editor's caption. It goes from memory, not as an attachment, which would need a plain
+    // copy on disk (ADR 0029). A swipe is quickly done, so sending and leaving with something drawn
+    // both go through a remorse, and taking that back returns to the editor as it was; so does a
+    // caption too long to go with it.
     function drawOnPicture(message, earlier) {
         var editor = pageStack.push(Qt.resolvedUrl("EditPhotoPage.qml"),
                                     { message: message, tool: "draw", earlier: earlier || null })
         editor.accepted.connect(function() {
             var state = editor.state()
+            var caption = editor.caption
             var held = editor.hold()
             if (!held) {
                 Notices.show(qsTrId("threesea-la-edit-photo-failed"), Notice.Long, Notice.Center)
@@ -1250,6 +1252,7 @@ Page {
             }
             page.finishDrawing()
             page.heldDrawing = held
+            page.drawingCaption = caption
             page.backToEditor = function() { page.drawOnPicture(message, state) }
             //% "Sending drawing"
             drawingRemorse.execute(qsTrId("threesea-la-sending-drawing"), function() { page.sendDrawing(held) })
@@ -1259,12 +1262,22 @@ Page {
     // A picture's bytes, read already, waiting for the remorse. Read while the chat still shows, as
     // a private chat's can't be once it has gone.
     property int heldDrawing: 0
+    property string drawingCaption
     property var backToEditor: null
     function sendDrawing(held) {
         if (held !== heldDrawing) return
+        var back = backToEditor
+        var alive = pageAlive
+        var answer = window.editedPictureAnswer(page, alive)
         heldDrawing = 0
         backToEditor = null
-        backend.sendHeldPicture(held, identity, window.editedPictureAnswer(page, pageAlive))
+        backend.sendHeldPicture(held, identity, drawingCaption, function(ok, result, kind, message) {
+            answer(ok, result, kind, message)
+            // The caption doesn't fit a message with the picture: back to the editor to shorten it.
+            if (!ok && kind === "messageTooLong" && back && alive.yes
+                    && pageStack.currentPage === page) back()
+        })
+        drawingCaption = ""
     }
     // What the remorse waits for happens now: another one is starting, or the chat is leaving.
     function finishDrawing() {

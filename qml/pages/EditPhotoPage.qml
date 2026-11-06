@@ -5,8 +5,9 @@ import "../components/Format.js" as Fmt
 
 // Cut, turn and draw on a photo before it is sent (Android's editor and ImagePaintActivity, with a
 // pen and text). Whoever opened it calls save() when it is accepted, for a new picture in the app's
-// capture folder, or hold() for the picture of a message; the original is never changed. state()
-// and `earlier` bring back where it was left, if the user takes back sending or leaving.
+// capture folder, or hold() for the picture of a message, which goes with `caption`; the original
+// is never changed. state() and `earlier` bring back where it was left, if the user takes back
+// sending or leaving.
 Dialog {
     id: dialog
     allowedOrientations: Orientation.All
@@ -18,6 +19,8 @@ Dialog {
     readonly property bool ofMessage: message >= 0
     // A state() to go on from.
     property var earlier: null
+    // What goes with the picture of a message as its caption (sent with it, ADR 0029).
+    readonly property string caption: captionField.text.trim()
     // The frame stays a square, and nothing is drawn (profile and group pictures).
     property bool square
 
@@ -51,6 +54,7 @@ Dialog {
         turn = earlier.turn
         tool = earlier.tool
         penColor = earlier.penColor
+        captionField.text = earlier.caption || ""
         for (var i = 0; i < earlier.texts.length; ++i) texts.append(earlier.texts[i])
     }
 
@@ -62,7 +66,7 @@ Dialog {
                         angle: text.angle })
         }
         return { strokes: strokes, texts: list, history: history, turn: turn, tool: tool,
-                 penColor: "" + penColor, crop: kept }
+                 penColor: "" + penColor, crop: kept, caption: captionField.text }
     }
 
     // The frame's place inside the picture as it is shown, as fractions of it.
@@ -173,10 +177,24 @@ Dialog {
             title: qsTrId("threesea-he-edit-photo")
         }
 
+        // Up here, where the keyboard leaves it in sight. Only for the picture of a message: a
+        // picked photo gets its caption in the chat's input.
+        TextField {
+            id: captionField
+            visible: dialog.ofMessage
+            anchors.top: header.bottom
+            width: parent.width
+            inputMethodHints: window.incognitoHints
+            placeholderText: qsTrId("threesea-la-add-caption")
+            label: qsTrId("threesea-la-confirm-caption")
+            EnterKey.iconSource: "image://theme/icon-m-enter-close"
+            EnterKey.onClicked: focus = false
+        }
+
         Item {
             id: area
             anchors {
-                top: header.bottom
+                top: dialog.ofMessage ? captionField.bottom : header.bottom
                 left: parent.left
                 right: parent.right
                 bottom: tools.top

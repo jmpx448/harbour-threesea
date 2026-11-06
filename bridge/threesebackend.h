@@ -344,10 +344,11 @@ public:
     // The picture of `message` edited the same way, in two steps, for the time a remorse takes. A
     // private chat's picture can only be read while the chat is showing, so its bytes are taken
     // now, on the GUI thread, into memory only: a number for them, 0 if they can't be read. Then
-    // sendHeldPicture sends it to `identity`, like sendFile with a photo, and dropHeldPicture
-    // wipes it. No plain copy of a received picture on disk at any point (ADR 0029).
+    // sendHeldPicture sends it to `identity` with `caption`, like sendFile with a photo, and
+    // dropHeldPicture wipes it. No plain copy of a received picture on disk at any point (ADR 0029).
     Q_INVOKABLE int holdPicture(qint64 message, const QRectF &crop, int rotation, const QVariantList &marks);
-    Q_INVOKABLE void sendHeldPicture(int held, const QString &identity, const QJSValue &callback);
+    Q_INVOKABLE void sendHeldPicture(int held, const QString &identity, const QString &caption,
+                                     const QJSValue &callback);
     Q_INVOKABLE void dropHeldPicture(int held);
     // Keep a GIF from the device as a favourite (`addGifFavourite`).
     Q_INVOKABLE void addGifFavourite(const QString &path, const QJSValue &callback = QJSValue());

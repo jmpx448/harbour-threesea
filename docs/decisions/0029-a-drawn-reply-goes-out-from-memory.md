@@ -14,7 +14,10 @@ decrypted media pass through the UI's readers in memory.
 thread, as a private chat's can't be read once the chat has gone: the bytes stay in memory. The
 result goes straight to the core: crop, turn and marks on the decoded image (at most 4096 px on a side)
 on a worker, the encoded result to the core (`ThreeseBackend::holdPicture`, `sendHeldPicture`). The
-dialog's accept says "Send". No plain copy of a received picture exists at any point: the bytes,
+dialog's accept says "Send". A caption field under its header goes with the picture (user decision
+2026-11-06): the core checks it like any file's caption, and if the message wouldn't fit a frame
+with it, the notice says the text is too long and the editor opens again as it was, caption
+included, to shorten it. No plain copy of a received picture exists at any point: the bytes,
 the decoded and edited images and the encoded picture are wiped once done with, as far as the bridge
 holds them alone. Only what the user brought in (a picked or just taken photo, already a plain file)
 goes through the capture folder as before, and is removed once sent.
@@ -31,8 +34,8 @@ pictures don't pass there: the core cleans those (`gif.rs`, `web/images.rs`).
 
 ## Consequences
 
-No caption and no second look in the chat's input for a picture drawn on; if the core refuses it, a
-notice says so and the drawing is gone. The bytes of a picture being sent stay in memory for the
+No second look in the chat's input for a picture drawn on, and no mentions in its caption; if the
+core refuses it for anything but the caption's length, a notice says so and the drawing is gone. The bytes of a picture being sent stay in memory for the
 remorse's four seconds. The encoders' own buffers (`QBuffer` growing) aren't wiped.
 The marks are burnt in by `QPainter`, from fractions of the picture: the preview's Canvas and Labels
 are only that, a preview.
