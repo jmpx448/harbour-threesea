@@ -1491,6 +1491,39 @@ QtObject {
                 check("gone", stack.currentPage.name, undefined)
             }, 0],
         ],
+        // A private chat the PIN showed stays shown for the answer, gets the file then, and is
+        // hidden after that; without an answer it is hidden as well.
+        forwardQuestionKeepsThePrivateChatShown: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["forwardMessages"] = function(args) {
+                    if (args.keepMetadata) return { forwarded: 1, failed: 0, errors: [], keepsMetadata: [] }
+                    return { forwarded: 0, failed: 1, errors: ["pictureKeepsMetadata"],
+                             keepsMetadata: [{ message: args.messages[0], name: "b.heic", video: false }] }
+                }
+                window.forwardInTurn([7], ["AAAAAAAA", "BCDE2345"], undefined, ["BCDE2345"])
+            }, 800],
+            [function() {
+                check("asked", stack.currentPage.name, "b.heic")
+                check("still shown", countSent("lock"), 0)
+                stack.currentPage.accept()
+            }, 800],
+            [function() {
+                check("sent again", countSent("forwardMessages"), 4)
+                check("the private one last asked of", backend.lastArgs["forwardMessages"].identity, "AAAAAAAA")
+                check("hidden once it had it", countSent("lock"), 1)
+                window.forwardInTurn([8], ["BCDE2345"], undefined, ["BCDE2345"])
+            }, 800],
+            [function() {
+                check("asked again", stack.currentPage.name, "b.heic")
+                check("shown meanwhile", countSent("lock"), 1)
+                stack.currentPage.reject()
+            }, 800],
+            [function() {
+                check("not sent", countSent("forwardMessages"), 5)
+                check("hidden without an answer", countSent("lock"), 2)
+            }, 0],
+        ],
         // What is under way when the data goes doesn't hold up what comes after it.
         sendingInTurnSurvivesDataRemoval: [
             [function() { ready(false) }, 100],

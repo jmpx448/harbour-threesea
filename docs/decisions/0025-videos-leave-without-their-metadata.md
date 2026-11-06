@@ -37,7 +37,10 @@ Subtitle and time code tracks go too; Android's re-encoding drops those as well.
 never show as media to the recipient: each one asks first, and goes as a file. A received WebM sent
 as media is forwarded only after the same question (user decision 2026-11-06): a Silica Dialog says
 its metadata can't be removed, accepting forwards it as a plain file, as it is, and cancelling sends
-nothing. With the window gone by the end of the forward, a notice says why it didn't go. Forwarding a media video cleans
+nothing. With the window gone by the end of the forward, a notice says why it didn't go. The question comes
+once the rest of the forward has gone, so an accepted file arrives after the other messages of that
+batch, out of their order. A private chat the PIN showed for the forward stays shown until the
+question about a file for it is answered, while the window is there, and is hidden then. Forwarding a media video cleans
 it as well: running it twice changes nothing, and a list's members get the same bytes. The codecs'
 own streams are not looked into, nor is an `mdat` outside any track's samples, nor sample entries'
 inner boxes (`avcC` and the like) beyond their vendor and encoder name fields.

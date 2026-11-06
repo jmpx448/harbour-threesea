@@ -41,7 +41,7 @@ Item {
             })
         })
         add({ steps: steps, caption: caption, targets: identities.length, hideAfter: hidden.length * messages.length,
-              keep: keep === true })
+              keep: keep === true, hiddenIds: hidden.slice() })
     }
 
     // `text` goes as the first file's caption or, without files, as a message.
@@ -161,7 +161,12 @@ Item {
         ++job.at
         if (job.at === job.hideAfter) {
             job.hideAfter = 0
-            hidePrivateChats()
+            // A file to such a chat waits for a question at the end: the chat stays shown for its
+            // answer, as long as the window is there (see onStateChanged below).
+            var hidden = job.hiddenIds || []
+            var asked = job.unclean.some(function(file) { return hidden.indexOf(file.identity) >= 0 })
+            if (asked && Qt.application.state === Qt.ApplicationActive) job.hideOwed = true
+            else hidePrivateChats()
         }
         // One waiting with chats the PIN showed: this one goes on after it.
         if (jobs.length > 0 && jobs[0].hideAfter > 0 && !(job.hideAfter > 0)) {
@@ -176,6 +181,7 @@ Item {
     // has gone into one by now.
     function hidePrivateChats() {
         if (jobs.length > 0 && jobs[0].hideAfter > 0) return
+        if (job && job.hideAfter > 0) return
         if (pageStack.find(function(page) { return page.objectName === "private" || page.isPrivate === true })) return
         backend.lockWithFilesOnTheirWay()
     }
@@ -194,8 +200,10 @@ Item {
     function finishJob() {
         frames.active = false
         if (job.unclean.length > 0 && Qt.application.state === Qt.ApplicationActive) {
-            addQuestions(job.unclean, job.caption)
+            if (job.hideOwed) hideOwed = true
+            addQuestions(job.unclean, job.caption, job.hiddenIds || [])
         } else {
+            if (job.hideOwed) hidePrivateChats()
             job.unclean.forEach(function(file) {
                 job.failed[file.identity] = true
                 var kind = file.video ? "videoKeepsMetadata" : "pictureKeepsMetadata"
@@ -209,7 +217,8 @@ Item {
         if (failed > 0 && (job.targets > 1 || job.kinds.length === 0)) {
             //% "Not everything went to %n chat(s)"
             say(qsTrId("threesea-la-not-sent-to-chats", failed))
-        } else if (failed === 0 && job.targets > 1 && Qt.application.state === Qt.ApplicationActive) {
+        } else if (failed === 0 && job.unclean.length === 0 && job.targets > 1
+                   && Qt.application.state === Qt.ApplicationActive) {
             //% "On its way to %n chat(s)"
             say(qsTrId("threesea-la-sent-to-chats", job.targets))
         }
@@ -225,24 +234,49 @@ Item {
     }
 
     // The forwarded files to ask about, one message at a time, each for all the chats it didn't
-    // reach. Asked once nothing else moves on the page stack.
+    // reach, those the PIN showed among them (`hidden`): they stay shown until the last answer
+    // (`hideOwed`), and the answer goes to them as the first time did. Asked once nothing else
+    // moves on the page stack.
     property var questions: []
     property bool asking
-    function addQuestions(unclean, caption) {
+    property bool hideOwed
+    function addQuestions(unclean, caption, hidden) {
         var list = questions.slice()
         unclean.forEach(function(file) {
             var same = list.filter(function(question) {
                 return question.message === file.message && question.caption === caption
             })[0]
-            if (same) {
-                if (same.identities.indexOf(file.identity) < 0) same.identities.push(file.identity)
-            } else {
-                list.push({ message: file.message, name: file.name, video: file.video,
-                            identities: [file.identity], caption: caption })
+            if (!same) {
+                same = { message: file.message, name: file.name, video: file.video,
+                         identities: [], hidden: [], caption: caption }
+                list.push(same)
+            }
+            if (same.identities.indexOf(file.identity) < 0) same.identities.push(file.identity)
+            if (hidden.indexOf(file.identity) >= 0 && same.hidden.indexOf(file.identity) < 0) {
+                same.hidden.push(file.identity)
             }
         })
         questions = list
         ask()
+    }
+    // No question left that needs the private chats shown: they are hidden again, or by the job
+    // the last answer started.
+    function settleHide() {
+        if (!hideOwed || questions.some(function(question) { return question.hidden.length > 0 })) return
+        hideOwed = false
+        hidePrivateChats()
+    }
+    // The window went: what was for the private chats isn't asked any more, and they are hidden.
+    function dropHiddenQuestions() {
+        if (!hideOwed) return
+        questions.forEach(function(question) {
+            question.identities = question.identities.filter(function(identity) {
+                return question.hidden.indexOf(identity) < 0
+            })
+            question.hidden = []
+        })
+        questions = questions.filter(function(question) { return question.identities.length > 0 })
+        settleHide()
     }
     function ask() {
         if (asking || questions.length === 0 || pageStack.busy) return
@@ -254,8 +288,11 @@ Item {
             if (answered) return
             answered = true
             asking = false
-            questions = questions.slice(1)
-            if (send) forward([question.message], question.identities, question.caption, [], true)
+            questions = questions.filter(function(other) { return other !== question })
+            if (send && question.identities.length > 0) {
+                forward([question.message], question.identities, question.caption, question.hidden, true)
+            }
+            settleHide()
             ask()
         }
         asking = true
@@ -272,12 +309,16 @@ Item {
     }
     Connections {
         target: Qt.application
-        onStateChanged: sender.ask()
+        onStateChanged: {
+            if (Qt.application.state !== Qt.ApplicationActive) sender.dropHiddenQuestions()
+            sender.ask()
+        }
     }
 
     // Everything forgotten: the data is gone, and with it the core that would have answered.
     function clear() {
         questions = []
+        hideOwed = false
         ++turn
         limit.stop()
         frames.active = false
@@ -293,7 +334,7 @@ Item {
         interval: 900000
         onTriggered: {
             sender.sayWhatIsLost()
-            var hide = sender.job && sender.job.hideAfter > 0
+            var hide = (sender.job && sender.job.hideAfter > 0) || sender.hideOwed
             sender.clear()
             if (hide) backend.lockWithFilesOnTheirWay()
             window.sentInTurn()
