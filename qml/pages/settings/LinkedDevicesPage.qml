@@ -81,6 +81,9 @@ Page {
         })
     }
 
+    // "Remove the linked devices first" chosen: done when this page is active again.
+    property bool removeWhenBack: false
+
     // Every other device, then this one; on a failure the choice what next.
     function removeAll() {
         page.loading = true
@@ -98,7 +101,9 @@ Page {
         var dialog = pageStack.push(Qt.resolvedUrl("LeaveDeviceGroupDialog.qml"))
         dialog.accepted.connect(function() {
             if (!dialog.leave) {
-                page.removeAll()
+                // Once this page is on top again: a failure that came while the dialog was still
+                // going would find another page current and not be offered.
+                page.removeWhenBack = true
                 return
             }
             page.loading = true
@@ -127,7 +132,15 @@ Page {
     }
 
     Component.onCompleted: load()
-    onStatusChanged: if (status === PageStatus.Active && !loading) load()
+    onStatusChanged: {
+        if (status !== PageStatus.Active) return
+        if (removeWhenBack) {
+            removeWhenBack = false
+            removeAll()
+        } else if (!loading) {
+            load()
+        }
+    }
 
     Connections {
         target: backend
@@ -176,6 +189,8 @@ Page {
                 onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-all-devices"), page.removeAll)
             }
             MenuItem {
+                // Not while it is unknown whether a group exists.
+                visible: !page.readFailed
                 //% "Link device"
                 text: qsTrId("threesea-me-link-device")
                 onClicked: pageStack.push(Qt.resolvedUrl("LinkDeviceDialog.qml"))
