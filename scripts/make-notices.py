@@ -60,7 +60,13 @@ Licensed under the Creative Commons Attribution 4.0 International licence (CC-BY
 https://creativecommons.org/licenses/by/4.0/
 The sprite sheets were put together by Threema (threema-android) from these graphics.
 
-Emoji search terms: from threema-android by Threema AG, AGPL-3.0 (see LICENSE)."""
+Emoji search terms: from threema-android by Threema AG, AGPL-3.0 (see LICENSE). They are likely
+derived from the emoji annotations of the Unicode Common Locale Data Repository (CLDR),
+https://cldr.unicode.org/, under the Unicode License v3, whose text is below with the crates' licence texts ("Used by: Unicode
+CLDR")."""
+
+# Whose text the CLDR annotations' licence is: the first line of the Unicode License v3.
+UNICODE_LICENCE = "UNICODE LICENSE V3"
 
 # The echo canceller of the Full flavour, built from the submodule and linked statically.
 WEBRTC_DIR = "third_party/webrtc-audio-processing"
@@ -119,6 +125,11 @@ def main():
             sys.exit(f"make-notices: {name} {version} ships no licence file")
         for f in files:
             texts.setdefault(read(os.path.join(d, f)), []).append(f"{name} {version} ({f})")
+
+    unicode = [text for text in texts if text.startswith(UNICODE_LICENCE)]
+    if not unicode:
+        sys.exit("make-notices: no crate brings the Unicode License v3 text for the CLDR annotations")
+    texts[unicode[0]].insert(0, "Unicode CLDR (emoji annotations, the emoji search terms)")
 
     out = []
     out.append("Threesea: third-party notices")

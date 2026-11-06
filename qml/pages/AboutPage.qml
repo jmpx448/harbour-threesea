@@ -82,6 +82,8 @@ Page {
                             qsTrId("threesea-la-twemoji-credit"),
                             //% "Emoji search terms from threema-android (AGPL-3.0)."
                             qsTrId("threesea-la-credit-emoji-search"),
+                            //% "Unicode CLDR: those search terms are likely derived from its emoji annotations (Unicode License v3)."
+                            qsTrId("threesea-la-credit-cldr"),
                             //% "opus-pure by Stephen Berry, from Rust ports of libopus by the Xiph.Org Foundation and others (BSD-3-Clause): voice messages."
                             qsTrId("threesea-la-credit-opus"),
                             //% "Jolla and Sailfish OS: Silica and its icons; Jolla's Messages, People, Settings and Gallery as the model for the design."

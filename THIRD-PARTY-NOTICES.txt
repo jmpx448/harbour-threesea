@@ -299,7 +299,10 @@ Licensed under the Creative Commons Attribution 4.0 International licence (CC-BY
 https://creativecommons.org/licenses/by/4.0/
 The sprite sheets were put together by Threema (threema-android) from these graphics.
 
-Emoji search terms: from threema-android by Threema AG, AGPL-3.0 (see LICENSE).
+Emoji search terms: from threema-android by Threema AG, AGPL-3.0 (see LICENSE). They are likely
+derived from the emoji annotations of the Unicode Common Locale Data Repository (CLDR),
+https://cldr.unicode.org/, under the Unicode License v3, whose text is below with the crates' licence texts ("Used by: Unicode
+CLDR").
 
 ==============================================================================
 webrtc-audio-processing (Full flavour: echo cancellation in calls), from Google's WebRTC,
@@ -5713,7 +5716,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-Used by: icu_collections 2.3.0 (LICENSE), icu_locale_core 2.3.0 (LICENSE), icu_normalizer 2.3.0 (LICENSE), icu_normalizer_data 2.3.0 (LICENSE), icu_properties 2.3.0 (LICENSE), icu_properties_data 2.3.0 (LICENSE), icu_provider 2.3.1 (LICENSE), litemap 0.8.3 (LICENSE), potential_utf 0.1.6 (LICENSE), tinystr 0.8.4 (LICENSE), writeable 0.6.4 (LICENSE), yoke 0.8.3 (LICENSE), yoke-derive 0.8.4 (LICENSE), zerofrom 0.1.8 (LICENSE), zerofrom-derive 0.1.8 (LICENSE), zerotrie 0.2.5 (LICENSE), zerovec 0.11.8 (LICENSE), zerovec-derive 0.11.6 (LICENSE)
+Used by: Unicode CLDR (emoji annotations, the emoji search terms), icu_collections 2.3.0 (LICENSE), icu_locale_core 2.3.0 (LICENSE), icu_normalizer 2.3.0 (LICENSE), icu_normalizer_data 2.3.0 (LICENSE), icu_properties 2.3.0 (LICENSE), icu_properties_data 2.3.0 (LICENSE), icu_provider 2.3.1 (LICENSE), litemap 0.8.3 (LICENSE), potential_utf 0.1.6 (LICENSE), tinystr 0.8.4 (LICENSE), writeable 0.6.4 (LICENSE), yoke 0.8.3 (LICENSE), yoke-derive 0.8.4 (LICENSE), zerofrom 0.1.8 (LICENSE), zerofrom-derive 0.1.8 (LICENSE), zerotrie 0.2.5 (LICENSE), zerovec 0.11.8 (LICENSE), zerovec-derive 0.11.6 (LICENSE)
 ==============================================================================
 
 UNICODE LICENSE V3

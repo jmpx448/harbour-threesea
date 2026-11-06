@@ -148,6 +148,8 @@ Threesea stands on the work of others; thank you:
   (AGPL-3.0, vendored with our changes in `third_party/libthreema`); the protocols of Threema,
   Threema for Desktop and Threema Web; the emoji panel's search terms, from threema-android's
   assets.
+- **[Unicode CLDR](https://cldr.unicode.org/)**: those search terms are likely derived from the
+  Unicode CLDR emoji annotations (Unicode License v3, in THIRD-PARTY-NOTICES.txt).
 - **[Twemoji](https://github.com/jdecked/twemoji)**: emoji graphics (CC-BY 4.0), as packaged
   in Threema Libre.
 - **[opus-pure](https://crates.io/crates/opus-pure)** by Stephen Berry, from rusty-opus and
