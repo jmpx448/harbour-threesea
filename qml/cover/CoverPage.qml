@@ -5,6 +5,9 @@ import Sailfish.Silica 1.0
 CoverBackground {
     id: cover
 
+    // The cover shows: the app was left, not only its focus lost (bridge/voicerecorder.h).
+    onStatusChanged: if (status === Cover.Active) voiceRecorder.appLeft()
+
     // A call: who and its state or running time, with answer/decline or hang up (Jolla's phone
     // app's cover). A 1:1 call that rings or runs comes first: it takes the microphone from a
     // group call when answered.

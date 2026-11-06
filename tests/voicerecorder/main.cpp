@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// What ends a voice recording, without a microphone: only a tap sends. The length limit stops it
-// and holds it for an answer; leaving the app throws it away, running or held, and what's under a
+// What ends a voice recording, without a microphone: only a tap sends. The length limit and losing
+// focus stop it and hold it for an answer; leaving the app throws it away, running or held, and what's under a
 // second or thrown away is gone from memory. Pausing doesn't count as time and ends the same ways; listening never gets in
 // the way of what happens to the recording. Exit 0: passed.
 #include "voicerecorder.h"
@@ -157,11 +157,32 @@ void aHeldOneGoesWhenLeaving()
     waitFor(1500);
     check(run.recorder.held(), "held: waits in front");
     setActive(false);
-    check(!run.recorder.held() && run.test.wordsGone(), "held, then away: gone");
-    check(run.discarded == 1 && run.finished == 0, "held, then away: discarded, and said so");
-    check(!run.recorder.owner(), "held, then away: nobody's any more");
+    check(run.recorder.held() && run.discarded == 0, "held, a dialog on top: still held");
     setActive(true);
-    check(!run.recorder.held() && !run.recorder.recording(), "held, away and back: nothing waits");
+    check(run.recorder.held(), "held, the dialog gone: still held");
+    setActive(false);
+    run.recorder.appLeft();
+    check(!run.recorder.held() && run.test.wordsGone(), "held, then left: gone");
+    check(run.discarded == 1 && run.finished == 0, "held, then left: discarded, and said so");
+    check(!run.recorder.owner(), "held, then left: nobody's any more");
+    setActive(true);
+    check(!run.recorder.held() && !run.recorder.recording(), "held, left and back: nothing waits");
+}
+
+// A system dialog takes the focus without the app being left.
+void losingFocusStopsAndHolds()
+{
+    Run run;
+    run.test.startWithWords(&run.owner);
+    waitFor(1100);
+    setActive(false);
+    check(!run.recorder.recording(), "focus lost: the microphone is free");
+    check(run.finished == 0 && run.discarded == 0, "focus lost: not sent, nothing lost");
+    check(run.recorder.held() && run.recorder.owner() == &run.owner, "focus lost: held for its owner");
+    setActive(true);
+    check(!run.recorder.recording() && run.recorder.held(), "focus back: it waits, it doesn't start again");
+    bool pcm = false;
+    check(run.recorder.takeRecording(&pcm) == "words", "focus back: what was said can be sent");
 }
 
 void leavingStopsAndDiscards()
@@ -170,6 +191,7 @@ void leavingStopsAndDiscards()
     run.test.startWithWords(&run.owner);
     waitFor(1100);
     setActive(false);
+    run.recorder.appLeft();
     check(!run.recorder.recording(), "leaving: the microphone is free");
     check(run.finished == 0, "leaving: not sent");
     check(run.discarded == 1, "leaving: discarded, and said so");
@@ -249,7 +271,9 @@ void aPausedOneEndsLikeARunningOne()
         waitFor(1100);
         run.recorder.pause();
         setActive(false);
-        check(!run.recorder.recording() && !run.recorder.held(), "paused, then away: the microphone is free, nothing held");
+        check(!run.recorder.recording() && run.recorder.held(), "paused, focus lost: the microphone is free, held");
+        run.recorder.appLeft();
+        check(!run.recorder.held(), "paused, then away: nothing held");
         check(!run.recorder.paused() && run.test.wordsGone(), "paused, then away: gone");
         check(run.discarded == 1 && run.finished == 0, "paused, then away: discarded, and said so");
         setActive(true);
@@ -406,6 +430,7 @@ void leavingWhileTheFileIsWritten()
         run.recorder.stop();
         run.test.reportStopped(QMediaRecorder::FinalizingStatus);
         setActive(false);
+        run.recorder.appLeft();
         run.test.writeFile("words");
         run.test.reportStatus(QMediaRecorder::LoadedStatus);
         check(run.finished == 1 && taken == "words" && run.discarded == 0, "file, sent, then away: it goes");
@@ -420,6 +445,7 @@ void leavingWhileTheFileIsWritten()
         run.recorder.stop();
         run.test.reportStopped(QMediaRecorder::FinalizingStatus);
         setActive(false);
+        run.recorder.appLeft();
         waitFor(150);
         check(!run.recorder.recording() && !run.recorder.held(), "file, no status, away: not held");
         check(run.finished == 0 && run.discarded == 1 && run.test.fileGone(), "file, no status, away: gone, and said so");
@@ -432,6 +458,7 @@ void leavingWhileTheFileIsWritten()
         run.recorder.hold();
         run.test.reportStopped(QMediaRecorder::FinalizingStatus);
         setActive(false);
+        run.recorder.appLeft();
         run.test.writeFile("words");
         run.test.reportStatus(QMediaRecorder::LoadedStatus);
         check(!run.recorder.held() && run.test.fileGone(), "file, holding, away: gone");
@@ -511,6 +538,7 @@ int main(int argc, char **argv)
     underASecondIsGone();
     theLimitHoldsInFront();
     aHeldOneGoesWhenLeaving();
+    losingFocusStopsAndHolds();
     leavingStopsAndDiscards();
     leavingAfterASlipLeavesNothing();
     aPauseIsntRecordedTime();

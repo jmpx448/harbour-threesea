@@ -20,8 +20,10 @@
 // A recording belongs to whoever started it (the chat page): only that one sends or discards it,
 // and it goes when its owner goes. Only the owner's tap sends: a recording that stopped any other
 // way (the length limit, the platform taking the microphone) waits as `held`, a plain file like a
-// running one, until the owner's tap, the app lock or the window's closing. Leaving the app throws
-// away a running or held recording at once (`discarded`): no plain file outlives the chat page.
+// running one, until the owner's tap, the app lock or the window's closing. Losing focus (a system
+// dialog too) stops a running one and holds it; leaving the app (appLeft: its cover shows, or the
+// display goes off) throws away a running or held recording at once (`discarded`): no plain file
+// outlives the chat page.
 //
 // A running recording can pause and go on. A held one can be listened to before it goes: the
 // platform's MP4 is only playable once it is finished, so listening means stopping, and what was
@@ -74,6 +76,8 @@ public:
     Q_INVOKABLE void resume();
     // Stop and keep it, for listening. Under a second there is nothing to keep.
     Q_INVOKABLE void hold();
+    // The app was left, not only its focus lost: what runs or is held goes; a tap's send goes on.
+    Q_INVOKABLE void appLeft();
     // Listen to the held recording, from where it stands; at its end it goes back to the start.
     Q_INVOKABLE void startPreview();
     Q_INVOKABLE void pausePreview();
@@ -141,6 +145,8 @@ private:
     qint64 m_pausePosition = -1;
     QTimer m_finalizeWait;
     bool m_held = false;
+    // Left (appLeft) and not in front again since: nothing is held for an answer.
+    bool m_left = false;
     bool m_previewing = false;
     // Only for the platform's file: the core's fallback has PCM in memory, for the output.
     QMediaPlayer *m_previewPlayer = nullptr;

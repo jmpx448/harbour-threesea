@@ -2142,6 +2142,8 @@ ApplicationWindow {
     // for an answer at the limit (blanking leaves the app, which stops or throws these away).
     // Once the app has been left, the phone blanks and locks as usual.
     DisplayBlanking {
+        // The display going off (the power key) leaves the app as the cover showing does.
+        onStatusChanged: if (status === DisplayBlanking.Off) voiceRecorder.appLeft()
         preventBlanking: Qt.application.state === Qt.ApplicationActive
                          && (videoPlayer.playing || window.cameraRecording || window.videoCallShowing
                              || voiceRecorder.recording || voiceRecorder.held)

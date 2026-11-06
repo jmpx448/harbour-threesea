@@ -190,6 +190,8 @@ QtObject {
         property QtObject owner
         property int duration
         property int cancels: 0
+        property int left: 0
+        function appLeft() { left = left + 1 }
         function cancel() {
             cancels = cancels + 1
             recording = false

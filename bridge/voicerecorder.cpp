@@ -115,25 +115,34 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     connect(m_recorder, &QMediaRecorder::statusChanged, this, &VoiceRecorder::recorderStatus);
     connect(m_recorder, static_cast<void (QMediaRecorder::*)(QMediaRecorder::Error)>(&QMediaRecorder::error), this,
             [this](QMediaRecorder::Error) { fail(m_recorder->errorString()); });
-    // No microphone left open with nothing to show it, and no plain file of someone's words
-    // waiting outside the chat page: leaving the app throws away what is running or held, and its
-    // owner says so (user decision 2026-11-06). What a tap already sent goes on.
+    // No microphone left open with nothing to show it: losing focus stops a running recording
+    // and holds it, as a system dialog (low battery, a USB prompt, an alarm) takes focus without
+    // the app being left. Leaving it for real throws it away (appLeft).
     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
         if (state == Qt::ApplicationActive) {
+            m_left = false;
             return;
         }
         pausePreview();
-        const bool sending = m_recording && m_stop == Stop::Send;
-        if (sending || (!m_recording && !m_held)) {
-            return;
+        if (m_recording && m_stop == Stop::ByItself) {
+            finish(Stop::Hold);
         }
-        // Under a second nobody has lost anything.
-        const bool something = m_held || duration() >= MinDurationMs;
-        if (something) {
-            emit discarded();
-        }
-        cancel();
     });
+}
+
+void VoiceRecorder::appLeft()
+{
+    m_left = true;
+    pausePreview();
+    const bool sending = m_recording && m_stop == Stop::Send;
+    if (sending || (!m_recording && !m_held)) {
+        return;
+    }
+    // Under a second nobody has lost anything.
+    if (m_held || duration() >= MinDurationMs) {
+        emit discarded();
+    }
+    cancel();
 }
 
 void VoiceRecorder::recorderStopped(QMediaRecorder::Status status)
@@ -198,12 +207,12 @@ void VoiceRecorder::stopped()
     if (complete && how == Stop::Send) {
         m_haveRecording = true;
         emit finished(m_finalDuration);
-    } else if (complete && QGuiApplication::applicationState() == Qt::ApplicationActive) {
+    } else if (complete && !m_left) {
         m_haveRecording = true;
         setHeld(true);
         return;
     } else if (wanted) {
-        // Also what came to rest only after the app was left: nobody is there to answer.
+        // Also what came to rest only after the app was left (appLeft): nobody is there to answer.
         emit discarded();
     }
     clear();

@@ -39,7 +39,7 @@ Other checks:
    notification holds; calls without it are ignored (tested in the emulator both ways).
 2. **Voice recording temp file**: the platform recorder writes an unencrypted
    `voice-recording.m4a` into the app's private cache until it is sent or discarded (then deleted;
-   leaving the app discards it too; a crash can leave it, and the next start removes it). Opus
+   leaving the app (its cover showing, the display going off) discards it too; a crash can leave it, and the next start removes it). Opus
    fallback records in memory only. Severity: low.
 3. **"Save to Downloads"** writes the decrypted file where other apps can read it; that is the
    point of the action, but worth saying so in the UI. Severity: informational.

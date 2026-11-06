@@ -657,9 +657,11 @@ Voice recording:
    - Expect: "Recording stopped and discarded" on the way there, the recording is gone and the mic
      is back; nothing was sent.
 4. Start a recording and have someone call the phone (the phone app, not Threesea).
-   - Expect: the microphone is free for the call. Back in the chat, "Recording stopped and
-     discarded", or the bar still recording if the call took no focus. Nothing is sent, and
-     `ls ~/.cache/org.threesea/harbour-threesea/` shows no `voice-recording.m4a`.
+   - Expect: the microphone is free for the call. If the call only took the focus, back in the
+     chat "Recording stopped. Send it or discard it."; if it left the app (the cover showed, or the
+     display went off), "Recording stopped and discarded", and
+     `ls ~/.cache/org.threesea/harbour-threesea/` shows no `voice-recording.m4a`. Nothing is sent
+     by itself; the bar still records if the call took no focus.
 5. Record, then close the window (Full), or let the app lock engage.
    - Expect: the microphone is free at once (Jolla's Voice Recorder can record) and no message goes
      out.
@@ -671,10 +673,13 @@ Voice recording:
    - Expect: the microphone is free at once (Jolla's Voice Recorder can record) and no
      `voice-recording.m4a` is left in the cache; the screen blanks after the usual time and the
      device locks as usual. Back in the chat, "Recording stopped and discarded", nothing sent.
-8a. What stops a recording this way comes from reading lipstick's compositor, so try each: the power
-    key, a completed side swipe, a phone call, an alarm, a system dialog window. Each must stop it
-    and throw it away, also a held one (listen to it, then leave). Pulling down the top menu takes
-    no focus: the recording must go on, the bar still counting.
+8a. Leaving is the cover showing (a completed side swipe, the home screen) or the display going
+    off (the power key): each must stop the recording and throw it away, also a held one (listen to
+    it, then leave), with "Recording stopped and discarded" on the way back. Something that only
+    takes the focus (an alarm, a low-battery or USB dialog, an incoming phone call shown over the
+    app) must stop it and hold it: back in the chat, "Recording stopped. Send it or discard it.",
+    and send delivers it. Pulling down the top menu takes no focus: the recording must go on, the
+    bar still counting.
 8b. Let a recording reach the limit (15 minutes) untouched, then leave the phone alone.
     - Expect: the screen stays on until send or discard is tapped, and the recording isn't lost.
     Then leave the app with it waiting: it is discarded.
