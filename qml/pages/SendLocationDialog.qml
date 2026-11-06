@@ -6,8 +6,9 @@ import "../components/Format.js" as Fmt
 
 // Send a location (Threema's location message): by default a recent position from the device's
 // positioning (GPS / network as set in Settings → Location) with how accurate it is, or a place
-// chosen from Threema's map server (PlacePickerPage); the user can name it. No address: Android
-// finds those with the platform's geocoder, which has no counterpart here. No map (ADR 0030).
+// chosen from Threema's map server (PlacePickerPage), or a point on Threema's map (MapPickerDialog,
+// ADR 0032); the user can name it. No address: Android finds those with the platform's geocoder,
+// which has no counterpart here.
 Dialog {
     id: dialog
     allowedOrientations: Orientation.All
@@ -24,8 +25,10 @@ Dialog {
     // comes. Then the last position known can be sent, chosen knowingly, with its time in view.
     readonly property bool offerLastKnown: !fix && !place && secondsWaited >= patience
                                            && center !== null && isFinite(center.taken)
-    // Keeps the position coming while the place list is on top.
+    // Keeps the position coming while the place list or the map is on top.
     property bool picking: false
+    // The chat is private (or not known yet): its map keeps the tiles in memory only.
+    property bool privateChat: true
 
     onStatusChanged: if (status === PageStatus.Active) picking = false
 
@@ -150,12 +153,25 @@ Dialog {
                        //% "Your last known position, from %1"
                        : dialog.place.taken ? qsTrId("threesea-la-location-last-known")
                                               .arg(Fmt.time(dialog.place.taken, Format, Formatter))
-                       : dialog.place.name
+                       //% "A point on the map"
+                       : dialog.place.name || qsTrId("threesea-la-location-map-point")
                 //% "To find places, Threema's map server gets your position and what you search for."
                 description: qsTrId("threesea-la-place-server")
                 onClicked: {
                     dialog.picking = true
                     pageStack.push(Qt.resolvedUrl("PlacePickerPage.qml"), { positioning: dialog })
+                }
+            }
+
+            ValueButton {
+                //% "Choose on the map"
+                label: qsTrId("threesea-la-location-on-map")
+                //% "The map comes from Threema's map server, which learns the area shown. The places on it come from Threema's places server, which gets the middle of the map."
+                description: qsTrId("threesea-la-location-map-server")
+                onClicked: {
+                    dialog.picking = true
+                    pageStack.push(Qt.resolvedUrl("MapPickerDialog.qml"),
+                                   { positioning: dialog, privateChat: dialog.privateChat })
                 }
             }
 

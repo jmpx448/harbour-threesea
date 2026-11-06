@@ -4,8 +4,8 @@ import Sailfish.Silica 1.0
 import "Format.js" as Fmt
 
 // A location inside a message bubble: the theme's location icon, the place's name and address
-// (if the sender gave them) and the coordinates; tapping the bubble opens the location in a maps
-// app (geo: link). The app draws no map itself (ADR 0030).
+// (if the sender gave them) and the coordinates; tapping the bubble opens the location on
+// Threema's map (LocationPage, ADR 0032). No map in the bubble: nothing is fetched before the tap.
 Row {
     id: root
 

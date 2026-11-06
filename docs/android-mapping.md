@@ -22,7 +22,7 @@ Upstream paths are relative to `third_party/threema-android`. "lt" = provided by
 | Outgoing tasks | `ch.threema.app.tasks` | helpers only (LIB-51) | patch 0003 encoder + `core::connection` queue | ✅ |
 | Message types/coders | `ch.threema.domain.protocol.csp.messages`, `.coders` | lt `csp_e2e/message` (partial) | lt `csp_e2e/message` with our commits, `core::messages` | ✅ |
 | Storage | `ch.threema.storage`, `ch.threema.data` | provider traits in lt `model/provider.rs` | `core::store` (SQLCipher): identity, settings, contacts, messages, nonces | ✅ |
-| Choosing a place to send | `ch.threema.app.location` (`PoiRepository`, `LocationPickerActivity`, `LocationAutocompleteActivity`) | — | `core::places` (`findPlaces`), `qml/pages/PlacePickerPage.qml`; the map isn't drawn (ADR 0030) | ✅ nearby and by name, without a map |
+| Choosing a place to send | `ch.threema.app.location` (`PoiRepository`, `LocationPickerActivity`, `LocationAutocompleteActivity`) | — | `core::places` (`findPlaces`), `qml/pages/PlacePickerPage.qml`; the map: `qml/pages/MapPickerDialog.qml`, received ones `LocationPage.qml`, `components/ThreemaMap.qml` (MapLibre, ADR 0032) | ✅ nearby, by name, on the map |
 | Forward secrecy (PFS) | `ch.threema.domain.fs`, `…csp.fs.ForwardSecurityMessageProcessor` | implemented by us in vendored lt `csp_e2e/fs/` (LIB-42) | lt `csp_e2e::fs` + `core::fs_store`, `core::connection` | ✅ 1:1 (versions 1.0–1.2); interop with Android verified |
 | Groups | `ch.threema.app.groupflows`, `…tasks` | absent (LIB-53) | `core::groups`, `core::app_groups` | ✅ |
 | Blob up/download | `ch.threema.domain.protocol.blob` | config + chunked crypto | `core::media`, `core::app_media` | ✅ |

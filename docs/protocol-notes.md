@@ -829,7 +829,13 @@ Android's places come from Threema's own hosts, as in `app/build.gradle.kts` and
   accepts a pin anywhere in the chain, so a leaf outside the set would fail only here.
 
 Android's map style is `https://map.threema.ch/styles/threema/style.json`, drawn by MapLibre. The
-hosts of its tiles and fonts are named in that file only, not in the Android source. Addresses of a
+hosts of its tiles and fonts are named in that file only, not in the Android source. Checked once
+(2026-11-06): everything is on `map.threema.ch` — the source `openmaptiles` is the TileJSON
+`/data/threema` (3.0.0; `/data/threema.json` is 404) with vector tiles at
+`/data/threema/{z}/{x}/{y}` (pbf, zoom 0-14), glyphs at `/fonts/{fontstack}/{range}.pbf` (Noto
+Sans), the sprite at `/styles/threema/sprite`; attribution "© OpenMapTiles © OpenStreetMap
+contributors". No raster tiles. `map.threema.ch` falls under the `threema.ch` pins; our MapLibre
+gets them from the core (ADR 0032). Addresses of a
 point come from the platform's `android.location.Geocoder`, not from Threema.
 
 ## Distribution lists

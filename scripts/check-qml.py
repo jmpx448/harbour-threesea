@@ -50,6 +50,9 @@ ALLOWED_IMPORTS = {
     "org.nemomobile.contacts": {"1.0"},
     # Our own, registered by the app itself.
     "harbour.threesea": {"1.0"},
+    # The map renderer's module, shipped in the package (scripts/maplibre; the validator takes a
+    # module the package brings along).
+    "MapboxMap": {"1.0"},
 }
 
 # Commands that no UI sends, and why that is right.

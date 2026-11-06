@@ -1710,12 +1710,11 @@ Page {
         })
     }
 
-    // Received locations open in a maps app (geo: link); without one, say so.
+    // A private chat's maps keep their tiles in memory only; so does a chat not known yet.
+    readonly property bool mapInMemory: isPrivate || markedPrivate || !shown
+    // Received locations open on Threema's map (ADR 0032), only now: the chat itself loads none.
     function openLocation(location) {
-        if (!Qt.openUrlExternally(Fmt.geoUri(location))) {
-            //% "No maps app installed. Long press to copy the coordinates."
-            Notices.show(qsTrId("threesea-la-no-maps-app"), Notice.Long, Notice.Center)
-        }
+        pageStack.push(Qt.resolvedUrl("LocationPage.qml"), { location: location, privateChat: mapInMemory })
     }
 
     // A text on its way to the core. It stays in the input until the core has accepted it, as
@@ -2263,7 +2262,8 @@ Page {
                 //% "Send location"
                 text: qsTrId("threesea-me-send-location")
                 onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("SendLocationDialog.qml"))
+                    var dialog = pageStack.push(Qt.resolvedUrl("SendLocationDialog.qml"),
+                                                { privateChat: page.mapInMemory })
                     dialog.accepted.connect(function() {
                         page.sendLocation(dialog.location, dialog.placeName.trim())
                     })

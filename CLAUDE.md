@@ -115,6 +115,7 @@ harbour-threesea/
   systemd/                  Full only: user service starting the app at login
   notifications/            Full only: lipstick's category of the incoming call's notification
   scripts/                  sdk-build.sh = full Docker build (sdk/Dockerfile), build-core.sh,
+                            maplibre/ (the bundled map renderer: pins, build, our patch),
                             update-libthreema.sh, emulator*.py/sh (UI testing), check.sh (all
                             checks; hooks/pre-commit runs its quick part), check-qml.py (UI
                             against core, imports, texts), test-*.sh (one per tests/ program, all
@@ -555,7 +556,8 @@ Facts:
   audit fixes of 2026-11-04.
 - Our only hosts outside Threema's are GitHub for the opt-in update check and self-hosted
   Threema Web servers the user allows (§7.6); places come from Threema's `poi.threema.ch`
-  (ADR 0030). No map is drawn: whether all of its tile hosts are Threema's is unchecked.
+  (ADR 0030), the map from `map.threema.ch`, drawn by a bundled MapLibre held to that origin
+  with the core's pins (ADR 0032).
 
 - Decided: minimum SFOS 5.1; ship Lite **and** Full flavours, no OpenRepos (ADR 0004, 0014).
 
