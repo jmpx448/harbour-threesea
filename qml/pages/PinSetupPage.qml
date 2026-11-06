@@ -56,7 +56,7 @@ Page {
                          //% "At least 4 digits"
                          : qsTrId("threesea-la-pin-hint")
         note: page.first.length === 0 && page.minimumLength > 4
-              //% "If you forget it, Threesea can start fresh only without what it has stored on this phone. Your ID and chats then come back from a backup."
+              //% "If you forget it, Threesea can start fresh only without what it has stored on this phone. Your ID and chats can then come back from a backup, if you have one."
               ? qsTrId("threesea-la-data-passphrase-note") : ""
         onCanceled: pageStack.pop()
         onEntered: {

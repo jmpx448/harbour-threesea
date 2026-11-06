@@ -26,7 +26,7 @@ Dialog {
             }
 
             InfoLabel {
-                //% "This deletes everything Threesea has stored on this phone: chats, contacts, media, settings and your Threema ID."
+                //% "This deletes Threesea's own data on this phone: chats, contacts, media, settings and your Threema ID. Backups and pictures saved to your folders stay."
                 text: qsTrId("threesea-la-start-fresh-goes")
             }
 
