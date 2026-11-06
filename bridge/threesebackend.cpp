@@ -55,6 +55,11 @@ QString takeCoreString(char *s)
     return result;
 }
 
+QString mapCacheFile()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/map/tiles.db");
+}
+
 QString dataDir()
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -1683,4 +1688,9 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
     }
     // What the core has now read into its own store; a refused file only if nobody took it back.
     removeTempSources(id, ok ? QJSValue() : answer);
+}
+
+QString ThreeseBackend::mapCache() const
+{
+    return mapCacheFile();
 }

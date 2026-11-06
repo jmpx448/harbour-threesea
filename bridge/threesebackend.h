@@ -111,6 +111,9 @@ class ThreeseBackend : public QObject
     // Picture behind the messages in every chat (Android's wallpaper); "": none. Device-local.
     Q_PROPERTY(QString wallpaper READ wallpaper WRITE setWallpaper NOTIFY notificationSettingsChanged)
     // Full flavour: a systemd user service starts the app in the background at login.
+    // The map renderer's tile cache (ADR 0032), inside the cache directory that Delete ID and data
+    // empties. Tiles, glyphs and the style only.
+    Q_PROPERTY(QString mapCache READ mapCache CONSTANT)
     Q_PROPERTY(bool full READ full CONSTANT)
     // State "locked": whether the passphrase is typed on the keyboard (else digits).
     Q_PROPERTY(bool passphraseKeyboard READ passphraseKeyboard NOTIFY dataEncryptionChanged)
@@ -265,6 +268,7 @@ public:
         QSettings().setValue(QStringLiteral("enterToSend"), send);
         emit notificationSettingsChanged();
     }
+    QString mapCache() const;
     // The i486 build only runs in the emulator (no x86 devices run Sailfish OS 5); the sandbox
     // hides /etc/sailfishos-emulator, so decide at compile time.
 #ifdef THREESEA_FULL

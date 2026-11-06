@@ -3,6 +3,8 @@
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QGuiApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -76,6 +78,24 @@ void onTerm(int)
     if (::write(termSocket[0], &byte, 1) < 0) {
         // Nothing to do in a signal handler.
     }
+}
+
+// The map (ADR 0032): what the bundled renderer's downloader may fetch, from the core's pin table.
+// MapLibre reads both variables for every request; without them it fetches nothing.
+void applyMapPolicy()
+{
+    char *policy = threesea_map_policy();
+    const QJsonObject object = QJsonDocument::fromJson(QByteArray(policy)).object();
+    threesea_string_free(policy);
+    const QByteArray origin = object.value(QStringLiteral("origin")).toString().toUtf8();
+    const QByteArray pins = object.value(QStringLiteral("pins")).toString().toUtf8();
+    if (origin.isEmpty() || pins.isEmpty()) {
+        qunsetenv("THREESEA_MAP_ORIGIN");
+        qunsetenv("THREESEA_MAP_PINS");
+        return;
+    }
+    qputenv("THREESEA_MAP_ORIGIN", origin);
+    qputenv("THREESEA_MAP_PINS", pins);
 }
 
 void quitOnTerm(QObject *parent)
@@ -177,7 +197,10 @@ int main(int argc, char *argv[])
     qmlRegisterType<AnimatedImage>("harbour.threesea", 1, 0, "AnimatedMedia");
     qmlRegisterType<CallVideo>("harbour.threesea", 1, 0, "CallVideo");
 
+    applyMapPolicy();
     QScopedPointer<QQuickView> view(SailfishApp::createView());
+    // The map renderer's QML module, bundled privately (scripts/maplibre).
+    view->engine()->addImportPath(SailfishApp::pathTo(QStringLiteral("lib/qml")).toLocalFile());
     // Outlives the engine (destroyed after main returns).
     static OfflineNetworkFactory offlineNetwork;
     view->engine()->setNetworkAccessManagerFactory(&offlineNetwork);
