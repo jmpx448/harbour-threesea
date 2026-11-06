@@ -71,8 +71,9 @@ copy of the tree inside the container and extracts the RPMs.
 The map renderer (MapLibre Native's Qt bindings and the QML module `MapboxMap`, the versions
 Chum builds for Pure Maps) is built by `scripts/maplibre/build.sh <arch>`, which `sdk-build.sh`
 calls first: it fetches the pinned sources from GitHub once (`scripts/maplibre/fetch.sh`; git
-checks every object against the pinned commits), builds them with the SDK's cmake and gcc in the
-target, and keeps the result in `target/maplibre/<sfos>-<arch>/` (`core/` the library, `qml/` the
+checks every object against the pinned commits), applies rinigus' Sailfish patches and ours
+(`scripts/maplibre/patches`: downloads only from the origin the app names, with its pins, ADR 0032),
+builds them with the SDK's cmake and gcc in the target, and keeps the result in `target/maplibre/<sfos>-<arch>/` (`core/` the library, `qml/` the
 module, each with a stamp of its pins and options). The library takes about seven minutes per
 architecture on four cores; the result is reused until a pin or an option changes. The RPM
 carries both privately under `/usr/share/harbour-threesea/lib` like Pure Maps' Jolla Store build;

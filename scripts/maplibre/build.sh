@@ -22,7 +22,7 @@ QML_OPTS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DUSE_CURL_SSL=
   -DCMAKE_INSTALL_RPATH=\$ORIGIN/../.."
 # Two parts, each kept while its pins and options stay: the library (several minutes) and the
 # QML module (seconds).
-CORE_STAMP="$QMAPLIBRE_VERSION $PKG_MAPLIBRE_COMMIT $FLAGS $CORE_OPTS"
+CORE_STAMP="$QMAPLIBRE_VERSION $PKG_MAPLIBRE_COMMIT $FLAGS $CORE_OPTS $(cat "$ROOT"/scripts/maplibre/patches/*.patch | sha256sum | cut -c1-16)"
 QML_STAMP="$MAPBOX_GL_QML_VERSION $MAPBOX_GL_QML_COMMIT $FLAGS $QML_OPTS $CORE_STAMP"
 fresh() { [ -f "$OUT/$1/.stamp" ] && [ "$(cat "$OUT/$1/.stamp")" = "$2" ]; }
 if fresh core "$CORE_STAMP" && fresh qml "$QML_STAMP"; then
@@ -38,7 +38,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 ||
 sdk() { # part script
   docker run --rm -i -e ARCH="$ARCH" -e SFOS="$SFOS" -e JOBS="${CARGO_BUILD_JOBS:-4}" \
     -e FLAGS="$FLAGS" -e CORE_OPTS="$CORE_OPTS" -e QML_OPTS="$QML_OPTS" \
-    -v "$ROOT/target/maplibre-src:/src:ro" -v "$OUT/core:/core:ro" "$IMAGE" sh -euc '
+    -v "$ROOT/target/maplibre-src:/src:ro" -v "$ROOT/scripts/maplibre/patches:/patches:ro" -v "$OUT/core:/core:ro" "$IMAGE" sh -euc '
     T=SailfishOS-$SFOS-$ARCH
     # What the Chum packages build with (rinigus spec files), into the target only.
     sb2 -t $T -m sdk-install -R zypper --non-interactive in cmake gcc-c++ \
@@ -63,11 +63,12 @@ if ! fresh core "$CORE_STAMP"; then
        --exclude=./maplibre-native-qt/vendor/maplibre-native/platform/darwin \
        --exclude=./maplibre-native-qt/vendor/maplibre-native/platform/windows .) | tar xf - -C $S
     Q=$S/maplibre-native-qt
-    # The Sailfish patches, in the order of rinigus spec file.
+    # The Sailfish patches in the order of rinigus spec file, then ours (scripts/maplibre/patches).
     (cd $Q && patch -s -p1 < ../rpm/0001-Use-CURL-for-downloads.patch &&
               patch -s -p1 < ../rpm/0002-Fixes-for-compilation-on-SFOS.patch)
     (cd $Q/vendor/maplibre-native && patch -s -p1 < ../../../rpm/0003-CURL_POLL_INOUT-action-handle-added-2365.patch &&
-              patch -s -p1 < ../../../rpm/0004-fix-double-move-callback.patch)
+              patch -s -p1 < ../../../rpm/0004-fix-double-move-callback.patch &&
+              patch -s -p1 < /patches/0005-threesea-one-origin-pinned.patch)
     cd $B
     sb2 -t $T cmake $Q $CORE_OPTS -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_CXX_FLAGS="$FLAGS" >&2
     sb2 -t $T make -j$JOBS >&2

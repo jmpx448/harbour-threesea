@@ -92,7 +92,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/maplibre/5.1.0.11-i486
-          key: maplibre-i486-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh') }}
+          key: maplibre-i486-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh', 'scripts/maplibre/patches/*') }}
       - name: Every scripts/test-*.sh
         run: scripts/run-sdk-tests.sh
 
@@ -117,7 +117,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/maplibre/5.1.0.11-${{ matrix.arch }}
-          key: maplibre-${{ matrix.arch }}-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh') }}
+          key: maplibre-${{ matrix.arch }}-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh', 'scripts/maplibre/patches/*') }}
       - name: Build
         run: FLAVOUR=${{ matrix.flavour }} FLAVOUR_SUFFIX=0 scripts/sdk-build.sh ${{ matrix.arch }}
       # The Lite flavour is what the Jolla Store takes: Jolla's own validator must pass.
