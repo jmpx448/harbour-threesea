@@ -13,7 +13,12 @@ Q=$S/pkg-maplibre-gl-native/maplibre-native-qt
 N=$Q/vendor/maplibre-native
 section() { printf '\n----------------------------------------------------------------------\n%s\n\n' "$1"; cat "$2"; }
 {
-  echo "The map renderer, bundled under /usr/share/harbour-threesea/lib (scripts/maplibre)."
+  echo "The map renderer, bundled under /usr/share/harbour-threesea/lib. Its exact source:"
+  echo "https://github.com/rinigus/pkg-maplibre-gl-native at $QMAPLIBRE_VERSION ($PKG_MAPLIBRE_COMMIT)"
+  echo "with its submodules (maplibre-native-qt, maplibre-native), and"
+  echo "https://github.com/rinigus/mapbox-gl-qml at $MAPBOX_GL_QML_VERSION ($MAPBOX_GL_QML_COMMIT),"
+  echo "with harbour-threesea's patches to both in its source repository, scripts/maplibre/patches,"
+  echo "built by scripts/maplibre/build.sh."
   section "MapLibre Native Qt bindings $QMAPLIBRE_VERSION (libQMapLibre), https://github.com/maplibre/maplibre-native-qt,
 packaged for Sailfish OS by rinigus, https://github.com/rinigus/pkg-maplibre-gl-native (patches: MIT)." "$Q/LICENSES/BSD-2-Clause.txt"
   section "The Sailfish OS packaging and patches of MapLibre Native Qt by rinigus" "$S/pkg-maplibre-gl-native/LICENSE"

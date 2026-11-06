@@ -86,6 +86,10 @@ Page {
                             qsTrId("threesea-la-credit-cldr"),
                             //% "opus-pure by Stephen Berry, from Rust ports of libopus by the Xiph.Org Foundation and others (BSD-3-Clause): voice messages."
                             qsTrId("threesea-la-credit-opus"),
+                            //% "The map: MapLibre Native and its Qt bindings (BSD-2-Clause), mapbox-gl-qml by rinigus (LGPL-3.0) and his Sailfish packaging pkg-maplibre-gl-native (MIT). Their exact sources: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 and github.com/rinigus/mapbox-gl-qml 3.2.1, with this app's patches in its source under scripts/maplibre."
+                            qsTrId("threesea-la-credit-maplibre"),
+                            //% "Map data © OpenMapTiles © OpenStreetMap contributors (ODbL), from Threema's map server."
+                            qsTrId("threesea-la-credit-map-data"),
                             //% "Jolla and Sailfish OS: Silica and its icons; Jolla's Messages, People, Settings and Gallery as the model for the design."
                             qsTrId("threesea-la-credit-jolla"),
                             //% "Whisperfish, the Signal client for Sailfish OS: a reference for building such an app."

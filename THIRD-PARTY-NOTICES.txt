@@ -551,7 +551,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 ==============================================================================
-The map renderer, bundled under /usr/share/harbour-threesea/lib (scripts/maplibre).
+The map renderer, bundled under /usr/share/harbour-threesea/lib. Its exact source:
+https://github.com/rinigus/pkg-maplibre-gl-native at 3.0.0+git2 (b0f203d517135c60c30ca99c6e8c2e0a5af5b4d1)
+with its submodules (maplibre-native-qt, maplibre-native), and
+https://github.com/rinigus/mapbox-gl-qml at 3.2.1 (426eb3de463cdde60f9949e8beb4080b9a017c75),
+with harbour-threesea's patches to both in its source repository, scripts/maplibre/patches,
+built by scripts/maplibre/build.sh.
 
 ----------------------------------------------------------------------
 MapLibre Native Qt bindings 3.0.0+git2 (libQMapLibre), https://github.com/maplibre/maplibre-native-qt,

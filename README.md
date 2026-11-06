@@ -158,6 +158,15 @@ Threesea stands on the work of others; thank you:
 - **[webrtc-audio-processing](https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing)**,
   the PulseAudio project's package of Google's WebRTC audio processing (BSD-3-Clause): echo
   cancellation in calls.
+- **[MapLibre Native](https://github.com/maplibre/maplibre-native)** and its
+  [Qt bindings](https://github.com/maplibre/maplibre-native-qt) (BSD-2-Clause), with
+  **rinigus**' [mapbox-gl-qml](https://github.com/rinigus/mapbox-gl-qml) (LGPL-3.0) and Sailfish
+  packaging [pkg-maplibre-gl-native](https://github.com/rinigus/pkg-maplibre-gl-native) (MIT):
+  the map, as in Pure Maps. Bundled in the package; the exact sources are those projects at the
+  versions in [scripts/maplibre/versions](scripts/maplibre/versions) plus our patches in
+  [scripts/maplibre/patches](scripts/maplibre/patches).
+- **[OpenMapTiles](https://openmaptiles.org/)** and **[OpenStreetMap](https://www.openstreetmap.org/copyright)
+  contributors** (ODbL): the map data, served by Threema's map server.
 - **[Jolla](https://jolla.com) and Sailfish OS**: the Silica components and theme icons, and
   Jolla's Messages, People, Settings and Gallery apps as the model for the UI.
 - **[Whisperfish](https://gitlab.com/whisperfish/whisperfish)**: the Rust-based Signal client for

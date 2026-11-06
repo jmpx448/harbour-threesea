@@ -18,10 +18,14 @@ refuses it).
   in Lite and Full (`scripts/maplibre`, docs/build.md). Jolla's validator accepts it.
 - MapLibre downloads with curl, not through the core. Our patch to its downloader refuses every
   URL outside one origin before any lookup, pins that origin's keys, follows no redirect and
-  speaks HTTPS only; with nothing set it fetches nothing. The bridge sets origin
+  speaks HTTPS only; with nothing set it fetches nothing. Its resource loader refuses the same
+  URLs, so no `asset://`, `file://` or `mbtiles://` either. The bridge sets origin
   (`https://map.threema.ch/`) and pins from the core (`threesea_map_policy`), which takes them from
   the same table as every other Threema host. `scripts/test-mapview.sh` shows a wrong key, another
-  host, a redirect and a missing policy refused against a local server.
+  host, a redirect, a local file and a missing policy refused against a local server.
+- MapLibre's log records keep only severity and event (our patch; their text names URLs and tile
+  ids, i.e. where a map was looked at, §7.3), the QML module's errors don't go to stderr, and the
+  bridge withholds the text of a record in MapLibre's own form should one come through.
 - Nothing is fetched before the user asks for a map: opening the app, a chat or the send dialog
   loads no tiles; a received location's bubble has no map, and its map loads when the bubble is
   tapped (`LocationPage`); the picker loads when its row is tapped (`MapPickerDialog`), whose text
@@ -29,8 +33,11 @@ refuses it).
 - The attribution OpenStreetMap's licence asks for ("© OpenMapTiles © OpenStreetMap
   contributors") shows on every map, small, at its bottom right. Android leaves it out.
 - Tiles, glyphs and the style are cached in the cache directory (`map/tiles.db`, at most 20 MB),
-  which Delete ID and data empties. A private chat's maps (and a chat's before it is known)
-  keep them in memory only, gone with the page.
+  which Delete ID and data empties, and which goes whenever Qt's picture cache is emptied: at the
+  app lock, when a chat goes private (a map opened before that wrote to it) and when that setting
+  is switched off. A private chat's maps (and a chat's before it is known) keep them in memory
+  only, gone with the page. A map still open keeps the removed file until it closes.
+- A map takes its starting point once; a position that keeps coming in doesn't pull it back.
 
 ## Consequences
 
