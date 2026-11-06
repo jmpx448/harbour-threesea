@@ -49,9 +49,6 @@ DE = {
     "threesea-la-verification-full":
         ("Fully verified",
          "Vollständig überprüft"),
-    "threesea-la-verification-server":
-        ("Verified by the server",
-         "Vom Server überprüft"),
     "threesea-la-verification-none":
         ("Not verified",
          "Nicht überprüft"),
@@ -3230,8 +3227,8 @@ DE = {
         ("Text",
          "Text"),
     "threesea-la-data-passphrase-note":
-        ("If you forget it, everything Threesea has stored on this phone is lost.",
-         "Wenn du sie vergisst, ist alles verloren, was Threesea auf diesem Telefon gespeichert hat."),
+        ("If you forget it, Threesea can start fresh only without what it has stored on this phone. Your ID and chats can then come back from a backup, if you have one.",
+         "Wenn du sie vergisst, kann Threesea nur ohne das, was es auf diesem Telefon gespeichert hat, neu anfangen. Deine ID und Chats kommen dann aus einem Backup zurück, falls du eines hast."),
     "threesea-me-try-again":
         ("Try again",
          "Erneut versuchen"),
@@ -3397,15 +3394,9 @@ DE = {
     "threesea-he-leave-device-group":
         ("Leave",
          "Verlassen"),
-    "threesea-he-leave-device-group-title":
-        ("Leave on this device only?",
-         "Gerätegruppe nur hier verlassen?"),
-    "threesea-la-leave-device-group-failed":
-        ("Removing your linked devices did not finish, so they may still be linked. Go back to try again once you are online.",
-         "Das Entfernen deiner verknüpften Geräte wurde nicht fertig, sie sind also vielleicht noch verknüpft. Geh zurück, um es erneut zu versuchen, sobald du online bist."),
     "threesea-la-leave-device-group-text":
-        ("If you leave, this device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.",
-         "Wenn du sie verlässt, verbindet sich dieses Gerät wieder direkt. Die anderen Geräte behalten deine ID und bleiben in ihrer Gruppe, und nur sie selbst können sich ab dann entfernen."),
+        ("This device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.",
+         "Dieses Gerät verbindet sich wieder direkt. Die anderen Geräte behalten deine ID und bleiben in ihrer Gruppe, und nur sie selbst können sich ab dann entfernen."),
     "threesea-he-link-desktop":
         ("Link Threema for Desktop",
          "Threema für Desktop verknüpfen"),
@@ -3493,8 +3484,8 @@ DE = {
         ("Not checked yet",
          "Noch nicht geprüft"),
     "threesea-la-data-passphrase-about":
-        ("Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything Threesea has stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats.",
-         "Deine Nachrichten werden mit einem Schlüssel verschlüsselt gespeichert, der mit dieser Passphrase verschlüsselt ist. Threesea fragt bei jedem Start danach, auch nach einem Neustart des Telefons oder dem Löschen seines Datenordners, und nur diese Passphrase öffnet ihn. Nachrichten empfängt es, sobald sie eingegeben ist. Wenn du sie vergisst, ist alles verloren, was Threesea auf diesem Telefon gespeichert hat. Threema Safe oder ein ID-Backup bewahrt deine ID, ein Daten-Backup deine Chats."),
+        ("Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, pull down where it is asked for to start fresh, without what Threesea has stored on this phone: Threema Safe or an ID backup brings your ID back, a Data backup your chats.",
+         "Deine Nachrichten werden mit einem Schlüssel verschlüsselt gespeichert, der mit dieser Passphrase verschlüsselt ist. Threesea fragt bei jedem Start danach, auch nach einem Neustart des Telefons oder dem Löschen seines Datenordners, und nur diese Passphrase öffnet ihn. Nachrichten empfängt es, sobald sie eingegeben ist. Wenn du sie vergisst, ziehe dort, wo sie abgefragt wird, nach unten, um ohne das, was Threesea auf diesem Telefon gespeichert hat, neu anzufangen: Threema Safe oder ein ID-Backup bringt deine ID zurück, ein Daten-Backup deine Chats."),
     "threesea-la-web-pair-grants":
         ("This code connects a browser to your Threema ID. That browser can read your contacts and chats and send messages in your name.",
          "Dieser Code verbindet einen Browser mit deiner Threema-ID. Dieser Browser kann deine Kontakte und Chats lesen und in deinem Namen Nachrichten senden."),
@@ -3594,6 +3585,75 @@ DE = {
     "threesea-la-ended-early-body":
         ("Your last files or draft did not reach the chat. Add them again there.",
          "Deine letzten Dateien oder dein Entwurf sind nicht im Chat angekommen. Füge sie dort noch einmal hinzu."),
+    "threesea-la-error-share-too-large":
+        ("That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes.",
+         "Das ist zu viel, um es auf einmal zu teilen. Wähle weniger oder kleinere Dateien, oder versuche es in ein paar Minuten erneut."),
+    "threesea-la-verification-partly":
+        ("Partly verified",
+         "Teilweise überprüft"),
+    "threesea-la-credit-cldr":
+        ("Unicode CLDR: those search terms are likely derived from its emoji annotations (Unicode License v3).",
+         "Unicode CLDR: Diese Suchbegriffe stammen wahrscheinlich aus seinen Emoji-Annotationen (Unicode License v3)."),
+    "threesea-la-verification-partly-explained":
+        ("Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully.",
+         "Teilweise überprüft: im Adressbuch gefunden oder mit dem Code aus einem Bild geprüft. Wenn du den Code persönlich mit der Kamera scannst, ist der Kontakt vollständig überprüft."),
+    "threesea-la-qr-verified-picture":
+        ("The code in the picture matches %1's key. For full verification, scan their code with the camera, in person.",
+         "Der Code im Bild passt zum Schlüssel von %1. Für die vollständige Überprüfung scanne den Code persönlich mit der Kamera."),
+    "threesea-he-remove-devices-again":
+        ("Remove",
+         "Entfernen"),
+    "threesea-he-leave-device-group-choice":
+        ("Your linked devices",
+         "Deine verknüpften Geräte"),
+    "threesea-la-leave-device-group-not-finished":
+        ("Removing your linked devices did not finish, so they may still be linked.",
+         "Das Entfernen deiner verknüpften Geräte wurde nicht fertig, sie sind also vielleicht noch verknüpft."),
+    "threesea-la-remove-devices-first":
+        ("Remove the linked devices first",
+         "Zuerst die verknüpften Geräte entfernen"),
+    "threesea-la-remove-devices-first-description":
+        ("Tries again now, best once you are online. This device stays in the group until they are removed, so it can still remove a lost or stolen computer.",
+         "Versucht es jetzt erneut, am besten, wenn du online bist. Dieses Gerät bleibt in der Gruppe, bis sie entfernt sind, und kann so noch einen verlorenen oder gestohlenen Computer entfernen."),
+    "threesea-la-leave-device-group-only":
+        ("Leave on this device only",
+         "Nur auf diesem Gerät verlassen"),
+    "threesea-la-linked-devices-read-failed":
+        ("The list of linked devices could not be read",
+         "Die Liste der verknüpften Geräte konnte nicht gelesen werden"),
+    "threesea-la-image-cache":
+        ("Keep pictures in memory",
+         "Bilder im Speicher behalten"),
+    "threesea-la-image-cache-description":
+        ("Chat pictures scroll back in faster: they stay decoded and unencrypted in the app's memory while it runs, until the app locks or a chat is made private. This uses more memory. Private chats load their pictures anew each time.",
+         "Chatbilder erscheinen beim Zurückscrollen schneller: Sie bleiben, solange die App läuft, entschlüsselt im Arbeitsspeicher der App, bis sie sich sperrt oder ein Chat privat gemacht wird. Das braucht mehr Speicher. Private Chats laden ihre Bilder jedes Mal neu."),
+    "threesea-he-start-fresh":
+        ("Start fresh",
+         "Neu anfangen"),
+    "threesea-la-start-fresh-goes":
+        ("This deletes Threesea's own data on this phone: chats, contacts, media, settings and your Threema ID. Backups and pictures saved to your folders stay.",
+         "Damit werden Threeseas eigene Daten auf diesem Telefon gelöscht: Chats, Kontakte, Medien, Einstellungen und deine Threema-ID. Backups und Bilder, die in deinen Ordnern gespeichert sind, bleiben."),
+    "threesea-la-start-fresh-comes-back":
+        ("You can then restore your ID from Threema Safe, an ID backup or a Data backup, and your chats from a Data backup. Without one of them, the ID is lost.",
+         "Danach kannst du deine ID aus Threema Safe, einem ID-Backup oder einem Daten-Backup wiederherstellen und deine Chats aus einem Daten-Backup. Ohne eines davon ist die ID verloren."),
+    "threesea-la-start-fresh-linked":
+        ("Devices linked to your ID stay linked to it.",
+         "Mit deiner ID verknüpfte Geräte bleiben mit ihr verknüpft."),
+    "threesea-la-start-fresh-understood":
+        ("Delete the stored data",
+         "Die gespeicherten Daten löschen"),
+    "threesea-la-starting-fresh":
+        ("Deleting the stored data",
+         "Gespeicherte Daten werden gelöscht"),
+    "threesea-la-startup-try-again-or-fresh":
+        ("Pull down to try again, or to start fresh without the stored data.",
+         "Ziehe nach unten, um es erneut zu versuchen oder ohne die gespeicherten Daten neu anzufangen."),
+    "threesea-me-start-fresh":
+        ("Start fresh",
+         "Neu anfangen"),
+    "threesea-la-data-passphrase-forgotten":
+        ("Forgotten it? Pull down to start fresh without the stored data.",
+         "Vergessen? Ziehe nach unten, um ohne die gespeicherten Daten neu anzufangen."),
 }
 
 # The engineering-English base file: only the plural forms need filling in.

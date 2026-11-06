@@ -52,10 +52,6 @@
             <source>Fully verified</source>
             <translation>Vollständig überprüft</translation>
         </message>
-        <message id="threesea-la-verification-server">
-            <source>Verified by the server</source>
-            <translation>Vom Server überprüft</translation>
-        </message>
         <message id="threesea-la-verification-none">
             <source>Not verified</source>
             <translation>Nicht überprüft</translation>
@@ -4376,8 +4372,9 @@
             <translation>Text</translation>
         </message>
         <message id="threesea-la-data-passphrase-note">
-            <source>If you forget it, everything Threesea has stored on this phone is lost.</source>
-            <translation>Wenn du sie vergisst, ist alles verloren, was Threesea auf diesem Telefon gespeichert hat.</translation>
+            <source>If you forget it, Threesea can start fresh only without what it has stored on this phone. Your ID and chats can then come back from a backup, if you have one.</source>
+            <oldsource>If you forget it, everything Threesea has stored on this phone is lost.</oldsource>
+            <translation>Wenn du sie vergisst, kann Threesea nur ohne das, was es auf diesem Telefon gespeichert hat, neu anfangen. Deine ID und Chats kommen dann aus einem Backup zurück, falls du eines hast.</translation>
         </message>
         <message id="threesea-me-try-again">
             <source>Try again</source>
@@ -4599,17 +4596,10 @@
             <source>Leave</source>
             <translation>Verlassen</translation>
         </message>
-        <message id="threesea-he-leave-device-group-title">
-            <source>Leave on this device only?</source>
-            <translation>Gerätegruppe nur hier verlassen?</translation>
-        </message>
-        <message id="threesea-la-leave-device-group-failed">
-            <source>Removing your linked devices did not finish, so they may still be linked. Go back to try again once you are online.</source>
-            <translation>Das Entfernen deiner verknüpften Geräte wurde nicht fertig, sie sind also vielleicht noch verknüpft. Geh zurück, um es erneut zu versuchen, sobald du online bist.</translation>
-        </message>
         <message id="threesea-la-leave-device-group-text">
-            <source>If you leave, this device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</source>
-            <translation>Wenn du sie verlässt, verbindet sich dieses Gerät wieder direkt. Die anderen Geräte behalten deine ID und bleiben in ihrer Gruppe, und nur sie selbst können sich ab dann entfernen.</translation>
+            <source>This device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</source>
+            <oldsource>If you leave, this device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</oldsource>
+            <translation>Dieses Gerät verbindet sich wieder direkt. Die anderen Geräte behalten deine ID und bleiben in ihrer Gruppe, und nur sie selbst können sich ab dann entfernen.</translation>
         </message>
         <message id="threesea-he-link-desktop">
             <source>Link Threema for Desktop</source>
@@ -4730,8 +4720,9 @@
             <translation>Noch nicht geprüft</translation>
         </message>
         <message id="threesea-la-data-passphrase-about">
-            <source>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything Threesea has stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats.</source>
-            <translation>Deine Nachrichten werden mit einem Schlüssel verschlüsselt gespeichert, der mit dieser Passphrase verschlüsselt ist. Threesea fragt bei jedem Start danach, auch nach einem Neustart des Telefons oder dem Löschen seines Datenordners, und nur diese Passphrase öffnet ihn. Nachrichten empfängt es, sobald sie eingegeben ist. Wenn du sie vergisst, ist alles verloren, was Threesea auf diesem Telefon gespeichert hat. Threema Safe oder ein ID-Backup bewahrt deine ID, ein Daten-Backup deine Chats.</translation>
+            <source>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, pull down where it is asked for to start fresh, without what Threesea has stored on this phone: Threema Safe or an ID backup brings your ID back, a Data backup your chats.</source>
+            <oldsource>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything Threesea has stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats.</oldsource>
+            <translation>Deine Nachrichten werden mit einem Schlüssel verschlüsselt gespeichert, der mit dieser Passphrase verschlüsselt ist. Threesea fragt bei jedem Start danach, auch nach einem Neustart des Telefons oder dem Löschen seines Datenordners, und nur diese Passphrase öffnet ihn. Nachrichten empfängt es, sobald sie eingegeben ist. Wenn du sie vergisst, ziehe dort, wo sie abgefragt wird, nach unten, um ohne das, was Threesea auf diesem Telefon gespeichert hat, neu anzufangen: Threema Safe oder ein ID-Backup bringt deine ID zurück, ein Daten-Backup deine Chats.</translation>
         </message>
         <message id="threesea-la-web-pair-grants">
             <source>This code connects a browser to your Threema ID. That browser can read your contacts and chats and send messages in your name.</source>
@@ -4864,6 +4855,98 @@
         <message id="threesea-la-ended-early-body">
             <source>Your last files or draft did not reach the chat. Add them again there.</source>
             <translation>Deine letzten Dateien oder dein Entwurf sind nicht im Chat angekommen. Füge sie dort noch einmal hinzu.</translation>
+        </message>
+        <message id="threesea-la-error-share-too-large">
+            <source>That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes.</source>
+            <translation>Das ist zu viel, um es auf einmal zu teilen. Wähle weniger oder kleinere Dateien, oder versuche es in ein paar Minuten erneut.</translation>
+        </message>
+        <message id="threesea-la-verification-partly">
+            <source>Partly verified</source>
+            <translation>Teilweise überprüft</translation>
+        </message>
+        <message id="threesea-la-credit-cldr">
+            <source>Unicode CLDR: those search terms are likely derived from its emoji annotations (Unicode License v3).</source>
+            <translation>Unicode CLDR: Diese Suchbegriffe stammen wahrscheinlich aus seinen Emoji-Annotationen (Unicode License v3).</translation>
+        </message>
+        <message id="threesea-la-verification-partly-explained">
+            <source>Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully.</source>
+            <translation>Teilweise überprüft: im Adressbuch gefunden oder mit dem Code aus einem Bild geprüft. Wenn du den Code persönlich mit der Kamera scannst, ist der Kontakt vollständig überprüft.</translation>
+        </message>
+        <message id="threesea-la-qr-verified-picture">
+            <source>The code in the picture matches %1's key. For full verification, scan their code with the camera, in person.</source>
+            <translation>Der Code im Bild passt zum Schlüssel von %1. Für die vollständige Überprüfung scanne den Code persönlich mit der Kamera.</translation>
+        </message>
+        <message id="threesea-he-remove-devices-again">
+            <source>Remove</source>
+            <translation>Entfernen</translation>
+        </message>
+        <message id="threesea-he-leave-device-group-choice">
+            <source>Your linked devices</source>
+            <translation>Deine verknüpften Geräte</translation>
+        </message>
+        <message id="threesea-la-leave-device-group-not-finished">
+            <source>Removing your linked devices did not finish, so they may still be linked.</source>
+            <translation>Das Entfernen deiner verknüpften Geräte wurde nicht fertig, sie sind also vielleicht noch verknüpft.</translation>
+        </message>
+        <message id="threesea-la-remove-devices-first">
+            <source>Remove the linked devices first</source>
+            <translation>Zuerst die verknüpften Geräte entfernen</translation>
+        </message>
+        <message id="threesea-la-remove-devices-first-description">
+            <source>Tries again now, best once you are online. This device stays in the group until they are removed, so it can still remove a lost or stolen computer.</source>
+            <translation>Versucht es jetzt erneut, am besten, wenn du online bist. Dieses Gerät bleibt in der Gruppe, bis sie entfernt sind, und kann so noch einen verlorenen oder gestohlenen Computer entfernen.</translation>
+        </message>
+        <message id="threesea-la-leave-device-group-only">
+            <source>Leave on this device only</source>
+            <translation>Nur auf diesem Gerät verlassen</translation>
+        </message>
+        <message id="threesea-la-linked-devices-read-failed">
+            <source>The list of linked devices could not be read</source>
+            <translation>Die Liste der verknüpften Geräte konnte nicht gelesen werden</translation>
+        </message>
+        <message id="threesea-la-image-cache">
+            <source>Keep pictures in memory</source>
+            <translation>Bilder im Speicher behalten</translation>
+        </message>
+        <message id="threesea-la-image-cache-description">
+            <source>Chat pictures scroll back in faster: they stay decoded and unencrypted in the app's memory while it runs, until the app locks or a chat is made private. This uses more memory. Private chats load their pictures anew each time.</source>
+            <translation>Chatbilder erscheinen beim Zurückscrollen schneller: Sie bleiben, solange die App läuft, entschlüsselt im Arbeitsspeicher der App, bis sie sich sperrt oder ein Chat privat gemacht wird. Das braucht mehr Speicher. Private Chats laden ihre Bilder jedes Mal neu.</translation>
+        </message>
+        <message id="threesea-he-start-fresh">
+            <source>Start fresh</source>
+            <translation>Neu anfangen</translation>
+        </message>
+        <message id="threesea-la-start-fresh-goes">
+            <source>This deletes Threesea's own data on this phone: chats, contacts, media, settings and your Threema ID. Backups and pictures saved to your folders stay.</source>
+            <translation>Damit werden Threeseas eigene Daten auf diesem Telefon gelöscht: Chats, Kontakte, Medien, Einstellungen und deine Threema-ID. Backups und Bilder, die in deinen Ordnern gespeichert sind, bleiben.</translation>
+        </message>
+        <message id="threesea-la-start-fresh-comes-back">
+            <source>You can then restore your ID from Threema Safe, an ID backup or a Data backup, and your chats from a Data backup. Without one of them, the ID is lost.</source>
+            <translation>Danach kannst du deine ID aus Threema Safe, einem ID-Backup oder einem Daten-Backup wiederherstellen und deine Chats aus einem Daten-Backup. Ohne eines davon ist die ID verloren.</translation>
+        </message>
+        <message id="threesea-la-start-fresh-linked">
+            <source>Devices linked to your ID stay linked to it.</source>
+            <translation>Mit deiner ID verknüpfte Geräte bleiben mit ihr verknüpft.</translation>
+        </message>
+        <message id="threesea-la-start-fresh-understood">
+            <source>Delete the stored data</source>
+            <translation>Die gespeicherten Daten löschen</translation>
+        </message>
+        <message id="threesea-la-starting-fresh">
+            <source>Deleting the stored data</source>
+            <translation>Gespeicherte Daten werden gelöscht</translation>
+        </message>
+        <message id="threesea-la-startup-try-again-or-fresh">
+            <source>Pull down to try again, or to start fresh without the stored data.</source>
+            <translation>Ziehe nach unten, um es erneut zu versuchen oder ohne die gespeicherten Daten neu anzufangen.</translation>
+        </message>
+        <message id="threesea-me-start-fresh">
+            <source>Start fresh</source>
+            <translation>Neu anfangen</translation>
+        </message>
+        <message id="threesea-la-data-passphrase-forgotten">
+            <source>Forgotten it? Pull down to start fresh without the stored data.</source>
+            <translation>Vergessen? Ziehe nach unten, um ohne die gespeicherten Daten neu anzufangen.</translation>
         </message>
     </context>
 </TS>

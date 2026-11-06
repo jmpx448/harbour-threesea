@@ -52,10 +52,6 @@
             <source>Fully verified</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-verification-server">
-            <source>Verified by the server</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-verification-none">
             <source>Not verified</source>
             <translation type="unfinished" />
@@ -4376,7 +4372,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-data-passphrase-note">
-            <source>If you forget it, everything Threesea has stored on this phone is lost.</source>
+            <source>If you forget it, Threesea can start fresh only without what it has stored on this phone. Your ID and chats can then come back from a backup, if you have one.</source>
+            <oldsource>If you forget it, everything Threesea has stored on this phone is lost.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-try-again">
@@ -4599,16 +4596,9 @@
             <source>Leave</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-he-leave-device-group-title">
-            <source>Leave on this device only?</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-leave-device-group-failed">
-            <source>Removing your linked devices did not finish, so they may still be linked. Go back to try again once you are online.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-leave-device-group-text">
-            <source>If you leave, this device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</source>
+            <source>This device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</source>
+            <oldsource>If you leave, this device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-link-desktop">
@@ -4730,7 +4720,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-data-passphrase-about">
-            <source>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything Threesea has stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats.</source>
+            <source>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, pull down where it is asked for to start fresh, without what Threesea has stored on this phone: Threema Safe or an ID backup brings your ID back, a Data backup your chats.</source>
+            <oldsource>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything Threesea has stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-web-pair-grants">
@@ -4863,6 +4854,98 @@
         </message>
         <message id="threesea-la-ended-early-body">
             <source>Your last files or draft did not reach the chat. Add them again there.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-share-too-large">
+            <source>That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-verification-partly">
+            <source>Partly verified</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-cldr">
+            <source>Unicode CLDR: those search terms are likely derived from its emoji annotations (Unicode License v3).</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-verification-partly-explained">
+            <source>Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-verified-picture">
+            <source>The code in the picture matches %1's key. For full verification, scan their code with the camera, in person.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-remove-devices-again">
+            <source>Remove</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-leave-device-group-choice">
+            <source>Your linked devices</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-leave-device-group-not-finished">
+            <source>Removing your linked devices did not finish, so they may still be linked.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-remove-devices-first">
+            <source>Remove the linked devices first</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-remove-devices-first-description">
+            <source>Tries again now, best once you are online. This device stays in the group until they are removed, so it can still remove a lost or stolen computer.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-leave-device-group-only">
+            <source>Leave on this device only</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-linked-devices-read-failed">
+            <source>The list of linked devices could not be read</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-image-cache">
+            <source>Keep pictures in memory</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-image-cache-description">
+            <source>Chat pictures scroll back in faster: they stay decoded and unencrypted in the app's memory while it runs, until the app locks or a chat is made private. This uses more memory. Private chats load their pictures anew each time.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-start-fresh">
+            <source>Start fresh</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-goes">
+            <source>This deletes Threesea's own data on this phone: chats, contacts, media, settings and your Threema ID. Backups and pictures saved to your folders stay.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-comes-back">
+            <source>You can then restore your ID from Threema Safe, an ID backup or a Data backup, and your chats from a Data backup. Without one of them, the ID is lost.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-linked">
+            <source>Devices linked to your ID stay linked to it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-understood">
+            <source>Delete the stored data</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-starting-fresh">
+            <source>Deleting the stored data</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-startup-try-again-or-fresh">
+            <source>Pull down to try again, or to start fresh without the stored data.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-start-fresh">
+            <source>Start fresh</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-passphrase-forgotten">
+            <source>Forgotten it? Pull down to start fresh without the stored data.</source>
             <translation type="unfinished" />
         </message>
     </context>
