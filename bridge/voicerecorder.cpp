@@ -115,17 +115,24 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     connect(m_recorder, &QMediaRecorder::statusChanged, this, &VoiceRecorder::recorderStatus);
     connect(m_recorder, static_cast<void (QMediaRecorder::*)(QMediaRecorder::Error)>(&QMediaRecorder::error), this,
             [this](QMediaRecorder::Error) { fail(m_recorder->errorString()); });
-    // No microphone left open with nothing to show it. What it picked up so far is the user's:
-    // the power key or a call may have been what took the app away, so it waits like at the
-    // limit. (What a tap already sent goes on.)
+    // No microphone left open with nothing to show it, and no plain file of someone's words
+    // waiting outside the chat page: leaving the app throws away what is running or held, and its
+    // owner says so (user decision 2026-11-06). What a tap already sent goes on.
     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
         if (state == Qt::ApplicationActive) {
             return;
         }
-        if (m_recording && m_stop == Stop::ByItself) {
-            finish(Stop::Hold);
-        }
         pausePreview();
+        const bool sending = m_recording && m_stop == Stop::Send;
+        if (sending || (!m_recording && !m_held)) {
+            return;
+        }
+        // Under a second nobody has lost anything.
+        const bool something = m_held || duration() >= MinDurationMs;
+        if (something) {
+            emit discarded();
+        }
+        cancel();
     });
 }
 
@@ -191,11 +198,12 @@ void VoiceRecorder::stopped()
     if (complete && how == Stop::Send) {
         m_haveRecording = true;
         emit finished(m_finalDuration);
-    } else if (complete) {
+    } else if (complete && QGuiApplication::applicationState() == Qt::ApplicationActive) {
         m_haveRecording = true;
         setHeld(true);
         return;
     } else if (wanted) {
+        // Also what came to rest only after the app was left: nobody is there to answer.
         emit discarded();
     }
     clear();

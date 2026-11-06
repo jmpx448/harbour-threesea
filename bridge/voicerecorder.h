@@ -19,9 +19,9 @@
 //
 // A recording belongs to whoever started it (the chat page): only that one sends or discards it,
 // and it goes when its owner goes. Only the owner's tap sends: a recording that stopped any other
-// way (the length limit, the platform taking the microphone, the app being left, which stops the
-// capture at once) waits as `held`, a plain file like a running one, until the owner's tap, the
-// app lock or the window's closing.
+// way (the length limit, the platform taking the microphone) waits as `held`, a plain file like a
+// running one, until the owner's tap, the app lock or the window's closing. Leaving the app throws
+// away a running or held recording at once (`discarded`): no plain file outlives the chat page.
 //
 // A running recording can pause and go on. A held one can be listened to before it goes: the
 // platform's MP4 is only playable once it is finished, so listening means stopping, and what was
@@ -91,7 +91,8 @@ signals:
     void ownerChanged();
     void durationChanged();
     void finished(int duration);
-    // Something nobody cancelled is gone: the platform left nothing usable to hold.
+    // Something nobody cancelled is gone: the app was left, or the platform left nothing usable to
+    // hold.
     void discarded();
     void failed(const QString &error);
     // The recording can't be listened to; it is still there to send.

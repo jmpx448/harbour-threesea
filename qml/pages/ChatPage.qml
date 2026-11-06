@@ -1499,9 +1499,9 @@ Page {
         })
     }
     RemorsePopup { id: recordingRemorse }
-    // A recording went, or stopped and waits, while nobody was looking: said when the app is back.
+    // A recording went while nobody was looking (leaving the app throws it away, bridge/
+    // voicerecorder.h): said when the app is back.
     property bool recordingDiscarded
-    property bool recordingHeldAway
 
     // ---- Voice messages at the ear, their queue and their "new" state (user requests
     // 2026-10-28, like Threema for Android) ----
@@ -1662,10 +1662,8 @@ Page {
                     // The microphone button is gone with this: it says why.
                     page.sayRecordingHeld()
                     voiceRecorder.startPreview()
-                } else if (Qt.application.state === Qt.ApplicationActive) {
-                    page.sayRecordingHeld()
                 } else {
-                    page.recordingHeldAway = true
+                    page.sayRecordingHeld()
                 }
             }
         }
@@ -2008,11 +2006,8 @@ Page {
             if (Qt.application.state !== Qt.ApplicationActive) {
                 page.stopTyping()
                 page.saveDraft()
-            } else {
-                if (page.recordingDiscarded) page.sayRecordingDiscarded()
-                // (A lock on the way back has taken it already.)
-                if (page.recordingHeldAway && voiceRecorder.held && page.recordingHere) page.sayRecordingHeld()
-                page.recordingHeldAway = false
+            } else if (page.recordingDiscarded) {
+                page.sayRecordingDiscarded()
             }
             page.cameBack()
             page.markRead()

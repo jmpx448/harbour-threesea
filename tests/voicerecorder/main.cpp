@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// What ends a voice recording, without a microphone: only a tap sends. The length limit and
-// leaving the app stop it and hold it for an answer, and what's under a second or thrown away is
-// gone from memory. Pausing doesn't count as time and ends the same ways; listening never gets in
+// What ends a voice recording, without a microphone: only a tap sends. The length limit stops it
+// and holds it for an answer; leaving the app throws it away, running or held, and what's under a
+// second or thrown away is gone from memory. Pausing doesn't count as time and ends the same ways; listening never gets in
 // the way of what happens to the recording. Exit 0: passed.
 #include "voicerecorder.h"
 
@@ -149,25 +149,22 @@ void theLimitHoldsInFront()
     check(run.finished == 0, "limit: discarding sends nothing");
 }
 
-void aHeldOneStaysWhenLeaving()
+void aHeldOneGoesWhenLeaving()
 {
     Run run;
     run.test.limitAfter(1100);
     run.test.startWithWords(&run.owner);
     waitFor(1500);
+    check(run.recorder.held(), "held: waits in front");
     setActive(false);
-    check(run.recorder.held(), "held, then away: still held");
-    check(run.discarded == 0 && run.finished == 0, "held, then away: nothing happened to it");
-    check(run.recorder.owner() == &run.owner, "held, then away: still its owner's");
+    check(!run.recorder.held() && run.test.wordsGone(), "held, then away: gone");
+    check(run.discarded == 1 && run.finished == 0, "held, then away: discarded, and said so");
+    check(!run.recorder.owner(), "held, then away: nobody's any more");
     setActive(true);
-    check(run.recorder.held(), "held, away and back: still held");
-    run.recorder.cancel();
-    setActive(false);
-    setActive(true);
-    check(!run.recorder.held() && run.test.wordsGone(), "held, discarded: stays gone");
+    check(!run.recorder.held() && !run.recorder.recording(), "held, away and back: nothing waits");
 }
 
-void leavingStopsAndHolds()
+void leavingStopsAndDiscards()
 {
     Run run;
     run.test.startWithWords(&run.owner);
@@ -175,17 +172,11 @@ void leavingStopsAndHolds()
     setActive(false);
     check(!run.recorder.recording(), "leaving: the microphone is free");
     check(run.finished == 0, "leaving: not sent");
-    check(run.discarded == 0, "leaving: nothing lost");
-    check(run.recorder.held(), "leaving: held for an answer");
-    check(run.recorder.owner() == &run.owner, "leaving: still its owner's");
+    check(run.discarded == 1, "leaving: discarded, and said so");
+    check(!run.recorder.held() && run.test.wordsGone(), "leaving: nothing kept");
+    check(!run.recorder.owner(), "leaving: nobody's any more");
     setActive(true);
-    check(!run.recorder.recording(), "coming back: it doesn't start again");
-    check(run.recorder.held() && run.finished == 0, "coming back: still waiting");
-    // The answer: only now it goes.
-    bool pcm = false;
-    const QByteArray taken = run.recorder.takeRecording(&pcm);
-    check(taken == "words", "coming back: what was said can be sent");
-    check(!run.recorder.held() && !run.recorder.owner(), "coming back: over once taken");
+    check(!run.recorder.recording() && !run.recorder.held(), "coming back: nothing starts or waits");
 }
 
 void leavingAfterASlipLeavesNothing()
@@ -258,12 +249,19 @@ void aPausedOneEndsLikeARunningOne()
         waitFor(1100);
         run.recorder.pause();
         setActive(false);
-        check(!run.recorder.recording() && run.recorder.held(), "paused, then away: the microphone is free, it is held");
-        check(!run.recorder.paused(), "paused, then away: no longer paused");
+        check(!run.recorder.recording() && !run.recorder.held(), "paused, then away: the microphone is free, nothing held");
+        check(!run.recorder.paused() && run.test.wordsGone(), "paused, then away: gone");
+        check(run.discarded == 1 && run.finished == 0, "paused, then away: discarded, and said so");
         setActive(true);
-        check(run.recorder.held(), "paused, away and back: waits");
+    }
+    {
+        Run run;
+        run.test.startWithWords(&run.owner);
+        waitFor(1100);
+        run.recorder.hold();
         run.recorder.resume();
         check(!run.recorder.recording() && run.recorder.held(), "held: can't go on recording");
+        run.recorder.cancel();
     }
 }
 
@@ -396,6 +394,52 @@ void aFileIsUsedOnlyOnceFinished()
     }
 }
 
+// Leaving while the platform still writes the file: what a tap sent goes on, nothing else waits.
+void leavingWhileTheFileIsWritten()
+{
+    {
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        bool pcm = true;
+        QByteArray taken;
+        QObject::connect(&run.recorder, &VoiceRecorder::finished, [&]() { taken = run.recorder.takeRecording(&pcm); });
+        run.recorder.stop();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        setActive(false);
+        run.test.writeFile("words");
+        run.test.reportStatus(QMediaRecorder::LoadedStatus);
+        check(run.finished == 1 && taken == "words" && run.discarded == 0, "file, sent, then away: it goes");
+        setActive(true);
+    }
+    {
+        // Sent, but the platform never says it is done: it would be held, and nobody is there.
+        Run run;
+        run.test.finalizeWithin(50);
+        run.test.startPlatform(&run.owner, 2000);
+        run.test.writeFile("wor");
+        run.recorder.stop();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        setActive(false);
+        waitFor(150);
+        check(!run.recorder.recording() && !run.recorder.held(), "file, no status, away: not held");
+        check(run.finished == 0 && run.discarded == 1 && run.test.fileGone(), "file, no status, away: gone, and said so");
+        setActive(true);
+    }
+    {
+        // Being stopped to listen to: thrown away like a running one.
+        Run run;
+        run.test.startPlatform(&run.owner, 2000);
+        run.recorder.hold();
+        run.test.reportStopped(QMediaRecorder::FinalizingStatus);
+        setActive(false);
+        run.test.writeFile("words");
+        run.test.reportStatus(QMediaRecorder::LoadedStatus);
+        check(!run.recorder.held() && run.test.fileGone(), "file, holding, away: gone");
+        check(run.discarded == 1 && run.finished == 0, "file, holding, away: said once");
+        setActive(true);
+    }
+}
+
 // Qt says "paused" at once: only the recorder's time tells.
 void aPauseIsJudgedByTheRecordersTime()
 {
@@ -466,14 +510,15 @@ int main(int argc, char **argv)
     aTapSends();
     underASecondIsGone();
     theLimitHoldsInFront();
-    aHeldOneStaysWhenLeaving();
-    leavingStopsAndHolds();
+    aHeldOneGoesWhenLeaving();
+    leavingStopsAndDiscards();
     leavingAfterASlipLeavesNothing();
     aPauseIsntRecordedTime();
     aPausedOneEndsLikeARunningOne();
     listeningAsksForAHeldOne();
     listeningLeavesTheWordsAlone();
     aFileIsUsedOnlyOnceFinished();
+    leavingWhileTheFileIsWritten();
     aPauseIsJudgedByTheRecordersTime();
     itGoesWithItsOwner();
     if (failures) {
