@@ -725,9 +725,6 @@ DE = {
     "threesea-la-blocked":
         ("Blocked",
          "Blockiert"),
-    "threesea-la-no-maps-app":
-        ("No maps app installed. Long press to copy the coordinates.",
-         "Keine Karten-App installiert. Gedrückt halten, um die Koordinaten zu kopieren."),
     "threesea-me-send-location":
         ("Send location",
          "Standort senden"),
@@ -3654,6 +3651,33 @@ DE = {
     "threesea-la-data-passphrase-forgotten":
         ("Forgotten it? Pull down to start fresh without the stored data.",
          "Vergessen? Ziehe nach unten, um ohne die gespeicherten Daten neu anzufangen."),
+    "threesea-la-credit-maplibre":
+        ("The map: MapLibre Native and its Qt bindings (BSD-2-Clause), mapbox-gl-qml by rinigus (LGPL-3.0) and his Sailfish packaging pkg-maplibre-gl-native (MIT). Their exact sources: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 and github.com/rinigus/mapbox-gl-qml 3.2.1, with this app's patches in its source under scripts/maplibre.",
+         "Die Karte: MapLibre Native und seine Qt-Anbindung (BSD-2-Clause), mapbox-gl-qml von rinigus (LGPL-3.0) und seine Sailfish-Pakete pkg-maplibre-gl-native (MIT). Ihre genauen Quellen: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 und github.com/rinigus/mapbox-gl-qml 3.2.1, mit den Patches dieser App in ihrem Quellcode unter scripts/maplibre."),
+    "threesea-la-credit-map-data":
+        ("Map data © OpenMapTiles © OpenStreetMap contributors (ODbL), from Threema's map server.",
+         "Kartendaten © OpenMapTiles © OpenStreetMap-Mitwirkende (ODbL), vom Kartenserver von Threema."),
+    "threesea-me-open-in-maps":
+        ("Open in maps app",
+         "In Maps-App öffnen"),
+    "threesea-la-no-maps-app-installed":
+        ("No maps app installed",
+         "Keine Maps-App installiert"),
+    "threesea-me-copy-coordinates":
+        ("Copy coordinates",
+         "Koordinaten kopieren"),
+    "threesea-he-choose":
+        ("Choose",
+         "Auswählen"),
+    "threesea-la-location-map-point":
+        ("A point on the map",
+         "Ein Punkt auf der Karte"),
+    "threesea-la-location-on-map":
+        ("Choose on the map",
+         "Auf der Karte wählen"),
+    "threesea-la-location-map-server":
+        ("The map comes from Threema's map server, which learns the area shown. The places on it come from Threema's places server, which gets the middle of the map.",
+         "Die Karte kommt vom Kartenserver von Threema, der den gezeigten Ausschnitt erfährt. Die Orte darauf kommen vom Ortsserver von Threema, der die Mitte der Karte bekommt."),
 }
 
 # The engineering-English base file: only the plural forms need filling in.

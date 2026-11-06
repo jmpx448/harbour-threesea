@@ -968,10 +968,6 @@
             <source>Blocked</source>
             <translation>Blockiert</translation>
         </message>
-        <message id="threesea-la-no-maps-app">
-            <source>No maps app installed. Long press to copy the coordinates.</source>
-            <translation>Keine Karten-App installiert. Gedrückt halten, um die Koordinaten zu kopieren.</translation>
-        </message>
         <message id="threesea-me-send-location">
             <source>Send location</source>
             <translation>Standort senden</translation>
@@ -4947,6 +4943,42 @@
         <message id="threesea-la-data-passphrase-forgotten">
             <source>Forgotten it? Pull down to start fresh without the stored data.</source>
             <translation>Vergessen? Ziehe nach unten, um ohne die gespeicherten Daten neu anzufangen.</translation>
+        </message>
+        <message id="threesea-la-credit-maplibre">
+            <source>The map: MapLibre Native and its Qt bindings (BSD-2-Clause), mapbox-gl-qml by rinigus (LGPL-3.0) and his Sailfish packaging pkg-maplibre-gl-native (MIT). Their exact sources: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 and github.com/rinigus/mapbox-gl-qml 3.2.1, with this app's patches in its source under scripts/maplibre.</source>
+            <translation>Die Karte: MapLibre Native und seine Qt-Anbindung (BSD-2-Clause), mapbox-gl-qml von rinigus (LGPL-3.0) und seine Sailfish-Pakete pkg-maplibre-gl-native (MIT). Ihre genauen Quellen: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 und github.com/rinigus/mapbox-gl-qml 3.2.1, mit den Patches dieser App in ihrem Quellcode unter scripts/maplibre.</translation>
+        </message>
+        <message id="threesea-la-credit-map-data">
+            <source>Map data © OpenMapTiles © OpenStreetMap contributors (ODbL), from Threema's map server.</source>
+            <translation>Kartendaten © OpenMapTiles © OpenStreetMap-Mitwirkende (ODbL), vom Kartenserver von Threema.</translation>
+        </message>
+        <message id="threesea-me-open-in-maps">
+            <source>Open in maps app</source>
+            <translation>In Maps-App öffnen</translation>
+        </message>
+        <message id="threesea-la-no-maps-app-installed">
+            <source>No maps app installed</source>
+            <translation>Keine Maps-App installiert</translation>
+        </message>
+        <message id="threesea-me-copy-coordinates">
+            <source>Copy coordinates</source>
+            <translation>Koordinaten kopieren</translation>
+        </message>
+        <message id="threesea-he-choose">
+            <source>Choose</source>
+            <translation>Auswählen</translation>
+        </message>
+        <message id="threesea-la-location-map-point">
+            <source>A point on the map</source>
+            <translation>Ein Punkt auf der Karte</translation>
+        </message>
+        <message id="threesea-la-location-on-map">
+            <source>Choose on the map</source>
+            <translation>Auf der Karte wählen</translation>
+        </message>
+        <message id="threesea-la-location-map-server">
+            <source>The map comes from Threema's map server, which learns the area shown. The places on it come from Threema's places server, which gets the middle of the map.</source>
+            <translation>Die Karte kommt vom Kartenserver von Threema, der den gezeigten Ausschnitt erfährt. Die Orte darauf kommen vom Ortsserver von Threema, der die Mitte der Karte bekommt.</translation>
         </message>
     </context>
 </TS>

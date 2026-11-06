@@ -968,10 +968,6 @@
             <source>Blocked</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-no-maps-app">
-            <source>No maps app installed. Long press to copy the coordinates.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-me-send-location">
             <source>Send location</source>
             <translation type="unfinished" />
@@ -4946,6 +4942,42 @@
         </message>
         <message id="threesea-la-data-passphrase-forgotten">
             <source>Forgotten it? Pull down to start fresh without the stored data.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-maplibre">
+            <source>The map: MapLibre Native and its Qt bindings (BSD-2-Clause), mapbox-gl-qml by rinigus (LGPL-3.0) and his Sailfish packaging pkg-maplibre-gl-native (MIT). Their exact sources: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 and github.com/rinigus/mapbox-gl-qml 3.2.1, with this app's patches in its source under scripts/maplibre.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-map-data">
+            <source>Map data © OpenMapTiles © OpenStreetMap contributors (ODbL), from Threema's map server.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-open-in-maps">
+            <source>Open in maps app</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-no-maps-app-installed">
+            <source>No maps app installed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-copy-coordinates">
+            <source>Copy coordinates</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-choose">
+            <source>Choose</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-map-point">
+            <source>A point on the map</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-on-map">
+            <source>Choose on the map</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-map-server">
+            <source>The map comes from Threema's map server, which learns the area shown. The places on it come from Threema's places server, which gets the middle of the map.</source>
             <translation type="unfinished" />
         </message>
     </context>
