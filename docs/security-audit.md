@@ -10,7 +10,7 @@ still to do.
 
 | § | Rule | Result |
 |---|------|--------|
-| 7.1 | Only the core touches keys and plaintext at rest | OK. The bridge only holds the 32-byte database key, in memory, to start the core and to encrypt it for "Encrypt stored data" (ADR 0009), wiped on exit. Media are decrypted into memory buffers for display; nothing is decrypted to disk except "Save to Downloads" (user action). The voice recording is a temporary file in the app's cache until it is sent or discarded (see open points). |
+| 7.1 | Only the core touches keys and plaintext at rest | OK. The bridge only holds the 32-byte database key, in memory, to start the core and to encrypt it for "Encrypt stored data" (ADR 0009), wiped on exit. Media are decrypted into memory buffers for display; nothing is decrypted to disk except "Save to Downloads" (user action) and Share (the user's word, an exception in §7.1, see open point 6). The voice recording is a temporary file in the app's cache until it is sent or discarded (see open points). |
 | 7.2 | SQLCipher, key in Secrets | OK. Key from `/dev/urandom`, kept in an owner-only Secrets collection; replacing it uses a staging copy so a crash can't lose it. The app lock PIN is stored only as a salted scrypt hash. |
 | 7.3 | No secrets in logs | OK. Every `tracing` call was checked: only counts, kinds, flags and error texts (never message text, numbers, addresses or keys). `eprintln!` only in tests. The bridge logs no content; QML logs only an error kind. One hold-over: `debug` logs a contact's feature mask (not sensitive). |
 | 7.4 | Hashed directory lookups only | OK, with the user's exception (linking the user's own e-mail/number, only on request). Address book matching sends HMAC hashes only. |
@@ -44,3 +44,18 @@ Other checks:
    point of the action, but worth saying so in the UI. Severity: informational.
 4. **Fuzzing** the message decoders (§9 Phase 5) is still to do.
 5. `cargo audit` should run in CI; there is no CI yet.
+6. **Share** (ADR 0031, user decision 2026-11-06) gives another app a decrypted copy, on the
+   user's word for those files. The core writes it into a memory-backed folder only (tmpfs: the
+   system's temporary folder or `/dev/shm`, checked in `/proc/self/mountinfo`; with neither it
+   refuses), in a folder with the deadline and a random part in its name, owner only; a private
+   chat's files as `file.<ext>`; all copies together within one maximum-size file
+   (`shareTooLarge`). So it never reaches the flash and a restart ends it at the latest. It goes
+   10 minutes later by the wall clock (swept on every wake-up and in maintenance, so sleep counts),
+   at once when a chat is marked private, at "Delete ID and data", when the process ends and at the
+   next start; not at the lock, which with the PIN asked at once comes before the other app reads.
+   A share asked for before a lock, a private mark or the deletion is refused, its copies taken
+   back. Until the deadline, every app of the same user can read it: Sailjail gives no app a
+   private `/tmp`, while Downloads at least needs its permission. That is the exception the user
+   accepted in §7.1: what is shared goes unencrypted to the other app anyway. What the chosen app
+   and the system's share dialog do with their copy is out of our hands, as with anything shared.
+   Severity: informational.

@@ -256,6 +256,8 @@ async fn run_until_quit(
             tracing::warn!("quitting: requests or file work left");
         }
     }
+    // Their time was to run in this process, which won't see it out.
+    crate::app_media::remove_shared_files();
 }
 
 /// What the user did just before the end, behind the command that was cut off: its words would

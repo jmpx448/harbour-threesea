@@ -227,7 +227,14 @@ Rules:
    bodies at rest. Bounded exceptions (ADR 0009, 0012): the bridge holds the 32-byte database
    key in memory to start the core and to (un)wrap it; the Full call engines generate a per-call
    DTLS key in C++ for WebRTC, wiped when the call ends; decrypted media pass through the UI's
-   readers in memory only (wiped buffers).
+   readers in memory only (wiped buffers). Share (ADR 0031; user decision 2026-11-06: what is
+   shared goes unencrypted to the other app anyway): on the user's word, the core writes a
+   decrypted copy of the chosen files into a tmpfs folder (the system's temporary folder or
+   `/dev/shm`, never the flash), owner only, private chats' files as `file.<ext>`, all copies
+   within one maximum-size file; it goes 10 minutes later by the wall clock (sleep counted), and
+   at once when a chat is marked private, at "Delete ID and data", at the end of the process and
+   at the next start, not at the lock. Its limit: until that deadline the user's other apps can
+   read it, since Sailjail gives no private `/tmp`.
 2. Database encrypted with SQLCipher; key derived/stored as described in §5 `SecretStore`.
 3. Never log key material, PINs, message contents, phone numbers or e-mail addresses. Logs
    carry fixed texts plus kinds, codes, counts and internal IDs; text from other users or

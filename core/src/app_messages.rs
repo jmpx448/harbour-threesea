@@ -388,8 +388,19 @@ impl App {
 impl Shared {
     /// Store a private mark and let everyone who follows them know at once: the media readers
     /// here, and through the event the UI's notifications and the browsers.
+    /// Shares asked for until now go nowhere ([`Self::shares_voided`]).
+    pub(crate) fn void_shares(&self) {
+        self.shares_voided
+            .set(self.shares_voided.get().wrapping_add(1));
+    }
+
     pub(crate) fn mark_private(&self, key: &str, private: bool) -> Result<(), ApiError> {
         self.store.set_private(key, private)?;
+        if private {
+            // Under the chat's name, in a folder the user's other apps can list.
+            self.void_shares();
+            crate::app_media::remove_shared_files();
+        }
         self.update_media_gate();
         let _ = self
             .media_events
@@ -653,6 +664,7 @@ impl App {
     pub(crate) fn wake_connection(&mut self) -> Value {
         // The word that is held back is for a wake-up gone by.
         self.wake_settled_held = false;
+        crate::app_media::sweep_shared_files();
         // The hourly tick goes by tokio's clock, which stands still while the device sleeps: with
         // short wake-ups an hour of it can take days.
         self.maintenance_overdue = self

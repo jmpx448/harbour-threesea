@@ -452,6 +452,10 @@ pub enum Command {
     CancelTransfer {
         message: i64,
     },
+    /// Decrypted copies of files for another app.
+    ShareFiles {
+        messages: Vec<i64>,
+    },
     /// One group (`key`: its conversation key).
     Group {
         key: String,
@@ -1130,6 +1134,9 @@ pub enum ApiError {
     /// File larger than Threema's blob limit (100 MB).
     #[error("file too large")]
     FileTooLarge,
+    /// The copies for sharing don't fit in memory.
+    #[error("too much to share at once")]
+    ShareTooLarge,
     /// Linking: not a Threema Desktop code / a Threema Web code / an app version we can't link.
     #[error("not a device linking code")]
     LinkUnknownCode,
@@ -1261,6 +1268,7 @@ impl ApiError {
             Self::MessageTooLong => "messageTooLong",
             Self::PollResultsTooLong => "pollResultsTooLong",
             Self::FileTooLarge => "fileTooLarge",
+            Self::ShareTooLarge => "shareTooLarge",
             Self::VideoKeepsMetadata => "videoKeepsMetadata",
             Self::PictureKeepsMetadata => "pictureKeepsMetadata",
             Self::NotGif => "notGif",
@@ -1453,6 +1461,9 @@ pub struct Shared {
     pub(crate) last_group_check: std::cell::Cell<Option<tokio::time::Instant>>,
     /// Private chats readable (ADR 0009); memory only, starts locked.
     pub(crate) unlocked: std::cell::Cell<bool>,
+    /// Counts locks, chats marked private and deletions of all data: a share asked for before one
+    /// of those is refused when its turn comes or its copies are written (ADR 0031).
+    pub(crate) shares_voided: std::rc::Rc<std::cell::Cell<u64>>,
     /// The app's data directory (store, media, the in-app log).
     pub(crate) data_dir: PathBuf,
     /// A data backup added contacts: what they support is unknown until the next refresh.
@@ -1596,6 +1607,7 @@ impl App {
             last_import_attempt: std::cell::Cell::default(),
             last_group_check: std::cell::Cell::default(),
             unlocked: std::cell::Cell::default(),
+            shares_voided: std::rc::Rc::default(),
             data_dir: start.data_dir.clone(),
             imported_contacts_unchecked: std::cell::Cell::new(false),
             in_background: std::cell::Cell::new(false),
@@ -2130,6 +2142,9 @@ impl App {
             }
             Command::Lock { pending_files } => {
                 self.unlocked.set(false);
+                // A share asked for before goes nowhere; one made stays until its deadline, for the
+                // app it went to (ADR 0031).
+                self.void_shares();
                 self.update_media_gate();
                 self.group_calls_locked();
                 if let Some(files) = pending_files {
@@ -2447,6 +2462,7 @@ impl App {
             Command::RetryUpload { message } => self.retry_upload(message),
             Command::ResendMessage { message } => self.resend_message(message),
             Command::CancelTransfer { message } => self.cancel_transfer(message),
+            Command::ShareFiles { messages } => self.share_files_in_background(messages),
             Command::SaveFile { message, directory } => {
                 if self.in_background.get() {
                     self.save_file_in_background(message, directory)
@@ -4949,6 +4965,111 @@ mod tests {
             .write(id, crate::media::MediaPart::File, b"content")
             .unwrap();
         id
+    }
+
+    /// Shares of this thread go into a folder of the test's own.
+    fn share_into(dir: &tempfile::TempDir) -> PathBuf {
+        let folder = dir.path().join("shared");
+        std::fs::create_dir(&folder).unwrap();
+        crate::app_media::SHARE_FOLDER_FOR_TESTS
+            .with(|shared| *shared.borrow_mut() = Some(folder.clone()));
+        folder
+    }
+
+    fn shares_in(folder: &std::path::Path) -> usize {
+        std::fs::read_dir(folder).unwrap().count()
+    }
+
+    /// `shareFiles` from the UI, with its answer.
+    fn share(app: &mut App, message: i64) -> serde_json::Value {
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "shareFiles", "messages": [message]});
+        let local = tokio::task::LocalSet::new();
+        let reply = rt().block_on(local.run_until(async {
+            assert!(from_ui(app, request).await.is_none());
+            let finished = done.recv().await.unwrap();
+            app.finish_file_work(finished).await
+        }));
+        app.file_work_done_rx = Some(done);
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    /// The other app may read the copy after the lock, even one at once; marking a chat private and
+    /// deleting all data take it.
+    #[test]
+    fn a_shared_file_outlives_the_lock_but_not_a_private_mark_or_deleting_the_data() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "IJKL9012", 2);
+        let reply = share(&mut app, message);
+        assert_eq!(reply["ok"], true, "{reply}");
+        let path = reply["result"]["files"][0].as_str().unwrap().to_owned();
+        assert!(path.ends_with("/a.txt"), "{path}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"content");
+        assert_eq!(reply["result"]["mimeType"], "text/plain");
+        call(&mut app, json!({"id": 4, "cmd": "lock"}));
+        assert!(std::path::Path::new(&path).exists(), "the lock leaves it");
+
+        app.mark_private("QRST7890", true).unwrap();
+        assert_eq!(
+            shares_in(&folder),
+            0,
+            "a chat marked private takes them all"
+        );
+
+        assert_eq!(share(&mut app, message)["ok"], true);
+        assert_eq!(shares_in(&folder), 1);
+        rt().block_on(app.delete_all_data()).unwrap();
+        assert_eq!(shares_in(&folder), 0, "deleting the data takes them");
+    }
+
+    /// Waiting behind other file work while the app locks: nothing is written, whatever chat.
+    #[test]
+    fn a_share_that_waited_through_the_lock_is_not_written() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "IJKL9012", 2);
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "shareFiles", "messages": [message]});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            let turn = std::rc::Rc::clone(&app.file_work_turn);
+            let before_us = turn.acquire().await.unwrap();
+            assert!(from_ui(&mut app, request).await.is_none());
+            tokio::task::yield_now().await;
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"})).await;
+            assert_eq!(lock.unwrap()["ok"], true);
+            drop(before_us);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+        assert_eq!(shares_in(&folder), 0);
+    }
+
+    /// A private chat's file goes under a name that says nothing; while the chats are hidden, not
+    /// at all.
+    #[test]
+    fn a_private_chats_file_is_shared_under_a_plain_name() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "ABCD1234", 2);
+        assert_eq!(share_locked(&mut app, message)["error"]["kind"], "locked");
+        assert_eq!(shares_in(&folder), 0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let reply = share(&mut app, message);
+        let path = reply["result"]["files"][0].as_str().unwrap();
+        assert!(path.ends_with("/file.txt"), "{path}");
+    }
+
+    /// One the command refuses at once has no work to wait for.
+    fn share_locked(app: &mut App, message: i64) -> serde_json::Value {
+        let request = json!({"id": 3, "cmd": "shareFiles", "messages": [message]});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(from_ui(app, request)))
+            .unwrap()
     }
 
     /// With a pass running nothing but the counted files gets through: the chat is hidden from

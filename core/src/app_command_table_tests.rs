@@ -134,6 +134,7 @@ const TABLE: &[(&str, Gate)] = &[
     ("retryUpload", Locked(r#"{"message":"$OUTGOING_FILE"}"#)),
     ("resendMessage", Locked(r#"{"message":"$OUTGOING"}"#)),
     ("cancelTransfer", Locked(r#"{"message":"$OUTGOING_FILE"}"#)),
+    ("shareFiles", Locked(r#"{"messages":["$FILE"]}"#)),
     ("group", Missing(r#"{"key":"$GROUP"}"#)),
     ("createGroup", Gate::None),
     ("renameGroup", Missing(r#"{"key":"$GROUP","name":"x"}"#)),

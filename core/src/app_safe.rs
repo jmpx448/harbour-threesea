@@ -1326,6 +1326,7 @@ impl App {
 
     /// The end of a round of maintenance, on the core loop. Returns the events to emit to the UI.
     pub(crate) fn finish_maintenance(&mut self, mut round: MaintenanceRound) -> Vec<&'static str> {
+        crate::app_media::sweep_shared_files();
         if round.refused {
             self.license_refused();
             round.events.push("licenseChanged");

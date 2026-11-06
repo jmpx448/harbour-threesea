@@ -15,6 +15,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
 };
@@ -1258,6 +1259,12 @@ pub(crate) enum FileWork {
         conversation: String,
         saved: Result<Value, ApiError>,
     },
+    Share {
+        conversations: Vec<String>,
+        /// [`Shared::shares_voided`] when it was asked for.
+        voided_at: u64,
+        shared: Result<SharedFiles, ApiError>,
+    },
 }
 
 /// That work, for the core loop to finish on its thread. No `work`: the blocking thread failed.
@@ -1331,6 +1338,262 @@ fn save_decrypted(
         .and_then(|name| name.to_str())
         .is_some_and(crate::file_types::opens_externally);
     Ok(json!({ "path": target.to_string_lossy(), "openable": openable }))
+}
+
+/// How long a file shared with another app stays. The system's share dialog and what the user picks
+/// in it read the file by its path, and some only when they get to it: an e-mail being written, a
+/// queued transfer. So the lock doesn't end it: a lock at once would take it before the other app
+/// has read it. By the wall clock, which counts the time the device sleeps (ADR 0031).
+const SHARED_FILES_KEPT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// What the folders for that are called, one per share: the prefix, the second of the deadline,
+/// a dash and a random part.
+const SHARED_FOLDER_PREFIX: &str = "threesea-share-";
+/// How much all copies for sharing may take together, in memory: one file of the largest size
+/// Threema sends, as it is stored.
+const SHARED_FILES_LIMIT: u64 = media::MAX_FILE_DOWNLOAD as u64;
+
+/// The wall clock in seconds.
+fn wall_clock_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The folder the tests share into; none, and nothing is shared or swept.
+    pub(crate) static SHARE_FOLDER_FOR_TESTS: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Where copies for sharing go ([`memory_backed_folder`]).
+fn share_folder() -> Option<PathBuf> {
+    #[cfg(test)]
+    return SHARE_FOLDER_FOR_TESTS.with(|folder| folder.borrow().clone());
+    #[cfg(not(test))]
+    memory_backed_folder()
+}
+
+/// The folder for what goes out to other apps by Share: one kept in memory, so that nothing of it
+/// reaches the flash and it is gone at the latest when the device restarts. The system's temporary
+/// folder or else `/dev/shm`, which the share dialog, outside of the app's sandbox, can read too.
+#[cfg_attr(test, allow(dead_code))]
+fn memory_backed_folder() -> Option<PathBuf> {
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    [std::env::temp_dir(), PathBuf::from("/dev/shm")]
+        .into_iter()
+        .find(|folder| folder.is_dir() && is_memory_backed(&mounts, folder))
+}
+
+/// Whether the filesystem `folder` is on, by the lines of `/proc/self/mountinfo`, keeps its files
+/// in memory. The longest mount point above it decides, and of equals the last mounted.
+fn is_memory_backed(mounts: &str, folder: &Path) -> bool {
+    let mut found: Option<(usize, bool)> = None;
+    for line in mounts.lines() {
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let (Some(point), Some(filesystem)) = (before.split(' ').nth(4), after.split(' ').next())
+        else {
+            continue;
+        };
+        let point = point.replace("\\040", " ");
+        let point = Path::new(&point);
+        if folder.starts_with(point) {
+            let depth = point.components().count();
+            if found.is_none_or(|(deepest, _)| depth >= deepest) {
+                found = Some((depth, filesystem == "tmpfs"));
+            }
+        }
+    }
+    found.is_some_and(|(_, memory)| memory)
+}
+
+/// Copies made for sharing.
+pub(crate) struct SharedFiles {
+    folder: PathBuf,
+    paths: Vec<String>,
+    /// What the share dialog offers methods for; empty if the files have nothing in common.
+    mime_type: String,
+}
+
+/// The one type several files have, or the kind they are all of, as the system's share dialog
+/// matches them.
+fn common_media_type(types: &[String]) -> String {
+    let Some(first) = types.first() else {
+        return String::new();
+    };
+    if types.iter().all(|media_type| media_type == first) {
+        return first.clone();
+    }
+    let kind = first.split('/').next().unwrap_or("");
+    if !kind.is_empty()
+        && types
+            .iter()
+            .all(|media_type| media_type.split('/').next() == Some(kind))
+    {
+        return format!("{kind}/*");
+    }
+    String::new()
+}
+
+fn private_folder(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// Write the files, decrypted, each under its own name in a folder only this user can read, to be
+/// removed at `deadline` (seconds of the wall clock); for a blocking thread. `size`: what they take,
+/// which with the copies still there must stay within [`SHARED_FILES_LIMIT`]. What didn't fit takes
+/// the rest back with it.
+fn share_decrypted(
+    media: &MediaStore,
+    directory: &Path,
+    files: &[(i64, FileToSave)],
+    size: u64,
+    deadline: u64,
+) -> Result<SharedFiles, ApiError> {
+    if shared_size_in(directory).saturating_add(size) > SHARED_FILES_LIMIT {
+        return Err(ApiError::ShareTooLarge);
+    }
+    let mut random = [0_u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut random);
+    let folder = directory.join(format!(
+        "{SHARED_FOLDER_PREFIX}{deadline}-{}",
+        data_encoding::HEXLOWER.encode(&random)
+    ));
+    private_folder(&folder).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let written = files
+        .iter()
+        .enumerate()
+        .map(|(index, (id, file))| write_shared_file(media, &folder, index, *id, file))
+        .collect::<Result<Vec<_>, ApiError>>();
+    let paths = match written {
+        Ok(paths) => paths,
+        Err(error) => {
+            remove_shared_folder(&folder);
+            return Err(error);
+        }
+    };
+    let types: Vec<String> = files
+        .iter()
+        .map(|(_, file)| file.media_type.to_ascii_lowercase())
+        .collect();
+    Ok(SharedFiles {
+        folder,
+        paths,
+        mime_type: common_media_type(&types),
+    })
+}
+
+/// One of them, in a folder of its own, as two may have the same name.
+fn write_shared_file(
+    media: &MediaStore,
+    folder: &Path,
+    index: usize,
+    id: i64,
+    file: &FileToSave,
+) -> Result<String, ApiError> {
+    use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    let data = media
+        .read(id, MediaPart::File)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or(ApiError::FileNotDownloaded)?;
+    let own = folder.join(index.to_string());
+    private_folder(&own).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let target = own.join(safe_file_name(file.name.as_deref(), &file.media_type));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&target)
+        .and_then(|mut opened| opened.write_all(&data))
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::StorageFull {
+                ApiError::ShareTooLarge
+            } else {
+                ApiError::Internal(error.to_string())
+            }
+        })?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+fn remove_shared_folder(folder: &Path) {
+    match std::fs::remove_dir_all(folder) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(%error, "removing shared files failed"),
+    }
+}
+
+/// Our folders for sharing in `directory`, each with its deadline (none if its name has none).
+fn shared_folders_in(directory: &Path) -> Vec<(PathBuf, Option<u64>)> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let rest = name.to_str()?.strip_prefix(SHARED_FOLDER_PREFIX)?;
+            let deadline = rest.split_once('-').and_then(|(at, _)| at.parse().ok());
+            Some((entry.path(), deadline))
+        })
+        .collect()
+}
+
+/// What the copies for sharing in `directory` take.
+fn shared_size_in(directory: &Path) -> u64 {
+    fn size(path: &Path) -> u64 {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => std::fs::read_dir(path).map_or(0, |entries| {
+                entries
+                    .flatten()
+                    .map(|entry| size(&entry.path()))
+                    .fold(0, u64::saturating_add)
+            }),
+            Ok(metadata) => metadata.len(),
+            Err(_) => 0,
+        }
+    }
+    shared_folders_in(directory)
+        .iter()
+        .map(|(folder, _)| size(folder))
+        .fold(0, u64::saturating_add)
+}
+
+/// Everything still there for sharing, also from before a restart: at the start, at the end of
+/// the process, when a chat is marked private and when the data are deleted.
+pub(crate) fn remove_shared_files() {
+    let Some(directory) = share_folder() else {
+        return;
+    };
+    remove_shared_files_in(&directory);
+}
+
+fn remove_shared_files_in(directory: &Path) {
+    for (folder, _) in shared_folders_in(directory) {
+        remove_shared_folder(&folder);
+    }
+}
+
+/// The copies whose time is up by the wall clock, which goes on while the device sleeps (a timer of
+/// the core loop doesn't): on waking and in maintenance. A deadline further away than a share is
+/// kept means the clock went back; that one goes too.
+pub(crate) fn sweep_shared_files() {
+    let Some(directory) = share_folder() else {
+        return;
+    };
+    sweep_shared_files_in(&directory, wall_clock_now());
+}
+
+fn sweep_shared_files_in(directory: &Path, now: u64) {
+    let latest = now.saturating_add(SHARED_FILES_KEPT.as_secs());
+    for (folder, deadline) in shared_folders_in(directory) {
+        if deadline.is_none_or(|deadline| deadline <= now || deadline > latest) {
+            remove_shared_folder(&folder);
+        }
+    }
 }
 
 /// How many uploads and downloads are running. A wake-up holds the device up for them: a picture
@@ -1603,6 +1866,11 @@ impl App {
                 conversation,
                 saved,
             }) => self.check_readable(&conversation).and(saved),
+            Some(FileWork::Share {
+                conversations,
+                voided_at,
+                shared,
+            }) => self.finish_share(&conversations, voided_at, shared),
             None => Err(ApiError::Internal("file work failed".into())),
         };
         self.reply(finished.request, None, outcome).await
@@ -2264,6 +2532,7 @@ impl App {
     pub(crate) fn resume_media(&mut self) {
         // First of all: the tasks started below write under the same temporary names.
         self.media.remove_temporary_files();
+        remove_shared_files();
         // An upload the end of the process cut short is a try that failed, and comes again on the
         // usual schedule: a process that keeps being closed doesn't send it again each time.
         match self.store.unfinished_uploads() {
@@ -2545,6 +2814,109 @@ impl App {
         })
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?
+    }
+
+    /// `shareFiles`: the decrypted copies for another app, on the user's word and in memory-backed
+    /// folders only ([`memory_backed_folder`]). Refused if there is no such folder here: a copy on
+    /// the disk would stay readable in the flash after it is removed. All of them or none, within
+    /// [`SHARED_FILES_LIMIT`] with those still there. A private chat's files go under a name that
+    /// says nothing (`file.<ext>`): the folder can be listed by the user's other apps.
+    pub(crate) fn share_files_in_background(&mut self, ids: Vec<i64>) -> Result<Value, ApiError> {
+        let mut files = ids
+            .iter()
+            .map(|id| Ok((*id, self.file_to_save(*id)?)))
+            .collect::<Result<Vec<_>, ApiError>>()?;
+        // From the UI only, the one with a place for the answer of work on another thread.
+        if !self.in_background.get() {
+            return Err(ApiError::Internal("not from here".into()));
+        }
+        if files.is_empty() {
+            return Err(ApiError::Internal("no files".into()));
+        }
+        let size = ids
+            .iter()
+            .map(|id| self.media.stored_size(*id, MediaPart::File) as u64)
+            .fold(0, u64::saturating_add);
+        if size > SHARED_FILES_LIMIT {
+            return Err(ApiError::ShareTooLarge);
+        }
+        let directory = share_folder().ok_or_else(|| {
+            tracing::warn!("no memory-backed folder to share files from");
+            ApiError::Internal("no folder to share from".into())
+        })?;
+        for (_, file) in &mut files {
+            if self.store.is_private(&file.conversation)? {
+                file.name = Some("file".to_owned());
+            }
+        }
+        let conversations = files
+            .iter()
+            .map(|(_, file)| file.conversation.clone())
+            .collect();
+        let voided_at = self.shares_voided.get();
+        let voided = Rc::clone(&self.shares_voided);
+        let (store, media) = (Rc::clone(&self.store), Arc::clone(&self.media));
+        let (checked, check) = (Arc::new(files), Arc::clone(&self.media));
+        let to_share = Arc::clone(&checked);
+        // One at a time: the largest is what it takes at most.
+        let memory = ids
+            .iter()
+            .map(|id| self.media.stored_size(*id, MediaPart::File))
+            .max()
+            .unwrap_or(0);
+        self.spawn_file_work(
+            memory,
+            move || {
+                if voided.get() != voided_at {
+                    return Err(ApiError::Locked);
+                }
+                checked
+                    .iter()
+                    .try_for_each(|(id, file)| file.may_go(&store, &check, *id))
+            },
+            move || FileWork::Share {
+                conversations,
+                voided_at,
+                shared: share_decrypted(
+                    &media,
+                    &directory,
+                    &to_share,
+                    size,
+                    wall_clock_now().saturating_add(SHARED_FILES_KEPT.as_secs()),
+                ),
+            },
+        );
+        Ok(json!({}))
+    }
+
+    /// The core thread's part of sharing. Locked, a chat marked private or the data deleted while
+    /// it was being written, or a chat hidden: the copies go again, and the answer doesn't name them.
+    fn finish_share(
+        &self,
+        conversations: &[String],
+        voided_at: u64,
+        shared: Result<SharedFiles, ApiError>,
+    ) -> Result<Value, ApiError> {
+        let shared = shared?;
+        let still = if self.shares_voided.get() == voided_at {
+            conversations
+                .iter()
+                .try_for_each(|chat| self.check_readable(chat))
+        } else {
+            Err(ApiError::Locked)
+        };
+        if let Err(error) = still {
+            remove_shared_folder(&shared.folder);
+            return Err(error);
+        }
+        let folder = shared.folder.clone();
+        // While the device is awake; asleep, the wake-up's sweep comes first.
+        tokio::task::spawn_local(async move {
+            tokio::time::sleep(SHARED_FILES_KEPT).await;
+            remove_shared_folder(&folder);
+            sweep_shared_files();
+        });
+        Ok(json!({ "files": shared.paths, "mimeType": shared.mime_type }))
     }
 
     /// The chat and what the file is called, if it may leave.
@@ -5415,5 +5787,229 @@ mod tests {
                 assert_eq!(Rc::strong_count(&held), 1);
             })
             .await;
+    }
+
+    #[test]
+    fn share_folders_are_only_those_kept_in_memory() {
+        let mounts = "\
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/root rw
+23 22 0:20 / /tmp rw,nosuid shared:2 - tmpfs tmpfs rw
+24 22 0:21 / /dev/shm rw,nosuid shared:3 - tmpfs tmpfs rw
+25 23 259:3 / /tmp/disk rw shared:4 - ext4 /dev/data rw
+26 22 0:22 / /a\\040b rw shared:5 - tmpfs tmpfs rw
+27 22 0:23 / /twice rw shared:6 - tmpfs tmpfs rw
+28 22 259:4 / /twice rw shared:7 - ext4 /dev/data rw
+garbage";
+        for (folder, memory) in [
+            ("/tmp", true),
+            ("/tmp/x", true),
+            ("/dev/shm", true),
+            ("/tmp/disk", false),
+            ("/tmp/disk/x", false),
+            ("/home", false),
+            ("/tmpfoo", false),
+            ("/a b/c", true),
+            ("/twice", false),
+        ] {
+            assert_eq!(
+                is_memory_backed(mounts, Path::new(folder)),
+                memory,
+                "{folder}"
+            );
+        }
+        assert!(!is_memory_backed("", Path::new("/tmp")));
+    }
+
+    #[test]
+    fn several_files_share_what_they_have_in_common() {
+        let types = |list: &[&str]| list.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>();
+        assert_eq!(common_media_type(&types(&[])), "");
+        assert_eq!(common_media_type(&types(&["image/png"])), "image/png");
+        assert_eq!(
+            common_media_type(&types(&["image/png", "image/png"])),
+            "image/png"
+        );
+        assert_eq!(
+            common_media_type(&types(&["image/png", "image/gif"])),
+            "image/*"
+        );
+        assert_eq!(common_media_type(&types(&["image/png", "video/mp4"])), "");
+    }
+
+    fn stored_file(app: &App, message_id: u64, name: &str, content: &[u8]) -> (i64, FileToSave) {
+        let id = received_file(&app.store, message_id, 1);
+        app.media.write(id, MediaPart::File, content).unwrap();
+        let file = FileToSave {
+            conversation: "ABCD1234".into(),
+            message_id,
+            name: Some(name.into()),
+            media_type: "image/png".into(),
+        };
+        (id, file)
+    }
+
+    /// Each under its own name, also when two have the same, where only this user can read them;
+    /// and they all go again.
+    #[test]
+    fn shared_files_are_written_for_this_user_only_and_removed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, app) = app();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        let files = vec![
+            stored_file(&app, 1, "a.png", b"one"),
+            stored_file(&app, 2, "a.png", b"two"),
+            stored_file(&app, 3, "../../up", b"three"),
+        ];
+        let shared = share_decrypted(&app.media, &target, &files, 0, later()).unwrap();
+        let contents: Vec<_> = shared
+            .paths
+            .iter()
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
+        assert_eq!(contents, [&b"one"[..], b"two", b"three"]);
+        assert!(
+            shared
+                .paths
+                .iter()
+                .all(|p| Path::new(p).starts_with(&shared.folder))
+        );
+        assert!(shared.paths[0].ends_with("/a.png"));
+        assert!(shared.paths[1].ends_with("/a.png"));
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&shared.folder), 0o700);
+        assert_eq!(mode(Path::new(&shared.paths[0])), 0o600);
+        assert_eq!(shared.mime_type, "image/png");
+
+        std::fs::write(target.join("someone-elses"), b"x").unwrap();
+        remove_shared_files_in(&target);
+        assert!(!shared.folder.exists());
+        assert!(target.join("someone-elses").exists());
+    }
+
+    /// One that can't be read takes the others back with it.
+    #[test]
+    fn a_share_is_all_or_nothing() {
+        let (dir, app) = app();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        let mut files = vec![stored_file(&app, 1, "a.png", b"one")];
+        let missing = received_file(&app.store, 2, 1);
+        files.push((
+            missing,
+            FileToSave {
+                conversation: "ABCD1234".into(),
+                message_id: 2,
+                name: None,
+                media_type: "image/png".into(),
+            },
+        ));
+        assert!(matches!(
+            share_decrypted(&app.media, &target, &files, 0, later()),
+            Err(ApiError::FileNotDownloaded)
+        ));
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    /// Hidden while it was written: nothing stays, and the answer names nothing.
+    #[test]
+    fn a_file_shared_as_its_chat_is_hidden_is_taken_back() {
+        let (dir, app) = app();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        let files = vec![stored_file(&app, 1, "a.png", b"one")];
+        let shared = share_decrypted(&app.media, &target, &files, 0, later()).unwrap();
+        let folder = shared.folder.clone();
+        app.store.set_private("ABCD1234", true).unwrap();
+        app.unlocked.set(false);
+        let answer = app.finish_share(&["ABCD1234".to_owned()], 0, Ok(shared));
+        assert!(matches!(answer, Err(ApiError::Locked)));
+        assert!(!folder.exists());
+    }
+    /// A deadline for copies made now.
+    fn later() -> u64 {
+        wall_clock_now() + SHARED_FILES_KEPT.as_secs()
+    }
+
+    /// Written as the app locked, a chat was marked private or the data were deleted: it goes again,
+    /// in a chat that isn't private too.
+    #[test]
+    fn a_share_written_as_the_app_locks_is_taken_back() {
+        let (dir, app) = app();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        let files = vec![stored_file(&app, 1, "a.png", b"one")];
+        let shared = share_decrypted(&app.media, &target, &files, 3, later()).unwrap();
+        let folder = shared.folder.clone();
+        let voided_at = app.shares_voided.get();
+        app.void_shares();
+        let answer = app.finish_share(&["ABCD1234".to_owned()], voided_at, Ok(shared));
+        assert!(matches!(answer, Err(ApiError::Locked)));
+        assert!(!folder.exists());
+    }
+
+    /// What is still shared counts: past the limit, nothing more is written.
+    #[test]
+    fn shares_stay_within_their_limit() {
+        let (dir, app) = app();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        let files = vec![stored_file(&app, 1, "a.png", b"one")];
+        assert!(matches!(
+            share_decrypted(&app.media, &target, &files, SHARED_FILES_LIMIT + 1, later()),
+            Err(ApiError::ShareTooLarge)
+        ));
+        let earlier = share_decrypted(&app.media, &target, &files, 3, later()).unwrap();
+        // Sparse: it counts as large without taking the room.
+        let large = std::fs::File::create(earlier.folder.join("large")).unwrap();
+        large.set_len(SHARED_FILES_LIMIT - 3).unwrap();
+        assert!(matches!(
+            share_decrypted(&app.media, &target, &files, 4, later()),
+            Err(ApiError::ShareTooLarge)
+        ));
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+        assert!(share_decrypted(&app.media, &target, &files, 0, later()).is_ok());
+        assert_eq!(ApiError::ShareTooLarge.kind(), "shareTooLarge");
+    }
+
+    /// By the wall clock: what is due goes, and what the clock going back put too far ahead; what
+    /// isn't ours stays.
+    #[test]
+    fn shared_files_go_when_their_time_is_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_800_000_000;
+        let kept = SHARED_FILES_KEPT.as_secs();
+        for name in [
+            format!("{SHARED_FOLDER_PREFIX}{}-aa", now - 1),
+            format!("{SHARED_FOLDER_PREFIX}{now}-bb"),
+            format!("{SHARED_FOLDER_PREFIX}{}-cc", now + 1),
+            format!("{SHARED_FOLDER_PREFIX}{}-dd", now + kept),
+            format!("{SHARED_FOLDER_PREFIX}{}-ee", now + kept + 1),
+            format!("{SHARED_FOLDER_PREFIX}ff"),
+            "someone-elses".to_owned(),
+        ] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        sweep_shared_files_in(dir.path(), now);
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "someone-elses".to_owned(),
+                format!("{SHARED_FOLDER_PREFIX}{}-cc", now + 1),
+                format!("{SHARED_FOLDER_PREFIX}{}-dd", now + kept),
+            ]
+        );
+        remove_shared_files_in(dir.path());
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "the start and the end of the process take them all"
+        );
     }
 }

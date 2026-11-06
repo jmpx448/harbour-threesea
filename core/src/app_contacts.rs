@@ -269,6 +269,8 @@ impl App {
             tracing::error!(%error, "the store could not be emptied, its file goes next");
         }
         self.media.remove_all();
+        self.void_shares();
+        crate::app_media::remove_shared_files();
         // The next identity starts locked; its private marks wait for its own PIN.
         self.unlocked.set(false);
         self.write_pass = None;
