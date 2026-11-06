@@ -18,6 +18,8 @@ Page {
     property bool loading: true
     // The list couldn't be fetched for lack of a connection, or the connection didn't answer.
     property bool offline: false
+    // Whether there is a device group at all couldn't be read (the store): nothing is known.
+    property bool readFailed: false
     // This device's label, as the other devices show it.
     property string label: ""
     // Messages received on another device that this one didn't keep (no room to wait for a contact).
@@ -33,8 +35,11 @@ Page {
 
     function load() {
         backend.call("multiDevice", {}, function(ok, result) {
+            page.readFailed = !ok
             if (!ok) {
                 page.loading = false
+                page.active = false
+                page.devices = []
                 return
             }
             page.active = result.active
@@ -146,6 +151,15 @@ Page {
 
         PullDownMenu {
             MenuItem {
+                visible: page.readFailed
+                //% "Try again"
+                text: qsTrId("threesea-me-try-again")
+                onClicked: {
+                    page.loading = true
+                    page.load()
+                }
+            }
+            MenuItem {
                 visible: page.active && page.leftOut > 0
                 //% "Clear count of messages not kept"
                 text: qsTrId("threesea-me-clear-reflected-left-out")
@@ -255,7 +269,15 @@ Page {
         }
 
         ViewPlaceholder {
-            enabled: !page.loading && !page.active
+            enabled: !page.loading && page.readFailed
+            //% "The list of linked devices could not be read"
+            text: qsTrId("threesea-la-linked-devices-read-failed")
+            //% "Pull down to try again."
+            hintText: qsTrId("threesea-la-startup-try-again")
+        }
+
+        ViewPlaceholder {
+            enabled: !page.loading && !page.active && !page.readFailed
             //% "No linked devices"
             text: qsTrId("threesea-la-no-linked-devices")
             //% "With Threema for Desktop you can read and write your chats on a computer. Open it there and pull down here to link it."
