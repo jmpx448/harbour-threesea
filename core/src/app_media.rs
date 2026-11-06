@@ -1452,6 +1452,7 @@ fn share_decrypted(
     files: &[(i64, FileToSave)],
     size: u64,
     deadline: u64,
+    closed: &std::sync::atomic::AtomicBool,
 ) -> Result<SharedFiles, ApiError> {
     if shared_size_in(directory).saturating_add(size) > SHARED_FILES_LIMIT {
         return Err(ApiError::ShareTooLarge);
@@ -1479,6 +1480,11 @@ fn share_decrypted(
         .iter()
         .map(|(_, file)| file.media_type.to_ascii_lowercase())
         .collect();
+    if closed.load(std::sync::atomic::Ordering::SeqCst) {
+        // The process ended meanwhile, and its clean-up may have come before this folder.
+        remove_shared_folder(&folder);
+        return Err(ApiError::Internal("quitting".into()));
+    }
     Ok(SharedFiles {
         folder,
         paths,
@@ -1575,6 +1581,30 @@ fn remove_shared_files_in(directory: &Path) {
     for (folder, _) in shared_folders_in(directory) {
         remove_shared_folder(&folder);
     }
+}
+
+/// How often the core loop looks at the wall clock while copies are there. The loop's timers stand
+/// still while the device sleeps, the wall clock doesn't: after a sleep the copies go at the latest
+/// this long after the device is up again, without a wake-up from the UI.
+const SHARED_FILES_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Sweep by the wall clock until no copies are left; one such task at a time (`running`).
+pub(crate) fn keep_sweeping(running: &Rc<Cell<bool>>) {
+    if running.replace(true) {
+        return;
+    }
+    let running = Rc::clone(running);
+    tokio::task::spawn_local(async move {
+        loop {
+            tokio::time::sleep(SHARED_FILES_SWEEP_EVERY).await;
+            sweep_shared_files();
+            let left = share_folder().is_some_and(|folder| !shared_folders_in(&folder).is_empty());
+            if !left {
+                break;
+            }
+        }
+        running.set(false);
+    });
 }
 
 /// The copies whose time is up by the wall clock, which goes on while the device sleeps (a timer of
@@ -2854,6 +2884,7 @@ impl App {
             .map(|(_, file)| file.conversation.clone())
             .collect();
         let voided_at = self.shares_voided.get();
+        let closed = Arc::clone(&self.shares_closed);
         let voided = Rc::clone(&self.shares_voided);
         let (store, media) = (Rc::clone(&self.store), Arc::clone(&self.media));
         let (checked, check) = (Arc::new(files), Arc::clone(&self.media));
@@ -2883,6 +2914,7 @@ impl App {
                     &to_share,
                     size,
                     wall_clock_now().saturating_add(SHARED_FILES_KEPT.as_secs()),
+                    &closed,
                 ),
             },
         );
@@ -2909,13 +2941,7 @@ impl App {
             remove_shared_folder(&shared.folder);
             return Err(error);
         }
-        let folder = shared.folder.clone();
-        // While the device is awake; asleep, the wake-up's sweep comes first.
-        tokio::task::spawn_local(async move {
-            tokio::time::sleep(SHARED_FILES_KEPT).await;
-            remove_shared_folder(&folder);
-            sweep_shared_files();
-        });
+        keep_sweeping(&self.share_sweep_running);
         Ok(json!({ "files": shared.paths, "mimeType": shared.mime_type }))
     }
 
@@ -5861,7 +5887,8 @@ garbage";
             stored_file(&app, 2, "a.png", b"two"),
             stored_file(&app, 3, "../../up", b"three"),
         ];
-        let shared = share_decrypted(&app.media, &target, &files, 0, later()).unwrap();
+        let shared =
+            share_decrypted(&app.media, &target, &files, 0, later(), &Default::default()).unwrap();
         let contents: Vec<_> = shared
             .paths
             .iter()
@@ -5905,7 +5932,7 @@ garbage";
             },
         ));
         assert!(matches!(
-            share_decrypted(&app.media, &target, &files, 0, later()),
+            share_decrypted(&app.media, &target, &files, 0, later(), &Default::default()),
             Err(ApiError::FileNotDownloaded)
         ));
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
@@ -5918,7 +5945,8 @@ garbage";
         let target = dir.path().join("out");
         std::fs::create_dir(&target).unwrap();
         let files = vec![stored_file(&app, 1, "a.png", b"one")];
-        let shared = share_decrypted(&app.media, &target, &files, 0, later()).unwrap();
+        let shared =
+            share_decrypted(&app.media, &target, &files, 0, later(), &Default::default()).unwrap();
         let folder = shared.folder.clone();
         app.store.set_private("ABCD1234", true).unwrap();
         app.unlocked.set(false);
@@ -5939,13 +5967,52 @@ garbage";
         let target = dir.path().join("out");
         std::fs::create_dir(&target).unwrap();
         let files = vec![stored_file(&app, 1, "a.png", b"one")];
-        let shared = share_decrypted(&app.media, &target, &files, 3, later()).unwrap();
+        let shared =
+            share_decrypted(&app.media, &target, &files, 3, later(), &Default::default()).unwrap();
         let folder = shared.folder.clone();
         let voided_at = app.shares_voided.get();
         app.void_shares();
         let answer = app.finish_share(&["ABCD1234".to_owned()], voided_at, Ok(shared));
         assert!(matches!(answer, Err(ApiError::Locked)));
         assert!(!folder.exists());
+    }
+
+    /// The core loop looks at the wall clock while copies are there, one sweep at a time, and
+    /// stops once they are gone.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn shared_files_are_swept_by_the_wall_clock_until_none_are_left() {
+        let dir = tempfile::tempdir().unwrap();
+        SHARE_FOLDER_FOR_TESTS.with(|folder| *folder.borrow_mut() = Some(dir.path().to_owned()));
+        let due = dir
+            .path()
+            .join(format!("{SHARED_FOLDER_PREFIX}{}-aa", wall_clock_now() - 1));
+        std::fs::create_dir(&due).unwrap();
+        let running = Rc::new(Cell::new(false));
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                keep_sweeping(&running);
+                keep_sweeping(&running);
+                assert!(running.get());
+                tokio::time::sleep(SHARED_FILES_SWEEP_EVERY + std::time::Duration::from_secs(1))
+                    .await;
+                assert!(!due.exists());
+                assert!(!running.get(), "nothing left to sweep");
+            })
+            .await;
+        SHARE_FOLDER_FOR_TESTS.with(|folder| *folder.borrow_mut() = None);
+    }
+
+    /// Written after the process's clean-up: it takes itself back.
+    #[test]
+    fn a_share_written_as_the_process_ends_removes_itself() {
+        let (dir, app) = app();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+        let files = vec![stored_file(&app, 1, "a.png", b"one")];
+        let closed = std::sync::atomic::AtomicBool::new(true);
+        assert!(share_decrypted(&app.media, &target, &files, 3, later(), &closed).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     }
 
     /// What is still shared counts: past the limit, nothing more is written.
@@ -5956,19 +6023,29 @@ garbage";
         std::fs::create_dir(&target).unwrap();
         let files = vec![stored_file(&app, 1, "a.png", b"one")];
         assert!(matches!(
-            share_decrypted(&app.media, &target, &files, SHARED_FILES_LIMIT + 1, later()),
+            share_decrypted(
+                &app.media,
+                &target,
+                &files,
+                SHARED_FILES_LIMIT + 1,
+                later(),
+                &Default::default()
+            ),
             Err(ApiError::ShareTooLarge)
         ));
-        let earlier = share_decrypted(&app.media, &target, &files, 3, later()).unwrap();
+        let earlier =
+            share_decrypted(&app.media, &target, &files, 3, later(), &Default::default()).unwrap();
         // Sparse: it counts as large without taking the room.
         let large = std::fs::File::create(earlier.folder.join("large")).unwrap();
         large.set_len(SHARED_FILES_LIMIT - 3).unwrap();
         assert!(matches!(
-            share_decrypted(&app.media, &target, &files, 4, later()),
+            share_decrypted(&app.media, &target, &files, 4, later(), &Default::default()),
             Err(ApiError::ShareTooLarge)
         ));
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
-        assert!(share_decrypted(&app.media, &target, &files, 0, later()).is_ok());
+        assert!(
+            share_decrypted(&app.media, &target, &files, 0, later(), &Default::default()).is_ok()
+        );
         assert_eq!(ApiError::ShareTooLarge.kind(), "shareTooLarge");
     }
 

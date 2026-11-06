@@ -1464,6 +1464,10 @@ pub struct Shared {
     /// Counts locks, chats marked private and deletions of all data: a share asked for before one
     /// of those is refused when its turn comes or its copies are written (ADR 0031).
     pub(crate) shares_voided: std::rc::Rc<std::cell::Cell<u64>>,
+    /// Set as the process ends: a share still being written takes its copies back itself.
+    pub(crate) shares_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the wall-clock sweep of shared copies runs ([`crate::app_media::keep_sweeping`]).
+    pub(crate) share_sweep_running: std::rc::Rc<std::cell::Cell<bool>>,
     /// The app's data directory (store, media, the in-app log).
     pub(crate) data_dir: PathBuf,
     /// A data backup added contacts: what they support is unknown until the next refresh.
@@ -1608,6 +1612,8 @@ impl App {
             last_group_check: std::cell::Cell::default(),
             unlocked: std::cell::Cell::default(),
             shares_voided: std::rc::Rc::default(),
+            shares_closed: Arc::default(),
+            share_sweep_running: std::rc::Rc::default(),
             data_dir: start.data_dir.clone(),
             imported_contacts_unchecked: std::cell::Cell::new(false),
             in_background: std::cell::Cell::new(false),

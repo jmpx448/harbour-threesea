@@ -50,9 +50,11 @@ Other checks:
    refuses), in a folder with the deadline and a random part in its name, owner only; a private
    chat's files as `file.<ext>`; all copies together within one maximum-size file
    (`shareTooLarge`). So it never reaches the flash and a restart ends it at the latest. It goes
-   10 minutes later by the wall clock (swept on every wake-up and in maintenance, so sleep counts),
-   at once when a chat is marked private, at "Delete ID and data", when the process ends and at the
-   next start; not at the lock, which with the PIN asked at once comes before the other app reads.
+   10 minutes later by the wall clock (checked every 30 s while the device is awake, on every
+   wake-up, when the app comes to the front and in maintenance, so sleep counts), at once when a
+   chat is marked private here or on a linked device, at "Delete ID and data", when the process
+   ends and when the app starts again, before the store opens. After a crash or kill it stays
+   until the app starts again or the device restarts. Not at the lock, which with the PIN asked at once comes before the other app reads.
    A share asked for before a lock, a private mark or the deletion is refused, its copies taken
    back. Until the deadline, every app of the same user can read it: Sailjail gives no app a
    private `/tmp`, while Downloads at least needs its permission. That is the exception the user

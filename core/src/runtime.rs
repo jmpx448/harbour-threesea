@@ -71,6 +71,9 @@ impl CoreHandle {
         emit: Emit,
     ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<CoreRequest>();
+        // Left by a process that ended without its clean-up (a crash, a kill), before anything
+        // else, the store included, can fail.
+        crate::app_media::remove_shared_files();
         let media = std::fs::create_dir_all(&config.data_dir)
             .and_then(|()| MediaStore::open(&config.data_dir, &db_key));
         let media = match media {
@@ -256,7 +259,10 @@ async fn run_until_quit(
             tracing::warn!("quitting: requests or file work left");
         }
     }
-    // Their time was to run in this process, which won't see it out.
+    // Their time was to run in this process, which won't see it out; one still being written
+    // removes itself.
+    app.shares_closed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     crate::app_media::remove_shared_files();
 }
 

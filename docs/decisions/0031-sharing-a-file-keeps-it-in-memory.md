@@ -31,10 +31,13 @@ unencrypted anyway, so it is less confidential than what stays in the store.
 - All copies together stay within one file of Threema's largest size (`shareTooLarge` otherwise):
   it is the phone's memory.
 - A copy goes 10 minutes after it was made, by the wall clock, which counts the time the device
-  sleeps: the deadline is in the folder's name, a timer removes it while awake, and every wake-up
-  and maintenance round sweeps what is due (and anything dated further ahead, after the clock went
-  back). Also at once when a chat is marked private, at "Delete ID and data", when the process ends
-  and at the next start.
+  sleeps: the deadline is in the folder's name, and while copies are there the core looks at the
+  wall clock every 30 seconds the device is awake, as well as on every wake-up, when the app comes
+  to the front and in maintenance, removing what is due (and anything dated further ahead, after
+  the clock went back). After a sleep a copy goes within 30 seconds of the device being up again.
+  Also at once when a chat is marked private, here or on a linked device, at "Delete ID and data",
+  when the process ends (a share still being written then removes itself) and when the app starts
+  again, before the store is opened.
 - The lock doesn't remove it. With the PIN asked at once, the lock comes as the share dialog opens;
   removing it then would break every share before the other app reads it. What was shared has
   left our protection with the user's choice of app; the deadline bounds the rest.
@@ -48,6 +51,8 @@ unencrypted anyway, so it is less confidential than what stays in the store.
 - An exception to CLAUDE.md §7.1, stated there: until the deadline, the copy is readable by the
   user's other apps, which can see the folder; they can list the share folders' names in any case.
   Nothing of a share reaches the flash through us, and a restart ends it at the latest.
+- Only our process removes copies. If it crashes or is killed, its copies stay until the app is
+  started again or the device restarts, whichever comes first.
 - What the chosen app and the share dialog do with their copy is out of our hands, as with anything
   shared.
 - The image's fstab mounts `/tmp` as tmpfs, and `ShareAction` was seen in the SDK taking these

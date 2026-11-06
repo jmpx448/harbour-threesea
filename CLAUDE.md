@@ -231,10 +231,12 @@ Rules:
    shared goes unencrypted to the other app anyway): on the user's word, the core writes a
    decrypted copy of the chosen files into a tmpfs folder (the system's temporary folder or
    `/dev/shm`, never the flash), owner only, private chats' files as `file.<ext>`, all copies
-   within one maximum-size file; it goes 10 minutes later by the wall clock (sleep counted), and
-   at once when a chat is marked private, at "Delete ID and data", at the end of the process and
-   at the next start, not at the lock. Its limit: until that deadline the user's other apps can
-   read it, since Sailjail gives no private `/tmp`.
+   within one maximum-size file; it goes 10 minutes later by the wall clock (sleep counted;
+   checked every 30 s awake, on wake-up and when the app comes to the front), and at once when a
+   chat is marked private (here or on a linked device), at "Delete ID and data", at the end of the
+   process and when the app starts again, not at the lock. Its limits: until that deadline the
+   user's other apps can read it, since Sailjail gives no private `/tmp`; after a crash or kill
+   it stays until the app starts again or the device restarts.
 2. Database encrypted with SQLCipher; key derived/stored as described in §5 `SecretStore`.
 3. Never log key material, PINs, message contents, phone numbers or e-mail addresses. Logs
    carry fixed texts plus kinds, codes, counts and internal IDs; text from other users or
