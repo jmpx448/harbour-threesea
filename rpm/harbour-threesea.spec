@@ -58,7 +58,7 @@ Requires:   libnice
 %endif
 
 # Harbour: the only shared libraries of our own are the map renderer's, private under
-# %{_datadir}/%{name}/lib: nothing to provide, and nothing to require from elsewhere for them.
+# /usr/share/harbour-threesea/lib: nothing to provide, and nothing to require from elsewhere for them.
 %define __provides_exclude_from ^%{_datadir}/.*$
 %define __requires_exclude ^libQMapLibre.*$
 
