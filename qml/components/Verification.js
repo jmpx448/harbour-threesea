@@ -7,8 +7,10 @@ function text(level) {
         //% "Fully verified"
         return qsTrId("threesea-la-verification-full")
     case 1:
-        //% "Verified by the server"
-        return qsTrId("threesea-la-verification-server")
+        // Android's middle level means matched in the address book; here a code from a picture
+        // gives it too, so a name true for both.
+        //% "Partly verified"
+        return qsTrId("threesea-la-verification-partly")
     default:
         //% "Not verified"
         return qsTrId("threesea-la-verification-none")

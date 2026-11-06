@@ -291,6 +291,18 @@ Page {
                 bottomPadding: Theme.paddingLarge
             }
 
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                visible: !page.noContact && page.contact.verification === 1
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.highlightColor
+                bottomPadding: Theme.paddingMedium
+                //% "Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully."
+                text: qsTrId("threesea-la-verification-partly-explained")
+            }
+
             Button {
                 // Here beside the key it is about; the pulley has its four items.
                 anchors.horizontalCenter: parent.horizontalCenter
