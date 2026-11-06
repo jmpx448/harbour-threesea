@@ -1312,6 +1312,7 @@ void ThreeseBackend::loadBubbleSettings()
     const bool bigger = settings.value(QStringLiteral("biggerEmojis"), true).toBool();
     const int size = qBound(0, settings.value(QStringLiteral("chatFontSize"), 1).toInt(), 2);
     const bool play = settings.value(QStringLiteral("autoPlayGifs"), true).toBool();
+    const bool cache = settings.value(QStringLiteral("imageCache"), false).toBool();
     if (threema != m_threemaEmoji) {
         m_threemaEmoji = threema;
         emit threemaEmojiChanged();
@@ -1327,6 +1328,10 @@ void ThreeseBackend::loadBubbleSettings()
     if (play != m_autoPlayGifs) {
         m_autoPlayGifs = play;
         emit autoPlayGifsChanged();
+    }
+    if (cache != m_imageCache) {
+        m_imageCache = cache;
+        emit imageCacheChanged();
     }
 }
 
@@ -1364,6 +1369,15 @@ void ThreeseBackend::setAutoPlayGifs(bool play)
         QSettings().setValue(QStringLiteral("autoPlayGifs"), play);
         m_autoPlayGifs = play;
         emit autoPlayGifsChanged();
+    }
+}
+
+void ThreeseBackend::setImageCache(bool cache)
+{
+    if (cache != m_imageCache) {
+        QSettings().setValue(QStringLiteral("imageCache"), cache);
+        m_imageCache = cache;
+        emit imageCacheChanged();
     }
 }
 

@@ -238,6 +238,11 @@ Rules:
    process and when the app starts again, not at the lock. Its limits: until that deadline the
    user's other apps can read it, since Sailjail gives no private `/tmp`; after a crash or kill
    it stays until the app starts again or the device restarts.
+   Keep pictures in memory (Settings → Media and storage, off by default, the user's choice): Qt's image cache may keep decoded pictures of non-private chats, unwiped,
+   while the app runs; a private chat's bubbles never ask for it. `purgeImageCache` empties it
+   of every picture no page shows at the lock, when the setting goes off and when a chat becomes
+   private (here or on a linked device); pictures still shown on an open page stay until it lets
+   go of them.
 2. Database encrypted with SQLCipher; key derived/stored as described in §5 `SecretStore`.
 3. Never log key material, PINs, message contents, phone numbers or e-mail addresses. Logs
    carry fixed texts plus kinds, codes, counts and internal IDs; text from other users or
@@ -455,7 +460,8 @@ details in `docs/STATUS.md`.
 - Open: phone tests, all collected in `docs/voice-video-device-checklist.md` (calls, camera,
   battery, video, the media controls, and everything the audit's fixes left to a phone);
   German and French for the texts added or reworded since 0.2.0 (§6); the questions the
-  audit's packages left for the user (in `docs/STATUS.md`: sharing media with other apps, a map, Qt's image cache); P01 for Threema Web's
+  audit's packages left for the user (in `docs/STATUS.md`: sharing media with other apps, a
+  map); P01 for Threema Web's
   picture and contact commands (still wait in the core loop, ADR 0028); the OrganizationName
   (§11); Jolla Store and Chum packaging. Done 2026-10-28:
   fuzzing setup and first runs (`core/fuzz/`), indexed search. Done 2026-10-29 (user asked for

@@ -227,6 +227,16 @@ Page {
                 value: Format.formatFileSize(page.storage.databaseBytes || 0)
             }
 
+            TextSwitch {
+                automaticCheck: false
+                checked: backend.imageCache
+                //% "Keep pictures in memory"
+                text: qsTrId("threesea-la-image-cache")
+                //% "Chat pictures scroll back in faster, decoded and unencrypted in the app's memory while it runs. This uses more memory. Private chats always load them anew."
+                description: qsTrId("threesea-la-image-cache-description")
+                onClicked: backend.imageCache = !checked
+            }
+
             ChoiceBox {
                 //% "Keep messages"
                 label: qsTrId("threesea-la-keep-messages")

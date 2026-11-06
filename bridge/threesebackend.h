@@ -85,6 +85,9 @@ class ThreeseBackend : public QObject
     Q_PROPERTY(bool emulator READ emulator CONSTANT)
     // Android's "Auto-play animated images" (GIFs play in the chat by themselves). Device-local.
     Q_PROPERTY(bool autoPlayGifs READ autoPlayGifs WRITE setAutoPlayGifs NOTIFY autoPlayGifsChanged)
+    // Qt may keep decoded chat pictures in its image cache (non-private chats only; CLAUDE.md
+    // section 7.1). Off by default.
+    Q_PROPERTY(bool imageCache READ imageCache WRITE setImageCache NOTIFY imageCacheChanged)
     // Enter sends the message (Shift+Enter: new line); off: the other way round. Device-local.
     Q_PROPERTY(bool enterToSend READ enterToSend WRITE setEnterToSend NOTIFY notificationSettingsChanged)
     // Sent videos (Android's video size): 0 original, 1 small (480 px), 2 medium (848 px).
@@ -250,6 +253,8 @@ public:
     }
     bool autoPlayGifs() const { return m_autoPlayGifs; }
     void setAutoPlayGifs(bool play);
+    bool imageCache() const { return m_imageCache; }
+    void setImageCache(bool cache);
     bool enterToSend() const { return QSettings().value(QStringLiteral("enterToSend"), true).toBool(); }
     void setEnterToSend(bool send)
     {
@@ -402,6 +407,7 @@ signals:
     void biggerEmojisChanged();
     void chatFontSizeChanged();
     void autoPlayGifsChanged();
+    void imageCacheChanged();
     void dataEncryptionChanged();
     // The PIN was accepted: calls and players stop now, the core can take a while.
     void dataRemovalStarted();
@@ -451,6 +457,7 @@ private:
     bool m_biggerEmojis = true;
     int m_chatFontSize = 1;
     bool m_autoPlayGifs = true;
+    bool m_imageCache = false;
     // Guards m_core against image loader threads while the core starts and stops.
     mutable QReadWriteLock m_coreLock;
     SecretStore *m_secrets;

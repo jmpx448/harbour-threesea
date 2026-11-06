@@ -21,6 +21,8 @@ Item {
     // list has rested the picture stays wanted, so scrolling on doesn't take it away.
     property bool listMoving: false
     property bool fullWanted: false
+    // Qt's image cache may keep the decoded pictures (the setting; never for a private chat).
+    property bool cachePictures: false
     onListMovingChanged: if (!listMoving) fullWanted = true
     Component.onCompleted: if (!listMoving) fullWanted = true
     property color textColor: Theme.primaryColor
@@ -190,7 +192,7 @@ Item {
             anchors.fill: parent
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
-            cache: false
+            cache: root.cachePictures
             sourceSize.width: root.pictureWidth
             source: root.hasPicture && root.body.thumbnailState === 2 && fullPicture.status !== Image.Ready
                     ? "image://threesea/" + root.messageId + "/thumb" : ""
@@ -202,7 +204,7 @@ Item {
             anchors.fill: parent
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
-            cache: false
+            cache: root.cachePictures
             sourceSize.width: root.pictureWidth
             // GIFs: AnimatedMedia draws them (the first frame too).
             source: root.isImage && !root.isGif && root.fileHere && root.fullWanted

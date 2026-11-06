@@ -29,6 +29,8 @@ ListItem {
     property string olderKind: ""
     // The list is moving, by a flick or the quick scroll: what can wait for it, waits.
     property bool listMoving: false
+    // The chat's pictures may stay decoded in Qt's image cache (FileContent).
+    property bool cachePictures: false
     // The contact understands any emoji; otherwise only thumbs up/down (legacy reactions).
     property bool anyReaction: true
     // Distribution lists have no reactions at all, not even the thumbs.
@@ -530,6 +532,7 @@ ListItem {
                                          && message.y + message.height > message.chatView.contentY
                                          && message.y < message.chatView.contentY + message.chatView.height)
                     listMoving: message.listMoving
+                    cachePictures: message.cachePictures
                     maxWidth: message.maxTextWidth
                     highlighted: message.highlighted
                     textColor: message.textColor

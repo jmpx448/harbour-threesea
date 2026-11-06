@@ -659,6 +659,9 @@ Page {
 
     // Marked private while this page is open (isPrivate says how it opened).
     property bool markedPrivate: false
+    // Qt's image cache for this chat's pictures: only when the setting asks for it, and never
+    // for a private chat (known once the first answer came: shown).
+    readonly property bool cachePictures: backend.imageCache && shown && !isPrivate && !markedPrivate
     // Where the reader is, for coming back to this chat. Nothing for a private chat, or behind
     // the lock; nothing either at the newest end, where a chat opens anyway.
     function rememberPlace() {
@@ -3085,6 +3088,7 @@ Page {
             delegate: MessageDelegate {
                 width: listView.width
                 listMoving: listView.moving || listView.quickScrollAnimating
+                cachePictures: page.cachePictures
                 hasOlder: index + 1 < messages.count
                 olderCreatedAt: index + 1 < messages.count ? messages.fieldAt(index + 1, "createdAt") || 0 : 0
                 olderOutgoing: index + 1 < messages.count && messages.fieldAt(index + 1, "outgoing") === true
