@@ -1,0 +1,2 @@
+{"version": 8, "name": "threesea-test-server", "sources": {},
+ "layers": [{"id": "background", "type": "background", "paint": {"background-color": "#ff00ff"}}]}

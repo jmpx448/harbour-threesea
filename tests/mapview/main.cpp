@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Shows MapViewTest.qml (Silica + the bundled MapboxMap) with the fixture style; argv[1] is the
-// directory with the QML and the style, argv[2] the bundled QML import directory. Exit code 1 on
-// any QML warning. scripts/test-mapview.sh runs it under tests/mapview/shotcompositor.c.
+// Shows MapViewTest.qml: the app's ThreemaMap (qml/components, the bundled MapboxMap) on a Silica
+// page. argv[1]: the directory with the QML and the fixture style; argv[2]: the bundled QML import
+// directory; argv[3]: seconds to run; argv[4]: "fixture" for the offline style, else the style's
+// URL; argv[5], if given: the cache database (else in memory, as for a private chat). Exit code 1 on
+// any QML warning. scripts/test-mapview.sh runs it under tests/mapview/shotcompositor.c, with
+// MapLibre's THREESEA_MAP_* variables set or not per case.
 #include <QFile>
 #include <QGuiApplication>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickView>
 #include <QTimer>
+#include <QVariantMap>
 #include <cstdio>
 
 static int problems = 0;
@@ -25,8 +29,8 @@ int main(int argc, char **argv)
 {
     qInstallMessageHandler(onMessage);
     QGuiApplication app(argc, argv);
-    if (argc < 4) {
-        fprintf(stderr, "usage: %s qmldir importdir seconds\n", argv[0]);
+    if (argc < 5) {
+        fprintf(stderr, "usage: %s qmldir importdir seconds fixture|style-url [cache]\n", argv[0]);
         return 2;
     }
     const QString dir = QString::fromLocal8Bit(argv[1]);
@@ -37,7 +41,15 @@ int main(int argc, char **argv)
     // Silica's ApplicationWindow is an item: shown in a view, like sailfishapp does.
     QQuickView view;
     view.engine()->addImportPath(QString::fromLocal8Bit(argv[2]));
-    view.rootContext()->setContextProperty("fixtureStyle", QString::fromUtf8(style.readAll()));
+    const QString styleArg = QString::fromLocal8Bit(argv[4]);
+    const bool fixture = styleArg == QLatin1String("fixture");
+    view.rootContext()->setContextProperty("testStyleJson", fixture ? QString::fromUtf8(style.readAll()) : QString());
+    view.rootContext()->setContextProperty("testStyleUrl", fixture ? QString() : styleArg);
+    view.rootContext()->setContextProperty("testPrivate", argc < 6);
+    // The one property of the bridge the map reads.
+    QVariantMap backend;
+    backend.insert("mapCache", argc >= 6 ? QString::fromLocal8Bit(argv[5]) : QString());
+    view.rootContext()->setContextProperty("backend", backend);
     view.setSource(QUrl::fromLocalFile(dir + "/MapViewTest.qml"));
     if (view.status() != QQuickView::Ready) {
         for (const QQmlError &e : view.errors()) {

@@ -147,6 +147,8 @@ int main(int argc, char **argv)
     Harness harness;
     engine.rootContext()->setContextProperty(QStringLiteral("harness"), &harness);
 
+    // The bundled map renderer's QML module, laid out as in the package (scripts/test-pages.sh).
+    engine.addImportPath(dir + QStringLiteral("/lib/qml"));
     engine.load(QUrl::fromLocalFile(dir + QStringLiteral("/qml/harbour-threesea.qml")));
     if (engine.rootObjects().isEmpty()) {
         return 2;

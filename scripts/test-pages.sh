@@ -9,6 +9,9 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SFOS=${SFOS_VERSION:-5.1.0.11}
+# The map pages need the bundled renderer's module (built once, scripts/maplibre); nothing draws
+# without a window system, and without the app's map policy MapLibre fetches nothing anyway.
+"$ROOT/scripts/maplibre/build.sh" i486 >&2
 docker run --rm -i -e "PAGES=$*" -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS" sh -euc '
     T=SailfishOS-'"$SFOS"'-i486
     B=$HOME/pageload
@@ -30,6 +33,8 @@ docker run --rm -i -e "PAGES=$*" -v "$ROOT:/src:ro" "harbour-threesea-sdk:$SFOS"
         A=$B/$flavour
         mkdir -p $A/fakes
         ln -sfn $B/qml $A/qml
+        M=/src/target/maplibre/'"$SFOS"'-i486
+        mkdir -p $A/lib && cp -a $M/core/usr/lib/libQMapLibre.so.3* $A/lib/ && cp -a $M/qml $A/lib/qml
         cp texts.qm $A/
         cp /src/tests/pageload/Driver.qml /src/tests/pageload/Pages.js /src/tests/pageload/Results.js $A/fakes/
         python3 -I /src/tests/pageload/make-fakes.py /src/bridge $flavour $A/fakes
