@@ -38,3 +38,11 @@ bridge's half shows on the start page with "Try again", and closing the window t
 process, whatever the settings say, so that the next start tries too. Settings are device-wide, so
 background running and the log level return to their defaults too. Backups in the user's folder,
 saved pictures and Threema Safe's copy stay, and the dialog says that.
+
+"Start fresh" (2026-11-06, user decision) is the bridge's half alone: when the stored data can't be
+opened (a forgotten passphrase, a key missing from Secrets, a database the core finds damaged or
+not fitting its key), the start page and the passphrase prompt offer it behind a dialog and a
+remorse timer. No core runs, so nobody leaves the device group, and the dialog says linked devices
+stay linked. Anyone holding the phone can do it, as with deleting the app's folder; it discloses
+nothing. Not offered for a newer version's data, a full disk or a read error, which an update, free
+space or a retry brings back.

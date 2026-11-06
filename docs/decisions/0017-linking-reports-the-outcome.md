@@ -19,7 +19,8 @@ An earlier user report stands: a phone must never be trapped behind an unreachab
    `runDropDevicesSteps`. When no other device would remain, this one leaves too. The same check
    with nothing to remove runs about hourly and when the page finds only this device.
 2. A failed "Remove all" changes nothing. **Deviation from what we did before:** leaving locally is
-   no longer automatic but a choice in a dialog that says the others stay linked. That is the way
+   no longer automatic but a choice in a dialog that says the others stay linked, beside
+   removing them first (the default, user decision 2026-11-06). That is the way
    out of an unreachable mediator, and it keeps a retry possible for the stolen laptop. A failed
    removal is also an event, so the user hears of it after leaving the page during the wait.
 3. A join tells whether the identity has left this device (from the first byte of the essential
