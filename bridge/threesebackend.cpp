@@ -1427,6 +1427,10 @@ void ThreeseBackend::purgeImageCache()
             view->releaseResources();
         }
     }
+    // The map's tiles go at the same moments (the lock, a chat going private, the setting off):
+    // a map opened before its chat went private wrote to the file (ADR 0032). A map still open
+    // keeps its handle on the removed file until it closes; the next one starts a new file.
+    QDir(QFileInfo(mapCacheFile()).absolutePath()).removeRecursively();
 }
 
 // Once the bubbles have let go of what they showed with the cache (their pictures load anew).
