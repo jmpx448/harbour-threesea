@@ -26,7 +26,12 @@ leaves it running as it is.
 - Called for the window with none up (the icon, a chat's notification, a link): it ends at once and
   publishes a notification that opens the new version. It doesn't start that version itself: the
   launcher refuses a second start while this process and its sandbox are alive, whereas a tap on the
-  notification or the icon after the end simply starts it.
+  notification or the icon after the end simply starts it. What the tap was for opens there (user
+  decision 2026-11-06): the notification's action makes the same D-Bus call again (a chat, the first
+  link through `openLink`, the update, Threema Web or Safe page), and the new version, finding that
+  notification at its start, makes the call itself on the icon's tap, then closes it; any other way
+  in, or dismissing it, drops it. Only what the tap carried is kept, in that notification, as the
+  chat's own notification held it already: no message content, no key, nothing in a file of ours.
 - A window up: it stays, since the user is in the middle of something, and a notification says to
   close it and open it again. Closing then ends the process whatever Keep running says.
 
@@ -52,6 +57,6 @@ A Lite user with Keep running on stops receiving messages after an update until 
 is told so. It could start itself in the background, as Full's script does. That is left out: whether
 a Lite app may do so in the Jolla Store is not known, and a tap brings it back.
 
-The first tap on the icon right after an update only ends the old process and leaves a notification.
-A link or a chat that tap asked for is not opened, and until the window is closed, pages loaded from
-the new package can still meet the old binary.
+The first tap on the icon, a notification or a link right after an update only ends the old process
+and leaves a notification; the next tap, on it or the icon, opens what the first was for. Until the
+window is closed, pages loaded from the new package can still meet the old binary.

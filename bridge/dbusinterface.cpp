@@ -47,14 +47,17 @@ bool DBusInterface::registerOnBus()
     return true;
 }
 
-bool DBusInterface::windowRefused() const
+bool DBusInterface::windowRefused(const QString &method, const QVariantList &arguments)
 {
-    return m_windowGuard && m_windowGuard();
+    m_refusedCall = { { QStringLiteral("method"), method }, { QStringLiteral("arguments"), arguments } };
+    const bool refused = m_windowGuard && m_windowGuard();
+    m_refusedCall.clear();
+    return refused;
 }
 
 void DBusInterface::openChat(const QString &identity)
 {
-    if (windowRefused()) {
+    if (windowRefused(QStringLiteral("openChat"), { identity })) {
         return;
     }
     emit called();
@@ -63,16 +66,17 @@ void DBusInterface::openChat(const QString &identity)
 
 void DBusInterface::activate()
 {
-    if (windowRefused()) {
+    if (windowRefused(QStringLiteral("activate"))) {
         return;
     }
     emit called();
+    emit launched();
     emit activateRequested();
 }
 
 void DBusInterface::showUpdate()
 {
-    if (windowRefused()) {
+    if (windowRefused(QStringLiteral("showUpdate"))) {
         return;
     }
     emit called();
@@ -82,7 +86,7 @@ void DBusInterface::showUpdate()
 
 void DBusInterface::showWebSessions()
 {
-    if (windowRefused()) {
+    if (windowRefused(QStringLiteral("showWebSessions"))) {
         return;
     }
     emit called();
@@ -92,7 +96,7 @@ void DBusInterface::showWebSessions()
 
 void DBusInterface::showSafe()
 {
-    if (windowRefused()) {
+    if (windowRefused(QStringLiteral("showSafe"))) {
         return;
     }
     emit called();
@@ -102,7 +106,10 @@ void DBusInterface::showSafe()
 
 void DBusInterface::activate(const QStringList &urls)
 {
-    if (windowRefused()) {
+    // Made again by a notification's action, whose arguments are of plain types: with the first
+    // link only.
+    if (windowRefused(urls.isEmpty() ? QStringLiteral("activate") : QStringLiteral("openLink"),
+                      urls.isEmpty() ? QVariantList() : QVariantList { urls.first() })) {
         return;
     }
     emit called();
@@ -110,6 +117,11 @@ void DBusInterface::activate(const QStringList &urls)
     for (const QString &url : urls) {
         emit openUrlRequested(url);
     }
+}
+
+void DBusInterface::openLink(const QString &url)
+{
+    activate(QStringList { url });
 }
 
 namespace {
@@ -355,7 +367,8 @@ void DBusInterface::answerCall(const QString &token)
         return;
     }
     forgetToken(key);
-    if (windowRefused()) {
+    // The call ends with this process: the new version can only be opened.
+    if (windowRefused(QStringLiteral("activate"))) {
         return;
     }
     emit called();

@@ -90,6 +90,10 @@ QtObject {
     property QtObject dbus: QtObject {
         signal openChatRequested(string identity)
         signal activateRequested()
+        signal launched()
+        // What the window guard last dropped.
+        property var refused: ({})
+        function refusedCall() { return refused }
         signal showUpdateRequested()
         signal openUrlRequested(string url)
         signal markReadRequested(string identity)

@@ -935,15 +935,16 @@ ApplicationWindow {
             property string key
             // The chat tapping it opens; otherwise it opens the app.
             property string chat
-            // Another of the D-Bus interface's methods to tap to, without an argument.
+            // Another of the D-Bus interface's methods to tap to, with `argument` if there is one.
             property string method
+            property string argument
             onClosed: {
                 window.notificationClosed(key, plain)
                 plain.destroy()
             }
             appName: "Threesea"
             appIcon: "harbour-threesea"
-            remoteActions: [window.dbusAction("default", "", method || (chat ? "openChat" : "activate"), chat)]
+            remoteActions: [window.dbusAction("default", "", method || (chat ? "openChat" : "activate"), chat || argument)]
         }
     }
 
@@ -1312,9 +1313,21 @@ ApplicationWindow {
             replyEnded(kept)
             return
         }
-        // Said by the version before this one, about this one being there.
+        // Said by the version before this one, about this one being there. One that holds what a
+        // tap was for stays until this run's window opens: a tap on it makes that call here, and
+        // the icon's does it too (launched).
         if (n.summary === qsTrId("threesea-la-updated") || n.summary === qsTrId("threesea-la-removed")) {
-            n.close()
+            var tapped = n.remoteActions && n.remoteActions[0]
+            if (n.body === qsTrId("threesea-la-updated-open-body") && tapped && tapped.method !== "activate"
+                    && !notifications["installChanged"]) {
+                notifications["installChanged"] = n
+                watchClosed("installChanged", n)
+                tapAfterUpdate = n
+                // Dismissed: what it held goes with it.
+                n.closed.connect(function() { if (window.tapAfterUpdate === n) window.tapAfterUpdate = null })
+            } else {
+                n.close()
+            }
             return
         }
         var actions = n.remoteActions || []
@@ -1496,6 +1509,41 @@ ApplicationWindow {
               qsTrId("threesea-la-locked-notification"), appLockedBody())
     }
 
+    function openChatAsked(identity) {
+        if (backend.state === "ready" && shownState === "ready" && !pageStack.busy) window.showChat(identity)
+        else if (backend.state === "needsLicense") window.activate()
+        else {
+            window.pendingChat = identity
+            // Locked or starting: show the PIN/passphrase screen meanwhile.
+            window.activate()
+        }
+    }
+
+    // The notification of the version before this one, holding the call a tap made of it, which
+    // it ended on (installationChanged): the icon's tap makes that call here, any other way in
+    // takes it away. No message content in it, only what that tap carried (ADR 0027).
+    property var tapAfterUpdate: null
+    property bool launchedNow: false
+    function replayTapAfterUpdate() {
+        var n = tapAfterUpdate
+        if (!n) return
+        tapAfterUpdate = null
+        var action = n.remoteActions[0]
+        var argument = (action.arguments || [])[0]
+        n.close()
+        if (action.method === "openChat" && argument) openChatAsked(String(argument))
+        else if (action.method === "openLink" && argument) openLink(String(argument), false)
+        else if (action.method === "showUpdate") showUpdate()
+        else if (action.method === "showWebSessions") showWebSessions()
+        else if (action.method === "showSafe") showSafe()
+    }
+    function dropTapAfterUpdate() {
+        if (!tapAfterUpdate) return
+        var n = tapAfterUpdate
+        tapAfterUpdate = null
+        n.close()
+    }
+
     // The package under this process has changed (bridge/applifecycle.h).
     function installationChanged(removed, windowOpen, windowAsked) {
         if (removed && !windowOpen) {
@@ -1513,10 +1561,22 @@ ApplicationWindow {
                               //% "Close it and open it again to use the new version."
                               qsTrId("threesea-la-updated-body"))
         } else if (windowAsked) {
-            // A tap on the icon or a notification that this process ends on instead of answering.
-            plainNotification("installChanged", qsTrId("threesea-la-updated"),
-                              //% "Tap to open the new version."
-                              qsTrId("threesea-la-updated-open-body"))
+            // A tap on the icon, a notification or a link that this process ends on instead of
+            // answering. The notification makes the same call, so the new version opens what the
+            // tap was for; so does the icon, if the new version finds it there (takeOver).
+            var tap = dbus.refusedCall()
+            var args = tap.arguments || []
+            clearNotification("installChanged")
+            var n = plainNotificationComponent.createObject(window, {
+                key: "installChanged", method: tap.method || "",
+                argument: args.length > 0 ? String(args[0]) : "" })
+            notifications["installChanged"] = n
+            n.summary = qsTrId("threesea-la-updated")
+            //% "Tap to open the new version."
+            n.body = qsTrId("threesea-la-updated-open-body")
+            n.previewSummary = n.summary
+            n.previewBody = n.body
+            n.publish()
         } else if (backend.keepRunning) {
             // It was receiving messages without a window, and now it isn't.
             plainNotification("installChanged", qsTrId("threesea-la-updated"),
@@ -1645,6 +1705,7 @@ ApplicationWindow {
 
     // The ID was removed from this device.
     function forgetNotifications() {
+        tapAfterUpdate = null
         Object.keys(notifications).forEach(clearNotification)
         // And the ones outside that list: an update, the device cookie.
         var shown = notificationQuery.notifications()
@@ -2135,19 +2196,21 @@ ApplicationWindow {
     Connections {
         target: dbus
         onOpenChatRequested: {
-            if (backend.state === "ready" && shownState === "ready" && !pageStack.busy) window.showChat(identity)
-            else if (backend.state === "needsLicense") window.activate()
-            else {
-                window.pendingChat = identity
-                // Locked or starting: show the PIN/passphrase screen meanwhile.
-                window.activate()
+            window.dropTapAfterUpdate()
+            window.openChatAsked(identity)
+        }
+        onLaunched: window.launchedNow = true
+        onActivateRequested: {
+            window.activate()
+            if (window.launchedNow) {
+                window.launchedNow = false
+                window.replayTapAfterUpdate()
             }
         }
-        onActivateRequested: window.activate()
-        onShowUpdateRequested: window.showUpdate()
-        onShowWebSessionsRequested: window.showWebSessions()
-        onShowSafeRequested: window.showSafe()
-        onOpenUrlRequested: window.openLink(url, false)
+        onShowUpdateRequested: { window.dropTapAfterUpdate(); window.showUpdate() }
+        onShowWebSessionsRequested: { window.dropTapAfterUpdate(); window.showWebSessions() }
+        onShowSafeRequested: { window.dropTapAfterUpdate(); window.showSafe() }
+        onOpenUrlRequested: { window.dropTapAfterUpdate(); window.openLink(url, false) }
         onMarkReadRequested: window.notificationAction({ identity: identity })
         onReplyRequested: window.notificationAction({ identity: identity, text: text })
         onAnswerCallRequested: {

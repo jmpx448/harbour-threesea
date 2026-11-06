@@ -6,6 +6,8 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantList>
+#include <QVariantMap>
 
 #include <functional>
 
@@ -41,6 +43,10 @@ public:
     // Asked first thing for a call that wants the window: true means no window from this process
     // (see AppLifecycle), and the call is dropped.
     void setWindowGuard(std::function<bool()> guard) { m_windowGuard = std::move(guard); }
+    // The call the guard just dropped, as a notification's action makes it again: `method` (one of
+    // the slots below) and `arguments`; a link as openLink. Only what the tap carried, in memory:
+    // the window puts it into the notification that opens the new version (ADR 0027).
+    Q_INVOKABLE QVariantMap refusedCall() const { return m_refusedCall; }
     // The token for this chat's notification actions; `renew`: a new one (a new notification).
     Q_INVOKABLE QString actionToken(const QString &identity, bool renew = false);
     // The chat's notification closed, by a tap on one of its actions as well: the grace starts.
@@ -59,15 +65,18 @@ private:
     // Removes tokens past their grace; the timer comes back for the next one.
     void pruneTokens();
     bool tokenValid(const QString &identity, const QString &token) const;
-    bool windowRefused() const;
+    bool windowRefused(const QString &method, const QVariantList &arguments = QVariantList());
 
     QTimer m_tokenPrune;
     std::function<bool()> m_windowGuard;
+    QVariantMap m_refusedCall;
 
 public slots:
     Q_SCRIPTABLE void openChat(const QString &identity);
     Q_SCRIPTABLE void activate();
     Q_SCRIPTABLE void activate(const QStringList &urls);
+    // One link, as activate(urls) with it: what the notification after an update calls.
+    Q_SCRIPTABLE void openLink(const QString &url);
     Q_SCRIPTABLE void reply(const QString &identity, const QString &token, const QString &text);
     Q_SCRIPTABLE void markRead(const QString &identity, const QString &token);
     // The incoming call's notification. Its token keeps anyone else on the bus from turning the
@@ -102,6 +111,8 @@ signals:
     // A reply came without a valid token.
     void replyLost();
     void activateRequested();
+    // activate() without arguments: the icon, or a notification that only opens the app.
+    void launched();
     void showUpdateRequested();
     void showWebSessionsRequested();
     void showSafeRequested();

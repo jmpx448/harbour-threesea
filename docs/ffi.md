@@ -307,7 +307,8 @@ For a non-blank reply the window then says that it wasn't sent, without its chat
 Lipstick raises the app window for non-input actions (Mark as read); quick reply stays in Events.
 Also: `answerCall(token)` / `declineCall(token)` (the incoming call's notification, Full; its own
 token, so nobody else on the bus can turn the microphone on), `showWebSessions()` (Threema Web's
-notification) and `showSafe()` (the backup notifications).
+notification), `showSafe()` (the backup notifications) and `openLink(url)` (as `activate([url])`:
+the notification after an update that a link's tap ended the old version on, ADR 0027).
 The window runs Reply and Mark as read only once it knows the app lock is open: otherwise they wait
 in memory for the PIN or passphrase (ADR 0009).
 

@@ -96,6 +96,19 @@ QtObject {
         check("no arguments", n.remoteActions[0].arguments.length, 0)
     }
 
+    // The previous version's notice that it ended on a tap for `method` (takeOver's view of it).
+    function oldUpdateNotice(method, argument) {
+        var listeners = []
+        var n = { summary: "threesea-la-updated", body: "threesea-la-updated-open-body", gone: false,
+                  remoteActions: [{ method: method, arguments: argument ? [argument] : [] }],
+                  closed: { connect: function(f) { listeners.push(f) } } }
+        n.close = function() {
+            n.gone = true
+            listeners.forEach(function(listener) { listener() })
+        }
+        return n
+    }
+
     // The usual start: ready, with a lock (or without) as the core reports it.
     function ready(appLock, graceSecs) {
         harness.setActive(true)
@@ -159,6 +172,61 @@ QtObject {
                 check("told", n.summary, "threesea-la-updated")
                 check("what to do", n.body, "threesea-la-updated-open-body")
                 check("tapping it opens the app", n.remoteActions[0].method, "activate")
+                check("with nothing", n.remoteActions[0].arguments.length, 0)
+                // The tap was for a chat, or a link: tapping this makes that call in the new version.
+                dbus.refused = { method: "openChat", arguments: [chat] }
+                lifecycle.installationChanged(false, false, true)
+                n = window.notifications["installChanged"]
+                check("one", n.body, "threesea-la-updated-open-body")
+                check("for the chat", n.remoteActions[0].method, "openChat")
+                check("this one", n.remoteActions[0].arguments[0], chat)
+                dbus.refused = { method: "openLink", arguments: ["threema://add?id=ABCD1234"] }
+                lifecycle.installationChanged(false, false, true)
+                n = window.notifications["installChanged"]
+                check("for the link", n.remoteActions[0].method, "openLink")
+                check("that link", n.remoteActions[0].arguments[0], "threema://add?id=ABCD1234")
+            }, 0],
+        ],
+        // The new version finds that notification: the icon opens what it holds, once; any other
+        // way in, or dismissing it, takes it away.
+        updateTapOpensInTheNewVersion: [
+            [function() { ready(false) }, 100],
+            [function() {
+                cut = oldUpdateNotice("openChat", chat)
+                window.takeOver(cut)
+                check("kept", cut.gone, false)
+                dbus.launched()
+                dbus.activateRequested()
+            }, 800],
+            [function() {
+                check("closed", cut.gone, true)
+                checkStack("conversations chat")
+                check("not kept", window.notifications["installChanged"], undefined)
+                stack.pop(null, PageStackAction.Immediate)
+                dbus.launched()
+                dbus.activateRequested()
+            }, 800],
+            [function() {
+                checkStack("conversations")
+                cut = oldUpdateNotice("openChat", chat)
+                window.takeOver(cut)
+                fakes.dbus.openChatRequested("EFGH5678")
+                check("another way in takes it away", cut.gone, true)
+            }, 800],
+            [function() {
+                check("that way's chat", stack.currentPage.identity, "EFGH5678")
+                stack.pop(null, PageStackAction.Immediate)
+                cut = oldUpdateNotice("openChat", chat)
+                window.takeOver(cut)
+                cut.close()
+                dbus.launched()
+                dbus.activateRequested()
+            }, 800],
+            [function() {
+                check("dismissed: nothing opens", names().indexOf("chat"), -1)
+                cut = oldUpdateNotice("activate", "")
+                window.takeOver(cut)
+                check("one that only opens the app goes", cut.gone, true)
             }, 0],
         ],
         // A reply after an update goes out from here, and then this process ends, Keep running or not.
