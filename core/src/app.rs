@@ -5023,6 +5023,42 @@ mod tests {
         assert_eq!(shares_in(&folder), 0, "deleting the data takes them");
     }
 
+    /// A chat marked private on a linked device takes the copies as one marked here does, and a
+    /// share on its way with them.
+    #[test]
+    fn a_private_mark_from_a_linked_device_takes_the_shared_files() {
+        use libthreema::protobuf::{
+            d2d::{ContactSync, contact_sync},
+            d2d_sync::{self, ConversationCategory},
+        };
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "IJKL9012", 2);
+        assert_eq!(share(&mut app, message)["ok"], true);
+        assert_eq!(shares_in(&folder), 1);
+        let voided = app.shares_voided.get();
+        let sync = ContactSync {
+            action: Some(contact_sync::Action::Update(contact_sync::Update {
+                contact: Some(d2d_sync::Contact {
+                    identity: "IJKL9012".into(),
+                    conversation_category: Some(ConversationCategory::Protected as i32),
+                    ..Default::default()
+                }),
+            })),
+        };
+        let mut events = Vec::new();
+        crate::sync::contact_sync(&app.store, sync, &mut events).unwrap();
+        for event in &events {
+            app.gate_media(event);
+        }
+        assert_eq!(shares_in(&folder), 0);
+        assert_ne!(
+            app.shares_voided.get(),
+            voided,
+            "a share on its way is refused"
+        );
+    }
+
     /// Waiting behind other file work while the app locks: nothing is written, whatever chat.
     #[test]
     fn a_share_that_waited_through_the_lock_is_not_written() {

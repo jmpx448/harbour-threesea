@@ -251,7 +251,13 @@ impl App {
     /// marked private (or not) takes its older messages along.
     pub(crate) fn gate_media(&self, event: &crate::providers::CoreEvent) {
         use crate::providers::CoreEvent;
-        if matches!(event, CoreEvent::PrivateChanged { .. }) {
+        if let CoreEvent::PrivateChanged { private, .. } = event {
+            // From any source (this device, another one, a restored group): copies under a now
+            // private chat's names go, and a share on its way with them.
+            if *private {
+                self.void_shares();
+                crate::app_media::remove_shared_files();
+            }
             self.update_media_gate();
             return;
         }
@@ -386,14 +392,14 @@ impl App {
 }
 
 impl Shared {
-    /// Store a private mark and let everyone who follows them know at once: the media readers
-    /// here, and through the event the UI's notifications and the browsers.
     /// Shares asked for until now go nowhere ([`Self::shares_voided`]).
     pub(crate) fn void_shares(&self) {
         self.shares_voided
             .set(self.shares_voided.get().wrapping_add(1));
     }
 
+    /// Store a private mark and let everyone who follows them know at once: the media readers
+    /// here, and through the event the UI's notifications and the browsers.
     pub(crate) fn mark_private(&self, key: &str, private: bool) -> Result<(), ApiError> {
         self.store.set_private(key, private)?;
         if private {

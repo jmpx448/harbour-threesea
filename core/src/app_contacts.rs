@@ -243,6 +243,8 @@ impl App {
     ///
     /// `{linkedDevicesRemain}`: linked devices could not be removed and keep the ID.
     pub(crate) async fn delete_all_data(&mut self) -> Result<Value, ApiError> {
+        // A share on its way is refused from here on, whatever is awaited below.
+        self.void_shares();
         // Whatever is under way for this ID ends here, and nothing it did is finished any more.
         self.drop_detached_work();
         // A dropped task goes when it next gets a turn, and takes what it was writing along.
@@ -269,7 +271,6 @@ impl App {
             tracing::error!(%error, "the store could not be emptied, its file goes next");
         }
         self.media.remove_all();
-        self.void_shares();
         crate::app_media::remove_shared_files();
         // The next identity starts locked; its private marks wait for its own PIN.
         self.unlocked.set(false);
