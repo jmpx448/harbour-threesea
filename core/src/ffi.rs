@@ -23,6 +23,13 @@ pub extern "C" fn threesea_core_version() -> *mut c_char {
     into_c_string(crate::VERSION.to_owned())
 }
 
+/// What the bundled map renderer may fetch, as JSON `{"origin": …, "pins": …}` (ADR 0032;
+/// `https::map_policy`). Needs no running core. Free with `threesea_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn threesea_map_policy() -> *mut c_char {
+    into_c_string(crate::https::map_policy().to_string())
+}
+
 /// A log line from the bridge (Qt warnings, QML errors), into the core's outputs (journal
 /// and the in-app log file). `level`: "debug", "info" or anything else for warning. Safe to
 /// call at any time; lines before `threesea_core_start` go to the journal only.

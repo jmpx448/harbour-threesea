@@ -17,6 +17,9 @@ typedef struct ThreeseaCore ThreeseaCore;
 typedef void (*ThreeseaEventCallback)(void *user_data, const char *json);
 
 char *threesea_core_version(void);
+/* What the bundled map renderer may fetch: JSON {"origin": "https://…/", "pins": "sha256//…;…"}
+ * (ADR 0032). Needs no running core. Free with threesea_string_free. */
+char *threesea_map_policy(void);
 
 /* A log line from the bridge (Qt warnings, QML errors) into the core's outputs (journal and
  * the in-app log file). level: "debug", "info" or anything else for warning. */

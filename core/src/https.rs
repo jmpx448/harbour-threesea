@@ -101,6 +101,28 @@ fn pins_for_host(host: &str) -> Option<&'static [&'static str]> {
         .map(|(_, pins)| *pins)
 }
 
+/// The only place the map renderer (MapLibre, bundled; scripts/maplibre) may fetch from: Threema's
+/// map server, as on Android (style, TileJSON, vector tiles, glyphs, sprite all live there).
+pub const MAP_ORIGIN: &str = "https://map.threema.ch/";
+
+/// What the map renderer is given (ADR 0032): the one origin it may ask and the pins of that host
+/// in curl's `CURLOPT_PINNEDPUBLICKEY` form (`sha256//<base64>;…`), from [`PINS`], so the map has
+/// the same pins as everything else. MapLibre's patched downloader refuses every other URL before
+/// any lookup, and every certificate whose key isn't one of these.
+pub fn map_policy() -> serde_json::Value {
+    let host = reqwest::Url::parse(MAP_ORIGIN)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let pins = pins_for_host(&host)
+        .unwrap_or_default()
+        .iter()
+        .map(|pin| format!("sha256//{pin}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    serde_json::json!({ "origin": MAP_ORIGIN, "pins": pins })
+}
+
 /// Base64 SHA-256 of the certificate's DER-encoded SubjectPublicKeyInfo.
 fn spki_sha256(cert: &CertificateDer<'_>) -> Result<String, rustls::Error> {
     let ee = webpki::EndEntityCert::try_from(cert)
@@ -761,6 +783,26 @@ mod tests {
         assert_eq!(pins_for_host("a.sfu.threema.ch").unwrap().len(), 4);
         assert_eq!(pins_for_host("safe-12.threema.ch").unwrap().len(), 6);
         assert!(pins_for_host("evilthreema.ch").is_none());
+    }
+
+    #[test]
+    fn map_policy_is_threemas_map_server_with_its_pins() {
+        let policy = map_policy();
+        assert_eq!(policy["origin"], "https://map.threema.ch/");
+        let pins = policy["pins"].as_str().unwrap();
+        // The threema.ch set, word for word: one source for the core and the map.
+        let expected = pins_for_host("map.threema.ch").unwrap();
+        assert_eq!(pins.split(';').count(), expected.len());
+        for pin in expected {
+            assert!(
+                pins.split(';').any(|p| p == format!("sha256//{pin}")),
+                "{pin}"
+            );
+        }
+        // The origin ends in "/", so a prefix check can't be passed by another host
+        // ("https://map.threema.ch.evil.example/", "https://map.threema.ch@evil.example/") or port.
+        assert!(MAP_ORIGIN.ends_with(".ch/"));
+        assert!(is_threema_url(MAP_ORIGIN));
         assert!(is_threema_url("wss://rendezvous.threema.ch/abc"));
         assert!(is_threema_url("https://blob-mirror.threema.ch/x"));
         assert!(!is_threema_url("wss://rendezvous.example.com/abc"));
