@@ -1649,6 +1649,8 @@ QtObject {
                 check("newer data", stack.currentPage.canStartFresh, false)
                 backend.errorKind = "diskFull"
                 check("full disk", stack.currentPage.canStartFresh, false)
+                backend.errorKind = "store"
+                check("other store error", stack.currentPage.canStartFresh, false)
                 backend.errorKind = "keyMissing"
                 check("key missing", stack.currentPage.canStartFresh, true)
                 backend.errorKind = "storeDamaged"

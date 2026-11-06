@@ -20,9 +20,10 @@ Page {
                                      && (backend.dataRemovalStuck || backend.errorKind !== "storeTooNew")
 
     // The data is there but can't be opened (its key, damage): starting without it is the way
-    // on. Not for a newer version's data or a full disk (the bridge's startFresh has the same).
+    // on. Not for a newer version's data, a full disk or any other store error such as a failed
+    // upgrade, which a fixed release opens again (the bridge's startFresh has the same list).
     readonly property bool canStartFresh: backend.state === "error" && !backend.dataRemovalStuck
-                                          && ["storeKey", "storeDamaged", "store", "keyMissing"].indexOf(backend.errorKind) >= 0
+                                          && ["storeKey", "storeDamaged", "keyMissing"].indexOf(backend.errorKind) >= 0
 
     function askStartFresh() {
         var dialog = pageStack.push(Qt.resolvedUrl("StartFreshDialog.qml"))

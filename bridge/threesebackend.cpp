@@ -489,9 +489,9 @@ void ThreeseBackend::startFresh()
 {
     // The kinds StartupPage offers it for: the data is there but its key doesn't open it, or it
     // is damaged. Not for a newer version's data or a full disk, which an update or some space
-    // brings back.
+    // brings back, nor for "store", any other SQLite error (a failed upgrade a fixed release opens).
     static const QStringList kinds{QStringLiteral("storeKey"), QStringLiteral("storeDamaged"),
-                                   QStringLiteral("store"), QStringLiteral("keyMissing")};
+                                   QStringLiteral("keyMissing")};
     const bool locked = m_state == QLatin1String("locked");
     const bool failed = m_state == QLatin1String("error") && kinds.contains(m_errorKind);
     if (m_removingData || m_ending || !(locked || failed)) {
