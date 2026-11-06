@@ -255,6 +255,10 @@ public:
     void setAutoPlayGifs(bool play);
     bool imageCache() const { return m_imageCache; }
     void setImageCache(bool cache);
+    // Qt's cache of decoded pictures no longer shown: emptied (QQuickWindow::releaseResources,
+    // which in Qt 5.6 ends in QQuickPixmap::purgeCache). At the lock, and by itself when the
+    // setting goes off or a chat becomes private.
+    Q_INVOKABLE void purgeImageCache();
     bool enterToSend() const { return QSettings().value(QStringLiteral("enterToSend"), true).toBool(); }
     void setEnterToSend(bool send)
     {
@@ -430,6 +434,7 @@ private slots:
     void onKeyWorkDone(quint64 id, const QByteArray &result);
     void reportNetwork();
     void finishDataRemoval();
+    void purgeImageCacheSoon();
     void filePrepared(const QVariantMap &request, const QByteArray &data, const QByteArray &thumbnail,
                       const QString &error);
 

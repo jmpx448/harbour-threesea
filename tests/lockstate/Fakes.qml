@@ -76,6 +76,7 @@ QtObject {
         function hold(cmd) { held[cmd] = true }
         function release(cmd) { held[cmd] = false }
         function refreshContacts() { }
+        function purgeImageCache() { }
         function refreshUnread() { }
         function chatTone() { return "" }
         // What the camera pages were told to remove.

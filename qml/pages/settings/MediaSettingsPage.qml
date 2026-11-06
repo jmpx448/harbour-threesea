@@ -232,7 +232,7 @@ Page {
                 checked: backend.imageCache
                 //% "Keep pictures in memory"
                 text: qsTrId("threesea-la-image-cache")
-                //% "Chat pictures scroll back in faster, decoded and unencrypted in the app's memory while it runs. This uses more memory. Private chats always load them anew."
+                //% "Chat pictures scroll back in faster: they stay decoded and unencrypted in the app's memory while it runs, until the app locks or a chat is made private. This uses more memory. Private chats load their pictures anew each time."
                 description: qsTrId("threesea-la-image-cache-description")
                 onClicked: backend.imageCache = !checked
             }

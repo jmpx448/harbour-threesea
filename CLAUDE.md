@@ -238,11 +238,12 @@ Rules:
    process and when the app starts again, not at the lock. Its limits: until that deadline the
    user's other apps can read it, since Sailjail gives no private `/tmp`; after a crash or kill
    it stays until the app starts again or the device restarts.
-   Keep pictures in memory (Settings → Media and storage, off by default, the user's choice): Qt's image cache may keep decoded pictures of non-private chats, unwiped,
-   while the app runs; a private chat's bubbles never ask for it. `purgeImageCache` empties it
-   of every picture no page shows at the lock, when the setting goes off and when a chat becomes
-   private (here or on a linked device); pictures still shown on an open page stay until it lets
-   go of them.
+   Keep pictures in memory (Settings → Media and storage, off by default, the user's choice):
+   Qt's image cache may keep decoded pictures of non-private chats, unwiped, while the app
+   runs; a private chat's bubbles never ask for it. `purgeImageCache` empties it of every
+   picture no page shows at the lock, when the setting goes off and when a chat becomes private
+   (here or on a linked device); pictures still shown on an open page stay until it lets go of
+   them.
 2. Database encrypted with SQLCipher; key derived/stored as described in §5 `SecretStore`.
 3. Never log key material, PINs, message contents, phone numbers or e-mail addresses. Logs
    carry fixed texts plus kinds, codes, counts and internal IDs; text from other users or

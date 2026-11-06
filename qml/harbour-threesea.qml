@@ -244,6 +244,8 @@ ApplicationWindow {
         if (backend.state !== "ready" && backend.state !== "needsLicense") return
         locked = true
         settleStack()
+        // Decoded chat pictures kept by "Keep pictures in memory" that no page shows any more.
+        backend.purgeImageCache()
     }
 
     // The lock page on top; only a call's page may be above it (it shows only who calls).

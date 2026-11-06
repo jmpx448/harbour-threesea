@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QImageReader>
 #include <QGuiApplication>
+#include <QQuickWindow>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -1408,7 +1409,25 @@ void ThreeseBackend::setImageCache(bool cache)
         QSettings().setValue(QStringLiteral("imageCache"), cache);
         m_imageCache = cache;
         emit imageCacheChanged();
+        if (!cache) {
+            purgeImageCacheSoon();
+        }
     }
+}
+
+void ThreeseBackend::purgeImageCache()
+{
+    for (QWindow *window : QGuiApplication::topLevelWindows()) {
+        if (auto *view = qobject_cast<QQuickWindow *>(window)) {
+            view->releaseResources();
+        }
+    }
+}
+
+// Once the bubbles have let go of what they showed with the cache (their pictures load anew).
+void ThreeseBackend::purgeImageCacheSoon()
+{
+    QTimer::singleShot(500, this, &ThreeseBackend::purgeImageCache);
 }
 
 void ThreeseBackend::setNotificationsEnabled(bool enabled)
@@ -1570,6 +1589,9 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
         } else if (name == QLatin1String("connectionState")) {
             m_connectionState = message.value(QStringLiteral("state")).toString();
             emit connectionStateChanged();
+        } else if (name == QLatin1String("privateChanged") && message.value(QStringLiteral("private")).toBool()) {
+            // Here or on a linked device: what its open chat or an earlier visit left in Qt's cache.
+            purgeImageCacheSoon();
         }
         // The cover's count and name, whether or not a chat list is looking (it only reloads when
         // seen): what brings or takes unread chats, and what renames them.
