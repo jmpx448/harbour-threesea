@@ -485,6 +485,36 @@ void ThreeseBackend::retryDataRemoval()
     QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
 }
 
+void ThreeseBackend::startFresh()
+{
+    // The kinds StartupPage offers it for: the data is there but its key doesn't open it, or it
+    // is damaged. Not for a newer version's data or a full disk, which an update or some space
+    // brings back.
+    static const QStringList kinds{QStringLiteral("storeKey"), QStringLiteral("storeDamaged"),
+                                   QStringLiteral("store"), QStringLiteral("keyMissing")};
+    const bool locked = m_state == QLatin1String("locked");
+    const bool failed = m_state == QLatin1String("error") && kinds.contains(m_errorKind);
+    if (m_removingData || m_ending || !(locked || failed)) {
+        return;
+    }
+    qInfo("threesea: starting fresh (%s)", locked ? "locked" : qPrintable(m_errorKind)); // log-ok: a state or an error kind
+    // A core that came up and failed has stopped by now; none is there while locked. The removal
+    // mark first: from here on a start finishes it. Nobody was told to leave the group.
+    stopCore();
+    m_discardCoreMessages = true;
+    {
+        QSettings settings;
+        settings.setValue(RemovalPendingKey, false);
+        settings.sync();
+    }
+    m_removingData = true;
+    m_errorKind.clear();
+    m_errorText.clear();
+    m_state = QStringLiteral("removing");
+    emit stateChanged();
+    QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+}
+
 void ThreeseBackend::stopCore()
 {
     QWriteLocker locker(&m_coreLock);

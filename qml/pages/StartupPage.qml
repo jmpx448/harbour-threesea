@@ -19,10 +19,26 @@ Page {
     readonly property bool canRetry: backend.state === "error"
                                      && (backend.dataRemovalStuck || backend.errorKind !== "storeTooNew")
 
+    // The data is there but can't be opened (its key, damage): starting without it is the way
+    // on. Not for a newer version's data or a full disk (the bridge's startFresh has the same).
+    readonly property bool canStartFresh: backend.state === "error" && !backend.dataRemovalStuck
+                                          && ["storeKey", "storeDamaged", "store", "keyMissing"].indexOf(backend.errorKind) >= 0
+
+    function askStartFresh() {
+        var dialog = pageStack.push(Qt.resolvedUrl("StartFreshDialog.qml"))
+        dialog.accepted.connect(function() {
+            // Last chance to undo, like Remove ID.
+            //% "Deleting the stored data"
+            Remorse.popupAction(page, qsTrId("threesea-la-starting-fresh"), function() { backend.startFresh() })
+        })
+    }
+
     function failureHint() {
         var lines = [Errors.text(backend.errorKind, "")]
+        //% "Pull down to try again, or to start fresh without the stored data."
+        if (canRetry && canStartFresh) lines.push(qsTrId("threesea-la-startup-try-again-or-fresh"))
         //% "Pull down to try again."
-        if (canRetry) lines.push(qsTrId("threesea-la-startup-try-again"))
+        else if (canRetry) lines.push(qsTrId("threesea-la-startup-try-again"))
         //% "Code: %1"
         lines.push(qsTrId("threesea-la-startup-code").arg(backend.errorText))
         return lines.join("\n")
@@ -32,8 +48,16 @@ Page {
         anchors.fill: parent
 
         PullDownMenu {
-            visible: canRetry
+            visible: canRetry || canStartFresh
             MenuItem {
+                objectName: "startFresh"
+                visible: page.canStartFresh
+                //% "Start fresh"
+                text: qsTrId("threesea-me-start-fresh")
+                onClicked: page.askStartFresh()
+            }
+            MenuItem {
+                visible: page.canRetry
                 //% "Try again"
                 text: qsTrId("threesea-me-try-again")
                 onClicked: backend.dataRemovalStuck ? backend.retryDataRemoval() : backend.retryStart()

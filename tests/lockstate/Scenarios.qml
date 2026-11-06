@@ -1605,6 +1605,77 @@ QtObject {
                 check("voice stopped", voice.playing, false)
             }, 0],
         ],
+        // Stored data that can't be opened: Start fresh, confirmed in its dialog and after the
+        // remorse timer, deletes it and goes on to a new start.
+        startFreshAfterFailedStart: [
+            [function() {
+                backend.errorKind = "storeKey"
+                backend.errorText = "storeKey"
+                backend.state = "error"
+            }, 800],
+            [function() {
+                var startup = stack.currentPage
+                check("offered", startup.canStartFresh, true)
+                findItem(startup, function(item) { return item.objectName === "startFresh" }).clicked(null)
+            }, 800],
+            [function() {
+                var dialog = stack.currentPage
+                check("its dialog", dialog.objectName, "startFresh")
+                check("not before the switch", dialog.canAccept, false)
+                findItem(dialog, function(item) { return item.objectName === "understood" }).checked = true
+                check("after the switch", dialog.canAccept, true)
+                dialog.accept()
+            }, 1000],
+            [function() {
+                check("dialog gone", stack.depth, 1)
+                check("not during the remorse", backend.startFreshCalls, 0)
+            }, 5500],
+            [function() {
+                check("started fresh", backend.startFreshCalls, 1)
+                check("removing", backend.state, "removing")
+                backend.state = "starting"
+            }, 100],
+            [function() { backend.state = "needsLicense" }, 800],
+            [function() { checkStack("license") }, 0],
+        ],
+        // Not where an update or free space brings the data back.
+        startFreshOnlyForUnopenableData: [
+            [function() {
+                backend.errorKind = "storeTooNew"
+                backend.errorText = "storeTooNew"
+                backend.state = "error"
+            }, 800],
+            [function() {
+                check("newer data", stack.currentPage.canStartFresh, false)
+                backend.errorKind = "diskFull"
+                check("full disk", stack.currentPage.canStartFresh, false)
+                backend.errorKind = "keyMissing"
+                check("key missing", stack.currentPage.canStartFresh, true)
+                backend.errorKind = "storeDamaged"
+                check("damaged", stack.currentPage.canStartFresh, true)
+            }, 0],
+        ],
+        // A forgotten passphrase: the stored data's prompt has the way out, the other prompts don't.
+        startFreshFromThePassphrase: [
+            [function() { ready(false) }, 800],
+            [function() {
+                var prompt = push("pages/RealUnlockPage.qml", { database: true, cancellable: false })
+                var menu = findItem(prompt, function(item) { return item.objectName === "startFreshMenu" })
+                check("menu", menu.visible, true)
+                check("note", entryOf(prompt).note.length > 0, true)
+                findItem(prompt, function(item) { return item.objectName === "startFresh" }).clicked(null)
+            }, 800],
+            [function() {
+                check("its dialog", stack.currentPage.objectName, "startFresh")
+                stack.pop(null, PageStackAction.Immediate)
+            }, 800],
+            [function() {
+                var pin = push("pages/RealUnlockPage.qml", { cancellable: false })
+                var menu = findItem(pin, function(item) { return item.objectName === "startFreshMenu" })
+                check("no menu for the app lock", menu.visible, false)
+                check("no note", entryOf(pin).note, "")
+            }, 0],
+        ],
         // The first start fails, with a share and more waiting: StartupPage stays, nothing waits on.
         failsWithContentWaiting: [
             [function() {

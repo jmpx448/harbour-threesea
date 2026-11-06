@@ -383,6 +383,10 @@ public:
     // dataRemovalFailed says how it ended.
     Q_INVOKABLE void removeAllData(const QString &pin);
     Q_INVOKABLE void retryDataRemoval();
+    // The stored data can't be opened (state "locked", or "error" with a key or store kind):
+    // removes it like Remove ID, without the core and without leaving the device group, and
+    // starts with a new, empty database under a new key.
+    Q_INVOKABLE void startFresh();
     // From state "error", not while removing the ID: from the key on, as if just launched.
     Q_INVOKABLE void retryStart();
     // Reload the contact list model.

@@ -13,6 +13,12 @@ QtObject {
         property string errorText
         property int startRetries: 0
         function retryStart() { startRetries++ }
+        // The bridge goes on to "removing" and, with a new key, to "starting".
+        property int startFreshCalls: 0
+        function startFresh() {
+            startFreshCalls++
+            state = "removing"
+        }
         property bool unlockedAtStart: false
         property bool keepRunning: false
         property bool addressBookSync: false
