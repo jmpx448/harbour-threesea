@@ -597,14 +597,19 @@ pub enum Command {
         identity: Option<String>,
     },
     /// Send messages (text or file) again to another chat, in the given order: `{forwarded, failed,
-    /// errors, failedMembers}`, `errors` being the kinds of error that came up, each once,
-    /// `failedMembers` how many of a list's members a file didn't reach.
+    /// errors, failedMembers, keepsMetadata}`, `errors` being the kinds of error that came up, each
+    /// once, `failedMembers` how many of a list's members a file didn't reach, `keepsMetadata` the
+    /// pictures and videos refused because they can't be cleaned, `{message, name, video}`, for the
+    /// user to be asked about.
     ForwardMessages {
         messages: Vec<i64>,
         identity: String,
         /// What a file goes with instead of its own caption; empty for none.
         #[serde(default)]
         caption: Option<String>,
+        /// The user's answer for those: they go as plain files, as they are.
+        #[serde(default)]
+        keep_metadata: bool,
     },
     /// A chat's notifications: `policy` `never` (muted; until `until` ms if set) or
     /// `mentioned` (groups), none for on. Returns `{policy, until}`.
@@ -2342,11 +2347,19 @@ impl App {
                 messages,
                 identity,
                 caption,
+                keep_metadata,
             } => {
                 let (mut forwarded, mut failed, mut failed_members) = (0, 0, 0);
                 let mut errors: Vec<&str> = Vec::new();
+                let mut keeps_metadata = Vec::new();
                 for message in messages {
-                    match Box::pin(self.forward_message(message, &identity, caption.clone())).await
+                    match Box::pin(self.forward_message(
+                        message,
+                        &identity,
+                        caption.clone(),
+                        keep_metadata,
+                    ))
+                    .await
                     {
                         Ok(sent) => {
                             forwarded += 1;
@@ -2358,12 +2371,27 @@ impl App {
                             if !errors.contains(&error.kind()) {
                                 errors.push(error.kind());
                             }
+                            if matches!(
+                                error,
+                                ApiError::PictureKeepsMetadata | ApiError::VideoKeepsMetadata
+                            ) {
+                                // Read already: these come only after the chat was found readable.
+                                let body = self.store.message(message)?.map(|m| m.body);
+                                let body: Value = body
+                                    .and_then(|body| serde_json::from_str(&body).ok())
+                                    .unwrap_or_default();
+                                keeps_metadata.push(json!({
+                                    "message": message,
+                                    "name": body["name"].as_str().unwrap_or_default(),
+                                    "video": matches!(error, ApiError::VideoKeepsMetadata),
+                                }));
+                            }
                         }
                     }
                 }
                 Ok(
                     json!({ "forwarded": forwarded, "failed": failed, "errors": errors,
-                           "failedMembers": failed_members }),
+                           "failedMembers": failed_members, "keepsMetadata": keeps_metadata }),
                 )
             }
             Command::SetChatNotifications {

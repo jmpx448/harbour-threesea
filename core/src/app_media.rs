@@ -1182,12 +1182,21 @@ fn prepare_file(
         }
     }
     // A GIF shown as a picture goes without what its file says about itself too, by its bytes,
-    // whichever way it came: from this phone, a favourite, a forward or the browser.
+    // whichever way it came: from this phone, a favourite, a forward or the browser. One that
+    // can't be cleaned goes as a plain file if the user said so.
     if file.rendering != "file" && crate::gif::is_gif(&data) {
-        let (width, height) =
-            crate::gif::clean(&mut data).map_err(|_| ApiError::PictureKeepsMetadata)?;
-        file.width = Some(width);
-        file.height = Some(height);
+        match crate::gif::clean(&mut data) {
+            Ok((width, height)) => {
+                file.width = Some(width);
+                file.height = Some(height);
+            }
+            Err(_) if file.keep_metadata => {
+                file.rendering = "file".to_owned();
+                file.width = None;
+                file.height = None;
+            }
+            Err(_) => return Err(ApiError::PictureKeepsMetadata),
+        }
     }
     if data.len() > media::MAX_BLOB_SIZE {
         return Err(ApiError::FileTooLarge);
@@ -2024,7 +2033,8 @@ impl App {
             let mut failed_members = 0;
             for member in self.list_receivers(list)? {
                 // What the list got has been made fit to leave; each member gets the same.
-                let forwarded = Box::pin(self.copy_message(message.id, &member, false, None)).await;
+                let forwarded =
+                    Box::pin(self.copy_message(message.id, &member, false, None, false)).await;
                 if let Err(error) = forwarded {
                     tracing::warn!(%error, "sending a list's file to a member failed");
                     failed_members += 1;
@@ -2686,20 +2696,25 @@ impl App {
         id: i64,
         identity: &str,
         caption: Option<String>,
+        keep_metadata: bool,
     ) -> Result<Value, ApiError> {
-        self.copy_message(id, identity, true, caption).await
+        self.copy_message(id, identity, true, caption, keep_metadata)
+            .await
     }
 
     /// A forwarded message, and a list's copy for a member. `clean`: a picture is made fit to leave
     /// first (ADR 0025), as what its file says isn't known, ours included: one may have come from a
     /// linked device. It keeps its size, as on Android. A thumbnail, which comes from the sender
-    /// too, is made anew or left behind, as the protocol leaves it optional.
+    /// too, is made anew or left behind, as the protocol leaves it optional. `keep_metadata`: the
+    /// user's answer for a picture or video that can't be cleaned, which then goes as a plain file,
+    /// as it is.
     async fn copy_message(
         &mut self,
         id: i64,
         identity: &str,
         clean: bool,
         caption: Option<String>,
+        keep_metadata: bool,
     ) -> Result<Value, ApiError> {
         let message = self
             .store
@@ -2744,6 +2759,7 @@ impl App {
                 let mut data = data.ok_or(ApiError::FileNotDownloaded)?;
                 let mut thumbnail = thumbnail;
                 let mut picture = None;
+                let mut as_file = false;
                 if clean {
                     let shown_as_media = body["rendering"].as_str().unwrap_or("file") != "file"
                         && !media_type.starts_with("video/")
@@ -2775,7 +2791,12 @@ impl App {
                             }
                             picture = Some(sent);
                         }
-                        // By its bytes or its label a picture, and nothing here can clean it.
+                        // By its bytes or its label a picture, and nothing here can clean it: its
+                        // bytes are as they were.
+                        Some(Err(_)) if keep_metadata => as_file = true,
+                        Some(Ok(None)) if keep_metadata && media_type.starts_with("image/") => {
+                            as_file = true;
+                        }
                         Some(Err(_)) => return Err(ApiError::PictureKeepsMetadata),
                         Some(Ok(None)) if media_type.starts_with("image/") => {
                             return Err(ApiError::PictureKeepsMetadata);
@@ -2802,20 +2823,26 @@ impl App {
                                 .as_ref()
                                 .map_or(media_type, |picture| picture.media_type.to_owned()),
                             caption: caption.or_else(|| text("caption")),
-                            rendering: text("rendering").unwrap_or_else(|| "file".into()),
+                            rendering: if as_file {
+                                "file".into()
+                            } else {
+                                text("rendering").unwrap_or_else(|| "file".into())
+                            },
                             width: picture
                                 .as_ref()
                                 .and_then(|picture| picture.size)
                                 .map(|(width, _)| width)
-                                .or_else(|| dimension("width")),
+                                .or_else(|| dimension("width"))
+                                .filter(|_| !as_file),
                             height: picture
                                 .as_ref()
                                 .and_then(|picture| picture.size)
                                 .map(|(_, height)| height)
-                                .or_else(|| dimension("height")),
+                                .or_else(|| dimension("height"))
+                                .filter(|_| !as_file),
                             duration: body["duration"].as_f64(),
                             encode: None,
-                            keep_metadata: false,
+                            keep_metadata,
                         },
                         memory,
                     )
@@ -4316,9 +4343,94 @@ mod tests {
             .write(received.id, MediaPart::File, b"\x1aE\xdf\xa3")
             .unwrap();
         assert!(matches!(
-            in_own_set(app.forward_message(received.id, "CCCCCCCC", None)).await,
+            in_own_set(app.forward_message(received.id, "CCCCCCCC", None, false)).await,
             Err(ApiError::VideoKeepsMetadata)
         ));
+    }
+
+    /// What can't be cleaned goes on forward when the user says so: as a plain file, as it was, and
+    /// the refusal before that names it for the question.
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_what_cant_be_cleaned_goes_as_a_file_when_asked() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "ABCD1234".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        for identity in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(identity))
+                .unwrap();
+        }
+        let received = |app: &App, id: u64, media_type: &str, name: &str, data: &[u8]| {
+            let body = json!({"rendering": "media", "mediaType": media_type, "name": name,
+                              "size": data.len(), "width": 3, "height": 4,
+                              "fileState": STATE_LOCAL});
+            let message = app
+                .store
+                .insert_incoming("BBBBBBBB", id, "file", &body.to_string(), 1)
+                .unwrap()
+                .unwrap();
+            app.media.write(message.id, MediaPart::File, data).unwrap();
+            message.id
+        };
+        let webm = b"\x1aE\xdf\xa3".to_vec();
+        let damaged = [&images::fixture::jpeg_with_exif()[..40], b"cut"].concat();
+        let gif = crate::gif::fixture::clean()[..25].to_vec();
+        let video = received(&app, 1, "video/webm", "a.webm", &webm);
+        let picture = received(&app, 2, "image/jpeg", "b.jpg", &damaged);
+        let animated = received(&app, 3, "image/gif", "c.gif", &gif);
+        let forward = |keep: bool| {
+            json!({"id": 1, "cmd": "forwardMessages", "identity": "CCCCCCCC",
+                   "messages": [video, picture, animated], "keepMetadata": keep})
+            .to_string()
+        };
+
+        let reply: Value =
+            serde_json::from_str(&in_own_set(app.handle(&forward(false))).await).unwrap();
+        assert_eq!(reply["result"]["failed"], 3, "{reply}");
+        assert_eq!(
+            reply["result"]["keepsMetadata"],
+            json!([{"message": video, "name": "a.webm", "video": true},
+                   {"message": picture, "name": "b.jpg", "video": false},
+                   {"message": animated, "name": "c.gif", "video": false}]),
+            "{reply}"
+        );
+        assert!(
+            app.store
+                .conversation_messages("CCCCCCCC", 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        let reply: Value =
+            serde_json::from_str(&in_own_set(app.handle(&forward(true))).await).unwrap();
+        assert_eq!(reply["result"]["forwarded"], 3, "{reply}");
+        assert_eq!(reply["result"]["keepsMetadata"], json!([]), "{reply}");
+        let mut sent = app.store.conversation_messages("CCCCCCCC", 10).unwrap();
+        sent.sort_by_key(|message| message.id);
+        for (message, (name, data)) in
+            sent.iter()
+                .zip([("a.webm", &webm), ("b.jpg", &damaged), ("c.gif", &gif)])
+        {
+            let body: Value = serde_json::from_str(&message.body).unwrap();
+            assert_eq!(body["rendering"], "file", "{name}");
+            assert_eq!(body["name"], name);
+            assert_eq!(
+                (&body["width"], &body["height"]),
+                (&Value::Null, &Value::Null),
+                "{name}"
+            );
+            let copy = app
+                .media
+                .read(message.id, MediaPart::File)
+                .unwrap()
+                .unwrap();
+            assert_eq!(copy.as_slice(), data.as_slice(), "{name}");
+        }
     }
 
     /// A forwarded picture doesn't pass on what its file says, whoever's it is, nor its size change.
@@ -4354,7 +4466,7 @@ mod tests {
         let forward = async |app: &mut App, id: i64| -> Result<Value, ApiError> {
             let local = tokio::task::LocalSet::new();
             let sent = local
-                .run_until(app.forward_message(id, "CCCCCCCC", None))
+                .run_until(app.forward_message(id, "CCCCCCCC", None, false))
                 .await?;
             let id = sent["id"].as_i64().unwrap();
             let body = app.store.message(id).unwrap().unwrap().body;
@@ -4467,7 +4579,7 @@ mod tests {
             .create_distribution_list("Crew", vec!["CCCCCCCC".into()])
             .unwrap();
         let id = received(&app, 14, "image/jpeg", "media", &jpeg);
-        let sent = in_own_set(app.forward_message(id, &list.key, None))
+        let sent = in_own_set(app.forward_message(id, &list.key, None, false))
             .await
             .unwrap();
         let list_copy = sent["id"].as_i64().unwrap();
@@ -4718,7 +4830,7 @@ mod tests {
 
         let source = app.store.conversation_messages("BBBBBBBB", 1).unwrap()[0].id;
         archive(&app, "EEEEEEEE");
-        in_own_set(app.forward_message(source, "EEEEEEEE", None))
+        in_own_set(app.forward_message(source, "EEEEEEEE", None, false))
             .await
             .unwrap();
         assert!(back(&app, "EEEEEEEE"), "forward");

@@ -10,6 +10,10 @@ import "Errors.js" as Errors
 // (setSendingInTurn), up to a limit; only a package update's kill or the like still can, and then it
 // says so itself.
 //
+// A forwarded picture or video whose metadata can't be removed is asked about at the end, one
+// message at a time, if the window is there: accepted, it goes again as a plain file, as it is
+// (ADR 0025); otherwise the notice says why it didn't go.
+//
 // Private chats the PIN showed for a job are readable in the core until it is hidden again, so
 // they come first: the job goes ahead of those waiting, at the next step of the running one, and
 // `lockWithFilesOnTheirWay` follows their last step, not the end.
@@ -27,15 +31,17 @@ Item {
     }
 
     // `caption`: instead of what the messages have, empty for none, undefined to keep it. `hidden`:
-    // those of `identities` that the PIN has just shown.
-    function forward(messages, identities, caption, hidden) {
+    // those of `identities` that the PIN has just shown. `keep`: the user's answer about metadata
+    // that can't be removed.
+    function forward(messages, identities, caption, hidden, keep) {
         var steps = []
         ordered(identities, hidden).forEach(function(identity) {
             messages.forEach(function(message) {
                 steps.push({ identity: identity, message: message })
             })
         })
-        add({ steps: steps, caption: caption, targets: identities.length, hideAfter: hidden.length * messages.length })
+        add({ steps: steps, caption: caption, targets: identities.length, hideAfter: hidden.length * messages.length,
+              keep: keep === true })
     }
 
     // `text` goes as the first file's caption or, without files, as a message.
@@ -56,6 +62,8 @@ Item {
         newJob.kinds = []
         newJob.texts = {}
         newJob.failed = {}
+        // Forwarded files refused for their metadata: [{message, name, video, identity}].
+        newJob.unclean = []
         // Others with chats the PIN showed go first, in their order.
         var ahead = 0
         if (newJob.hideAfter > 0) {
@@ -118,12 +126,24 @@ Item {
         if (step.message !== undefined) {
             var args = { messages: [step.message], identity: step.identity }
             if (job.caption !== undefined) args.caption = job.caption
+            if (job.keep) args.keepMetadata = true
             backend.call("forwardMessages", args, function(ok, result, kind, message) {
                 if (mine !== turn) return
                 if (!ok) {
                     failed(kind, message)
                 } else {
-                    (result.errors || []).forEach(function(error) { failed(error) })
+                    var unclean = result.keepsMetadata || []
+                    unclean.forEach(function(file) {
+                        job.unclean.push({ message: file.message, name: file.name, video: file.video,
+                                           identity: step.identity })
+                    })
+                    // Those are asked about at the end, or said then.
+                    var errors = result.errors || []
+                    errors.forEach(function(error) {
+                        if (unclean.length === 0 || (error !== "videoKeepsMetadata" && error !== "pictureKeepsMetadata")) {
+                            failed(error)
+                        }
+                    })
                     if (result.failedMembers > 0) failed()
                 }
                 done()
@@ -173,6 +193,15 @@ Item {
 
     function finishJob() {
         frames.active = false
+        if (job.unclean.length > 0 && Qt.application.state === Qt.ApplicationActive) {
+            addQuestions(job.unclean, job.caption)
+        } else {
+            job.unclean.forEach(function(file) {
+                job.failed[file.identity] = true
+                var kind = file.video ? "videoKeepsMetadata" : "pictureKeepsMetadata"
+                if (job.kinds.indexOf(kind) < 0) job.kinds.push(kind)
+            })
+        }
         for (var i = 0; i < job.kinds.length; ++i) {
             say(Errors.text(job.kinds[i], job.texts[job.kinds[i]]))
         }
@@ -195,8 +224,60 @@ Item {
                                  qsTrId("threesea-la-send-in-turn-lost"))
     }
 
+    // The forwarded files to ask about, one message at a time, each for all the chats it didn't
+    // reach. Asked once nothing else moves on the page stack.
+    property var questions: []
+    property bool asking
+    function addQuestions(unclean, caption) {
+        var list = questions.slice()
+        unclean.forEach(function(file) {
+            var same = list.filter(function(question) {
+                return question.message === file.message && question.caption === caption
+            })[0]
+            if (same) {
+                if (same.identities.indexOf(file.identity) < 0) same.identities.push(file.identity)
+            } else {
+                list.push({ message: file.message, name: file.name, video: file.video,
+                            identities: [file.identity], caption: caption })
+            }
+        })
+        questions = list
+        ask()
+    }
+    function ask() {
+        if (asking || questions.length === 0 || pageStack.busy) return
+        // Not over the lock, which takes the page stack away anyway (and is left with a pop).
+        if (Qt.application.state !== Qt.ApplicationActive || window.locked || backend.state !== "ready") return
+        var question = questions[0]
+        var answered = false
+        function answer(send) {
+            if (answered) return
+            answered = true
+            asking = false
+            questions = questions.slice(1)
+            if (send) forward([question.message], question.identities, question.caption, [], true)
+            ask()
+        }
+        asking = true
+        var dialog = pageStack.push(Qt.resolvedUrl("../pages/VideoMetadataDialog.qml"),
+                                    { name: question.name, video: question.video })
+        dialog.accepted.connect(function() { answer(true) })
+        dialog.rejected.connect(function() { answer(false) })
+        // Taken off the stack by something else (the app lock): no answer, so not sent.
+        dialog.done.connect(function() { if (dialog.result === DialogResult.None) answer(false) })
+    }
+    Connections {
+        target: pageStack
+        onBusyChanged: sender.ask()
+    }
+    Connections {
+        target: Qt.application
+        onStateChanged: sender.ask()
+    }
+
     // Everything forgotten: the data is gone, and with it the core that would have answered.
     function clear() {
+        questions = []
         ++turn
         limit.stop()
         frames.active = false

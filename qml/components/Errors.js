@@ -117,7 +117,7 @@ function text(kind, message) {
         //% "That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes."
         return qsTrId("threesea-la-error-share-too-large")
     case "videoKeepsMetadata":
-        // Where nobody can be asked: the chat was left, or a message is forwarded.
+        // Where nobody can be asked: the chat was left, or a forward ended with the window gone.
         //% "A video was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file."
         return qsTrId("threesea-la-error-video-metadata")
     case "fileKeepsMetadata":
@@ -125,7 +125,7 @@ function text(kind, message) {
         //% "A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file."
         return qsTrId("threesea-la-error-file-picture-metadata")
     case "pictureKeepsMetadata":
-        // A message is forwarded, so nobody can be asked.
+        // A forward ended with the window gone, so nobody can be asked.
         //% "A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. Save it, and it can be sent as a file."
         return qsTrId("threesea-la-error-picture-metadata")
     case "linkUnknownCode":

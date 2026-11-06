@@ -1388,6 +1388,41 @@ QtObject {
                 check("without it", JSON.stringify(stack.currentPage.selected), JSON.stringify(["BCDE2345", "CDEF3456"]))
             }, 0],
         ],
+        // A forwarded video whose metadata can't be removed: asked about, and accepting sends it
+        // again as a file to the chats it missed; cancelling sends nothing.
+        forwardAsksAboutMetadata: [
+            [function() { ready(false) }, 100],
+            [function() {
+                backend.results["forwardMessages"] = function(args) {
+                    if (args.keepMetadata) return { forwarded: 1, failed: 0, errors: [], keepsMetadata: [] }
+                    return { forwarded: 0, failed: 1, errors: ["videoKeepsMetadata"],
+                             keepsMetadata: [{ message: args.messages[0], name: "a.webm", video: true }] }
+                }
+                window.forwardInTurn([5], ["AAAAAAAA", "BBBBBBBB"], "words", [])
+            }, 800],
+            [function() {
+                check("asked once", stack.currentPage.name, "a.webm")
+                check("about a video", stack.currentPage.video, true)
+                stack.currentPage.accept()
+            }, 800],
+            [function() {
+                check("sent again, to both", countSent("forwardMessages"), 4)
+                var args = backend.lastArgs["forwardMessages"]
+                check("as it is", args.keepMetadata, true)
+                check("the same", JSON.stringify(args.messages), "[5]")
+                check("with its caption", args.caption, "words")
+                check("no second question", stack.currentPage.name, undefined)
+                window.forwardInTurn([6], ["AAAAAAAA"], undefined, [])
+            }, 800],
+            [function() {
+                check("asked", stack.currentPage.name, "a.webm")
+                stack.currentPage.reject()
+            }, 800],
+            [function() {
+                check("not sent", countSent("forwardMessages"), 5)
+                check("gone", stack.currentPage.name, undefined)
+            }, 0],
+        ],
         // What is under way when the data goes doesn't hold up what comes after it.
         sendingInTurnSurvivesDataRemoval: [
             [function() { ready(false) }, 100],

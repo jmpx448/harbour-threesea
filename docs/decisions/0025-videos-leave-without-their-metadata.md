@@ -35,7 +35,9 @@ one the thumbnailer has no frame for included.
 
 Subtitle and time code tracks go too; Android's re-encoding drops those as well. WebM, MKV and AVI
 never show as media to the recipient: each one asks first, and goes as a file. A received WebM sent
-as media can't be forwarded; saving it and sending it as a file can. Forwarding a media video cleans
+as media is forwarded only after the same question (user decision 2026-11-06): a Silica Dialog says
+its metadata can't be removed, accepting forwards it as a plain file, as it is, and cancelling sends
+nothing. With the window gone by the end of the forward, a notice says why it didn't go. Forwarding a media video cleans
 it as well: running it twice changes nothing, and a list's members get the same bytes. The codecs'
 own streams are not looked into, nor is an `mdat` outside any track's samples, nor sample entries'
 inner boxes (`avcC` and the like) beyond their vendor and encoder name fields.
@@ -49,7 +51,8 @@ looks at the bytes where the name gives only a generic type). One Qt can't read,
 a plugin, or an SVG, which nothing here makes anew, is refused (`pictureKeepsMetadata`) and asks like a
 video, sent as it is going out as a plain file. A file picked "as a file" stays the user's file. A picture forwarded as media goes through the same, ours too, since
 one may have come from a linked device, at its own size as on Android, and is refused
-(`pictureKeepsMetadata`) if it can't: whichever its label says, what the bytes are decides. That costs
+(`pictureKeepsMetadata`) if it can't, whichever its label says, as what the bytes are decides; it then
+asks like a forwarded video (`keepMetadata` on `forwardMessages`). That costs
 one JPEG generation per forward, not per list member, whose copies are the list's. A thumbnail forwarded
 is made anew or left behind. A video mislabelled by its sender as neither `video/` nor a picture passes
 as a file would.
