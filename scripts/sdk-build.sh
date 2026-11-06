@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Build installable RPMs on a Linux host that only has Docker (no Sailfish SDK installer needed).
 # 1. builds the SDK+Rust image (scripts/sdk/Dockerfile) if missing,
-# 2. cross-builds the Rust core per arch (scripts/build-core.sh, as the host user),
+# 2. cross-builds the Rust core per arch (scripts/build-core.sh, as the host user), and the map
+#    renderer once per arch (scripts/maplibre/build.sh, kept in target/maplibre),
 # 3. packages with mb2 inside the SDK (as the SDK user, on a private copy of the tree),
 # and drops the RPMs into ./RPMS/<flavour>, named harbour-threesea-<flavour>-<version>…rpm (the
 # package itself is harbour-threesea in both: one or the other is installed).
@@ -28,6 +29,8 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 ||
 
 mkdir -p "$OUT"
 for ARCH in $ARCHES; do
+  # The map renderer, built once per architecture and kept in target/maplibre.
+  "$ROOT/scripts/maplibre/build.sh" "$ARCH"
   docker run --rm -u "$(id -u):$(id -g)" -e SFOS_VERSION="$SFOS" -e STORE="$STORE" \
     -v "$ROOT:$ROOT" -w "$ROOT" "$IMAGE" scripts/build-core.sh "$ARCH"
 
@@ -43,6 +46,9 @@ for ARCH in $ARCHES; do
       for a in /src/target/*/release/libthreesea_core.a; do
         d=$B/target/${a#/src/target/}; mkdir -p ${d%/*}; cp $a $d
       done
+      M=/src/target/maplibre/$SFOS-$ARCH
+      mkdir -p $B/target/maplibre
+      cp -a $M/core/usr/lib*/libQMapLibre.so.3* $M/qml/MapboxMap $B/target/maplibre/
       if [ "$FLAVOUR" = full ]; then
         sed -i "s/^%bcond_with full$/%bcond_without full/" $B/rpm/harbour-threesea.spec
       fi

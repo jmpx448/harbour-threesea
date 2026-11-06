@@ -57,8 +57,10 @@ Requires:   gstreamer1.0-plugins-bad
 Requires:   libnice
 %endif
 
-# Harbour: no shared libs of our own, so nothing to provide/require automatically.
+# Harbour: the only shared libraries of our own are the map renderer's, private under
+# %{_datadir}/%{name}/lib: nothing to provide, and nothing to require from elsewhere for them.
 %define __provides_exclude_from ^%{_datadir}/.*$
+%define __requires_exclude ^libQMapLibre.*$
 
 %description
 Native Sailfish OS client for the Threema messenger, built on
@@ -98,6 +100,18 @@ meson install -C target/wap-build
 %install
 %qmake5_install
 strip %{buildroot}%{_bindir}/%{name}
+# The map renderer (scripts/maplibre/build.sh; MapLibre Native Qt, BSD-2-Clause, and the QML
+# module MapboxMap, LGPL-3.0), private like Pure Maps' Jolla Store build: the QML module finds the
+# library beside it through its RUNPATH. QtPositioning 5.3 is not a Harbour-allowed import; 5.4 is
+# the same module on the device.
+mkdir -p %{buildroot}%{_datadir}/%{name}/lib/qml
+cp -a target/maplibre/libQMapLibre.so.3* %{buildroot}%{_datadir}/%{name}/lib/
+cp -a target/maplibre/MapboxMap %{buildroot}%{_datadir}/%{name}/lib/qml/
+sed -i 's/^import QtPositioning 5.3$/import QtPositioning 5.4/' \
+    %{buildroot}%{_datadir}/%{name}/lib/qml/MapboxMap/MapboxMapGestureArea.qml
+strip --strip-unneeded %{buildroot}%{_datadir}/%{name}/lib/libQMapLibre.so.3.* \
+    %{buildroot}%{_datadir}/%{name}/lib/qml/MapboxMap/*.so
+chmod 0644 %{buildroot}%{_datadir}/%{name}/lib/*.so* %{buildroot}%{_datadir}/%{name}/lib/qml/MapboxMap/*.so
 %if %{with store}
 # Asked once in builds for GitHub only; nothing opens it here (the core offers no update check).
 rm %{buildroot}%{_datadir}/%{name}/qml/pages/UpdateCheckDialog.qml

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Writes THIRD-PARTY-NOTICES.txt: the licences and copyright notices of everything bundled into
 the app (the Rust crates linked into the core for any of the three targets, the vendored C/C++
-code, the emoji pictures). The RPM installs it with LICENSE, and About → Licences shows both.
+code, the map renderer, the emoji pictures). The RPM installs it with LICENSE, and About → Licences shows both.
 
   python3 -I scripts/make-notices.py           rewrite the file
   python3 -I scripts/make-notices.py --check   fail if it is out of date (scripts/check.sh)
@@ -163,6 +163,10 @@ def main():
         out.append(f"--- {f}")
         out.append("")
         out.append(read(os.path.join(ROOT, WEBRTC_DIR, f)))
+    out.append("")
+    out.append(RULE)
+    # Written by scripts/maplibre/notices.sh from the pinned sources (not in this tree).
+    out.append(read(os.path.join(ROOT, "scripts/maplibre/NOTICES.txt")))
     out.append("")
     out.append(RULE)
     out.append("Licence texts of the Rust crates")
