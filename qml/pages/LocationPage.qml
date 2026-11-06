@@ -17,9 +17,13 @@ Page {
     // A private chat's map keeps its tiles in memory only.
     property bool privateChat: true
 
+    // The map takes the swipes while it is moved: no going back or pulling the menu by accident.
+    backNavigation: !mapView.map.gestureInProgress
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: height
+        interactive: !mapView.map.gestureInProgress
 
         PullDownMenu {
             MenuItem {
@@ -47,6 +51,7 @@ Page {
         }
 
         ThreemaMap {
+            id: mapView
             anchors {
                 top: header.bottom
                 left: parent.left

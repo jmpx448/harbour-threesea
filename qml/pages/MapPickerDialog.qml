@@ -27,8 +27,17 @@ Dialog {
     property var askedAt: null
     property int requests: 0
 
-    readonly property var point: map.center
-    readonly property bool pointValid: point && point.isValid && (start !== null || map.map.zoomLevel > 3)
+    // The map's middle, its longitude brought back into -180…180 (panned across the date line
+    // it runs on beyond).
+    readonly property var point: wrapped(map.center)
+    function wrapped(c) {
+        if (!c || !isFinite(c.latitude) || !isFinite(c.longitude)) return null
+        return QtPositioning.coordinate(c.latitude, ((c.longitude + 180) % 360 + 360) % 360 - 180)
+    }
+    // The map takes the swipes while it is moved: no accepting or going back by accident.
+    backNavigation: !map.map.gestureInProgress
+    forwardNavigation: !map.map.gestureInProgress
+    readonly property bool pointValid: !!point && point.isValid && (start !== null || map.map.zoomLevel > 3)
 
     canAccept: pointValid
     onAccepted: {
