@@ -35,6 +35,7 @@
 #include "enterkeyfilter.h"
 #include "jsonlistmodel.h"
 #include "listfilter.h"
+#include "maplogfilter.h"
 #include "mediaimageprovider.h"
 #include "proximitymonitor.h"
 #include "softsound.h"
@@ -55,8 +56,10 @@ namespace {
 // core's own lines; the previous handler keeps them going to the journal as before.
 QtMessageHandler previousMessageHandler = nullptr;
 
-void forwardMessageToLog(QtMsgType type, const QMessageLogContext &context, const QString &message)
+void forwardMessageToLog(QtMsgType type, const QMessageLogContext &context, const QString &rawMessage)
 {
+    // The map renderer's records never with their text, here or in the journal.
+    const QString message = withoutMapDetails(rawMessage);
     // Only warnings and worse: Qt's own debug/info stream is a firehose of internals that
     // would drown the core's lines (and the journal keeps carrying everything anyway).
     if (type != QtDebugMsg && type != QtInfoMsg) {

@@ -79,6 +79,7 @@ HEADERS += \
     bridge/installcheck.h \
     bridge/jsonlistmodel.h \
     bridge/listfilter.h \
+    bridge/maplogfilter.h \
     bridge/mediaimageprovider.h \
     bridge/photoedit.h \
     bridge/peerimage.h \

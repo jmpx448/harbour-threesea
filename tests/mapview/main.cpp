@@ -14,6 +14,8 @@
 #include <QVariantMap>
 #include <cstdio>
 
+#include "maplogfilter.h"
+
 static int problems = 0;
 
 static void onMessage(QtMsgType type, const QMessageLogContext &context, const QString &message)
@@ -27,6 +29,13 @@ static void onMessage(QtMsgType type, const QMessageLogContext &context, const Q
 
 int main(int argc, char **argv)
 {
+    // The bridge's second guard: a record in MapLibre's own form loses its text.
+    const QString unpatched = withoutMapDetails(
+        QStringLiteral("[ ERROR ]  \"{Worker}[Style]: Failed to load tile 14/8600/5750=>14 for source tiles\""));
+    if (unpatched != QStringLiteral("MapLibre: ERROR (text withheld)")) {
+        fprintf(stderr, "maplogfilter let through: %s\n", qPrintable(unpatched));
+        return 1;
+    }
     qInstallMessageHandler(onMessage);
     QGuiApplication app(argc, argv);
     if (argc < 5) {

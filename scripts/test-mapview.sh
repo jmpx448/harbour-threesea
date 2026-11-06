@@ -12,6 +12,12 @@
 #   other-host a URL outside the origin: not even a connection
 #   redirect   the map server redirects elsewhere: not followed
 #   no-policy  without the app's variables: nothing fetched at all
+#   local-file a file:// or asset:// style: not read either
+#
+# In every case nothing the renderer logs names a host, a URL or a tile (its records keep only
+# severity and event; the allowed style's tiles all fail, so there are such records), and the
+# bridge's guard (bridge/maplogfilter.h) withholds a record in MapLibre's own form. A position
+# arriving after the map started doesn't move it (MapViewTest.qml).
 #
 # Fails on any QML warning or a case gone wrong; target/mapview.png is the fixture's frame.
 # Usage: scripts/test-mapview.sh   (the frame comes back on the container's stdout)
@@ -21,13 +27,14 @@ SFOS=${SFOS_VERSION:-5.1.0.11}
 LIB=$ROOT/target/maplibre/$SFOS-i486
 "$ROOT/scripts/maplibre/build.sh" i486 >&2
 docker run --rm -i -v "$ROOT/tests/mapview:/src:ro" -v "$ROOT/qml/components:/components:ro" \
+  -v "$ROOT/bridge/maplogfilter.h:/bridge/maplogfilter.h:ro" \
   -v "$LIB:/maplibre:ro" "harbour-threesea-sdk:$SFOS" sh -euc '
     T=SailfishOS-'"$SFOS"'-i486
     R=/srv/mer/targets/$T
     # Software GL for the test only (the device has its own driver).
     sb2 -t $T -m sdk-install -R zypper --non-interactive in mesa-llvmpipe-dri-swrast-driver \
         "pkgconfig(wayland-server)" >&2
-    B=$HOME/mapview && mkdir -p $B/components $B/lib && cp /src/* $B/ && cp /components/ThreemaMap.qml $B/components/
+    B=$HOME/mapview && mkdir -p $B/components $B/lib && cp /src/* $B/ && cp /components/ThreemaMap.qml $B/components/ && mkdir -p $B/bridge && cp /bridge/maplogfilter.h $B/bridge/
     # Laid out as in the package (the module finds the library through its RUNPATH), inside the
     # home directory, where sb2 shows it to the target'"'"'s programs.
     cp -a /maplibre/core/usr/lib/libQMapLibre.so.3* $B/lib/ && cp -a /maplibre/qml $B/lib/qml
@@ -88,8 +95,12 @@ docker run --rm -i -v "$ROOT/tests/mapview:/src:ro" -v "$ROOT/qml/components:/co
           || { echo "FAIL $name: QML warnings or no window" >&2; cat $name.out >&2; failed=1; }
         wait $compositor 2>/dev/null || true
         cp server.log $name.log
-        echo "== $name: server saw: $(tr "\n" "," < $name.log)" >&2
-        grep -iE "error|fail|refused|warn" $name.out | sort | uniq -c | head -5 >&2 || true
+        echo "== $name: server saw: $(tr "\n" "," < $name.log | cut -c1-200)" >&2
+        grep "MapLibre" $name.out | sort | uniq -c | head -5 >&2 || true
+        # Where a map was looked at stays out of every log line (CLAUDE.md §7.3).
+        if grep -nE "threema\.ch|other\.example|https?:|file:|asset:|tiles/|[0-9]+/[0-9]+/[0-9]+|Failed to load|Refused" $name.out >&2; then
+            echo "FAIL $name: the log names a place, URL or tile" >&2; failed=1
+        fi
     }
     expect() { # <case> <grep -E pattern> <present|absent>
         if grep -qE "$2" $1.log; then found=present; else found=absent; fi
@@ -113,6 +124,10 @@ docker run --rm -i -v "$ROOT/tests/mapview:/src:ro" -v "$ROOT/qml/components:/co
     frame redirect lacks ff00ff
     run no-policy 10 $STYLE --
     frame no-policy lacks ff00ff; expect no-policy . absent
+    run local-file 10 file://$B/server-style.json -- $OK
+    frame local-file lacks ff00ff; expect local-file . absent
+    run asset 10 asset://server-style.json -- $OK
+    frame asset lacks ff00ff; expect asset . absent
     sudo kill $SERVER 2>/dev/null || true
     [ $failed = 0 ] && echo "all map cases passed" >&2
     cat fixture.ppm

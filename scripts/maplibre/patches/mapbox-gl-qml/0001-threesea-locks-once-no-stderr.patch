@@ -1,0 +1,50 @@
+From: penttimus <348773418+penttimus@users.noreply.github.com>
+Subject: [PATCH] Threesea: OpenSSL locks set up once, errors not to stderr
+
+Two maps at a time freed the one static lock array twice; and an error's text (which can name a URL)
+went to stderr, i.e. the journal. For harbour-threesea (ADR 0032). This patch is under
+LGPL-3.0, like the code it changes.
+
+--- a/src/qquickitemmapboxgl.cpp
++++ b/src/qquickitemmapboxgl.cpp
+@@ -110,6 +110,11 @@
+     CRYPTO_set_locking_callback(lock_callback);
+ }
+ 
++// Threesea: the locks are one static array; with two maps at a time each would set it up and
++// free it, so only the first map in sets them up and the last one out takes them down (all on the
++// GUI thread).
++static int lock_users = 0;
++
+ static void kill_locks(void) {
+     int i;
+ 
+@@ -166,14 +171,16 @@
+ 
+     /* Must initialize libcurl before any threads are started */
+     curl_global_init(CURL_GLOBAL_ALL);
+-    init_locks();
++    if (lock_users++ == 0)
++        init_locks();
+ #endif
+ }
+ 
+ QQuickItemMapboxGL::~QQuickItemMapboxGL() {
+ #ifdef USE_CURL_SSL
+     // curl openssl locks
+-    kill_locks();
++    if (--lock_users == 0)
++        kill_locks();
+ #endif
+ }
+ 
+@@ -288,7 +295,8 @@
+ 
+ void QQuickItemMapboxGL::setError(QString error) {
+     m_errorString = error;
+-    std::cerr << error.toStdString() << std::endl;
++    // Threesea: not to stderr, which goes to the journal: an error's text can name a URL, which
++    // says where a map was looked at (harbour-threesea's CLAUDE.md §7.3). errorString keeps it.
+     emit errorChanged(error);
+ }
+ 

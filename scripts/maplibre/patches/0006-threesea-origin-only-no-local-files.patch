@@ -1,0 +1,51 @@
+From: penttimus <348773418+penttimus@users.noreply.github.com>
+Subject: [PATCH] Threesea: serve the app's origin only, no local files
+
+harbour-threesea (ADR 0032) lets the map load from Threema's map server only. Besides the
+downloader (0005), the resource loader refuses every other URL before any file source sees it:
+no asset://, file:// or mbtiles:// from the device. This patch is under BSD-2-Clause, like the
+code it changes.
+
+--- a/platform/default/src/mbgl/storage/main_resource_loader.cpp
++++ b/platform/default/src/mbgl/storage/main_resource_loader.cpp
+@@ -11,10 +11,25 @@
+ #include <mbgl/util/thread.hpp>
+ 
+ #include <cassert>
++#include <cstdlib>
++#include <cstring>
+ #include <map>
+ 
+ namespace mbgl {
+ 
++// Threesea (scripts/maplibre/patches): the one origin the app allows (THREESEA_MAP_ORIGIN, as in
++// http_file_source.cpp) is the only kind of URL served at all, from the network or the cache:
++// no asset://, file:// or mbtiles:// from the device. Without the variable nothing is served.
++namespace threesea {
++static bool allowed(const std::string &url) {
++    const char *origin = std::getenv("THREESEA_MAP_ORIGIN");
++    if (!origin) return false;
++    const size_t length = std::strlen(origin);
++    if (length < 9 || std::strncmp(origin, "https://", 8) != 0 || origin[length - 1] != '/') return false;
++    return url.compare(0, length, origin) == 0;
++}
++} // namespace threesea
++
+ class MainResourceLoaderThread {
+ public:
+     MainResourceLoaderThread(std::shared_ptr<FileSource> assetFileSource_,
+@@ -33,6 +48,14 @@
+             ref.invoke(&FileSourceRequest::setResponse, res);
+         };
+ 
++        if (!threesea::allowed(resource.url)) {
++            Response response;
++            response.error = std::make_unique<Response::Error>(Response::Error::Reason::Other,
++                                                               "Refused: not the map server");
++            callback(response);
++            return;
++        }
++
+         auto requestFromNetwork = [=](const Resource& res,
+                                       std::unique_ptr<AsyncRequest> parent) -> std::unique_ptr<AsyncRequest> {
+             if (!onlineFileSource || !onlineFileSource->canRequest(resource)) {

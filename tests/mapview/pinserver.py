@@ -2,7 +2,8 @@
 """The test's own HTTPS server for scripts/test-mapview.sh, standing in for every host the map might
 reach (the target's /etc/hosts points them here). It writes one line per event to the log: "tcp"
 for each connection, "tls <server name>" after a handshake, "http <host> <path>" for each request.
-/styles/test/style.json answers with the test style, /redirect with a redirect to another host.
+/styles/test/style.json answers with the test style (whose tiles under /tiles/ all fail), /redirect
+with a redirect to another host.
 
   python3 -I pinserver.py <cert.pem> <key.pem> <style.json> <log> <port>
 """
@@ -56,6 +57,10 @@ def main(cert, key, style, log_path, port):
             if path == "/styles/test/style.json":
                 head = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
                 tls.sendall(head.encode() + b"Connection: close\r\n\r\n" + body)
+            elif path.startswith("/tiles/"):
+                # A tile that fails: MapLibre then records which one (the test checks that its
+                # text reaches no log).
+                tls.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             elif path == "/redirect":
                 tls.sendall(b"HTTP/1.1 302 Found\r\nLocation: https://other.example/styles/test/style.json\r\n"
                             b"Content-Length: 0\r\nConnection: close\r\n\r\n")

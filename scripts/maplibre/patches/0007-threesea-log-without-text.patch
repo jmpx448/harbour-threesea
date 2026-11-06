@@ -1,0 +1,31 @@
+From: penttimus <348773418+penttimus@users.noreply.github.com>
+Subject: [PATCH] Threesea: log records without their text
+
+A record's text can name a URL or a tile id, which says where a map was looked at; harbour-threesea's
+log must not hold that (its CLAUDE.md §7.3). Only severity and event are logged. This patch is
+under BSD-2-Clause, like the code it changes.
+
+--- a/platform/qt/src/mbgl/logging_qt.cpp
++++ b/platform/qt/src/mbgl/logging_qt.cpp
+@@ -5,8 +5,20 @@
+ 
+ namespace mbgl {
+ 
++// Threesea (scripts/maplibre/patches): a record's text can name a URL or a tile, which says where
++// a map was looked at, and the app's log must not hold that (its CLAUDE.md §7.3). Only the
++// severity and the event ("{thread}[Event]: text" -> "Event") go out.
+ void Log::platformRecord(EventSeverity severity, const std::string &msg) {
+-    qWarning() << "[" << Enum<EventSeverity>::toString(severity) << "] " << QString::fromStdString(msg);
++    std::string event;
++    const auto open = msg.find('[');
++    const auto close = msg.find("]:");
++    if (open != std::string::npos && close != std::string::npos && open < close) {
++        event = msg.substr(open + 1, close - open - 1);
++        for (char &c : event) {
++            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) c = '_';
++        }
++    }
++    qWarning("MapLibre: %s %s", Enum<EventSeverity>::toString(severity), event.empty() ? "-" : event.c_str());
+ }
+ 
+ } // namespace mbgl

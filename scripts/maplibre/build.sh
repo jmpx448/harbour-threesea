@@ -23,7 +23,7 @@ QML_OPTS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DUSE_CURL_SSL=
 # Two parts, each kept while its pins and options stay: the library (several minutes) and the
 # QML module (seconds).
 CORE_STAMP="$QMAPLIBRE_VERSION $PKG_MAPLIBRE_COMMIT $FLAGS $CORE_OPTS $(cat "$ROOT"/scripts/maplibre/patches/*.patch | sha256sum | cut -c1-16)"
-QML_STAMP="$MAPBOX_GL_QML_VERSION $MAPBOX_GL_QML_COMMIT $FLAGS $QML_OPTS $CORE_STAMP"
+QML_STAMP="$MAPBOX_GL_QML_VERSION $MAPBOX_GL_QML_COMMIT $FLAGS $QML_OPTS $CORE_STAMP $(cat "$ROOT"/scripts/maplibre/patches/mapbox-gl-qml/*.patch | sha256sum | cut -c1-16)"
 fresh() { [ -f "$OUT/$1/.stamp" ] && [ "$(cat "$OUT/$1/.stamp")" = "$2" ]; }
 if fresh core "$CORE_STAMP" && fresh qml "$QML_STAMP"; then
   echo "map renderer for $ARCH is up to date ($OUT)"
@@ -68,7 +68,7 @@ if ! fresh core "$CORE_STAMP"; then
               patch -s -p1 < ../rpm/0002-Fixes-for-compilation-on-SFOS.patch)
     (cd $Q/vendor/maplibre-native && patch -s -p1 < ../../../rpm/0003-CURL_POLL_INOUT-action-handle-added-2365.patch &&
               patch -s -p1 < ../../../rpm/0004-fix-double-move-callback.patch &&
-              patch -s -p1 < /patches/0005-threesea-one-origin-pinned.patch)
+              for p in /patches/0*.patch; do patch -s -p1 < $p || exit 1; done)
     cd $B
     sb2 -t $T cmake $Q $CORE_OPTS -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_CXX_FLAGS="$FLAGS" >&2
     sb2 -t $T make -j$JOBS >&2
@@ -79,6 +79,7 @@ if ! fresh core "$CORE_STAMP"; then
 fi
 sdk qml '
     cp -a /src/mapbox-gl-qml $S/ && cp -a /core/usr $D/core-usr
+    (cd $S/mapbox-gl-qml && for p in /patches/mapbox-gl-qml/*.patch; do patch -s -p1 < $p || exit 1; done)
     cd $B
     # QMapLibre exports its directories as the prefix'"'"'s, which only /usr has by default.
     L=$(dirname $(find $D/core-usr -name "libQMapLibre.so" | head -1))

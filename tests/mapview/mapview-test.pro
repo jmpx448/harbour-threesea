@@ -4,4 +4,6 @@
 TARGET = mapview-test
 QT = core gui qml quick
 CONFIG += c++14 console
+INCLUDEPATH += bridge
 SOURCES += main.cpp
+HEADERS += bridge/maplogfilter.h
