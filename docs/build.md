@@ -9,6 +9,8 @@
 | protoc (for libthreema's prost-build) | 29.3, sha256 `3e866620…0021a` | `scripts/fetch-protoc.sh` |
 | Sailfish OS build target | 5.1.0.11 (Qt 5.6.3, glibc 2.41) | `coderus/sailfishos-platform-sdk:5.1.0.11` |
 | libthreema | vendored in `third_party/libthreema` + our commits (ADR 0006) | `scripts/update-libthreema.sh` |
+| Map renderer: MapLibre Native Qt (BSD-2-Clause) as rinigus packages it for Sailfish (patches: curl downloads, Qt 5.6 fixes) | `pkg-maplibre-gl-native` tag `3.0.0+git2`, commit `b0f203d5` (maplibre-native-qt `d929c783`, maplibre-native `0a4e5a44`) | `scripts/maplibre/versions`; fetched into `target/maplibre-src`, built by `scripts/maplibre/build.sh` |
+| Map QML module `MapboxMap` (LGPL-3.0) | mapbox-gl-qml tag `3.2.1`, commit `426eb3de` | same |
 | webrtc-audio-processing (Full: call echo cancellation, BSD) | tag `v2.1`, commit `846fe90a` | `third_party/webrtc-audio-processing` (submodule; built by the spec's `%build` with meson against SFOS's abseil-cpp, linked statically) |
 
 ## Prerequisites
@@ -65,6 +67,20 @@ What it does (see docs/decisions/0002-rust-toolchain.md): builds the image
 `harbour-threesea-sdk:5.1.0.11` once, cross-compiles `core` to
 `target/<triple>/release/libthreesea_core.a` with Jolla's cross gcc, then runs `mb2 build` on a
 copy of the tree inside the container and extracts the RPMs.
+
+The map renderer (MapLibre Native's Qt bindings and the QML module `MapboxMap`, the versions
+Chum builds for Pure Maps) is built by `scripts/maplibre/build.sh <arch>`, which `sdk-build.sh`
+calls first: it fetches the pinned sources from GitHub once (`scripts/maplibre/fetch.sh`; git
+checks every object against the pinned commits), builds them with the SDK's cmake and gcc in the
+target, and keeps the result in `target/maplibre/<sfos>-<arch>/` (`core/` the library, `qml/` the
+module, each with a stamp of its pins and options). The library takes about seven minutes per
+architecture on four cores; the result is reused until a pin or an option changes. The RPM
+carries both privately under `/usr/share/harbour-threesea/lib` like Pure Maps' Jolla Store build;
+the module finds the library through its RUNPATH (`$ORIGIN/../..`). After changing the pins, run
+`scripts/maplibre/notices.sh` (rewrites `scripts/maplibre/NOTICES.txt`) and
+`scripts/make-notices.py`. `scripts/test-mapview.sh` draws an offline style on a Silica page in
+the SDK (Mesa's llvmpipe, a tiny Wayland compositor in `tests/mapview`) into
+`target/mapview.png`.
 
 `STORE=1` makes a store's build, without the GitHub update check (ADR 0014). The Jolla Store's
 validator (`scripts/validate-rpm.sh`, for a Lite build with `FLAVOUR_SUFFIX=0`) and the store

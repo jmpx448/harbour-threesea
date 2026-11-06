@@ -20,8 +20,8 @@ CORE_OPTS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DMLN_QT_WITH_
 # The plugin finds libQMapLibre beside it: lib/qml/MapboxMap/ -> lib/.
 QML_OPTS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DUSE_CURL_SSL=ON -DQT_INSTALL_QML=/qml \
   -DCMAKE_INSTALL_RPATH=\$ORIGIN/../.."
-# Two parts, each kept while its pins and options stay: the library (an hour or more) and the
-# QML module (minutes).
+# Two parts, each kept while its pins and options stay: the library (several minutes) and the
+# QML module (seconds).
 CORE_STAMP="$QMAPLIBRE_VERSION $PKG_MAPLIBRE_COMMIT $FLAGS $CORE_OPTS"
 QML_STAMP="$MAPBOX_GL_QML_VERSION $MAPBOX_GL_QML_COMMIT $FLAGS $QML_OPTS $CORE_STAMP"
 fresh() { [ -f "$OUT/$1/.stamp" ] && [ "$(cat "$OUT/$1/.stamp")" = "$2" ]; }
