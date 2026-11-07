@@ -4064,10 +4064,6 @@
             <source>Add to contacts</source>
             <translation>Ajouter aux contacts</translation>
         </message>
-        <message id="threesea-me-write-message">
-            <source>Write message</source>
-            <translation>Écrire un message</translation>
-        </message>
         <message id="threesea-la-contact-share-picture">
             <source>Share profile picture</source>
             <translation>Partager la photo de profil</translation>

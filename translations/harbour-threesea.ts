@@ -4064,10 +4064,6 @@
             <source>Add to contacts</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-me-write-message">
-            <source>Write message</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-contact-share-picture">
             <source>Share profile picture</source>
             <translation type="unfinished" />

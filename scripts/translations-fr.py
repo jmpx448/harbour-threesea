@@ -3002,9 +3002,6 @@ FR = {
     "threesea-me-add-to-contacts":
         ("Add to contacts",
          "Ajouter aux contacts"),
-    "threesea-me-write-message":
-        ("Write message",
-         "Écrire un message"),
     "threesea-la-contact-share-picture":
         ("Share profile picture",
          "Partager la photo de profil"),

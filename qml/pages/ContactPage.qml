@@ -13,14 +13,6 @@ Page {
     property var contact: ({})
     // An ID without a contact (earlier versions left chats like that behind).
     property bool noContact: false
-    // Attached to this contact's chat: that is one swipe back, nothing to offer here.
-    property bool besideChat: false
-    onStatusChanged: {
-        if (status === PageStatus.Activating || status === PageStatus.Active) {
-            var below = pageStack.previousPage(page)
-            besideChat = !!below && below.inputField !== undefined && below.identity === identity
-        }
-    }
 
     function load() {
         backend.call("contact", { identity: identity }, function(ok, result, kind) {
@@ -121,14 +113,16 @@ Page {
                 text: qsTrId("threesea-me-edit")
                 onClicked: page.edit()
             }
+            // The first item, nearest the content (user 2026-11-07). The chat is the row in the
+            // lists, or one swipe back: no Write message here.
             MenuItem {
-                // The chat asks for the PIN itself if it is a private one. A blocked or revoked
-                // contact's chat has no input.
-                visible: !page.besideChat && !page.noContact
-                         && page.contact.blocked !== true && page.contact.invalid !== true
-                //% "Write message"
-                text: qsTrId("threesea-me-write-message")
-                onClicked: pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: page.identity })
+                visible: !page.noContact && (page.contact.verification || 0) < 2
+                //% "Verify by QR code"
+                text: qsTrId("threesea-me-verify-qr")
+                onClicked: {
+                    var scan = pageStack.push(Qt.resolvedUrl("ScanQrPage.qml"), { expectedIdentity: page.identity })
+                    scan.verified.connect(function(contact) { page.contact = contact })
+                }
             }
         }
 
@@ -301,18 +295,6 @@ Page {
                 bottomPadding: Theme.paddingMedium
                 //% "Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully."
                 text: qsTrId("threesea-la-verification-partly-explained")
-            }
-
-            Button {
-                // Here beside the key it is about; the pulley has its four items.
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: !page.noContact && (page.contact.verification || 0) < 2
-                //% "Verify by QR code"
-                text: qsTrId("threesea-me-verify-qr")
-                onClicked: {
-                    var scan = pageStack.push(Qt.resolvedUrl("ScanQrPage.qml"), { expectedIdentity: page.identity })
-                    scan.verified.connect(function(contact) { page.contact = contact })
-                }
             }
         }
 

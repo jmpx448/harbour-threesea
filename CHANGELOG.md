@@ -50,7 +50,8 @@ Changed:
 - Scanning a code asks before it pairs a browser, links a device or adds a contact, and a contact's
   code is refused once it has expired or names another key.
 - Pull-down menus have at most four items: Export chat moved to the contact and group pages, and
-  sharing the profile picture is a choice on the contact's page.
+  sharing the profile picture is a choice on the contact's page. "Verify by QR code" stays the
+  contact page's first pulley item.
 - Errors are plain sentences everywhere; the app no longer shows internal English.
 - With IPv6 off, every connection uses IPv4, calls included.
 - Contacts are sorted by their letter whatever its accents.
@@ -89,7 +90,7 @@ Added:
 - The cover opens the waiting chat directly.
 - Settings → Privacy: which country numbers without a country code belong to, for the address book.
 - Links shared from the Browser; memory cards in the file picker and for data backups.
-- "Write message" on a contact page opened on its own; copy and share Threema IDs.
+- Copy and share Threema IDs.
 - The link in Threema's verification SMS confirms the number.
 - Why Threesea is offline (what Threema's servers said) shows under the chat list's header, and as
   a notification when the window is closed.

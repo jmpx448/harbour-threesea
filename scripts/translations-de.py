@@ -2999,9 +2999,6 @@ DE = {
     "threesea-me-add-to-contacts":
         ("Add to contacts",
          "Zu den Kontakten hinzufügen"),
-    "threesea-me-write-message":
-        ("Write message",
-         "Nachricht schreiben"),
     "threesea-la-contact-share-picture":
         ("Share profile picture",
          "Profilbild teilen"),
