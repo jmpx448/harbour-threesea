@@ -136,16 +136,8 @@ Page {
         onTriggered: page.load()
     }
 
-    // Reloads are for someone looking at the list. Hidden under another page, or with the app in
-    // the background or its window closed, a change only marks it; it reloads on coming back.
-    readonly property bool seen: page.status === PageStatus.Active && Qt.application.state === Qt.ApplicationActive
-    property bool stale: false
-    onSeenChanged: if (seen && stale) reload()
-
-    function reloadWhenSeen() {
-        if (seen) reload()
-        else stale = true
-    }
+    // The list follows every change, also under other pages and with the window closed: one that
+    // caught up only on coming back jumped in front of the user (user 2026-11-07).
 
     // Whether changed messages show in this list: of a row, only the newest message does (its
     // delivery icon, its text). While a reload is under way the list can't tell yet which is the
@@ -161,7 +153,6 @@ Page {
     property int loadsRunning: 0
 
     function load() {
-        stale = false
         loadsRunning++
         backend.call("conversations", { archived: page.archived, private: page.privateList },
                      function(ok, result, kind, message) {
@@ -295,18 +286,16 @@ Page {
         onCoreEvent: {
             if (name === "messageAdded" || name === "contactsChanged"
                     || name === "conversationRead" || name === "groupsChanged" || name === "chatsChanged") {
-                page.reloadWhenSeen()
+                page.reload()
             } else if (name === "privateChanged") {
-                // Seen or not: a chat that went private must not be drawn again on coming back,
-                // not even until the reply is here. Gone from this list at once.
+                // A chat that went private must not be drawn again, not even until the reply is
+                // here. Gone from this list at once.
                 if (data.private !== page.privateList) conversations.remove(data.identity)
-                if (data.private) page.reload()
-                else page.reloadWhenSeen()
+                page.reload()
             } else if (name === "messagesChanged") {
-                if (!page.seen) page.stale = true
                 // A private chat's message from another device comes only as a change, with an id
                 // the list doesn't know yet, and no conversationRead follows it.
-                else if (page.privateList || page.showsAnyOf(data.messages)) page.reload()
+                if (page.privateList || page.showsAnyOf(data.messages)) page.reload()
             }
         }
     }
@@ -574,10 +563,12 @@ Page {
                 }
             }
 
-            // Picture at the left edge like Jolla Media's lists.
+            // Picture at the left edge like Jolla Media's lists. Its size stays the one of before
+            // the third preview line; the row grows around it (user 2026-11-07).
             Thumbnail {
                 id: avatar
-                height: item.contentHeight
+                height: Theme.itemSizeExtraLarge
+                anchors.verticalCenter: parent.verticalCenter
                 group: model.group === true
                 list: model.distributionList === true
                 highlighted: item.highlighted || pressed
