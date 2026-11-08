@@ -62,8 +62,9 @@ Added:
   first-time contributor ([#1](https://github.com/penttimus/harbour-threesea/pull/1)).
 - Draw on a photo before sending it (pen, text, colours, undo), also on a picture you received, and
   send it back.
-- Send a place: a place nearby or one found by name, from Threema's own map server. The place row
-  says what goes to the server before anything does. There is no map yet.
+- Send a place: a place nearby or one found by name, from Threema's own map server, or a point
+  picked on Threema's map. A received location opens on that map when you tap it. The rows say what
+  goes to the server before anything does.
 - A chat's polls on a page of their own, and a reminder of open polls under the chat's header.
 - Profile and group pictures: cut them to a square, or take one with the camera.
 - Voice messages: pause the recording, listen to it before sending, and discard it with a countdown.
