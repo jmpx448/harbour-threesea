@@ -171,4 +171,5 @@ DISTFILES += systemd/harbour-threesea.service
 
 TRANSLATIONS += translations/harbour-threesea.ts \
     translations/harbour-threesea-de.ts \
-    translations/harbour-threesea-fr.ts
+    translations/harbour-threesea-fr.ts \
+    translations/harbour-threesea-fi.ts
