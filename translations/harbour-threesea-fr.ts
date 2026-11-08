@@ -4984,5 +4984,9 @@
             <source>After a restart the phone asks once whether Threesea may read the key to its data. Confirm that to receive messages.</source>
             <translation type="unfinished" />
         </message>
+        <message id="threesea-la-credit-finnish">
+            <source>The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.</source>
+            <translation type="unfinished" />
+        </message>
     </context>
 </TS>

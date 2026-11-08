@@ -4976,5 +4976,17 @@
             <source>The map comes from Threema's map server, which learns the area shown. The places on it come from Threema's places server, which gets the middle of the map.</source>
             <translation>Kartta tulee Threeman karttapalvelimelta, joka saa tietää näytetyn alueen. Kartan paikat tulevat Threeman paikkapalvelimelta, joka saa kartan keskipisteen.</translation>
         </message>
+        <message id="threesea-la-key-confirmation-notification">
+            <source>Threesea is waiting for your OK</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-key-confirmation-notification-body">
+            <source>After a restart the phone asks once whether Threesea may read the key to its data. Confirm that to receive messages.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-finnish">
+            <source>The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.</source>
+            <translation type="unfinished" />
+        </message>
     </context>
 </TS>
