@@ -44,6 +44,10 @@ jobs:
           echo "PROTOC=$(scripts/fetch-protoc.sh)" >> "$GITHUB_ENV"
       - name: cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Crates of every target
+        # The licence notices (scripts/make-notices.py) read them offline; building only fetches
+        # the runner's own.
+        run: cargo fetch --locked
       - name: Checks
         # Into a release, every text has to be in translations/ as well.
         run: |
@@ -69,6 +73,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The core compiles in Android's list of bad passwords from the threema-android submodule.
+          submodules: true
           persist-credentials: false
       - name: Nightly toolchain and protoc
         run: |
