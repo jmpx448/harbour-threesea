@@ -78,6 +78,12 @@ QtObject {
         function release(cmd) { held[cmd] = false }
         function refreshContacts() { }
         function purgeImageCache() { }
+        property var keptOnLockScreen: null
+        property string keptCategory
+        function keepOnLockScreen(n) {
+            keptOnLockScreen = n
+            keptCategory = n.category
+        }
         function refreshUnread() { }
         function chatTone() { return "" }
         // What the camera pages were told to remove.

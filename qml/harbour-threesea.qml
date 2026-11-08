@@ -1238,10 +1238,17 @@ ApplicationWindow {
         }
     }
 
+    // Without the sound it is im.received, which has only the light, and no priority: lipstick
+    // would take the icon off the lock screen, while the notification stays in the events view.
+    function setCategory(n, sound) {
+        n.category = sound ? "x-nemo.messaging.im" : "im.received"
+        backend.keepOnLockScreen(n)
+    }
+
     function alertNow(n, identity, group, title, text) {
         var sound = group ? backend.soundGroups : backend.soundChats
         var vibrate = group ? backend.vibrateGroups : backend.vibrateChats
-        n.category = sound ? "x-nemo.messaging.im" : "im.received"
+        setCategory(n, sound)
         // A chosen tone replaces the profile's (lipstick plays it at the profile's volume).
         var tone = identity ? backend.chatTone(identity) : ""
         if (!tone) tone = group ? backend.toneGroups : backend.toneChats
@@ -1450,7 +1457,7 @@ ApplicationWindow {
     // Quietly, as this isn't news: no sound or vibration (this category only has the light), and
     // no banner. The next message's alert() sets them all again.
     function publishQuietly(n, summary, body, banner) {
-        n.category = "im.received"
+        setCategory(n, false)
         n.sound = ""
         n.summary = summary
         n.body = body

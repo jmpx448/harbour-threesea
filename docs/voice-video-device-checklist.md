@@ -355,6 +355,12 @@ Camera:
 
 Notifications:
 
+Lock screen icon: lock the phone, send two messages to one chat within 30 seconds, wake the screen.
+
+- Expect: Threesea's icon is still at the left of the lock screen, with the LED blinking.
+- The same with message sound off in Threesea, after an edit or deletion of the message, and with
+  the app lock coming on (the "Threesea is locked" notification).
+
 5. Message arrives with the app in the background: tap it; then reply from the notification.
    - Expect: the tap opens that chat; the reply is sent and appears in the chat.
    - Mark as read from the notification, also with the app in the background.

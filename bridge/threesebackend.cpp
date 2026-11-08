@@ -29,6 +29,7 @@
 #include <QThreadPool>
 #include <QUrl>
 
+#include <notification.h>
 #include <threesea_core.h>
 
 #include "contactlistmodel.h"
@@ -1429,6 +1430,15 @@ void ThreeseBackend::setImageCache(bool cache)
         if (!cache) {
             purgeImageCacheSoon();
         }
+    }
+}
+
+void ThreeseBackend::keepOnLockScreen(QObject *notification)
+{
+    // The lock screen lists 100 and up; x-nemo.messaging.im has 120. What is set here stands over
+    // the category's.
+    if (auto *n = qobject_cast<Notification *>(notification)) {
+        n->setHintValue(QStringLiteral("x-nemo-priority"), 120);
     }
 }
 

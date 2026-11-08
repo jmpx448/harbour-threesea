@@ -37,6 +37,7 @@ BuildRequires:  pkgconfig(Qt5Quick)
 BuildRequires:  pkgconfig(Qt5DBus)
 BuildRequires:  pkgconfig(Qt5Multimedia)
 BuildRequires:  pkgconfig(sailfishsecrets)
+BuildRequires:  pkgconfig(nemonotifications-qt5)
 BuildRequires:  pkgconfig(openssl)
 BuildRequires:  desktop-file-utils
 %if %{with full}

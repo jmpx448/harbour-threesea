@@ -2157,6 +2157,23 @@ QtObject {
                 check("the chat's goes", window.notifications[chat], undefined)
             }, 0],
         ],
+        // The next message of a burst changes the notification without a sound: its icon stays on
+        // the lock screen all the same.
+        quietUpdateStaysOnTheLockScreen: [
+            [function() { ready(false) }, 100],
+            [function() { incoming("the first") }, 50],
+            [function() {
+                backend.keptOnLockScreen = null
+                incoming("the second")
+            }, 50],
+            [function() {
+                var n = window.notifications[chat]
+                check("the new text", n.body, "the second")
+                check("in the quiet category", n.category, "im.received")
+                check("kept there", backend.keptOnLockScreen === n, true)
+                check("in that category", backend.keptCategory, "im.received")
+            }, 0],
+        ],
         // One from the last run is about a chat, but isn't that chat's notification.
         replyNotSentTakenOver: [
             [function() { ready(false) }, 100],

@@ -264,6 +264,9 @@ public:
     // which in Qt 5.6 ends in QQuickPixmap::purgeCache). At the lock, and by itself when the
     // setting goes off or a chat becomes private.
     Q_INVOKABLE void purgeImageCache();
+    // Keeps a chat's notification among the lock screen's icons, also in a category without a
+    // priority of its own (im.received). In C++ as QML can't set a hint.
+    Q_INVOKABLE void keepOnLockScreen(QObject *notification);
     bool enterToSend() const { return QSettings().value(QStringLiteral("enterToSend"), true).toBool(); }
     void setEnterToSend(bool send)
     {

@@ -8,7 +8,7 @@ DEFINES += APP_VERSION=\\\"$$VERSION\\\"
 # (//% comments); keep unfinished entries so it becomes the fallback .qm.
 CONFIG += sailfishapp sailfishapp_i18n sailfishapp_i18n_idbased sailfishapp_i18n_unfinished c++14 link_pkgconfig
 # sailfishapp listed explicitly: setting PKGCONFIG here otherwise drops it from the link line.
-PKGCONFIG += sailfishapp sailfishsecrets
+PKGCONFIG += sailfishapp sailfishsecrets nemonotifications-qt5
 
 # The Rust core is built beforehand by scripts/build-core.sh into
 # target/<rust triple>/release/libthreesea_core.a; RUST_TRIPLE is passed by the spec file.
