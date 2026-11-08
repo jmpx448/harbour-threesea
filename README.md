@@ -175,6 +175,8 @@ Threesea stands on the work of others; thank you:
   and its `webrtcbin` (LGPL), **[Qt](https://www.qt.io/)** (LGPL), and the Rust crates in
   [Cargo.lock](Cargo.lock), among them tokio, rustls, reqwest, rusqlite, RustCrypto, prost and
   image.
+- **[jmpx448](https://github.com/jmpx448)**: the Finnish translation, as a first-time contributor
+  ([#1](https://github.com/penttimus/harbour-threesea/pull/1)).
 - The **"AI generated" label** is the European Commission's icon for AI-generated content, free
   to use.
 

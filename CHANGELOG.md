@@ -58,6 +58,8 @@ Changed:
 
 Added:
 
+- Finnish: the whole interface is translated, by [jmpx448](https://github.com/jmpx448), a
+  first-time contributor ([#1](https://github.com/penttimus/harbour-threesea/pull/1)).
 - Draw on a photo before sending it (pen, text, colours, undo), also on a picture you received, and
   send it back.
 - Send a place: a place nearby or one found by name, from Threema's own map server. The place row

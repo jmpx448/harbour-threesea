@@ -96,6 +96,8 @@ Page {
                             qsTrId("threesea-la-credit-whisperfish"),
                             //% "SQLCipher, GStreamer, Qt and many Rust libraries (tokio, rustls, reqwest, rusqlite, RustCrypto and others)."
                             qsTrId("threesea-la-credit-libraries"),
+                            //% "The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor."
+                            qsTrId("threesea-la-credit-finnish"),
                             //% "The “AI generated” label is the European Commission's icon for AI-generated content."
                             qsTrId("threesea-la-credit-eu-icon")]
                     // Only the Full flavour has calls and links the echo canceller.
