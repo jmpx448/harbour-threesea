@@ -67,7 +67,7 @@ Made-up demo data, taken in the emulator. [Which version each picture is from](d
 | Multi-device (Threema for Desktop, with names for the linked devices), Threema Web (sessions with names of their own, self-hosted servers you allow) | ✅ |
 | Archive, pinned chats, mark as unread, chat search, starred messages, auto-delete | ✅ |
 | 1:1 calls and group calls, audio and video (Full flavour) | ✅ (phone tests pending) |
-| German and French translations | ✅ |
+| German, French and Finnish translations | ✅ |
 
 Two flavours are built from this tree, both as RPMs on the GitHub releases page (not in the
 Jolla Store or Chum yet): **Full**, with a background service that connects at login and calls,
