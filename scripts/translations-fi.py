@@ -63,7 +63,7 @@ FI = {
          "Lisenssi"),
     "threesea-la-license-text":
         ("An unofficial Threema client for Sailfish OS, licensed under the GNU AGPL v3. Uses libthreema by Threema AG. Requires a Threema Libre license from the Threema Shop. Not affiliated with or supported by Threema AG.",
-         "Epävirallinen Threema-sovellus Sailfish OS:lle, lisensoitu GNU AGPL v3 -lisenssillä. Käyttää Threema AG:n libthreema-kirjastoa. Vaatii Threema Libre -lisenssin Threema Shopista. Ei Threema AG:n tekemä eikä tukema."),
+         "Epävirallinen Threema-sovellus Sailfish OS:lle, lisensoitu GNU AGPL v3 -lisenssillä. Käyttää Threema AG:n libthreema-kirjastoa. Vaatii Threema Libre -lisenssin Threema Shopista. Ei ole sidoksissa Threema AG:hen eikä sen tukema."),
     "threesea-he-add":
         ("Add",
          "Lisää"),
@@ -2996,9 +2996,6 @@ FI = {
     "threesea-me-add-to-contacts":
         ("Add to contacts",
          "Lisää yhteystietoihin"),
-    "threesea-me-write-message":
-        ("Write message",
-         "Kirjoita viesti"),
     "threesea-la-contact-share-picture":
         ("Share profile picture",
          "Jaa profiilikuva"),

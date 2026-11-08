@@ -74,7 +74,7 @@
         </message>
         <message id="threesea-la-license-text">
             <source>An unofficial Threema client for Sailfish OS, licensed under the GNU AGPL v3. Uses libthreema by Threema AG. Requires a Threema Libre license from the Threema Shop. Not affiliated with or supported by Threema AG.</source>
-            <translation>Epävirallinen Threema-sovellus Sailfish OS:lle, lisensoitu GNU AGPL v3 -lisenssillä. Käyttää Threema AG:n libthreema-kirjastoa. Vaatii Threema Libre -lisenssin Threema Shopista. Ei Threema AG:n tekemä eikä tukema.</translation>
+            <translation>Epävirallinen Threema-sovellus Sailfish OS:lle, lisensoitu GNU AGPL v3 -lisenssillä. Käyttää Threema AG:n libthreema-kirjastoa. Vaatii Threema Libre -lisenssin Threema Shopista. Ei ole sidoksissa Threema AG:hen eikä sen tukema.</translation>
         </message>
         <message id="threesea-he-add">
             <source>Add</source>
@@ -4063,10 +4063,6 @@
         <message id="threesea-me-add-to-contacts">
             <source>Add to contacts</source>
             <translation>Lisää yhteystietoihin</translation>
-        </message>
-        <message id="threesea-me-write-message">
-            <source>Write message</source>
-            <translation>Kirjoita viesti</translation>
         </message>
         <message id="threesea-la-contact-share-picture">
             <source>Share profile picture</source>
