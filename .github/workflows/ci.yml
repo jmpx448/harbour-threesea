@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# On every push and pull request: the checks (scripts/check.sh), libthreema's own tests, the C ABI
+# On every push and pull request that changes more than Markdown files: the checks
+# (scripts/check.sh), libthreema's own tests, the C ABI
 # under AddressSanitizer (scripts/test-ffi-asan.sh, nightly), every
 # test in the Sailfish SDK (scripts/run-sdk-tests.sh: list models, pages, app lock, SecretStore,
 # notification tokens, ...; the call engine built only), and both flavours built for all three
@@ -11,7 +12,11 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -42,7 +47,22 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           echo "PROTOC=$(scripts/fetch-protoc.sh)" >> "$GITHUB_ENV"
+      - name: Rust build output from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: rust-checks-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-checks-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: cargo-audit from the cache
+        id: cargo-audit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-ubuntu-24.04
       - name: cargo-audit
+        if: steps.cargo-audit.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Crates of every target
         # The licence notices (scripts/make-notices.py) read them offline; building only fetches
@@ -53,6 +73,7 @@ jobs:
         run: |
           if [ "$RELEASE" = true ]; then scripts/check.sh --release; else scripts/check.sh; fi
         env:
+          CARGO_INCREMENTAL: 0
           RELEASE: ${{ inputs.release_gate || github.base_ref == 'release' || github.ref == 'refs/heads/release' }}
 
   libthreema:
@@ -101,6 +122,8 @@ jobs:
           key: maplibre-i486-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh', 'scripts/maplibre/patches/**') }}
       - name: Every scripts/test-*.sh
         run: scripts/run-sdk-tests.sh
+        env:
+          SDK_TEST_JOBS: 3
 
   sdk-build:
     if: ${{ !inputs.release_gate }}
@@ -124,6 +147,16 @@ jobs:
         with:
           path: target/maplibre/5.1.0.11-${{ matrix.arch }}
           key: maplibre-${{ matrix.arch }}-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh', 'scripts/maplibre/patches/**') }}
+      # The crates; our own are built anew, as a checkout makes their files newer.
+      - name: Rust build output from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/cargo-home
+            target/release
+            target/*-unknown-linux-*
+          key: rust-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Build
         run: FLAVOUR=${{ matrix.flavour }} FLAVOUR_SUFFIX=0 scripts/sdk-build.sh ${{ matrix.arch }}
       # The Lite flavour is what the Jolla Store takes: Jolla's own validator must pass.
