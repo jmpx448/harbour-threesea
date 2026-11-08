@@ -2,12 +2,13 @@
 //! Threema Web in the app (ADR 0013): pairing from a scanned code, one task per running session
 //! (WebSocket, SaltyRTC responder, ARP connection layer), and the app's answers to the browser.
 //!
-//! Commands: `webSessions`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
-//! {session}`, `webDelete {session}`, `webAcceptCertificate {session}`. Events: `webSession {id, state, error?}`
-//! (`connecting`, `waiting` for the browser, `connected`, `stopped`), `webCertificateChanged
-//! {id, host}`.
+//! Commands: `webSessions`, `webSetEnabled {enabled}`, `webPair {qr, allowHost?}`, `webStart {session}`, `webStop
+//! {session}`, `webDelete {session}`, `webDeleteAll`, `webRename {session, label}`, `webAcceptCertificate {session}`, `webDeclineCertificate
+//! {session}`, `webRemoveServer {host}`. Events: `webSession {id, state, error?}`
+//! (`connecting`, `waiting` for the browser, `connected`, `stopped`; `error`: a [`WebFailure`]'s
+//! code), `webCertificateChanged {id, host}`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use data_encoding::HEXLOWER;
 use libthreema::common::keys::{ClientKey, PublicKey};
@@ -45,7 +46,7 @@ pub(crate) enum FromWeb {
     Ended {
         session: i64,
         delete: bool,
-        error: Option<String>,
+        error: Option<WebFailure>,
     },
     /// A self-hosted server's first certificate, to pin.
     Pinned {
@@ -60,10 +61,96 @@ pub(crate) enum FromWeb {
     },
 }
 
+/// Why a session's task ended against its will. Only fixed codes reach the log and the UI: what
+/// a server gives as its reason for closing is its own text, and a self-hosted server isn't
+/// Threema's (CLAUDE.md §7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebFailure {
+    Timeout,
+    Tls,
+    CertificateChanged,
+    /// The server closed the connection, with this close code.
+    Closed(Option<u16>),
+    /// One of our own fixed texts.
+    Protocol(&'static str),
+    Socket,
+}
+
+impl WebFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Tls => "tls",
+            Self::CertificateChanged => "certificateChanged",
+            Self::Closed(_) => "closed",
+            Self::Protocol(_) => "protocol",
+            Self::Socket => "socket",
+        }
+    }
+}
+
+impl From<WebSocketError> for WebFailure {
+    fn from(error: WebSocketError) -> Self {
+        use tokio_tungstenite::tungstenite::Error as Socket;
+        match error {
+            WebSocketError::Closed { code, .. } => Self::Closed(code),
+            WebSocketError::NotSecure | WebSocketError::NotThreema | WebSocketError::Tls(_) => {
+                Self::Tls
+            }
+            WebSocketError::Text => Self::Protocol("text message"),
+            WebSocketError::Socket(Socket::Io(error))
+                if error
+                    .get_ref()
+                    .is_some_and(|inner| inner.is::<rustls::Error>()) =>
+            {
+                Self::Tls
+            }
+            WebSocketError::Socket(_) => Self::Socket,
+        }
+    }
+}
+
+impl From<saltyrtc::Error> for WebFailure {
+    fn from(error: saltyrtc::Error) -> Self {
+        match error {
+            saltyrtc::Error::Protocol(text) => Self::Protocol(text),
+            saltyrtc::Error::NotConnected => Self::Protocol("not connected"),
+        }
+    }
+}
+
 /// From the app to a session task.
 pub(crate) enum ToWeb {
     Send(Value),
+    Stop(StopReason),
+}
+
+/// What the browser is told when the app ends a session (`connectionDisconnect`'s `reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// Disconnected for now: the pairing stays and the browser may come back.
     Stop,
+    /// Removed here: the browser should forget the session.
+    Delete,
+    /// Threema Web was switched off: the pairing stays for when it is on again.
+    Disable,
+}
+
+impl StopReason {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Delete => "delete",
+            Self::Disable => "disable",
+        }
+    }
+}
+
+/// A self-hosted server's new certificate, waiting for the user's word. It has to name the host
+/// itself: a session the browser never stored is gone by the time the user answers.
+struct ChangedCertificate {
+    host: String,
+    spki: String,
 }
 
 /// A session's task as the core knows it.
@@ -99,14 +186,19 @@ const EVENT_QUEUE: usize = 16;
 pub(crate) struct WebSessions {
     running: HashMap<i64, Running>,
     next_task: u64,
-    /// A changed certificate per session, until the user accepts it.
-    changed: HashMap<i64, String>,
+    /// A changed certificate per session, until the user answers or the session starts again.
+    changed: HashMap<i64, ChangedCertificate>,
     /// What each connected browser subscribed to (app_web_data).
     pub(crate) subscriptions: HashMap<i64, crate::app_web_data::Subscriptions>,
     /// `request/blob`s waiting for a download.
     pub(crate) pending_blobs: Vec<crate::app_web_media::PendingBlob>,
+    /// What the browser is to be told once it has the reply to the request in hand.
+    pub(crate) alert_after_reply: Option<Value>,
     /// When the browsers were last brought up to date (app_web_data::web_refresh).
     pub(crate) refresh: crate::app_web_data::RefreshState,
+    pub(crate) thumbnails: std::cell::RefCell<crate::app_web_media::WebThumbnails>,
+    /// Since when the connection to the chat server has been up.
+    pub(crate) connected_since: Option<std::time::Instant>,
     events: tokio::sync::mpsc::Sender<WebEvent>,
     events_rx: Option<tokio::sync::mpsc::Receiver<WebEvent>>,
 }
@@ -120,7 +212,10 @@ impl Default for WebSessions {
             changed: HashMap::new(),
             subscriptions: HashMap::new(),
             pending_blobs: Vec::new(),
+            alert_after_reply: None,
             refresh: crate::app_web_data::RefreshState::default(),
+            thumbnails: std::cell::RefCell::default(),
+            connected_since: None,
             events,
             events_rx: Some(events_rx),
         }
@@ -131,8 +226,21 @@ impl App {
     /// The receiver of session events (taken once by the core loop).
     pub(crate) fn take_web_events(&mut self) -> Option<tokio::sync::mpsc::Receiver<WebEvent>> {
         // Sessions the browser never stored can't come back: leftovers of a killed app.
-        for session in self.store.web_sessions().unwrap_or_default() {
+        let mut sessions = self.store.web_sessions().unwrap_or_default();
+        sessions.retain(|session| {
             if !session.persistent {
+                let _ = self.store.remove_web_session(session.id);
+            }
+            session.persistent
+        });
+        // One browser, one session: older versions let the same code pair twice. A wake-up only
+        // reaches one of them, so the one it used last stays.
+        sessions.sort_by_key(|session| {
+            std::cmp::Reverse(session.last_connection.unwrap_or(session.created_at))
+        });
+        let mut browsers = HashSet::new();
+        for session in &sessions {
+            if !browsers.insert(session.initiator_key) {
                 let _ = self.store.remove_web_session(session.id);
             }
         }
@@ -157,8 +265,25 @@ impl App {
         (rx, task)
     }
 
-    /// `webSessions`: `{sessions: [{id, host, selfHosted, persistent, client, createdAt,
-    /// lastConnection, state}]}`.
+    /// The user's switch. Off, nothing connects: not from a scanned code, a tap or a wake-up.
+    fn web_enabled(&self) -> Result<bool, ApiError> {
+        Ok(self.store.setting(keys::WEB_ENABLED)?.as_deref() != Some("0"))
+    }
+
+    /// `webSetEnabled {enabled}`: like `webSessions`. Off also disconnects what is running; the
+    /// pairings stay.
+    pub(crate) fn web_set_enabled(&mut self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        self.store
+            .set_setting(keys::WEB_ENABLED, if enabled { "1" } else { "0" })?;
+        if !enabled {
+            self.web_stop_all(StopReason::Disable);
+        }
+        self.web_sessions_json()
+    }
+
+    /// `webSessions`: `{enabled, sessions: [{id, host, selfHosted, persistent, client, label,
+    /// createdAt, lastConnection, state}], servers: [host], certificates: [{id, host}]}` (`servers`: the
+    /// self-hosted ones allowed; `certificates`: new ones waiting for the user's word).
     pub(crate) fn web_sessions_json(&self) -> Result<serde_json::Value, ApiError> {
         let sessions: Vec<serde_json::Value> = self
             .store
@@ -175,7 +300,18 @@ impl App {
                 value
             })
             .collect();
-        Ok(json!({ "sessions": sessions }))
+        let mut certificates: Vec<_> = self.web.changed.iter().collect();
+        certificates.sort_unstable_by_key(|(id, _)| **id);
+        let certificates: Vec<serde_json::Value> = certificates
+            .into_iter()
+            .map(|(id, changed)| json!({ "id": id, "host": changed.host }))
+            .collect();
+        Ok(json!({
+            "enabled": self.web_enabled()?,
+            "sessions": sessions,
+            "servers": self.store.web_hosts()?,
+            "certificates": certificates,
+        }))
     }
 
     /// `webPair {qr, allowHost}`: a new session from Threema Web's code. A server outside
@@ -185,15 +321,26 @@ impl App {
         code: &str,
         allow_host: bool,
     ) -> Result<serde_json::Value, ApiError> {
+        if !self.web_enabled()? {
+            return Err(ApiError::WebDisabled);
+        }
         let qr = qr::parse(code).map_err(|error| match error {
             qr::QrError::Invalid => ApiError::WebCodeInvalid,
             qr::QrError::Version(_) => ApiError::WebVersion,
         })?;
-        if !qr::is_threema_host(&qr.host) && self.store.web_host(&qr.host)?.is_none() {
+        let same_browser = self.web_sessions_of_browser(&qr.initiator_key)?;
+        if self.web_session_in_use(&same_browser) {
+            return Err(ApiError::WebAlreadyPaired);
+        }
+        if self.web_host_needs_asking(&qr.host)? {
             if !allow_host {
                 return Ok(json!({ "confirmHost": qr.host }));
             }
             self.store.set_web_host(&qr.host, None)?;
+        }
+        // Left by a kill during pairing: it never worked, so nobody has to remove it first.
+        for stale in same_browser {
+            self.store.remove_web_session(stale.id)?;
         }
         let session = WebSession {
             id: 0,
@@ -205,6 +352,7 @@ impl App {
             self_hosted: qr.self_hosted,
             persistent: false,
             client: String::new(),
+            label: String::new(),
             created_at: crate::messages::now_ms(),
             last_connection: None,
         };
@@ -214,6 +362,47 @@ impl App {
         Ok(json!({ "id": id }))
     }
 
+    fn web_sessions_of_browser(
+        &self,
+        initiator_key: &[u8; 32],
+    ) -> Result<Vec<WebSession>, ApiError> {
+        let mut sessions = self.store.web_sessions()?;
+        sessions.retain(|session| session.initiator_key == *initiator_key);
+        Ok(sessions)
+    }
+
+    /// One of these sessions works, or can come back: a second one would only compete with it
+    /// on the same SaltyRTC path. Android refuses this too.
+    fn web_session_in_use(&self, sessions: &[WebSession]) -> bool {
+        sessions
+            .iter()
+            .any(|session| session.persistent || self.web.running.contains_key(&session.id))
+    }
+
+    /// Not Threema's and not allowed by the user before (ADR 0013).
+    fn web_host_needs_asking(&self, host: &str) -> Result<bool, ApiError> {
+        Ok(!qr::is_threema_host(host) && self.store.web_host(host)?.is_none())
+    }
+
+    /// `qrKind`: what a scanned code is, and for Threema Web whether its server must be allowed.
+    pub(crate) fn classify_qr(&self, text: &str) -> Result<serde_json::Value, ApiError> {
+        let mut code = crate::app::qr_kind(text, crate::messages::now_ms() / 1000);
+        if let Some(host) = code["host"].as_str() {
+            code["confirmHost"] = json!(self.web_host_needs_asking(host)?);
+        }
+        // Say so before asking anything about pairing it.
+        if code["kind"] == "web"
+            && let Ok(qr) = qr::parse(text)
+        {
+            if !self.web_enabled()? {
+                code["error"] = json!(ApiError::WebDisabled.kind());
+            } else if self.web_session_in_use(&self.web_sessions_of_browser(&qr.initiator_key)?) {
+                code["error"] = json!(ApiError::WebAlreadyPaired.kind());
+            }
+        }
+        Ok(code)
+    }
+
     /// `webStart {session}`: connect a stored session (the browser must be waiting for us).
     pub(crate) fn web_start(&mut self, id: i64) -> Result<serde_json::Value, ApiError> {
         self.start_web_session(id, None)?;
@@ -221,9 +410,13 @@ impl App {
     }
 
     /// The push relay woke us for a stored session (its browser key's hex SHA-256): connect it,
-    /// if the browser stored it too.
+    /// if the browser stored it too and Threema Web is on.
     pub(crate) fn web_resume(&mut self, hash: &str) {
         use sha2::{Digest as _, Sha256};
+        if !self.web_enabled().unwrap_or(false) {
+            tracing::info!("Threema Web wake-up while it is off");
+            return;
+        }
         let Ok(sessions) = self.store.web_sessions() else {
             return;
         };
@@ -244,18 +437,35 @@ impl App {
     /// `webStop {session}`: tell the browser and disconnect.
     pub(crate) fn web_stop(&mut self, id: i64) -> serde_json::Value {
         if let Some(running) = self.web.running.get(&id) {
-            let _ = running.tx.send(ToWeb::Stop);
+            let _ = running.tx.send(ToWeb::Stop(StopReason::Stop));
         }
         json!({})
     }
 
-    /// Stop every session and forget what they were waiting for: the identity they were paired
-    /// with is going away (security audit 2026-10-27, S01).
-    pub(crate) fn web_stop_all(&mut self) {
-        for running in self.web.running.values() {
-            let _ = running.tx.send(ToWeb::Stop);
+    /// Stop every session at once and forget what they were waiting for: the identity they were
+    /// paired with is going away (security audit 2026-10-27, S01), or the user removes them all, with `Delete`; the license was
+    /// refused with `Stop` or Threema Web switched off with `Disable`, which leave the pairings.
+    /// Their tasks have no say any more, so this is also where their end is reported.
+    pub(crate) fn web_stop_all(&mut self, reason: StopReason) {
+        let running: Vec<(i64, Running)> = self.web.running.drain().collect();
+        for (id, running) in running {
+            // As when its task ends by itself: one the browser never stored can't come back, so
+            // it goes, and the browser hears that (Android does this when switched off too).
+            let never_stored = matches!(
+                self.store.web_session(id),
+                Ok(Some(session)) if !session.persistent
+            );
+            let reason = if never_stored {
+                StopReason::Delete
+            } else {
+                reason
+            };
+            let _ = running.tx.send(ToWeb::Stop(reason));
+            if never_stored {
+                let _ = self.store.remove_web_session(id);
+            }
+            self.emit_web_state(id, "stopped", None);
         }
-        self.web.running.clear();
         self.web.changed.clear();
         self.web.subscriptions.clear();
         self.web.pending_blobs.clear();
@@ -263,34 +473,91 @@ impl App {
 
     /// `webDelete {session}`: stop and forget the session.
     pub(crate) fn web_delete(&mut self, id: i64) -> Result<serde_json::Value, ApiError> {
-        self.web_stop(id);
-        self.web.running.remove(&id);
+        let running = self.web.running.remove(&id);
+        if let Some(running) = &running {
+            let _ = running.tx.send(ToWeb::Stop(StopReason::Delete));
+        }
         // Nothing waiting for it may reach a later session with the same ID.
         self.web.changed.remove(&id);
         self.web.subscriptions.remove(&id);
         self.web.pending_blobs.retain(|blob| blob.session != id);
         self.store.remove_web_session(id)?;
+        // Its task has no say any more, so its end is reported here.
+        if running.is_some() {
+            self.emit_web_state(id, "stopped", None);
+        }
         Ok(json!({}))
     }
 
-    /// `webAcceptCertificate {session}`: the self-hosted server's new certificate is fine; pin it and
-    /// connect again.
+    /// `webDeleteAll`: stop and forget every session, for someone who no longer trusts a browser.
+    /// All of them are cut off and told to forget first, so a failing store can't leave one
+    /// connected; the allowed servers stay, they are a choice of their own.
+    pub(crate) fn web_delete_all(&mut self) -> Result<serde_json::Value, ApiError> {
+        self.web_stop_all(StopReason::Delete);
+        self.store.remove_web_sessions()?;
+        self.web_sessions_json()
+    }
+
+    /// `webRename {session, label}`: name a browser for this phone's list; empty, it goes by what
+    /// it says it is again. The browser doesn't hear of it.
+    pub(crate) fn web_rename(&self, id: i64, label: &str) -> Result<serde_json::Value, ApiError> {
+        let label = crate::app_multidevice::trimmed_name(label);
+        if !self.store.set_web_session_label(id, &label)? {
+            return Err(ApiError::WebSessionNotFound);
+        }
+        Ok(json!({}))
+    }
+
+    /// `webRemoveServer {host}`: the user takes back a self-hosted server's permission. Its
+    /// sessions go with it, as nothing may connect there any more, and with the permission the
+    /// pin: the next code naming the server asks again (ADR 0013).
+    pub(crate) fn web_remove_server(&mut self, host: &str) -> Result<serde_json::Value, ApiError> {
+        for session in self.store.web_sessions()? {
+            if session.host == host {
+                self.web_delete(session.id)?;
+            }
+        }
+        // Also those of sessions that are gone already.
+        self.web.changed.retain(|_, changed| changed.host != host);
+        self.store.remove_web_host(host)?;
+        self.web_sessions_json()
+    }
+
+    /// `webAcceptCertificate {session}`: the self-hosted server's new certificate is fine; pin it
+    /// and connect again. `{scanAgain: true}`: the session was one the browser hadn't stored, so
+    /// its auth token is gone with it and the next connection needs the browser's code again.
     pub(crate) fn web_accept_certificate(
         &mut self,
         id: i64,
     ) -> Result<serde_json::Value, ApiError> {
-        let spki = self
+        let changed = self
             .web
             .changed
             .remove(&id)
             .ok_or(ApiError::WebSessionNotFound)?;
-        let session = self
+        self.store
+            .set_web_host(&changed.host, Some(&changed.spki))?;
+        // The pin is the server's, so this answers for its other sessions too.
+        self.web
+            .changed
+            .retain(|_, other| other.host != changed.host);
+        if self
             .store
             .web_session(id)?
-            .ok_or(ApiError::WebSessionNotFound)?;
-        self.store.set_web_host(&session.host, Some(&spki))?;
-        self.start_web_session(id, None)?;
-        Ok(json!({}))
+            .is_some_and(|session| session.persistent && session.host == changed.host)
+        {
+            self.start_web_session(id, None)?;
+            Ok(json!({}))
+        } else {
+            Ok(json!({ "scanAgain": true }))
+        }
+    }
+
+    /// `webDeclineCertificate {session}`: not this certificate; the pin stays, and the session
+    /// asks again the next time it connects.
+    pub(crate) fn web_decline_certificate(&mut self, id: i64) -> serde_json::Value {
+        self.web.changed.remove(&id);
+        json!({})
     }
 
     fn start_web_session(
@@ -298,6 +565,9 @@ impl App {
         id: i64,
         token: Option<Zeroizing<[u8; 32]>>,
     ) -> Result<(), ApiError> {
+        if !self.web_enabled()? {
+            return Err(ApiError::WebDisabled);
+        }
         if self.web.running.contains_key(&id) {
             return Ok(());
         }
@@ -305,6 +575,9 @@ impl App {
             .store
             .web_session(id)?
             .ok_or(ApiError::WebSessionNotFound)?;
+        // Any question about an earlier attempt, perhaps of a session that had this ID before,
+        // is asked anew if it still applies.
+        self.web.changed.remove(&id);
         // Threema's hosts: their built-in pins only. Others: allowed by the user, pinned on
         // first use.
         let pin = if qr::is_threema_host(&session.host) {
@@ -408,23 +681,31 @@ impl App {
                 if delete || !persistent {
                     let _ = self.store.remove_web_session(session);
                 }
-                if let Some(error) = &error {
-                    tracing::warn!(%error, "Threema Web session ended");
+                if let Some(error) = error {
+                    tracing::warn!(failure = ?error, "Threema Web session ended");
                 }
-                self.emit_web_state(session, "stopped", error.as_deref());
+                self.emit_web_state(session, "stopped", error.map(WebFailure::code));
             }
             FromWeb::Pinned { host, spki, .. } => {
                 let _ = self.store.set_web_host(&host, Some(&spki));
             }
             FromWeb::CertificateChanged { session, spki } => {
-                let host = self
+                let Some(host) = self
                     .store
                     .web_session(session)
                     .ok()
                     .flatten()
                     .map(|stored| stored.host)
-                    .unwrap_or_default();
-                self.web.changed.insert(session, spki);
+                else {
+                    return;
+                };
+                self.web.changed.insert(
+                    session,
+                    ChangedCertificate {
+                        host: host.clone(),
+                        spki,
+                    },
+                );
                 let _ = self.media_events.send(CoreEvent::Call(
                     json!({ "event": "webCertificateChanged", "id": session, "host": host }),
                 ));
@@ -444,6 +725,7 @@ impl App {
             return;
         };
         if let Some(result) = self.web_media_action(session, &incoming).await {
+            let alert = self.web.alert_after_reply.take();
             let reply = match (result, incoming.id) {
                 (Ok(None), _) => return,
                 (Ok(Some(reply)), Some(id)) => arp::with_ack(reply, id, None),
@@ -463,6 +745,9 @@ impl App {
                 (Err(_), None) => return,
             };
             self.send_web(session, reply);
+            if let Some(alert) = alert {
+                self.send_web(session, alert);
+            }
             return;
         }
         let result = match self.web_action(&incoming).await {
@@ -509,9 +794,15 @@ impl App {
                 self.web_client_info()
                     .map(|data| arp::message("response", "clientInfo", None, Some(data)))
             }
-            ("request", "profile") => self
-                .web_profile()
-                .map(|data| arp::message("response", "profile", None, Some(data))),
+            ("request", "profile") => {
+                let reply = self
+                    .web_profile()
+                    .map(|data| arp::message("response", "profile", None, Some(data)));
+                if reply.is_ok() {
+                    self.web_subscribe_profile(session);
+                }
+                reply
+            }
             ("request", "receivers") => {
                 let reply = self
                     .web_receivers()
@@ -614,7 +905,7 @@ impl App {
         ]))
     }
 
-    /// `response/profile`: our ID, public key and nickname.
+    /// `response/profile`: our ID, public key, nickname and picture.
     fn web_profile(&self) -> Result<Value, ApiError> {
         let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let public = ClientKey::from(*identity.client_key).public_key();
@@ -628,6 +919,9 @@ impl App {
             .filter(|n| !n.is_empty())
         {
             fields.push(("publicNickname", nickname.into()));
+        }
+        if let Some(picture) = self.web_own_picture() {
+            fields.push(("avatar", Value::Binary(picture)));
         }
         Ok(arp::map(fields))
     }
@@ -646,7 +940,7 @@ async fn run_session(
     pin: Option<Option<String>>,
     mut rx: UnboundedReceiver<ToWeb>,
     events: &TaskEvents,
-) -> Result<bool, String> {
+) -> Result<bool, WebFailure> {
     let mut responder = Responder::new(
         ClientKey::from(*session.private_key),
         PublicKey::from(session.initiator_key),
@@ -665,14 +959,15 @@ async fn run_session(
         Some(expected) => {
             crate::https::tofu_tls_config(expected.clone(), std::sync::Arc::clone(&seen))
         }
-    }?;
+    }
+    .map_err(|_| WebFailure::Tls)?;
     let connected = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         Datagrams::connect_with(&url, Some(saltyrtc::SUBPROTOCOL), tls),
     )
     .await
-    .map_err(|_| "timeout".to_owned())
-    .and_then(|result| result.map_err(|error: WebSocketError| error.to_string()));
+    .map_err(|_| WebFailure::Timeout)
+    .and_then(|result| result.map_err(WebFailure::from));
     let presented = seen
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -695,7 +990,7 @@ async fn run_session(
                         spki: presented,
                     })
                     .await;
-                return Err("certificate changed".into());
+                return Err(WebFailure::CertificateChanged);
             }
             Some(_) => {}
         }
@@ -713,19 +1008,21 @@ async fn run_session(
         let mut actions: Vec<Action> = Vec::new();
         tokio::select! {
             frame = socket.receive() => {
-                let frame = frame.map_err(|error| error.to_string())?;
+                let frame = frame?;
                 let saltyrtc_events = match responder.receive(&frame) {
                     Ok(saltyrtc_events) => saltyrtc_events,
                     Err(error) => {
                         socket.close().await;
-                        return Err(error.to_string());
+                        return Err(error.into());
                     }
                 };
                 for event in saltyrtc_events {
                     match event {
                         Event::Send(frame) => out.push(frame),
                         Event::PeerConnected => {
-                            let id = responder.connection_id().ok_or("no connection ID")?;
+                            let id = responder
+                                .connection_id()
+                                .ok_or(WebFailure::Protocol("no connection ID"))?;
                             let (started, first) = arp::Connection::start(id);
                             connection = Some(started);
                             actions.extend(first);
@@ -757,15 +1054,13 @@ async fn run_session(
                         actions.extend(connection.send(message));
                     }
                 }
-                Some(ToWeb::Stop) | None => {
+                command @ (Some(ToWeb::Stop(_)) | None) => {
+                    let reason = match command {
+                        Some(ToWeb::Stop(reason)) => reason,
+                        _ => StopReason::Stop,
+                    };
                     if let Some(connection) = connection.as_mut() {
-                        let goodbye = arp::message(
-                            "update",
-                            "connectionDisconnect",
-                            None,
-                            Some(arp::map(vec![("reason", "stop".into())])),
-                        );
-                        for action in connection.send(goodbye) {
+                        for action in connection.send(goodbye(reason)) {
                             if let Action::Chunk(chunk) = action
                                 && let Ok(frame) = responder.send_data(Value::Binary(chunk))
                             {
@@ -809,13 +1104,12 @@ async fn run_session(
         }
         for action in actions {
             match action {
-                Action::Chunk(chunk) => {
-                    out.push(
-                        responder
-                            .send_data(Value::Binary(chunk))
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
+                Action::Chunk(chunk) => match responder.send_data(Value::Binary(chunk)) {
+                    Ok(frame) => out.push(frame),
+                    // Between two browsers: the old connection's last words go nowhere.
+                    Err(saltyrtc::Error::NotConnected) => {}
+                    Err(error) => return Err(error.into()),
+                },
                 Action::Message(message) => {
                     events
                         .send(FromWeb::Message {
@@ -834,12 +1128,19 @@ async fn run_session(
             }
         }
         for frame in out {
-            socket
-                .send(frame)
-                .await
-                .map_err(|error| error.to_string())?;
+            socket.send(frame).await?;
         }
     }
+}
+
+/// The last message on a connection the app ends.
+fn goodbye(reason: StopReason) -> Value {
+    arp::message(
+        "update",
+        "connectionDisconnect",
+        None,
+        Some(arp::map(vec![("reason", reason.wire().into())])),
+    )
 }
 
 /// After the server handshake without a browser on the path: we wait for it.

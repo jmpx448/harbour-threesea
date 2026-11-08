@@ -34,6 +34,16 @@ pub enum DirectoryError {
     /// The server answered with an error message meant for the user (often localized).
     #[error("{0}")]
     Server(String),
+    /// The server said no, without saying why. Not a refusal to act on: nobody knows what it
+    /// was about.
+    #[error("the server gave no reason")]
+    Unexplained,
+    /// HTTP 429: too many requests from here, which says nothing about the request itself.
+    #[error("rate limited")]
+    RateLimited,
+    /// The directory didn't take a spam report.
+    #[error("report not accepted")]
+    ReportRefused,
     /// Unexpected HTTP status.
     #[error("unexpected HTTP status {0}")]
     Status(u16),
@@ -95,11 +105,16 @@ fn ensure_ok(
     let response = result?;
     match response.status {
         200 => Ok(response.body),
-        429 => Err(DirectoryError::Server(
-            "Too many requests, please try again later.".into(),
-        )),
+        429 => Err(DirectoryError::RateLimited),
         status => Err(DirectoryError::Status(status)),
     }
+}
+
+/// The directory's "no": its own words if it gave any.
+fn refusal(error: Option<String>) -> DirectoryError {
+    error
+        .filter(|error| !error.trim().is_empty())
+        .map_or(DirectoryError::Unexplained, DirectoryError::Server)
 }
 
 #[derive(Deserialize)]
@@ -114,11 +129,7 @@ fn check_success(body: &[u8]) -> Result<(), DirectoryError> {
     if response.success {
         Ok(())
     } else {
-        Err(DirectoryError::Server(
-            response
-                .error
-                .unwrap_or_else(|| "Unknown server error".into()),
-        ))
+        Err(refusal(response.error))
     }
 }
 
@@ -254,13 +265,7 @@ fn link_phase1(body: &[u8]) -> Result<bool, DirectoryError> {
         error: Option<String>,
     }
     let phase1: Phase1 = serde_json::from_slice(body)?;
-    phase1.linked.ok_or_else(|| {
-        DirectoryError::Server(
-            phase1
-                .error
-                .unwrap_or_else(|| "Unknown server error".into()),
-        )
-    })
+    phase1.linked.ok_or_else(|| refusal(phase1.error))
 }
 
 /// `POST identity/link_email` (`APIConnector.linkEmail`): link `email` (empty: unlink). The
@@ -415,9 +420,7 @@ fn check_report_status(body: &[u8]) -> Result<(), DirectoryError> {
     if response.status.as_deref() == Some("success") {
         Ok(())
     } else {
-        Err(DirectoryError::Server(
-            "The report was not accepted.".into(),
-        ))
+        Err(DirectoryError::ReportRefused)
     }
 }
 
@@ -535,6 +538,71 @@ pub async fn check_revocation_key(
     ))
 }
 
+/// One contact in the answer of [`check_identities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityCheck {
+    /// 0 active, 1 inactive, 2 revoked or never existed; anything else says nothing.
+    pub state: i64,
+    /// `None` for an ID that has none, e.g. a revoked one.
+    pub feature_mask: Option<u64>,
+}
+
+/// The answer of [`check_identities`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct IdentityChecks {
+    /// In the order of the request.
+    pub identities: Vec<IdentityCheck>,
+    /// Seconds until the next check, Threema's own say in how often clients ask; 0 or less: no
+    /// opinion.
+    pub check_interval: i64,
+}
+
+fn parse_identity_checks(body: &[u8], asked: usize) -> Result<IdentityChecks, DirectoryError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        check_interval: i64,
+        states: Vec<i64>,
+        feature_masks: Vec<Option<u64>>,
+    }
+    let response: Response = serde_json::from_slice(body)?;
+    // The lists go by position: if they don't fit there is no telling who is who.
+    if response.states.len() != asked || response.feature_masks.len() != asked {
+        return Err(DirectoryError::InvalidResponse(
+            "identity check: lists of the wrong length".into(),
+        ));
+    }
+    Ok(IdentityChecks {
+        identities: response
+            .states
+            .into_iter()
+            .zip(response.feature_masks)
+            .map(|(state, feature_mask)| IdentityCheck {
+                state,
+                feature_mask,
+            })
+            .collect(),
+        check_interval: response.check_interval,
+    })
+}
+
+/// `POST identity/check` (Android `APIConnector.checkIdentityStates`): the state and feature mask
+/// of any number of IDs in one request.
+pub async fn check_identities(
+    client: &HttpsClient,
+    identities: &[String],
+) -> Result<IdentityChecks, DirectoryError> {
+    let body = ensure_ok(
+        client
+            .post_json(
+                &format!("{DIRECTORY_URL}identity/check"),
+                &json!({ "identities": identities }),
+            )
+            .await,
+    )?;
+    parse_identity_checks(&body, identities.len())
+}
+
 /// `yyyy-MM-ddTHH:mm:ss` followed by `Z` or `±HHMM` / `±HH:MM` (the directory's dates) as ms.
 fn parse_timestamp(text: &str) -> Option<i64> {
     let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
@@ -568,6 +636,61 @@ fn parse_timestamp(text: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    fn answer(status: u16, body: &str) -> Result<libthreema::https::HttpsResponse, HttpsError> {
+        Ok(libthreema::https::HttpsResponse {
+            status,
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn too_many_requests_is_not_an_answer_to_the_request() {
+        assert!(matches!(
+            ensure_ok(answer(429, "")),
+            Err(DirectoryError::RateLimited)
+        ));
+        assert!(matches!(
+            ensure_ok(answer(500, "")),
+            Err(DirectoryError::Status(500))
+        ));
+    }
+
+    #[test]
+    fn only_the_directorys_own_words_make_a_refusal() {
+        assert!(matches!(
+            check_success(br#"{"success":false,"error":"Key expired"}"#),
+            Err(DirectoryError::Server(message)) if message == "Key expired"
+        ));
+        for body in [
+            &br#"{"success":false}"#[..],
+            br#"{"success":false,"error":null}"#,
+            br#"{"success":false,"error":"  "}"#,
+        ] {
+            assert!(matches!(
+                check_success(body),
+                Err(DirectoryError::Unexplained)
+            ));
+        }
+        assert!(matches!(
+            link_phase1(br#"{"success":false}"#),
+            Err(DirectoryError::Unexplained)
+        ));
+    }
+
+    #[test]
+    fn a_search_for_an_id_has_no_token_and_also_finds_inactive_ids() {
+        let hashes = ["hash".to_owned()];
+        assert_eq!(
+            match_request(None, &hashes, &[], true),
+            json!({"emailHashes": ["hash"], "mobileNoHashes": [], "includeInactive": true})
+        );
+        // Address book matching as ever.
+        assert_eq!(
+            match_request(Some("token"), &[], &hashes, false),
+            json!({"matchToken": "token", "emailHashes": [], "mobileNoHashes": ["hash"]})
+        );
+    }
+
     #[test]
     fn link_phase1_answers() {
         assert!(link_phase1(br#"{"linked":true}"#).unwrap());
@@ -575,6 +698,37 @@ mod tests {
         assert!(matches!(
             link_phase1(br#"{"success":false,"error":"Invalid e-mail address"}"#),
             Err(DirectoryError::Server(message)) if message == "Invalid e-mail address"
+        ));
+    }
+
+    #[test]
+    fn identity_check_answers_go_by_position() {
+        let checks = parse_identity_checks(
+            br#"{"checkInterval":3600,"states":[0,2],"types":[0,0],"featureMasks":[255,null]}"#,
+            2,
+        )
+        .unwrap();
+        assert_eq!(checks.check_interval, 3600);
+        assert_eq!(
+            checks.identities,
+            [
+                IdentityCheck {
+                    state: 0,
+                    feature_mask: Some(255)
+                },
+                IdentityCheck {
+                    state: 2,
+                    feature_mask: None
+                }
+            ]
+        );
+        // One short: nobody can say whose state is whose.
+        assert!(matches!(
+            parse_identity_checks(
+                br#"{"checkInterval":0,"states":[0],"types":[0],"featureMasks":[1]}"#,
+                2
+            ),
+            Err(DirectoryError::InvalidResponse(_))
         ));
     }
 
@@ -629,7 +783,7 @@ mod tests {
         for body in [&br#"{"status":"error"}"#[..], br"{}"] {
             assert!(matches!(
                 check_report_status(body),
-                Err(DirectoryError::Server(_))
+                Err(DirectoryError::ReportRefused)
             ));
         }
         assert!(matches!(
@@ -785,13 +939,52 @@ pub async fn match_identities(
     email_hashes: &[String],
     mobile_hashes: &[String],
 ) -> Result<Vec<MatchedIdentity>, DirectoryError> {
-    let url = format!("{DIRECTORY_URL}identity/match");
-    let request = json!({
-        "matchToken": token,
+    post_match(
+        client,
+        &match_request(Some(token), email_hashes, mobile_hashes, false),
+    )
+    .await
+}
+
+/// The same without an ID of our own, to find the ID to restore: no token, as Android posts it
+/// with no identity yet, and also IDs that are inactive by now.
+pub async fn search_identities(
+    client: &HttpsClient,
+    email_hashes: &[String],
+    mobile_hashes: &[String],
+) -> Result<Vec<MatchedIdentity>, DirectoryError> {
+    post_match(
+        client,
+        &match_request(None, email_hashes, mobile_hashes, true),
+    )
+    .await
+}
+
+fn match_request(
+    token: Option<&str>,
+    email_hashes: &[String],
+    mobile_hashes: &[String],
+    include_inactive: bool,
+) -> serde_json::Value {
+    let mut request = json!({
         "emailHashes": email_hashes,
         "mobileNoHashes": mobile_hashes,
     });
-    let body = ensure_ok(client.post_json(&url, &request).await)?;
+    if let Some(token) = token {
+        request["matchToken"] = json!(token);
+    }
+    if include_inactive {
+        request["includeInactive"] = json!(true);
+    }
+    request
+}
+
+async fn post_match(
+    client: &HttpsClient,
+    request: &serde_json::Value,
+) -> Result<Vec<MatchedIdentity>, DirectoryError> {
+    let url = format!("{DIRECTORY_URL}identity/match");
+    let body = ensure_ok(client.post_json(&url, request).await)?;
     let value: serde_json::Value = serde_json::from_slice(&body)?;
     let identities = value["identities"].as_array().cloned().unwrap_or_default();
     Ok(identities

@@ -2,10 +2,13 @@
 #ifndef EMOJIHIGHLIGHTER_H
 #define EMOJIHIGHLIGHTER_H
 
+#include <QFont>
+#include <QHash>
 #include <QPointer>
 #include <QQuickTextDocument>
 #include <QSyntaxHighlighter>
 #include <QVariantList>
+#include <QVector>
 
 // Threema's emoji pictures in a plain text editor (Settings → Appearance → Emoji style): the
 // editor keeps its plain text (cursor, copy and paste, mentions unchanged); this highlighter makes
@@ -43,8 +46,18 @@ protected:
 private:
     QPointer<QQuickTextDocument> m_textDocument;
     void attach();
+    qreal spacingFor(const QString &emoji, const QFont &font);
+    struct Range {
+        int start;
+        int end;
+    };
     QVariantList m_ranges;
+    QVector<Range> m_spans;
     qreal m_emojiWidth = 0;
+    // The letter spacing per emoji in m_spacingFont: every keystroke before an emoji highlights
+    // the whole text again, and laying out each emoji anew made typing slower with each of them.
+    QHash<QString, qreal> m_spacings;
+    QFont m_spacingFont;
 };
 
 #endif // EMOJIHIGHLIGHTER_H

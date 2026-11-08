@@ -5,6 +5,7 @@
 
 #include <QFile>
 #include <QLoggingCategory>
+#include <QTimer>
 
 #include <Sailfish/Secrets/createcollectionrequest.h>
 #include <Sailfish/Secrets/deletesecretrequest.h>
@@ -41,6 +42,14 @@ Secret::Identifier secretId(const QString &name = SecretName)
     return Secret::Identifier(name, CollectionName, SecretManager::DefaultEncryptedStoragePluginName);
 }
 
+// What Secrets answered, for support: which step, and its error code.
+QString secretsCode(const char *step, const Result &result)
+{
+    // log-ok: the secrets daemon's own text about its request, no user data in it
+    qWarning("threesea: Sailfish Secrets: %s: %s", step, qPrintable(result.errorMessage()));
+    return QStringLiteral("%1 %2").arg(QLatin1String(step)).arg(static_cast<int>(result.errorCode()));
+}
+
 } // namespace
 
 SecretStore::SecretStore(QObject *parent)
@@ -54,6 +63,20 @@ SecretStore::~SecretStore() = default;
 void SecretStore::loadKey(bool allowCreate)
 {
     m_allowCreate = allowCreate;
+    m_askedAgain = false;
+    ensureCollection();
+}
+
+void SecretStore::askAgainIfDismissed(int delay, std::function<bool()> mayAsk)
+{
+    m_askAgainAfter = delay;
+    m_mayAskAgain = std::move(mayAsk);
+}
+
+void SecretStore::replaceKey()
+{
+    m_allowCreate = true;
+    m_replaceKey = true;
     ensureCollection();
 }
 
@@ -71,45 +94,125 @@ void SecretStore::ensureCollection()
     whenFinished(request, [this](CreateCollectionRequest *r) {
         const Result result = r->result();
         if (result.code() == Result::Failed && result.errorCode() != Result::CollectionAlreadyExistsError) {
-            emit failed(QStringLiteral("collection: ") + result.errorMessage());
+            emit failed(QStringLiteral("secrets"), secretsCode("collection", result));
+            return;
+        }
+        if (m_replaceKey) {
+            m_replaceKey = false;
+            // A wrapped key goes the same way: the passphrase belonged to the removed ID. Either
+            // may be absent, so what counts is that neither can be fetched afterwards: the old
+            // key must not stay behind while a new one works.
+            remove(StagingName, [this](bool) {
+                remove(SecretName, [this](bool) {
+                    fetch(StagingName, [this](const Fetched &staged) {
+                        const bool stagedFound = staged.found;
+                        fetch(SecretName, [this, stagedFound](const Fetched &key) {
+                            if (stagedFound || key.found) {
+                                emit failed(QStringLiteral("oldKeyStored"));
+                                return;
+                            }
+                            storeNewKey();
+                        });
+                    });
+                });
+            });
             return;
         }
         fetchKey();
     });
 }
 
+bool SecretStore::readFailed(const Fetched &fetched)
+{
+    // With no database there is nothing to protect: on to a new key, and writing it shows what's
+    // wrong. Also when a secret that isn't there were reported under another code than we expect.
+    if (m_allowCreate || fetched.missing) {
+        return false;
+    }
+    emit failed(QStringLiteral("secrets"), fetched.code);
+    return true;
+}
+
 void SecretStore::fetchKey()
 {
-    fetch(SecretName, [this](bool found, const QByteArray &data) {
-        if (found) {
-            useKey(data, true);
+    // After every boot the collection is locked and reading brings up the system's prompt, in the
+    // system's words (ADR 0010). Trying first without it says whether that is about to happen, so
+    // that the app can say what the prompt is for.
+    fetch(SecretName, [this](const Fetched &key) {
+        if (!key.locked) {
+            keyFetched(key);
             return;
         }
-        // Interrupted while replacing it: the staging copy is the current one.
-        fetch(StagingName, [this](bool found, const QByteArray &data) {
-            if (!found) {
+        emit confirmationNeeded();
+        askForKey();
+    }, false);
+}
+
+void SecretStore::askForKey()
+{
+    fetch(SecretName, [this](const Fetched &key) {
+        if (key.dismissed && !m_askedAgain && m_mayAskAgain && m_mayAskAgain()) {
+            m_askedAgain = true;
+            qWarning("threesea: the prompt for the database key went away, asking once more");
+            QTimer::singleShot(m_askAgainAfter, this, [this]() { askForKey(); });
+            return;
+        }
+        keyFetched(key);
+    });
+}
+
+void SecretStore::keyFetched(const Fetched &key)
+{
+    if (key.found) {
+        useKey(key.data, true);
+        return;
+    }
+    if (readFailed(key)) {
+        return;
+    }
+    // Interrupted while replacing it: the staging copy is the current one.
+    fetch(StagingName, [this](const Fetched &staged) {
+        if (!staged.found) {
+            if (!readFailed(staged)) {
                 useKey(QByteArray(), false);
-                return;
             }
-            qWarning("threesea: finishing an interrupted database key replacement");
-            write(SecretName, data, [this, data](bool ok) {
-                if (ok) {
-                    remove(StagingName, [](bool) {});
-                }
-                useKey(data, true);
-            });
+            return;
+        }
+        const QByteArray data = staged.data;
+        qWarning("threesea: finishing an interrupted database key replacement");
+        write(SecretName, data, [this, data](bool ok) {
+            if (ok) {
+                remove(StagingName, [](bool) {});
+            }
+            useKey(data, true);
         });
     });
 }
 
-void SecretStore::fetch(const QString &name, std::function<void(bool, const QByteArray &)> done)
+void SecretStore::fetch(const QString &name, std::function<void(const Fetched &)> done, bool mayAsk)
 {
     auto *request = new StoredSecretRequest(this);
     request->setManager(m_manager);
     request->setIdentifier(secretId(name));
-    request->setUserInteractionMode(SecretManager::SystemInteraction);
-    whenFinished(request, [done](StoredSecretRequest *r) {
-        done(r->result().code() == Result::Succeeded, r->secret().data());
+    request->setUserInteractionMode(mayAsk ? SecretManager::SystemInteraction : SecretManager::PreventInteraction);
+    whenFinished(request, [done, mayAsk](StoredSecretRequest *r) {
+        const Result result = r->result();
+        Fetched fetched;
+        fetched.found = result.code() == Result::Succeeded;
+        if (fetched.found) {
+            fetched.data = r->secret().data();
+        } else {
+            // Not InvalidCollectionError: the daemon also answers that when its metadata query
+            // fails, and ensureCollection has made the collection by now.
+            fetched.missing = result.errorCode() == Result::InvalidSecretError;
+            fetched.locked = !mayAsk && (result.errorCode() == Result::CollectionIsLockedError
+                                         || result.errorCode() == Result::OperationRequiresUserInteraction);
+            fetched.dismissed = result.errorCode() == Result::InteractionViewUserCanceledError;
+            if (!fetched.missing && !fetched.locked) {
+                fetched.code = secretsCode("read", result);
+            }
+        }
+        done(fetched);
     });
 }
 
@@ -152,11 +255,40 @@ void SecretStore::useKey(const QByteArray &key, bool found)
         storeNewKey();
     } else {
         // A database exists but its key is gone: never silently create a new one.
-        emit failed(QStringLiteral("database key missing"));
+        emit failed(QStringLiteral("keyMissing"));
     }
 }
 
 void SecretStore::store(const QByteArray &data)
+{
+    // Nothing is deleted until it is known what is current: the staging copy may be the only one.
+    fetch(SecretName, [this, data](const Fetched &current) {
+        if (current.found) {
+            replaceWith(data);
+        } else if (!current.missing) {
+            emit stored(false);
+        } else {
+            // An earlier replacement stopped between its two writes: the staging copy is current.
+            fetch(StagingName, [this, data](const Fetched &staged) {
+                if (staged.found) {
+                    write(SecretName, staged.data, [this, data](bool ok) {
+                        if (ok) {
+                            replaceWith(data);
+                        } else {
+                            emit stored(false);
+                        }
+                    });
+                } else if (staged.missing) {
+                    replaceWith(data);
+                } else {
+                    emit stored(false);
+                }
+            });
+        }
+    });
+}
+
+void SecretStore::replaceWith(const QByteArray &data)
 {
     // Secrets refuses to overwrite. So: the new data as the staging copy, then replace the key
     // with it, then drop the copy; at every point one valid copy exists (fetchKey finishes an
@@ -168,15 +300,37 @@ void SecretStore::store(const QByteArray &data)
                 return;
             }
             remove(SecretName, [this, data](bool) {
-                write(SecretName, data, [this](bool ok) {
+                write(SecretName, data, [this, data](bool ok) {
                     if (ok) {
                         remove(StagingName, [](bool) {});
+                        emit stored(true);
+                    } else {
+                        settleFailedReplacement(data);
                     }
-                    // Not ok: the staging copy stays and is used on the next start.
-                    emit stored(ok);
                 });
             });
         });
+    });
+}
+
+void SecretStore::settleFailedReplacement(const QByteArray &data)
+{
+    // The answer has to be what the next start will do (fetchKey: the key if there is one, else
+    // the staging copy), or the user is told one thing and gets the other.
+    fetch(SecretName, [this, data](const Fetched &current) {
+        if (current.found && current.data == data) {
+            remove(StagingName, [](bool) {});
+            emit stored(true);
+        } else if (current.found) {
+            // The old one could not be removed, and stays in force.
+            remove(StagingName, [this](bool) { emit stored(false); });
+        } else if (current.missing) {
+            qWarning("threesea: database key replaced in its staging copy only");
+            emit stored(true);
+        } else {
+            // Can't tell. The copy stays, as it may be the only one.
+            emit stored(false);
+        }
     });
 }
 
@@ -188,7 +342,7 @@ void SecretStore::storeNewKey()
         key = random.read(32);
     }
     if (key.size() != 32) {
-        emit failed(QStringLiteral("no randomness"));
+        emit failed(QStringLiteral("noRandomness"));
         return;
     }
     Secret secret(secretId());
@@ -204,7 +358,7 @@ void SecretStore::storeNewKey()
         if (r->result().code() == Result::Succeeded) {
             emit keyReady(key);
         } else {
-            emit failed(QStringLiteral("store: ") + r->result().errorMessage());
+            emit failed(QStringLiteral("secrets"), secretsCode("store", r->result()));
         }
         key.fill('\0');
     });

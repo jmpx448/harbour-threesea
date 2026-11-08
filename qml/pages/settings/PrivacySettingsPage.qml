@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../../components"
+import "../../components/Errors.js" as Errors
 
 // Settings → Privacy: receipts, typing, unknown senders, blocked contacts, address book.
 Page {
@@ -20,14 +21,26 @@ Page {
 
     property int blockedCount: 0
 
-    Component.onCompleted: backend.call("settings", {}, function(ok, result) {
-        if (ok) page.settings = result
-    })
-    // Back from the block list: its number may have changed.
-    onStatusChanged: if (status === PageStatus.Active) {
+    function loadSettings() {
+        backend.call("settings", {}, function(ok, result) {
+            if (ok) page.settings = result
+        })
+    }
+    function loadBlockedCount() {
         backend.call("blockedContacts", {}, function(ok, result) {
             if (ok) page.blockedCount = result.blocked.length
         })
+    }
+
+    Component.onCompleted: loadSettings()
+    // Back from the block list: its number may have changed.
+    onStatusChanged: if (status === PageStatus.Active) loadBlockedCount()
+    Connections {
+        target: backend
+        onCoreEvent: if (name === "settingsChanged") {
+            page.loadSettings()
+            page.loadBlockedCount()
+        }
     }
 
     SilicaFlickable {
@@ -61,10 +74,18 @@ Page {
                 }
             }
 
+            AddressBookCountryBox {
+                enabled: backend.addressBookSync
+                // The same numbers now count as others, so they are looked up at once.
+                onPicked: if (backend.addressBookSync) window.syncAddressBook(true)
+            }
+
             SettingsButton {
                 enabled: backend.addressBookSync
                 //% "Exclusion list"
                 text: qsTrId("threesea-he-exclusion-list")
+                //% "Finding contacts from the address book will not add or rename these Threema IDs."
+                description: qsTrId("threesea-la-exclusion-list-description")
                 onClicked: pageStack.push(Qt.resolvedUrl("../BlockedContactsPage.qml"), { exclusion: true })
             }
 
@@ -120,12 +141,20 @@ Page {
             SettingsButton {
                 //% "Clear individual settings"
                 text: qsTrId("threesea-me-clear-contact-policies")
+                //% "The read receipt and typing indicator choices made on single contacts' pages go back to the settings above."
+                description: qsTrId("threesea-la-clear-contact-policies-description")
                 //% "Clearing individual settings"
                 onClicked: Remorse.popupAction(page, qsTrId("threesea-la-clearing-contact-policies"), function() {
-                    backend.call("clearContactPolicies", {}, function(ok, result) {
-                        if (ok && result.cleared === 0) {
+                    backend.call("clearContactPolicies", {}, function(ok, result, kind, message) {
+                        if (!ok) {
+                            Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        } else if (result.cleared === 0) {
                             //% "No contact has its own setting."
                             Notices.show(qsTrId("threesea-la-no-contact-policies"), Notice.Short, Notice.Center)
+                        } else {
+                            //% "Cleared for %n contact(s)"
+                            Notices.show(qsTrId("threesea-la-contact-policies-cleared", result.cleared),
+                                         Notice.Short, Notice.Center)
                         }
                     })
                 })
@@ -165,16 +194,21 @@ Page {
                 id: fsSwitch
                 automaticCheck: false
                 // Multi-device needs it off (the protocol's rule): the switch rests then.
-                //% "Forward secrecy"
+                //% "Perfect Forward Secrecy"
                 text: qsTrId("threesea-la-forward-secrecy")
-                //% "Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts or resets."
-                description: qsTrId("threesea-la-forward-secrecy-description")
+                property bool linked: false
+                description: linked
+                             //% "Off while other devices are linked to this ID. Your choice here applies again when the last one is removed."
+                             ? qsTrId("threesea-la-forward-secrecy-linked")
+                             //% "Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts, resets or is turned off."
+                             : qsTrId("threesea-la-forward-secrecy-description")
                 Component.onCompleted: refresh()
                 function refresh() {
                     backend.call("forwardSecurity", {}, function(ok, result) {
                         if (!ok) return
                         fsSwitch.checked = result.on
-                        fsSwitch.enabled = result.multiDevice !== true
+                        fsSwitch.linked = result.multiDevice === true
+                        fsSwitch.enabled = !fsSwitch.linked
                     })
                 }
                 onClicked: {

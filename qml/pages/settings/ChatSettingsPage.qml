@@ -26,7 +26,7 @@ Page {
                 checked: backend.enterToSend
                 //% "Enter sends"
                 text: qsTrId("threesea-la-enter-to-send")
-                //% "Enter sends the message, Shift+Enter starts a new line. Off: Enter starts a new line, Shift+Enter sends."
+                //% "Enter sends the message. Off: Enter starts a new line and the send button sends. On a hardware keyboard, Shift+Enter does the opposite."
                 description: qsTrId("threesea-la-enter-to-send-description")
                 onClicked: backend.enterToSend = !checked
             }

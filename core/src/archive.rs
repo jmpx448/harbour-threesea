@@ -19,6 +19,14 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Bring a chat back from the archive; `true` if it was there.
+    pub fn unarchive(&self, conversation: &str) -> Result<bool, StoreError> {
+        Ok(self.conn.execute(
+            "DELETE FROM archived_chats WHERE conversation = ?1",
+            [conversation],
+        )? > 0)
+    }
+
     /// Archive (also unpins: a pinned chat in the archive makes no sense) or bring back.
     pub fn set_archived(&self, conversation: &str, archived: bool) -> Result<(), StoreError> {
         if archived {
@@ -50,6 +58,10 @@ mod tests {
         store.set_archived("A", true).unwrap();
         assert_eq!(store.archived_chats().unwrap(), ["A"]);
         assert!(store.pinned_chats().unwrap().is_empty());
+        assert!(!store.unarchive("B").unwrap(), "was not there");
+        assert!(store.unarchive("A").unwrap());
+        assert!(!store.unarchive("A").unwrap(), "not any more");
+        store.set_archived("A", true).unwrap();
         store.set_archived("A", false).unwrap();
         assert!(store.archived_chats().unwrap().is_empty());
     }

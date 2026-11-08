@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
+import "../components/Errors.js" as Errors
 
 // A group call (ADR 0012): the group's name and the running time on top, everyone in the call
 // as square tiles (us first; their picture or camera, name and a crossed-out microphone when it
@@ -21,7 +22,12 @@ Page {
     readonly property bool connected: groupCalls.state === "connected"
     readonly property int tileSize: Math.floor((width - 2 * Theme.horizontalPageMargin - Theme.paddingMedium) / 2)
 
+    readonly property bool atEar: !groupCalls.camera && !callRoute.speaker
+                                  && (connected || groupCalls.state === "joining"
+                                      || groupCalls.state === "connecting")
+
     allowedOrientations: Orientation.Portrait
+    backNavigation: !guard.shown
 
     function duration() {
         var h = Math.floor(seconds / 3600)
@@ -40,14 +46,27 @@ Page {
         if (connected) joinedAt = Date.now()
     }
 
+    // The call is over: say why if it failed, and leave. It may have ended before this page came
+    // up, or while another page was on top (a 1:1 call takes the microphone over).
+    function closeIfOver() {
+        if (status !== PageStatus.Active || groupCalls.state !== "idle") return
+        if (groupCalls.error.length > 0) Notices.show(Errors.text(groupCalls.error, groupCalls.errorMessage), Notice.Long, Notice.Center)
+        pageStack.pop()
+    }
+
+    // A moment later: going back in the middle of the status changing is a binding loop.
+    onStatusChanged: if (status === PageStatus.Active) closeLater.restart()
+    Timer {
+        id: closeLater
+        interval: 0
+        onTriggered: page.closeIfOver()
+    }
+
     Connections {
         target: groupCalls
         onStateChanged: {
             if (groupCalls.state === "connected") page.joinedAt = Date.now()
-            if (groupCalls.state === "idle" && page.status === PageStatus.Active) {
-                if (groupCalls.error.length > 0) Notices.show(groupCalls.error, Notice.Long, Notice.Center)
-                pageStack.pop()
-            }
+            page.closeIfOver()
         }
     }
 
@@ -147,7 +166,7 @@ Page {
             bottom: parent.bottom
             bottomMargin: Theme.paddingLarge * 2
         }
-        spacing: Theme.itemSizeMedium
+        spacing: callRoute.available ? Theme.paddingLarge : Theme.itemSizeMedium
 
         IconButton {
             anchors.verticalCenter: parent.verticalCenter
@@ -163,8 +182,20 @@ Page {
             onClicked: groupCalls.camera = !groupCalls.camera
         }
         IconButton {
+            visible: callRoute.available
+            anchors.verticalCenter: parent.verticalCenter
+            icon.source: "image://theme/icon-m-speaker"
+            highlighted: down || callRoute.speaker
+            onClicked: callRoute.speaker = !callRoute.speaker
+        }
+        IconButton {
             icon.source: "image://theme/icon-l-reject"
             onClicked: groupCalls.leave()
         }
+    }
+
+    EarGuard {
+        id: guard
+        atEar: page.atEar
     }
 }

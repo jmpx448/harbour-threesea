@@ -7,6 +7,8 @@ import "../components/Errors.js" as Errors
 Page {
     id: page
     allowedOrientations: Orientation.All
+    // The core finishes the restore anyway, and meanwhile the page below offers a new ID.
+    backNavigation: !working
 
     property bool working: false
 
@@ -31,6 +33,18 @@ Page {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
 
+        PullDownMenu {
+            enabled: !page.working
+            MenuItem {
+                //% "Find my ID"
+                text: qsTrId("threesea-me-safe-find-id")
+                onClicked: {
+                    var finder = pageStack.push(Qt.resolvedUrl("SafeFindIdPage.qml"))
+                    finder.chosen.connect(function(identity) { identityField.text = identity })
+                }
+            }
+        }
+
         Column {
             id: column
             width: parent.width
@@ -42,8 +56,13 @@ Page {
             }
 
             InfoLabel {
-                //% "Enter your Threema ID and your Threema Safe password. Your profile, contacts, groups and settings are restored with it."
-                text: qsTrId("threesea-la-restore-safe-intro")
+                //% "Enter your Threema ID and your Threema Safe password. Your profile, contacts, groups and settings are restored with it. Chats come from a Data backup, which Settings, Backup can import afterwards."
+                text: qsTrId("threesea-la-restore-safe-intro-data-backup")
+            }
+
+            InfoLabel {
+                //% "An ID works on one phone at a time: new messages go only to the phone that connected last."
+                text: qsTrId("threesea-la-restore-one-phone")
             }
 
             TextField {

@@ -236,6 +236,7 @@ pub mod cli {
             trace!(?response, "Got response");
             let status = response.status();
             let body = response.bytes().await?.to_vec();
+            // log-ok: its length only
             trace!(body_length = body.len(), "Got body");
 
             // Await the body, convert to response

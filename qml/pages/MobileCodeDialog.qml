@@ -8,6 +8,7 @@ import "../components/Errors.js" as Errors
 // for a call that reads the code instead, or cancels the link.
 Dialog {
     id: dialog
+    objectName: "mobileCode"
     allowedOrientations: Orientation.All
 
     property string number

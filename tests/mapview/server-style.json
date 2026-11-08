@@ -1,0 +1,4 @@
+{"version": 8, "name": "threesea-test-server",
+ "sources": {"tiles": {"type": "vector", "tiles": ["https://map.threema.ch/tiles/{z}/{x}/{y}.pbf"], "minzoom": 0, "maxzoom": 14}},
+ "layers": [{"id": "background", "type": "background", "paint": {"background-color": "#ff00ff"}},
+            {"id": "tiles", "type": "fill", "source": "tiles", "source-layer": "water", "paint": {"fill-color": "#0000ff"}}]}

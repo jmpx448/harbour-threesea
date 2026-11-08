@@ -117,38 +117,52 @@ impl App {
         let own = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
         let client_key = ClientKey::from(*own.client_key);
         let suspect_id = suspect.identity.to_string();
-        let nickname = suspect.nickname.as_deref();
-        match &conversation {
-            Conversation::Group(group) => {
-                // `members` is everyone but us.
-                directory::report_group(
-                    &self.https,
-                    &client_key,
-                    &own.threema_id,
-                    &suspect_id,
-                    nickname,
-                    group.identity.group_id,
-                    group.members.len() + 1,
-                )
-                .await?;
-            }
-            _ => {
-                directory::report_identity(
-                    &self.https,
-                    &client_key,
-                    &own.threema_id,
-                    &suspect_id,
-                    nickname,
-                )
-                .await?;
-            }
-        }
-        self.after_report(&key, &conversation, &suspect_id, block)
-            .await
+        let nickname = suspect.nickname;
+        let group = match &conversation {
+            // `members` is everyone but us.
+            Conversation::Group(group) => Some((group.identity.group_id, group.members.len() + 1)),
+            _ => None,
+        };
+        let https = self.https.clone();
+        let suspect = suspect_id.clone();
+        self.detached_then(
+            crate::detached::Lane::Free,
+            move |_| async move {
+                match group {
+                    Some((group_id, members)) => {
+                        directory::report_group(
+                            &https,
+                            &client_key,
+                            &own.threema_id,
+                            &suspect,
+                            nickname.as_deref(),
+                            group_id,
+                            members,
+                        )
+                        .await
+                    }
+                    None => {
+                        directory::report_identity(
+                            &https,
+                            &client_key,
+                            &own.threema_id,
+                            &suspect,
+                            nickname.as_deref(),
+                        )
+                        .await
+                    }
+                }
+            },
+            move |app, reported| {
+                reported?;
+                app.after_report(&key, &conversation, &suspect_id, block)
+            },
+        )
+        .await
     }
 
     /// The report is through: remember it, and block and delete if that was asked for.
-    async fn after_report(
+    fn after_report(
         &mut self,
         key: &str,
         conversation: &Conversation,
@@ -161,14 +175,15 @@ impl App {
         if block {
             self.set_blocked(suspect, true)?;
             self.set_sync_excluded(suspect, true)?;
-            self.reflect_change(SyncChange::Settings, &json!({})).await;
+            self.queue_reflection(SyncChange::Settings, &json!({}));
             if matches!(conversation, Conversation::Group(_)) {
                 let left = self.leave_group(key)?;
                 let change = SyncChange::Group {
+                    previous_members: None,
                     key: Some(key.to_owned()),
                     created: false,
                 };
-                self.reflect_change(change, &left).await;
+                self.queue_reflection(change, &left);
             }
             self.delete_conversation(key)?;
         }
@@ -375,7 +390,6 @@ mod tests {
         message(&app, SUSPECT, CREATED + DAY);
         let (key, conversation) = app.readable_conversation(SUSPECT).unwrap();
         app.after_report(&key, &conversation, SUSPECT, false)
-            .await
             .unwrap();
         assert!(!potential(&app, SUSPECT), "reported once");
         assert!(
@@ -402,7 +416,6 @@ mod tests {
         message(&app, SUSPECT, CREATED + DAY);
         let (key, conversation) = app.readable_conversation(SUSPECT).unwrap();
         app.after_report(&key, &conversation, SUSPECT, true)
-            .await
             .unwrap();
         assert!(blocked(&app, SUSPECT));
         assert_eq!(app.store.earliest_incoming_content(SUSPECT).unwrap(), None);
@@ -419,11 +432,20 @@ mod tests {
                 message(&app, &theirs.key, CREATED + DAY);
                 let (key, conversation) = app.readable_conversation(&theirs.key).unwrap();
                 app.after_report(&key, &conversation, SUSPECT, true)
-                    .await
                     .unwrap();
                 assert!(blocked(&app, SUSPECT));
                 assert!(app.store.group(&theirs.key).unwrap().is_none());
                 assert_eq!(app.store.earliest_incoming_content(&key).unwrap(), None);
+                // They still hear that we left, or they answer with the group again.
+                let queued = app.store.outbox().unwrap();
+                assert_eq!(queued.len(), 1);
+                assert_eq!(queued[0].kind, crate::groups::OUTBOX_GROUP_LEAVE);
+                assert_eq!(
+                    app.store
+                        .pending_receivers(&theirs.key, queued[0].message_id)
+                        .unwrap(),
+                    theirs.members
+                );
             })
             .await;
     }

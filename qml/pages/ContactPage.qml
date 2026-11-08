@@ -11,11 +11,39 @@ Page {
 
     property string identity
     property var contact: ({})
+    // An ID without a contact (earlier versions left chats like that behind).
+    property bool noContact: false
 
     function load() {
-        backend.call("contact", { identity: identity }, function(ok, result) {
-            if (ok) page.contact = result
+        backend.call("contact", { identity: identity }, function(ok, result, kind) {
+            if (ok) {
+                page.noContact = false
+                page.contact = result
+            } else if (kind === "contactNotFound") {
+                page.noContact = true
+            }
         })
+    }
+
+    function addToContacts() {
+        backend.call("addContact", { identity: identity }, function(ok, result, kind, message) {
+            if (ok) {
+                page.noContact = false
+                page.contact = result
+                backend.refreshContacts()
+            } else {
+                Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            }
+        })
+    }
+
+    // The chat went with the contact: back past it, if this page is attached to it.
+    function leaveDeleted() {
+        var below = pageStack.previousPage(page)
+        if (below && below.inputField !== undefined && below.identity === identity) {
+            below = pageStack.previousPage(below)
+        }
+        pageStack.pop(below || undefined)
     }
 
     function edit() {
@@ -49,15 +77,23 @@ Page {
 
         PullDownMenu {
             MenuItem {
+                // Someone a group of ours needs stays until they leave it.
+                visible: page.contact.neededByGroup !== true
                 //% "Delete"
                 text: qsTrId("threesea-me-delete")
-                //% "Deleting contact"
+                //% "Deleting contact and chat"
                 onClicked: remorse.execute(qsTrId("threesea-la-deleting-contact"), function() {
                     backend.call("deleteContact", { identity: page.identity }, function() {
                         backend.refreshContacts()
-                        pageStack.pop()
+                        page.leaveDeleted()
                     })
                 })
+            }
+            MenuItem {
+                visible: page.contact.hidden === true || page.noContact
+                //% "Add to contacts"
+                text: qsTrId("threesea-me-add-to-contacts")
+                onClicked: page.addToContacts()
             }
             MenuItem {
                 text: page.contact.blocked
@@ -71,32 +107,22 @@ Page {
                 })
             }
             MenuItem {
-                // Sharing the profile picture with selected contacts (Settings); not with
-                // ECHOECHO or gateway IDs, which never get it.
-                visible: typeof page.contact.pictureRecipient === "boolean"
-                         && page.identity !== "ECHOECHO" && page.identity.charAt(0) !== "*"
-                text: page.contact.pictureRecipient
-                      //% "Stop sharing profile picture"
-                      ? qsTrId("threesea-me-stop-sharing-picture")
-                      //% "Share profile picture"
-                      : qsTrId("threesea-me-share-picture")
-                onClicked: backend.call("setProfilePictureRecipient",
-                                        { identity: page.identity, share: !page.contact.pictureRecipient },
-                                        function(ok, result) { if (ok) page.contact = result })
+                // Not saved yet: added first.
+                visible: !page.noContact && page.contact.hidden !== true
+                //% "Edit"
+                text: qsTrId("threesea-me-edit")
+                onClicked: page.edit()
             }
+            // The first item, nearest the content (user 2026-11-07). The chat is the row in the
+            // lists, or one swipe back: no Write message here.
             MenuItem {
-                visible: (page.contact.verification || 0) < 2
+                visible: !page.noContact && (page.contact.verification || 0) < 2
                 //% "Verify by QR code"
                 text: qsTrId("threesea-me-verify-qr")
                 onClicked: {
                     var scan = pageStack.push(Qt.resolvedUrl("ScanQrPage.qml"), { expectedIdentity: page.identity })
                     scan.verified.connect(function(contact) { page.contact = contact })
                 }
-            }
-            MenuItem {
-                //% "Edit"
-                text: qsTrId("threesea-me-edit")
-                onClicked: page.edit()
             }
         }
 
@@ -110,6 +136,8 @@ Page {
                                            function() { page.load() })
                 title: page.contact.displayName || page.identity
                 description: page.identity
+                descriptionHoldable: true
+                onDescriptionHeld: identityMenu.open(menuHost)
                 source: page.contact.pictureVersion > 0
                         ? "image://threesea/contact/" + page.identity + "?" + page.contact.pictureVersion : ""
                 Row {
@@ -126,6 +154,18 @@ Page {
                         color: Theme.secondaryColor
                     }
                 }
+            }
+
+            // The ID's menu opens right under the card.
+            Item {
+                id: menuHost
+                width: parent.width
+                height: identityMenu.height
+            }
+
+            IdentityMenu {
+                id: identityMenu
+                identity: page.identity
             }
 
             // Only when the name on the card is our own one for them (else it is the nickname).
@@ -165,13 +205,20 @@ Page {
                 identity: page.identity
                 name: page.contact.displayName || page.identity
             }
+            ExportChatButton {
+                visible: !page.noContact
+                identity: page.identity
+                name: page.contact.displayName || page.identity
+            }
 
             ChatNotificationsButton {
+                visible: !page.noContact
                 identity: page.identity
                 settings: page.contact.notifications || ({})
             }
             // Device-local, like the tone of all chats.
             ToneButton {
+                visible: !page.noContact
                 property int revision: 0
                 tone: revision >= 0 ? backend.chatTone(page.identity) : ""
                 //% "Same as all chats"
@@ -183,9 +230,11 @@ Page {
             }
 
             SectionHeader {
+                visible: !page.noContact
                 text: qsTrId("threesea-se-privacy")
             }
             ContactPolicyButton {
+                visible: !page.noContact
                 identity: page.identity
                 field: "readReceipts"
                 choice: page.contact.readReceipts || 0
@@ -196,6 +245,7 @@ Page {
             }
 
             ContactPolicyButton {
+                visible: !page.noContact
                 identity: page.identity
                 field: "typing"
                 choice: page.contact.typing || 0
@@ -205,7 +255,22 @@ Page {
                 onChanged: page.contact = contact
             }
 
+            TextSwitch {
+                // Sharing the profile picture with selected contacts (Settings); not with
+                // ECHOECHO or gateway IDs, which never get it.
+                visible: !page.noContact && typeof page.contact.pictureRecipient === "boolean"
+                         && page.identity !== "ECHOECHO" && page.identity.charAt(0) !== "*"
+                automaticCheck: false
+                checked: page.contact.pictureRecipient === true
+                //% "Share profile picture"
+                text: qsTrId("threesea-la-contact-share-picture")
+                onClicked: backend.call("setProfilePictureRecipient",
+                                        { identity: page.identity, share: !page.contact.pictureRecipient },
+                                        function(ok, result) { if (ok) page.contact = result })
+            }
+
             SectionHeader {
+                visible: !page.noContact
                 //% "Public key"
                 text: qsTrId("threesea-se-public-key")
             }
@@ -218,6 +283,18 @@ Page {
                 font.pixelSize: Theme.fontSizeExtraSmall
                 color: Theme.secondaryHighlightColor
                 bottomPadding: Theme.paddingLarge
+            }
+
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                visible: !page.noContact && page.contact.verification === 1
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.highlightColor
+                bottomPadding: Theme.paddingMedium
+                //% "Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully."
+                text: qsTrId("threesea-la-verification-partly-explained")
             }
         }
 

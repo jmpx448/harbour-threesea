@@ -1,0 +1,201 @@
+{
+ "version": 8,
+ "name": "threesea-test-fixture",
+ "sources": {
+  "shapes": {
+   "type": "geojson",
+   "data": {
+    "type": "FeatureCollection",
+    "features": [
+     {
+      "type": "Feature",
+      "properties": {
+       "kind": "water"
+      },
+      "geometry": {
+       "type": "Polygon",
+       "coordinates": [
+        [
+         [
+          8.535,
+          47.355
+         ],
+         [
+          8.56,
+          47.355
+         ],
+         [
+          8.565,
+          47.37
+         ],
+         [
+          8.548,
+          47.372
+         ],
+         [
+          8.535,
+          47.355
+         ]
+        ]
+       ]
+      }
+     },
+     {
+      "type": "Feature",
+      "properties": {
+       "kind": "park"
+      },
+      "geometry": {
+       "type": "Polygon",
+       "coordinates": [
+        [
+         [
+          8.52,
+          47.38
+         ],
+         [
+          8.535,
+          47.38
+         ],
+         [
+          8.535,
+          47.39
+         ],
+         [
+          8.52,
+          47.39
+         ],
+         [
+          8.52,
+          47.38
+         ]
+        ]
+       ]
+      }
+     },
+     {
+      "type": "Feature",
+      "properties": {
+       "kind": "road"
+      },
+      "geometry": {
+       "type": "LineString",
+       "coordinates": [
+        [
+         8.5,
+         47.37
+        ],
+        [
+         8.53,
+         47.376
+        ],
+        [
+         8.545,
+         47.377
+        ],
+        [
+         8.58,
+         47.385
+        ]
+       ]
+      }
+     },
+     {
+      "type": "Feature",
+      "properties": {
+       "kind": "road"
+      },
+      "geometry": {
+       "type": "LineString",
+       "coordinates": [
+        [
+         8.54,
+         47.4
+        ],
+        [
+         8.542,
+         47.377
+        ],
+        [
+         8.55,
+         47.35
+        ]
+       ]
+      }
+     }
+    ]
+   }
+  }
+ },
+ "layers": [
+  {
+   "id": "background",
+   "type": "background",
+   "paint": {
+    "background-color": "#f8f4f0"
+   }
+  },
+  {
+   "id": "water",
+   "type": "fill",
+   "source": "shapes",
+   "filter": [
+    "==",
+    "kind",
+    "water"
+   ],
+   "paint": {
+    "fill-color": "#a0c8f0"
+   }
+  },
+  {
+   "id": "park",
+   "type": "fill",
+   "source": "shapes",
+   "filter": [
+    "==",
+    "kind",
+    "park"
+   ],
+   "paint": {
+    "fill-color": "#d8e8c8"
+   }
+  },
+  {
+   "id": "road-casing",
+   "type": "line",
+   "source": "shapes",
+   "filter": [
+    "==",
+    "kind",
+    "road"
+   ],
+   "layout": {
+    "line-cap": "round",
+    "line-join": "round"
+   },
+   "paint": {
+    "line-color": "#e9ac77",
+    "line-width": 9
+   }
+  },
+  {
+   "id": "road",
+   "type": "line",
+   "source": "shapes",
+   "filter": [
+    "==",
+    "kind",
+    "road"
+   ],
+   "layout": {
+    "line-cap": "round",
+    "line-join": "round"
+   },
+   "paint": {
+    "line-color": "#fea",
+    "line-width": 6
+   }
+  }
+ ]
+}

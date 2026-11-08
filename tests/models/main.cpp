@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // JsonListModel and ContactListModel: update() ends with exactly the given rows, with few row
-// signals (a chat moving to the top is one move, deep audit 2026-10-27, P03). Exit 0: passed.
+// signals (a chat moving to the top is one move, deep audit 2026-10-27, P03). And a command's
+// result as a QML callback gets it. Exit 0: passed.
 #include "contactlistmodel.h"
+#include "coreresult.h"
 #include "jsonlistmodel.h"
+#include "listfilter.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QJsonDocument>
 #include <cstdio>
 #include <random>
 
@@ -135,6 +139,27 @@ int main(int argc, char **argv)
     page.insertAll(QVariantList(), page.rowCount());
     check(page.rowCount() == 6, "json: an empty page changes nothing");
 
+    // What a bubble asks of the rows: one field, or a row by one field, without a row copy.
+    {
+        JsonListModel lookup;
+        lookup.setKeyField(QStringLiteral("id"));
+        lookup.setRoleList({QStringLiteral("id"), QStringLiteral("messageId")});
+        QVariantList lookupRows;
+        lookupRows << QVariantMap{{QStringLiteral("id"), 1}, {QStringLiteral("messageId"), QStringLiteral("aa")}};
+        lookupRows << QVariantMap{{QStringLiteral("id"), 2}};
+        lookupRows << QVariantMap{{QStringLiteral("id"), 3}, {QStringLiteral("messageId"), QStringLiteral("cc")}};
+        lookup.update(lookupRows);
+        check(lookup.indexOfField(QStringLiteral("messageId"), QStringLiteral("cc")) == 2, "indexOfField: found");
+        check(lookup.indexOfField(QStringLiteral("messageId"), QStringLiteral("bb")) == -1, "indexOfField: not here");
+        check(lookup.indexOfField(QStringLiteral("messageId"), QString()) == -1,
+              "indexOfField: a row without the field isn't a row with an empty one");
+        check(lookup.indexOfField(QStringLiteral("id"), 2.0) == 1, "indexOfField: a number as QML sends it");
+        check(lookup.fieldAt(2, QStringLiteral("messageId")).toString() == QStringLiteral("cc"), "fieldAt: the field");
+        check(!lookup.fieldAt(1, QStringLiteral("messageId")).isValid(), "fieldAt: no such field");
+        check(!lookup.fieldAt(3, QStringLiteral("id")).isValid() && !lookup.fieldAt(-1, QStringLiteral("id")).isValid(),
+              "fieldAt: no such row");
+    }
+
     // What the chat page's scrolling back costs in the model: a page of a hundred messages
     // row by row against the same page as one insert (user report 2026-10-29: the UI stopped
     // while a page came in).
@@ -232,6 +257,75 @@ int main(int argc, char **argv)
     check(got == reordered, "contacts: reorder and remove");
     check(contactCounts.moved == 1 && contactCounts.removed == 1 && contactCounts.inserted == 0,
           "contacts: one move, one removal");
+
+    // A search field's filter over the contacts: names and ID, any case and order, accents or
+    // none; a group's key isn't a name. The source's rows stay as they are, and what changes in
+    // the source reaches the filter.
+    {
+        const auto person = [](const QString &identity, const QString &name, const QString &first, const QString &last) {
+            QVariantMap row;
+            row.insert(QStringLiteral("identity"), identity);
+            row.insert(QStringLiteral("displayName"), name);
+            row.insert(QStringLiteral("firstName"), first);
+            row.insert(QStringLiteral("lastName"), last);
+            return QVariant(row);
+        };
+        ContactListModel source;
+        const QVariantList everyone = {
+            person(QStringLiteral("ABCD1234"), QStringLiteral("Jos\u00e9 Garc\u00eda"), QStringLiteral("Jos\u00e9"), QStringLiteral("Garc\u00eda")),
+            person(QStringLiteral("BCDE2345"), QStringLiteral("Stra\u00dfe \u0141ukasz"), QStringLiteral("Stra\u00dfe"), QStringLiteral("\u0141ukasz")),
+            person(QStringLiteral("g:CDEF3456:00ab"), QStringLiteral("Dinner"), QString(), QString()),
+        };
+        source.update(everyone);
+        ListFilter filter;
+        filter.setSourceModel(&source);
+        int counted = 0;
+        QObject::connect(&filter, &ListFilter::countChanged, [&counted]() { ++counted; });
+        const auto found = [&filter](const QString &query) {
+            filter.setQuery(query);
+            QStringList list;
+            const int role = filter.roleNames().key("identity");
+            for (int i = 0; i < filter.rowCount(); ++i) {
+                list << filter.data(filter.index(i, 0), role).toString();
+            }
+            return list;
+        };
+        check(found(QString()).size() == 3, "filter: no query, all rows");
+        check(found(QStringLiteral("  ")).size() == 3, "filter: only spaces, all rows");
+        check(found(QStringLiteral("jose")) == QStringList{QStringLiteral("ABCD1234")}, "filter: accents off");
+        check(found(QStringLiteral("GARC JOS\u00c9")) == QStringList{QStringLiteral("ABCD1234")}, "filter: any case and order");
+        check(found(QStringLiteral("Jose\u0301")) == QStringList{QStringLiteral("ABCD1234")}, "filter: a mark of its own");
+        check(found(QStringLiteral("strasse lukasz")) == QStringList{QStringLiteral("BCDE2345")}, "filter: letters that don't come apart");
+        check(found(QStringLiteral("bcde23")) == QStringList{QStringLiteral("BCDE2345")}, "filter: by ID");
+        check(found(QStringLiteral("cdef")).isEmpty(), "filter: a group's key is no name");
+        check(found(QStringLiteral("dinner")) == QStringList{QStringLiteral("g:CDEF3456:00ab")}, "filter: a group's name");
+        check(counted > 0, "filter: says when its count changes");
+        check(filter.property("count").toInt() == 1, "filter: count");
+        check(source.rowCount() == 3, "filter: the source keeps its rows");
+
+        // A new matching row comes in, in the source's order, and a renamed one goes.
+        QVariantList changed = everyone;
+        changed.insert(0, person(QStringLiteral("DEFG4567"), QStringLiteral("Dinner guest"), QString(), QString()));
+        source.update(changed);
+        check(filter.rowCount() == 2 && filter.data(filter.index(0, 0), filter.roleNames().key("identity")).toString()
+              == QLatin1String("DEFG4567"), "filter: follows an inserted row");
+        changed[0] = person(QStringLiteral("DEFG4567"), QStringLiteral("Someone"), QString(), QString());
+        source.update(changed);
+        check(filter.rowCount() == 1, "filter: follows a changed row");
+    }
+
+    // Null stays null, the core's "no such thing" (a quote of a message this device doesn't have);
+    // a result is an object, and an error reply's missing one an empty object.
+    {
+        QJSEngine engine;
+        const QJsonObject reply = QJsonDocument::fromJson(
+                R"({"none": null, "message": {"id": 7, "quote": null}})").object();
+        check(coreResultForScript(&engine, reply.value(QStringLiteral("none"))).isNull(), "null stays null");
+        const QJSValue message = coreResultForScript(&engine, reply.value(QStringLiteral("message")));
+        check(message.isObject() && message.property(QStringLiteral("id")).toInt() == 7, "a result is the object");
+        const QJSValue missing = coreResultForScript(&engine, reply.value(QStringLiteral("absent")));
+        check(missing.isObject() && !missing.isNull(), "no result at all: an empty object");
+    }
 
     std::printf(failures ? "%d failure(s)\n" : "passed\n", failures);
     return failures ? 1 : 0;

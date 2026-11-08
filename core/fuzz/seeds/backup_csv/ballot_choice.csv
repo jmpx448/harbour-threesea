@@ -1,0 +1,5 @@
+"id","ballot","aid","type","name","vote_count","order","created_at","modified_at"
+"1","0102030405060708-B0B0B0B0","0","Text","Pizza","1","0","",""
+"2","0102030405060708-B0B0B0B0","1","Text","Sushi","0","1","",""
+"3","1112131415161718-ANNANNAN","0","Text","Monday","1","1","",""
+"4","1112131415161718-ANNANNAN","1","Text","Tuesday","2","0","",""

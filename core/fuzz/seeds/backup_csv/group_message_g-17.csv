@@ -1,0 +1,7 @@
+"apiid","uid","isoutbox","isread","issaved","messagestae","identity","type","body","posted_at","created_at","modified_at","isstatusmessage","caption","quoted_message_apiid","delivered_at","read_at","g_msg_states","display_tags","edited_at","deleted_at"
+"2123456789abcdef","gm-0001","0","1","","READ","ANNANNAN","TEXT","Hello group","1700000004000","1700000004000","","0","","","","","","0","",""
+"8823456789abcdef","gm-0002","0","1","","READ","B0B0B0B0","TEXT","thumbs?","1700000004500","1700000004500","","0","","","","","{""ANNANNAN"":""USERACK"",""ABCD1234"":""USERDEC""}","0","",""
+"9923456789abcdef","gm-0003","1","1","","READ","","TEXT","from me","1700000004800","1700000004800","","0","","","","","","0","",""
+"a123456789abcdef","gm-0004","0","1","","READ","ANNANNAN","BALLOT","[1,2]","1700000005000","1700000005000","","0","","","","","","0","",""
+"b123456789abcdef","gm-0005","0","1","","READ","ANNANNAN","BALLOT","[2,2]","1700000005500","1700000005500","","0","","","","","","0","",""
+"c123456789abcdef","gm-0006","0","1","","READ","ANNANNAN","BALLOT","[3,2]","1700000006000","1700000006000","","0","","","","","","0","",""

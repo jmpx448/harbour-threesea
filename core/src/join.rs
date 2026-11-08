@@ -25,7 +25,7 @@ use libthreema::protobuf::{
     },
 };
 use prost::Message as _;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     chat_notifications::Policy,
@@ -40,6 +40,9 @@ pub struct JoinData {
     pub blobs: Vec<Zeroizing<Vec<u8>>>,
     pub essential_data: Zeroizing<Vec<u8>>,
 }
+
+/// What ChaCha20-Poly1305 appends when the rendezvous link encrypts in place.
+const ENCRYPTION_TAG_LENGTH: usize = 16;
 
 /// `d2d_join.EdToNd { begin }`.
 #[must_use]
@@ -133,8 +136,9 @@ pub fn profile_sync(store: &Store) -> Result<UserProfile, StoreError> {
             })
         }
     };
+    let (email, mobile) = store.confirmed_links()?;
     let mut links = Vec::new();
-    if let Some(email) = store.setting(keys::LINKED_EMAIL)? {
+    if let Some(email) = email {
         links.push(user_profile::identity_links::IdentityLink {
             r#type: Some(user_profile::identity_links::identity_link::Type::Email(
                 email,
@@ -142,7 +146,7 @@ pub fn profile_sync(store: &Store) -> Result<UserProfile, StoreError> {
             description: String::new(),
         });
     }
-    if let Some(mobile) = store.setting(keys::LINKED_MOBILE)? {
+    if let Some(mobile) = mobile {
         links.push(user_profile::identity_links::IdentityLink {
             r#type: Some(user_profile::identity_links::identity_link::Type::PhoneNumber(mobile)),
             description: String::new(),
@@ -266,6 +270,13 @@ pub fn contact_sync(
 pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group, StoreError> {
     let pinned = store.pinned_chats()?;
     let archived = store.archived_chats()?;
+    let user_state = if !stored.left {
+        group::UserState::Member
+    } else if store.group_kicked(&stored.key)? {
+        group::UserState::Kicked
+    } else {
+        group::UserState::Left
+    };
     let notification = match store.chat_notifications(&stored.key)? {
         Some((policy, until)) => group::notification_trigger_policy_override::Override::Policy(
             group::notification_trigger_policy_override::Policy {
@@ -286,16 +297,12 @@ pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group,
         }),
         name: Some(stored.name.clone()),
         created_at: Some(u64::try_from(stored.created_at).unwrap_or_default()),
-        user_state: Some(if stored.left {
-            group::UserState::Left as i32
-        } else {
-            group::UserState::Member as i32
-        }),
+        user_state: Some(user_state as i32),
         profile_picture: Some(DeltaImage {
             image: Some(delta_image::Image::Removed(Unit {})),
         }),
         member_identities: Some(Identities {
-            identities: stored.members.clone(),
+            identities: group_sync_members(store, stored)?,
         }),
         notification_trigger_policy_override: Some(group::NotificationTriggerPolicyOverride {
             r#override: Some(notification),
@@ -312,6 +319,52 @@ pub fn group_sync(store: &Store, stored: &crate::groups::Group) -> Result<Group,
         conversation_category: Some(category(store, &stored.key)?),
         conversation_visibility: Some(visibility(&stored.key, &pinned, &archived)),
     })
+}
+
+/// A group's member list for the other devices: without the creator and the user
+/// (md-d2d-sync.proto), and without anyone whose lookup hasn't given us a contact yet, as the
+/// others only get to know the people we have a contact for.
+pub(crate) fn group_sync_members(
+    store: &Store,
+    stored: &crate::groups::Group,
+) -> Result<Vec<String>, StoreError> {
+    let user = store
+        .identity()?
+        .ok_or_else(|| StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+    let mut members = Vec::new();
+    for member in stored.sync_members(&user.threema_id) {
+        if store.contact(&member)?.is_some() {
+            members.push(member);
+        }
+    }
+    Ok(members)
+}
+
+/// When each conversation last changed (its newest message, or the stand-in of a chat without
+/// messages), in ms.
+pub(crate) fn last_updates(store: &Store) -> Result<HashMap<String, u64>, StoreError> {
+    Ok(store
+        .conversations()?
+        .into_iter()
+        .map(|(message, _)| {
+            let at = u64::try_from(message.arrived_at()).unwrap_or_default();
+            (message.conversation, at)
+        })
+        .collect())
+}
+
+/// Whether the other devices can take this group at all: Threema Desktop refuses a group whose
+/// creator it has no contact for, and with it the whole join (`dom/backend/join.ts`). A creator
+/// without a contact has no public key we could give them either.
+pub(crate) fn group_syncable(
+    store: &Store,
+    stored: &crate::groups::Group,
+) -> Result<bool, StoreError> {
+    let creator = stored.identity.creator_identity.to_string();
+    let user = store
+        .identity()?
+        .ok_or_else(|| StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+    Ok(creator == user.threema_id || store.contact(&creator)?.is_some())
 }
 
 /// Collect everything for the new device. `dgk`: the device group key.
@@ -342,17 +395,7 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
     }
     let settings = settings_sync(store)?;
 
-    // When each conversation last changed (its newest message).
-    let last_update: HashMap<String, u64> = store
-        .conversations()?
-        .into_iter()
-        .map(|(message, _)| {
-            (
-                message.conversation,
-                u64::try_from(message.created_at).unwrap_or_default(),
-            )
-        })
-        .collect();
+    let last_update = last_updates(store)?;
 
     // Contacts.
     let mut contacts = Vec::new();
@@ -374,9 +417,17 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
 
     // Groups.
     let mut groups = Vec::new();
+    let mut left_out = 0_u32;
     for stored in store.groups()? {
+        if !group_syncable(store, &stored)? {
+            left_out += 1;
+            continue;
+        }
         let mut group = group_sync(store, &stored)?;
-        if let Some(data) = media.read_picture(&stored.key).ok().flatten() {
+        // Version 0: no picture, whatever a file may say (a removal that didn't finish).
+        if stored.picture_version != 0
+            && let Some(data) = media.read_picture(&stored.key).ok().flatten()
+        {
             group.profile_picture = Some(blobs.add(data, None));
         }
         groups.push(AugmentedGroup {
@@ -388,6 +439,16 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
         });
     }
 
+    if left_out > 0 {
+        tracing::warn!(
+            groups = left_out,
+            "groups without a creator's contact left out of the join"
+        );
+    }
+
+    // Before the secrets are copied into the message: nothing leaves early after that.
+    let csp_hashed_nonces = hashed_nonces(&identity.threema_id, store.all_nonces()?);
+    let d2d_hashed_nonces = hashed_nonces(&identity.threema_id, store.all_d2d_nonces()?);
     let essential = EssentialData {
         identity_data: Some(IdentityData {
             identity: identity.threema_id.clone(),
@@ -403,21 +464,174 @@ pub fn collect(store: &Store, media: &MediaStore, dgk: &[u8; 32]) -> Result<Join
         contacts,
         groups,
         distribution_lists: Vec::new(),
-        csp_hashed_nonces: hashed_nonces(&identity.threema_id, store.all_nonces()?),
-        d2d_hashed_nonces: hashed_nonces(&identity.threema_id, store.all_d2d_nonces()?),
+        csp_hashed_nonces,
+        d2d_hashed_nonces,
     };
-    let message = EdToNd {
+    let mut message = EdToNd {
         content: Some(ed_to_nd::Content::EssentialData(essential)),
     };
+    // Room for the tag from the start: the sending encrypts in place, so the buffer never moves
+    // and leaves no plain copy behind.
+    let mut essential_data = Zeroizing::new(Vec::with_capacity(
+        message.encoded_len() + ENCRYPTION_TAG_LENGTH,
+    ));
+    // Can't fail: a Vec always has the room.
+    let _ = message.encode(&mut *essential_data);
+    wipe_secrets(&mut message);
     Ok(JoinData {
         blobs: blobs.data,
-        essential_data: Zeroizing::new(message.encode_to_vec()),
+        essential_data,
     })
+}
+
+/// The ID's private key and the device group key are in plain `Vec`s of the message, only until
+/// it is encoded.
+fn wipe_secrets(message: &mut EdToNd) {
+    if let Some(ed_to_nd::Content::EssentialData(essential)) = &mut message.content {
+        if let Some(identity) = &mut essential.identity_data {
+            identity.ck.zeroize();
+        }
+        if let Some(group) = &mut essential.device_group_data {
+            group.dgk.zeroize();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use libthreema::common::{GroupIdentity, ThreemaId};
+
     use super::*;
+
+    fn with_group(left: bool) -> (tempfile::TempDir, Store, crate::groups::Group) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db"), &[2; 32]).unwrap();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "TESTTEST".into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        let identity = GroupIdentity {
+            creator_identity: ThreemaId::try_from("CREATOR1").unwrap(),
+            group_id: 7,
+        };
+        let group = crate::groups::Group {
+            key: crate::groups::key(&identity),
+            identity,
+            name: "Crew".into(),
+            members: vec![
+                "CREATOR1".into(),
+                "ABCD1234".into(),
+                "TESTTEST".into(),
+                "UNKNOWN1".into(),
+            ],
+            left,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        store.upsert_group(&group).unwrap();
+        for id in ["CREATOR1", "ABCD1234"] {
+            store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        (dir, store, group)
+    }
+
+    #[test]
+    fn a_group_goes_out_without_the_creator_the_user_and_people_without_a_contact() {
+        let (_dir, store, group) = with_group(false);
+        let synced = group_sync(&store, &group).unwrap();
+        assert_eq!(
+            synced.member_identities.unwrap().identities,
+            vec!["ABCD1234"]
+        );
+        assert_eq!(synced.user_state, Some(group::UserState::Member as i32));
+    }
+
+    #[test]
+    fn a_group_is_only_for_the_other_devices_with_its_creators_contact() {
+        let (_dir, store, group) = with_group(true);
+        assert!(group_syncable(&store, &group).unwrap());
+        store.delete_contact("CREATOR1").unwrap();
+        assert!(!group_syncable(&store, &group).unwrap());
+
+        // Ours needs no contact of ourselves.
+        let ours = GroupIdentity {
+            creator_identity: ThreemaId::try_from("TESTTEST").unwrap(),
+            group_id: 8,
+        };
+        let ours = crate::groups::Group {
+            key: crate::groups::key(&ours),
+            identity: ours,
+            ..group
+        };
+        store.upsert_group(&ours).unwrap();
+        assert!(group_syncable(&store, &ours).unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let media = MediaStore::open(dir.path(), &[3; 32]).unwrap();
+        let data = collect(&store, &media, &[1; 32]).unwrap();
+        let Some(ed_to_nd::Content::EssentialData(essential)) =
+            EdToNd::decode(data.essential_data.as_slice())
+                .unwrap()
+                .content
+        else {
+            panic!("not essential data");
+        };
+        let keys: Vec<u64> = essential
+            .groups
+            .iter()
+            .map(|g| {
+                g.group
+                    .as_ref()
+                    .unwrap()
+                    .group_identity
+                    .as_ref()
+                    .unwrap()
+                    .group_id
+            })
+            .collect();
+        assert_eq!(keys, vec![8]);
+    }
+
+    #[test]
+    fn being_removed_goes_out_as_removed() {
+        let (_dir, store, group) = with_group(true);
+        let state = |store: &Store| group_sync(store, &group).unwrap().user_state;
+        assert_eq!(state(&store), Some(group::UserState::Left as i32));
+        store.set_group_kicked(&group.key, true).unwrap();
+        assert_eq!(state(&store), Some(group::UserState::Kicked as i32));
+    }
+
+    #[test]
+    fn secrets_are_wiped_and_the_buffer_has_room_for_the_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db"), &[2; 32]).unwrap();
+        let media = MediaStore::open(dir.path(), &[2; 32]).unwrap();
+        store
+            .set_identity(&crate::store::StoredIdentity {
+                threema_id: "TESTTEST".into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "a".into(),
+            })
+            .unwrap();
+        let data = collect(&store, &media, &[5; 32]).unwrap();
+        assert!(
+            data.essential_data.capacity() - data.essential_data.len() >= ENCRYPTION_TAG_LENGTH
+        );
+
+        let mut message = EdToNd::decode(data.essential_data.as_slice()).unwrap();
+        wipe_secrets(&mut message);
+        let Some(ed_to_nd::Content::EssentialData(essential)) = message.content else {
+            panic!("not essential data");
+        };
+        assert!(essential.identity_data.unwrap().ck.is_empty());
+        assert!(essential.device_group_data.unwrap().dgk.is_empty());
+    }
 
     #[test]
     fn essential_data_from_the_store() {

@@ -6,6 +6,7 @@ import "../components/Errors.js" as Errors
 
 Page {
     id: page
+    objectName: "identitySetup"
     allowedOrientations: Orientation.All
 
     property bool working: false
@@ -23,9 +24,37 @@ Page {
         })
     }
 
+    // From a threema://license?key=… link: the directory may have turned the last key down here.
+    function useKey(key) {
+        if (working) return
+        working = true
+        errorLabel.text = ""
+        backend.call("checkLicense", { licenseKey: key }, function(ok, result, kind, message) {
+            working = false
+            if (ok) {
+                //% "License key changed"
+                Notices.show(qsTrId("threesea-la-license-key-changed"), Notice.Long, Notice.Center)
+            } else {
+                errorLabel.text = Errors.text(kind, message)
+            }
+        })
+    }
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
+
+        PullDownMenu {
+            enabled: !page.working
+            MenuItem {
+                //% "Change license key"
+                text: qsTrId("threesea-me-change-license-key")
+                onClicked: backend.call("forgetLicense", {}, function(ok, result, kind, message) {
+                    if (ok) backend.refresh()
+                    else errorLabel.text = Errors.text(kind, message)
+                })
+            }
+        }
 
         Column {
             id: column
@@ -38,8 +67,8 @@ Page {
             }
 
             InfoLabel {
-                //% "Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe or an ID backup."
-                text: qsTrId("threesea-la-identity-intro")
+                //% "Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe, an ID backup (Threema for Android calls it an ID export) or a Data backup. A Data backup brings your chats as well."
+                text: qsTrId("threesea-la-identity-intro-id-export")
             }
 
             ErrorLabel { id: errorLabel }
@@ -61,6 +90,11 @@ Page {
                     //% "Restore ID backup"
                     text: qsTrId("threesea-bt-restore-backup")
                     onClicked: pageStack.push(Qt.resolvedUrl("RestoreBackupPage.qml"))
+                }
+                Button {
+                    //% "Restore from Data backup"
+                    text: qsTrId("threesea-bt-restore-data-backup")
+                    onClicked: pageStack.push(Qt.resolvedUrl("DataBackupRestorePage.qml"))
                 }
             }
 

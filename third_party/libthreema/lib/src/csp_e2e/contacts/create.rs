@@ -89,7 +89,7 @@ impl State {
         // Add tracing span
         //
         // TODO(LIB-16): This should be applied to the whole task somehow
-        let _span = tracing::info_span! { "contacts", contacts = ?identities }.entered();
+        let _span = tracing::info_span! { "contacts", n_contacts = identities.len() }.entered();
 
         // Non-MD: Add contacts and done
         if context.d2x.is_none() {
@@ -218,7 +218,7 @@ impl State {
         let added = Self::add_contacts(&mut *context.contacts.borrow_mut(), state.contacts)?;
         if expected.len() != added.len() {
             let message = "One or more contact were added unexpectedly during a transaction";
-            error!(?expected, ?added, message);
+            error!(n_expected = expected.len(), n_added = added.len(), message);
             return Err(CspE2eProtocolError::DesyncError(message.to_owned()));
         }
 
@@ -237,15 +237,15 @@ impl State {
         let mut identities: Vec<ThreemaId> = Vec::with_capacity(contacts.len());
         for contact in &contacts {
             if contact_provider.has(contact.identity)? {
-                error!(identity = ?contact.identity, "Not adding contact, already exists");
+                error!("Not adding contact, already exists");
             } else {
                 identities.push(contact.identity);
             }
         }
         contacts.retain(|contact| identities.contains(&contact.identity));
-        debug!(contacts = ?identities, "Adding contacts");
+        debug!(n_contacts = identities.len(), "Adding contacts");
         contact_provider.add(contacts)?;
-        info!(contacts = ?identities, "Added contacts");
+        info!(n_contacts = identities.len(), "Added contacts");
 
         // TODO(SE-510): Schedule fetching gateway-defined profile picture here, if contact was
         // added and if necessary.

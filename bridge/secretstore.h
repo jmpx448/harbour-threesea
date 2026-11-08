@@ -24,27 +24,63 @@ public:
     // is no database yet). Emits exactly one of keyReady / failed.
     void loadKey(bool allowCreate);
 
-    // Replace what is stored (the key, or the wrapped key); emits stored(ok).
+    // Replace what is stored (the key, or the wrapped key); emits stored(ok): whether the next
+    // start goes by the new data.
     void store(const QByteArray &data);
+
+    // The old key goes for good and a new one takes its place: the ID was removed and its
+    // database with it (ADR 0018). Emits keyReady or failed.
+    void replaceKey();
+
+    // A prompt that ends as cancelled may never have been answered: Secrets says the same when
+    // the system's dialog goes away with the home screen. If `mayAsk` then holds, it is shown
+    // once more after `delay` ms.
+    void askAgainIfDismissed(int delay, std::function<bool()> mayAsk);
 
 signals:
     void keyReady(QByteArray key);
     // The key is encrypted with the app lock passphrase; `keyboard`: typed, not digits.
     void wrappedKeyReady(QByteArray blob, bool keyboard);
-    void failed(const QString &reason);
+    // The collection is locked (after every boot): the system is asking the user whether the app
+    // may read the key. One of the answers above or failed follows.
+    void confirmationNeeded();
+    // `kind`: what the UI tells apart (secrets: Secrets answered with an error, keyMissing: a
+    // database exists and its key is really not there). `detail`: a code for support.
+    void failed(const QString &kind, const QString &detail = QString());
     void stored(bool ok);
 
 private:
+    struct Fetched
+    {
+        bool found = false;
+        // Secrets says it isn't there; anything else that went wrong says nothing about that.
+        bool missing = false;
+        // Reading it needs the user's confirmation; only when the read was not to ask for one.
+        bool locked = false;
+        bool dismissed = false;
+        QByteArray data;
+        QString code;
+    };
+
     void ensureCollection();
     void fetchKey();
+    void askForKey();
+    void keyFetched(const Fetched &key);
+    bool readFailed(const Fetched &fetched);
     void useKey(const QByteArray &key, bool found);
-    void fetch(const QString &name, std::function<void(bool, const QByteArray &)> done);
+    void fetch(const QString &name, std::function<void(const Fetched &)> done, bool mayAsk = true);
     void write(const QString &name, const QByteArray &data, std::function<void(bool)> done);
     void remove(const QString &name, std::function<void(bool)> done);
+    void replaceWith(const QByteArray &data);
+    void settleFailedReplacement(const QByteArray &data);
     void storeNewKey();
 
     Sailfish::Secrets::SecretManager *m_manager;
     bool m_allowCreate = false;
+    bool m_replaceKey = false;
+    bool m_askedAgain = false;
+    int m_askAgainAfter = 0;
+    std::function<bool()> m_mayAskAgain;
 };
 
 #endif // SECRETSTORE_H

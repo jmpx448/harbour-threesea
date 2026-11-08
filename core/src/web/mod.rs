@@ -38,6 +38,10 @@ pub(crate) const MIGRATION: &str = "
     );
 ";
 
+/// The name the user gave a browser (sessions of the same browser program look alike).
+pub(crate) const MIGRATION_LABEL: &str =
+    "ALTER TABLE web_sessions ADD COLUMN label TEXT NOT NULL DEFAULT '';";
+
 /// A Threema Web session (one browser).
 pub struct WebSession {
     pub id: i64,
@@ -48,11 +52,15 @@ pub struct WebSession {
     pub server_key: Option<[u8; 32]>,
     pub host: String,
     pub port: u16,
+    /// What the code claimed (its options). Not for anything that matters: the host itself says
+    /// whether the server is Threema's.
     pub self_hosted: bool,
     /// The browser stored the session (`keyPersisted`): it can come back without a QR code.
     pub persistent: bool,
     /// What the browser said it is (`clientInfo`).
     pub client: String,
+    /// What the user calls it; empty: `client` is its name.
+    pub label: String,
     pub created_at: i64,
     pub last_connection: Option<i64>,
 }
@@ -64,9 +72,10 @@ impl WebSession {
         json!({
             "id": self.id,
             "host": self.host,
-            "selfHosted": self.self_hosted,
+            "selfHosted": !qr::is_threema_host(&self.host),
             "persistent": self.persistent,
             "client": self.client,
+            "label": self.label,
             "createdAt": self.created_at,
             "lastConnection": self.last_connection,
         })
@@ -79,7 +88,7 @@ fn key32(bytes: Vec<u8>) -> [u8; 32] {
 
 const COLUMNS: &str =
     "id, initiator_key, private_key, server_key, host, port, self_hosted, persistent,
-    client, created_at, last_connection";
+    client, created_at, last_connection, label";
 
 fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebSession> {
     Ok(WebSession {
@@ -94,6 +103,7 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebSession> {
         client: row.get(8)?,
         created_at: row.get(9)?,
         last_connection: row.get(10)?,
+        label: row.get(11)?,
     })
 }
 
@@ -102,8 +112,8 @@ impl Store {
     pub fn add_web_session(&self, session: &WebSession) -> Result<i64, StoreError> {
         self.conn.execute(
             "INSERT INTO web_sessions (initiator_key, private_key, server_key, host, port, self_hosted,
-                 persistent, client, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 persistent, client, created_at, label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 session.initiator_key.as_slice(),
                 session.private_key.as_slice(),
@@ -114,6 +124,7 @@ impl Store {
                 session.persistent,
                 session.client,
                 session.created_at,
+                session.label,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -159,9 +170,23 @@ impl Store {
         Ok(())
     }
 
+    /// Name a session (empty: none); whether it exists.
+    pub fn set_web_session_label(&self, id: i64, label: &str) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE web_sessions SET label = ?2 WHERE id = ?1",
+            params![id, label],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn remove_web_session(&self, id: i64) -> Result<(), StoreError> {
         self.conn
             .execute("DELETE FROM web_sessions WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn remove_web_sessions(&self) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM web_sessions", [])?;
         Ok(())
     }
 
@@ -185,6 +210,22 @@ impl Store {
              ON CONFLICT(host) DO UPDATE SET spki = excluded.spki",
             params![host, spki],
         )?;
+        Ok(())
+    }
+
+    /// The self-hosted servers the user allowed.
+    pub fn web_hosts(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT host FROM web_hosts ORDER BY host")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Take a self-hosted server's permission and its certificate pin back.
+    pub fn remove_web_host(&self, host: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM web_hosts WHERE host = ?1", [host])?;
         Ok(())
     }
 }

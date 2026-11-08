@@ -62,6 +62,10 @@ Notes:
   Without this, the screen is 1024×768 landscape and apps come up rotated.
 - After each boot, Sailfish Secrets asks to confirm access to our key once (the emulator has no
   device lock code; on a phone with a lock code the collection unlocks with the device).
+- **Confirm that prompt before deploying.** The Full build's background instance starts at boot and
+  waits on it; deploying meanwhile crashed `sailfishsecretsd`, and from then on every read of the
+  key failed with `secrets read 11` and no prompt, until a reboot. Answer the prompt (or let the app
+  open once), then run `scripts/emulator-deploy.sh`.
 - Jolla Settings may not start from the app grid in this setup; `nohup jolla-settings &` over
   SSH works. Its device-lock switch does not react in the emulator.
 - **Translucency is rendered too weak**: the emulator's software renderer blends translucent
@@ -94,6 +98,7 @@ ssh -p 2223 -i ~/SailfishOS/emulator/share/id_ed25519 root@127.0.0.1 journalctl 
 Call media engine (Full, ADR 0012): `scripts/test-callengine.sh` builds `tests/callengine` (two
 webrtcbin engines calling each other) in the SDK image and runs it in the emulator as
 `defaultuser` (PulseAudio session); it prints both SDPs and `connected`, exit code 0 on success.
+With `--build-only` it stops after the build (what CI and `scripts/run-sdk-tests.sh` do).
 Sound (calls, voice messages): the VM needs VirtualBox's PulseAudio driver with input and
 output, set while it is off:
 `VBoxManage modifyvm "Sailfish OS Emulator 5.1.0.11" --audio-driver pulse --audio-enabled on --audio-in on --audio-out on`.

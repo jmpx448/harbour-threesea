@@ -20,8 +20,8 @@ public:
     static int bitrateForSetting(int setting);
 
     // Writes the scaled video to `target` (an .mp4 path) and returns true. False means the
-    // video is to be sent as it is: no encoder, an unreadable container, already small enough,
-    // or an error (then `target` is removed again).
+    // video is to be sent as it is: no encoder, an unreadable container, or an error (then
+    // `target` is removed again). Whether it is too large is the caller's question.
     static bool scaleDown(const QString &source, int setting, const QString &target);
 };
 

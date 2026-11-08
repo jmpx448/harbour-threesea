@@ -16,7 +16,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{LazyLock, Mutex},
+    sync::Mutex,
 };
 
 use aes_gcm::{
@@ -110,10 +110,36 @@ struct State {
     peers: HashMap<u32, Vec<KeyState>>,
 }
 
-static STATE: LazyLock<Mutex<State>> = LazyLock::new(Mutex::default);
+#[cfg(not(test))]
+static STATE: std::sync::LazyLock<Mutex<State>> = std::sync::LazyLock::new(Mutex::default);
 
+#[cfg(not(test))]
 fn state() -> std::sync::MutexGuard<'static, State> {
     STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// Each test has a thread of its own, and its own keys: a test that ends a call elsewhere (a leave
+// resets the keys) can't take them away from one that is encrypting.
+#[cfg(test)]
+thread_local! {
+    static STATE: &'static Mutex<State> = {
+        let state: &'static Mutex<State> = Box::leak(Box::default());
+        TEST_STATES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(state);
+        state
+    };
+}
+
+/// Every test thread's keys, so that a leak checker (scripts/test-ffi-asan.sh) sees them as
+/// still in use rather than lost.
+#[cfg(test)]
+static TEST_STATES: Mutex<Vec<&'static Mutex<State>>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn state() -> std::sync::MutexGuard<'static, State> {
+    STATE
+        .with(|state| *state)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -266,7 +292,7 @@ pub fn decrypt(participant: u32, codec: Codec, frame: &[u8]) -> Option<Vec<u8>> 
 mod tests {
     use super::*;
 
-    // The state is process-wide: one test runs the whole sequence.
+    // One test runs the whole sequence: the keys go on from one step to the next.
     #[test]
     fn frames_round_trip_with_keys_and_ratchets() {
         reset([7; 32]);

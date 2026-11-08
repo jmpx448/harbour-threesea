@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Message storage: 1:1 conversations, delivery states, used nonces.
 
+use std::collections::HashMap;
+
 use rusqlite::{OptionalExtension as _, Row, params};
 use serde_json::{Value, json};
 
@@ -226,6 +228,22 @@ pub enum OutgoingState {
     Failed = 4,
 }
 
+/// An incoming message that was just marked read.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadMessage {
+    /// Its row.
+    pub id: i64,
+    /// Its protocol ID.
+    pub message_id: u64,
+    /// The sender asked for no delivery receipts.
+    pub no_receipts: bool,
+}
+
+/// The longest message body we send (`encode_message_body`'s data). A frame holds 8192 bytes, and
+/// its wrappings take up to about 600: padding, boxes, the metadata with a nickname, and the
+/// envelope of forward secrecy.
+pub const MESSAGE_BODY_MAX: usize = 7500;
+
 /// Incoming message state.
 pub const INCOMING_UNREAD: i64 = 0;
 pub const INCOMING_READ: i64 = 1;
@@ -260,12 +278,58 @@ pub struct Message {
     /// arrival order, imported history slotted between them. Internal; not part of the UI
     /// JSON.
     pub sort_key: i64,
+    /// Outgoing: a send has begun, so someone may have it even while it is pending (see
+    /// [`MIGRATION_WRITTEN_OUT`]).
+    pub written_out: bool,
 }
+
+/// Resetting what was loading takes no read of the whole table, which the start's clean-up does
+/// twice.
+pub(crate) const MIGRATION_FILE_MESSAGES: &str =
+    "CREATE INDEX IF NOT EXISTS messages_files ON messages (id) WHERE kind = 'file';";
+
+/// Whether the sender asked for no delivery receipts (flag `0x80`, Threema Gateway's): the read
+/// receipt stays away too.
+pub(crate) const MIGRATION_NO_RECEIPTS: &str = "
+    ALTER TABLE messages ADD COLUMN no_receipts INTEGER NOT NULL DEFAULT 0;";
+
+/// Indexes for what is looked for often and is rarely there: what waits to go out, what waits to
+/// come, what is starred, whose acknowledgement a message waits for; search's walk through all
+/// chats, newest first; a chat's media. Partial ones stay small. The
+/// queries name them (`INDEXED BY`), since a term that is a bound parameter can't select a partial
+/// index; so a query that stops matching its index fails at once instead of scanning. A body that
+/// is no JSON must not fail its write: `json_valid` comes first. 0 and 1 in here are
+/// [`OutgoingState::Pending`], `STATE_REMOTE` and `STATE_LOADING`.
+pub(crate) const MIGRATION_LOOKUP_INDEXES: &str = "
+    CREATE INDEX messages_pending ON messages (id) WHERE outgoing = 1 AND state = 0;
+    CREATE INDEX messages_uploading ON messages (id)
+        WHERE kind = 'file' AND outgoing = 1 AND json_valid(body)
+            AND json_extract(body, '$.uploadState') = 1;
+    CREATE INDEX messages_media_to_come ON messages (id)
+        WHERE kind = 'file' AND json_valid(body)
+            AND (json_extract(body, '$.thumbnailState') = 0
+                 OR json_extract(body, '$.fileState') = 0);
+    CREATE INDEX messages_starred ON messages (created_at, id) WHERE starred = 1;
+    CREATE INDEX messages_by_time ON messages (created_at, id);
+    CREATE INDEX messages_media ON messages (conversation, sort_key, id) WHERE kind = 'file';
+    CREATE INDEX pending_receivers_by_receiver ON pending_receivers (receiver, message_id);";
+
+const _: () = assert!(OutgoingState::Pending as i64 == 0 && INCOMING_UNREAD == 0);
+
+/// Received 1:1 messages stored on a leader whose reflection isn't confirmed
+/// ([`Store::await_reflection`]).
+pub(crate) const MIGRATION_AWAITING_REFLECTION: &str = "
+    CREATE TABLE awaiting_reflection (
+        sender     TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        PRIMARY KEY (sender, message_id)
+    ) WITHOUT ROWID;";
 
 fn columns() -> String {
     format!(
         "id, conversation, message_id, outgoing, kind, body, created_at, updated_at, state, \
-         edited_at, sender, {}, starred, sent_at, delivered_at, read_at, received_at, sort_key",
+         edited_at, sender, {}, starred, sent_at, delivered_at, read_at, received_at, sort_key, \
+         written_out",
         crate::reactions::REACTIONS_COLUMN
     )
 }
@@ -283,17 +347,39 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         state: row.get(8)?,
         edited_at: row.get(9)?,
         sender: row.get(10)?,
-        reactions: row
-            .get::<_, Option<String>>(11)?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_else(|| Value::Array(Vec::new())),
+        reactions: crate::reactions::shown_reactions(row.get::<_, Option<String>>(11)?.as_deref()),
         starred: row.get(12)?,
         sent_at: row.get(13)?,
         delivered_at: row.get(14)?,
         read_at: row.get(15)?,
         received_at: row.get(16)?,
         sort_key: row.get(17)?,
+        written_out: row.get(18)?,
     })
+}
+
+/// Store migration 36. `written_out`: a send of this outgoing message has begun, so someone may
+/// have it although it isn't acknowledged. The queue doesn't survive a reconnect, and a resend
+/// under the same ID is dropped by whoever has the message, so this has to be on record for edits
+/// to know who may hold the old text. What was waiting during the upgrade counts as begun. And
+/// placeholders an older version put back into the queue come out of it.
+pub(crate) const MIGRATION_WRITTEN_OUT: &str = "
+    ALTER TABLE messages ADD COLUMN written_out INTEGER NOT NULL DEFAULT 0;
+    UPDATE messages SET written_out = 1 WHERE outgoing = 1 AND state = 0;
+    UPDATE messages SET state = 1 WHERE outgoing = 1 AND state = 0 AND kind = 'deleted';
+    DELETE FROM pending_receivers WHERE (conversation, message_id) IN
+        (SELECT conversation, message_id FROM messages WHERE outgoing = 1 AND kind = 'deleted');";
+
+/// Whether a received edit applies to this kind of message (the proto's _Edit applies to_): a
+/// text, or a file's caption.
+pub fn edit_applies_to(kind: &str) -> bool {
+    matches!(kind, "text" | "file")
+}
+
+/// Whether a deletion for everyone applies to this kind of message, sent or received (Android's
+/// `doesMessageTypeAllowRemoteDeletion`). A poll isn't one: it has to stay what votes refer to.
+pub fn delete_applies_to(kind: &str) -> bool {
+    matches!(kind, "text" | "location" | "file")
 }
 
 /// Threema's quote format (Android `QuoteUtil`, "quote v2"): `> quote #<message id hex>\n\n`
@@ -351,12 +437,18 @@ pub fn location_message(body: &str) -> Option<libthreema::model::message::Locati
     let longitude = value["longitude"]
         .as_f64()
         .filter(|l| (-180.0..=180.0).contains(l))?;
+    // The wire format's single line after the coordinates is the address; libthreema's encoder
+    // drops a name that comes without one. The place's name is what the recipient has to see.
+    let (name, address) = match (text("name"), text("address")) {
+        (Some(name), None) => (None, Some(name)),
+        fields => fields,
+    };
     Some(libthreema::model::message::LocationMessage {
         latitude,
         longitude,
         accuracy_m: value["accuracy"].as_f64().filter(|a| *a >= 0.0),
-        name: text("name"),
-        address: text("address"),
+        name,
+        address,
     })
 }
 
@@ -365,10 +457,14 @@ pub fn location_message(body: &str) -> Option<libthreema::model::message::Locati
 /// media), `audio` (sent as a file) or `file`. `body` is the stored file JSON.
 pub fn media_kind(body: &str) -> &'static str {
     let value: Value = serde_json::from_str(body).unwrap_or_default();
-    let media_type = value["mediaType"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    kind_of_media(
+        value["mediaType"].as_str().unwrap_or_default(),
+        value["rendering"] == "file",
+    )
+}
+
+fn kind_of_media(media_type: &str, rendered_as_file: bool) -> &'static str {
+    let media_type = media_type.to_ascii_lowercase();
     if media_type == "image/gif" {
         "gif"
     } else if media_type.starts_with("image/") {
@@ -376,11 +472,7 @@ pub fn media_kind(body: &str) -> &'static str {
     } else if media_type.starts_with("video/") {
         "video"
     } else if media_type.starts_with("audio/") {
-        if value["rendering"] == "file" {
-            "audio"
-        } else {
-            "voice"
-        }
+        if rendered_as_file { "audio" } else { "voice" }
     } else {
         "file"
     }
@@ -388,6 +480,55 @@ pub fn media_kind(body: &str) -> &'static str {
 
 /// All kinds, in the filter's order.
 pub const MEDIA_KINDS: [&str; 6] = ["image", "gif", "video", "voice", "audio", "file"];
+
+/// Where a page of a chat's media continues: the history position of the row before it.
+pub type MediaCursor = (i64, i64);
+/// File messages with their [`media_kind`].
+pub type MediaPage = Vec<(Message, &'static str)>;
+
+/// Up to this many candidates from the search index are sorted, about a millisecond per thousand on
+/// a desktop, as much as the walk below takes for this many. Lower in tests, as is the next, which
+/// go through all the ways.
+const SEARCH_SORTED_MAX: usize = if cfg!(test) { 1000 } else { 10_000 };
+/// Up to this many are kept in a list to check rows against while walking the messages from the
+/// newest on, which stops at the limit. More than that, of either the index's hits or messages with
+/// mentions: the text is so common that the walk comes to enough hits without any list.
+const SEARCH_IDS_MAX: usize = if cfg!(test) { 2000 } else { 50_000 };
+/// The kinds search looks at.
+const SEARCHED_KINDS: &str = "kind IN ('text', 'file', 'location', 'poll')";
+
+/// Search results in one chat come in its history order, those of all chats by time.
+fn search_order(in_chat: bool) -> &'static str {
+    if in_chat {
+        "sort_key DESC, id DESC"
+    } else {
+        "created_at DESC, id DESC"
+    }
+}
+
+/// How a walk through the messages narrows them down in SQL, with what it binds.
+const SEARCH_WALK_IN_LIST: &str = "AND id IN (SELECT value FROM json_each(?))";
+/// For a query too short for the search index. Messages with mentions always pass: names aren't in
+/// the body.
+const SEARCH_WALK_LIKE: &str = "AND (body LIKE ? ESCAPE '\\' OR body LIKE '%@[%')";
+
+/// All messages from the newest on, in the order an index has them, so that nothing has to be
+/// sorted first and stopping at the limit saves the rest. Binds the chat, if `in_chat`, then what
+/// `narrowed` takes.
+fn search_walk(in_chat: bool, narrowed: &str) -> String {
+    let (index, chat) = if in_chat {
+        ("messages_position", "conversation = ? AND")
+    } else {
+        ("messages_by_time", "")
+    };
+    format!(
+        "SELECT {} FROM messages INDEXED BY {index}
+         WHERE {chat} {SEARCHED_KINDS} {narrowed}
+         ORDER BY {}",
+        columns(),
+        search_order(in_chat)
+    )
+}
 
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -417,6 +558,7 @@ fn marker(conversation: String, kind: &str, at: i64) -> Message {
         read_at: None,
         received_at: None,
         sort_key: 0,
+        written_out: false,
     }
 }
 
@@ -439,9 +581,13 @@ impl Message {
             "body": match self.kind.as_str() {
                 "text" => Value::Null,
                 "status" => Value::from(self.body.clone()),
+                "file" => crate::file_types::shown_body(
+                    serde_json::from_str(&self.body).unwrap_or(Value::Null),
+                ),
                 _ => serde_json::from_str(&self.body).unwrap_or(Value::Null),
             },
             "createdAt": self.created_at,
+            "arrivedAt": self.arrived_at(),
             "updatedAt": self.updated_at,
             "state": self.state,
             "editedAt": self.edited_at,
@@ -452,7 +598,21 @@ impl Message {
             "deliveredAt": self.delivered_at,
             "readAt": self.read_at,
             "receivedAt": self.received_at,
+            // The history position: the chat page tells by it whether a row outside its window
+            // is new. Fits a JavaScript number: a row id shifted by 20 bits (see the migration).
+            "sortKey": self.sort_key,
+            // Pending, but someone may have it already: changing it takes an edit message.
+            "writtenOut": self.written_out,
         })
+    }
+}
+
+impl Message {
+    /// When this message reached this device: an incoming `created_at` is the sender's clock,
+    /// which may be off by any amount or set on purpose. What retention and the chat list go by.
+    /// Rows with no arrival time (ours, imported ones, status lines) have only the one clock.
+    pub fn arrived_at(&self) -> i64 {
+        self.received_at.unwrap_or(self.created_at)
     }
 }
 
@@ -621,6 +781,36 @@ impl Store {
             .is_some())
     }
 
+    /// `has_incoming`'s row isn't known to the other devices of the group yet: the mediator hasn't
+    /// confirmed its reflection. Until it has, the server's next copy has to pass again.
+    pub fn await_reflection(&self, sender: &str, message_id: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO awaiting_reflection (sender, message_id) VALUES (?1, ?2)",
+            params![sender, message_id.cast_signed()],
+        )?;
+        Ok(())
+    }
+
+    pub fn awaits_reflection(&self, sender: &str, message_id: u64) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM awaiting_reflection WHERE sender = ?1 AND message_id = ?2",
+                params![sender, message_id.cast_signed()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn reflection_done(&self, sender: &str, message_id: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM awaiting_reflection WHERE sender = ?1 AND message_id = ?2",
+            params![sender, message_id.cast_signed()],
+        )?;
+        Ok(())
+    }
+
     /// Raise the state of outgoing messages (never lowers it: a late "delivered" must not undo
     /// "read"). Returns the changed messages.
     pub fn raise_outgoing_state(
@@ -687,8 +877,41 @@ impl Store {
         self.message(self.conn.last_insert_rowid())
     }
 
+    /// Whether the chat's newest row is the status line `code`.
+    pub fn newest_is_status(&self, conversation: &str, code: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT kind = 'status' AND body = ?2 FROM messages WHERE conversation = ?1
+                 ORDER BY id DESC LIMIT 1",
+                params![conversation, code],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// The chat with `peer` shows the call `call_id` (`call|…|callId`) among its last few calls
+    /// (Android looks at the last 4 too).
+    pub fn call_recorded(&self, peer: &str, call_id: u32) -> Result<bool, StoreError> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT body FROM messages
+             WHERE conversation = ?1 AND kind = 'status' AND body LIKE 'call|%'
+             ORDER BY id DESC LIMIT 4",
+        )?;
+        let call_id = call_id.to_string();
+        let bodies = statement.query_map(params![peer], |row| row.get::<_, String>(0))?;
+        for body in bodies {
+            if body?.split('|').nth(4) == Some(call_id.as_str()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Put a sent outgoing message back into the queue (the peer rejected it, e.g. after a lost
-    /// forward security session). Returns the changed message.
+    /// forward security session). Returns the changed message; one deleted for everyone meanwhile
+    /// has nothing left to send and stays as it is.
     pub fn reset_outgoing(
         &self,
         conversation: &str,
@@ -697,7 +920,7 @@ impl Store {
         let changed = self.conn.execute(
             "UPDATE messages SET state = ?3, updated_at = ?4,
                  sent_at = NULL, delivered_at = NULL, read_at = NULL
-             WHERE conversation = ?1 AND outgoing = 1 AND message_id = ?2",
+             WHERE conversation = ?1 AND outgoing = 1 AND message_id = ?2 AND kind <> 'deleted'",
             params![
                 conversation,
                 message_id.cast_signed(),
@@ -717,6 +940,19 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// A send of this outgoing message begins: from here on someone may have it. Returns the
+    /// message the first time, for the chat: changing it now takes more than it did.
+    pub fn set_written_out(&self, id: i64) -> Result<Option<Message>, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET written_out = 1 WHERE id = ?1 AND written_out = 0",
+            [id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.message(id)
+    }
+
     pub fn set_outgoing_failed(&self, id: i64) -> Result<Option<Message>, StoreError> {
         self.conn.execute(
             "UPDATE messages SET state = ?2, updated_at = ?3 WHERE id = ?1 AND outgoing = 1",
@@ -725,10 +961,51 @@ impl Store {
         self.message(id)
     }
 
+    /// A failed outgoing message is sent again, as `message_id`, to `receivers` if it is a group's:
+    /// to the queue, as if nothing had been tried. A file counts as uploading from here on, so
+    /// nothing sends its old blob, and the next start takes up the upload if this one ends first.
+    /// One step: pending with no receivers would count as sent. `None` if it isn't a failed one
+    /// (any more).
+    pub fn resend_outgoing(
+        &self,
+        id: i64,
+        message_id: u64,
+        receivers: &[String],
+    ) -> Result<Option<Message>, StoreError> {
+        let Some(old) = self
+            .message(id)?
+            .filter(|old| old.outgoing && old.state == OutgoingState::Failed as i64)
+        else {
+            return Ok(None);
+        };
+        let step = self.step()?;
+        self.conn.execute(
+            "DELETE FROM pending_receivers WHERE conversation = ?1 AND message_id = ?2",
+            params![old.conversation, old.message_id.cast_signed()],
+        )?;
+        self.conn.execute(
+            "UPDATE messages SET message_id = ?2, state = ?3, written_out = 0, updated_at = ?4,
+                 sent_at = NULL, delivered_at = NULL, read_at = NULL,
+                 body = CASE kind WHEN 'file' THEN json_set(body, '$.uploadState', 1) ELSE body END
+             WHERE id = ?1",
+            params![
+                id,
+                message_id.cast_signed(),
+                OutgoingState::Pending as i64,
+                now_ms()
+            ],
+        )?;
+        self.set_pending_receivers(&old.conversation, message_id, receivers)?;
+        step.commit()?;
+        self.message(id)
+    }
+
     /// Outgoing messages that still need sending, oldest first.
     pub fn pending_outgoing(&self) -> Result<Vec<Message>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE outgoing = 1 AND state = 0 ORDER BY id",
+            "SELECT {} FROM messages INDEXED BY messages_pending
+             WHERE outgoing = 1 AND state = 0 AND kind <> 'deleted'
+             ORDER BY id",
             columns()
         ))?;
         let rows = statement.query_map([], from_row)?;
@@ -813,19 +1090,22 @@ impl Store {
     /// How many incoming messages are unread, and the first of them in history order: the
     /// chat page opens there and draws the new-messages line above it.
     pub fn unread_position(&self, conversation: &str) -> Result<(i64, Option<i64>), StoreError> {
-        let count = self.conn.query_row(
-            "SELECT count(*) FROM messages
-             WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
-            params![conversation, INCOMING_UNREAD],
+        let count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM messages INDEXED BY messages_unread
+             WHERE conversation = ?1 AND outgoing = 0 AND state = 0",
+            [conversation],
             |row| row.get(0),
         )?;
+        if count == 0 {
+            return Ok((0, None));
+        }
         let first = self
             .conn
             .query_row(
-                "SELECT id FROM messages
-                 WHERE conversation = ?1 AND outgoing = 0 AND state = ?2
+                "SELECT id FROM messages INDEXED BY messages_unread
+                 WHERE conversation = ?1 AND outgoing = 0 AND state = 0
                  ORDER BY sort_key, id LIMIT 1",
-                params![conversation, INCOMING_UNREAD],
+                [conversation],
                 |row| row.get(0),
             )
             .optional()?;
@@ -848,6 +1128,32 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The IDs of a conversation's messages from `from` on.
+    pub fn message_ids_from(
+        &self,
+        conversation: &str,
+        from: i64,
+    ) -> Result<std::collections::HashSet<i64>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM messages WHERE conversation = ?1 AND id >= ?2")?;
+        let rows = statement.query_map(params![conversation, from], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A conversation's highest message ID, up to `limit`.
+    pub fn newest_message_id_up_to(
+        &self,
+        conversation: &str,
+        limit: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(id) FROM messages WHERE conversation = ?1 AND id <= ?2",
+            params![conversation, limit],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn message_count(&self, conversation: &str) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation = ?1",
@@ -856,27 +1162,30 @@ impl Store {
         )?)
     }
 
-    /// Messages of a conversation from `since` (a local id) on **in history order**, at least
-    /// the newest `limit`: to show a search hit that is older than the usual page.
-    pub fn conversation_messages_since(
+    /// A window of a conversation around the message `around` (a local id), oldest first: up
+    /// to `side` messages before it in history and up to `side` after it, to show a search hit
+    /// or a quoted message however old it is. The flag says whether the window reaches the
+    /// newest message; the chat pages on from there. A message that isn't there any more (or
+    /// isn't of this conversation) gives the newest messages.
+    pub fn conversation_messages_around(
         &self,
         conversation: &str,
-        since: i64,
-        limit: u32,
-    ) -> Result<Vec<Message>, StoreError> {
-        let Some((key, id)) = self.position_of(conversation, since)? else {
-            return self.conversation_messages(conversation, limit);
-        };
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE conversation = ?1
-               AND ((sort_key > ?2 OR (sort_key = ?2 AND id >= ?3)) OR id IN
-                 (SELECT id FROM messages WHERE conversation = ?1
-                  ORDER BY sort_key DESC, id DESC LIMIT ?4))
-             ORDER BY sort_key, id",
-            columns()
-        ))?;
-        let rows = statement.query_map(params![conversation, key, id, limit], from_row)?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        around: i64,
+        side: u32,
+    ) -> Result<(Vec<Message>, bool), StoreError> {
+        if self.position_of(conversation, around)?.is_none() {
+            let newest = side.saturating_mul(2).saturating_add(1);
+            return Ok((self.conversation_messages(conversation, newest)?, true));
+        }
+        let mut window = self.conversation_messages_before(conversation, around, side)?;
+        window.extend(self.message(around)?);
+        // One more than asked for tells whether anything lies beyond the window.
+        let mut newer =
+            self.conversation_messages_newer(conversation, around, side.saturating_add(1))?;
+        let reaches_newest = newer.len() <= side as usize;
+        newer.truncate(side as usize);
+        window.append(&mut newer);
+        Ok((window, reaches_newest))
     }
 
     /// Texts, captions, file, place and poll names containing `query` (case-insensitive),
@@ -888,6 +1197,7 @@ impl Store {
         query: &str,
         conversation: Option<&str>,
         limit: u32,
+        listed: impl Fn(&str) -> bool,
         names: impl Fn(&str) -> Option<String>,
     ) -> Result<Vec<(Message, String)>, StoreError> {
         let escaped = query
@@ -895,30 +1205,49 @@ impl Store {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let pattern = format!("%{escaped}%");
-        // SQL narrows it down (messages with mentions always pass: names are not in the body).
-        // From three characters on, the trigram index finds the candidates; shorter queries
-        // can't use it and scan, as before.
-        let indexed = query.chars().count() >= 3;
-        let candidates = if indexed {
-            "id IN (SELECT rowid FROM messages_search WHERE messages_search MATCH ?1
-                    UNION SELECT id FROM messages WHERE body LIKE '%@[%')"
+        // From three characters on, the trigram index finds the candidates (messages with mentions
+        // always are: names aren't in the body). Shorter queries can't use it.
+        let short = query.chars().count() < 3;
+        let candidates = if short {
+            None
         } else {
-            "(body LIKE ?1 ESCAPE '\\' OR body LIKE '%@[%')"
+            self.search_candidates(query)?.map(|ids| {
+                (
+                    serde_json::to_string(&ids).unwrap_or_default(),
+                    ids.len() <= SEARCH_SORTED_MAX,
+                )
+            })
         };
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages
-             WHERE kind IN ('text', 'file', 'location', 'poll')
-               AND {candidates}
-               AND (?2 IS NULL OR conversation = ?2)
-             ORDER BY created_at DESC, id DESC",
-            columns()
-        ))?;
-        // A quoted phrase: the trigram tokenizer matches it as a substring, case-insensitive.
-        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
-        let rows = statement.query_map(
-            params![if indexed { &phrase } else { &pattern }, conversation],
-            from_row,
-        )?;
+        let in_chat = conversation.is_some();
+        // In the order they are bound.
+        let mut args: Vec<&str> = Vec::new();
+        let sql = match &candidates {
+            Some((ids, few)) if *few => {
+                args.push(ids);
+                // Not by the chat's index: that would walk the chat to avoid sorting these few.
+                let chat = if in_chat { "AND +conversation = ?" } else { "" };
+                format!(
+                    "SELECT {} FROM messages
+                     WHERE {SEARCHED_KINDS} AND id IN (SELECT value FROM json_each(?)) {chat}
+                     ORDER BY {}",
+                    columns(),
+                    search_order(in_chat)
+                )
+            }
+            Some(_) => search_walk(in_chat, SEARCH_WALK_IN_LIST),
+            None => search_walk(in_chat, if short { SEARCH_WALK_LIKE } else { "" }),
+        };
+        if let Some(conversation) = conversation {
+            args.push(conversation);
+        }
+        match &candidates {
+            Some((ids, few)) if !*few => args.push(ids),
+            None if short => args.push(&pattern),
+            _ => {}
+        }
+        let mut statement = self.conn.prepare(&sql)?;
+        // Row by row: what follows stops at the limit, and a walk with it.
+        let rows = statement.query_map(rusqlite::params_from_iter(args), from_row)?;
         let needle = query.to_lowercase();
         let with_names = |text: &str| -> String {
             let mut text = text.to_owned();
@@ -948,6 +1277,8 @@ impl Store {
             if let Some(hit) = fields
                 .into_iter()
                 .find(|f| with_names(f).to_lowercase().contains(&needle))
+                // Here, not afterwards: a hidden chat's hits would use up the limit.
+                && listed(&message.conversation)
             {
                 found.push((message, hit));
                 if found.len() >= limit as usize {
@@ -956,6 +1287,46 @@ impl Store {
             }
         }
         Ok(found)
+    }
+
+    /// What the search index holds for `query`, and every message with a mention; `None` if either
+    /// is more than [`SEARCH_IDS_MAX`]. Stops reading there.
+    fn search_candidates(&self, query: &str) -> Result<Option<Vec<i64>>, StoreError> {
+        // A quoted phrase: the trigram tokenizer matches it as a substring, case-insensitive.
+        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+        let mut ids = self.ids_up_to_max(
+            "SELECT rowid FROM messages_search WHERE messages_search MATCH ?1 LIMIT ?2",
+            &[&phrase],
+        )?;
+        let mentions = self.ids_up_to_max(
+            "SELECT id FROM messages INDEXED BY messages_mentions WHERE body LIKE '%@[%' LIMIT ?1",
+            &[],
+        )?;
+        let (Some(found), Some(mentions)) = (ids.as_mut(), mentions) else {
+            return Ok(None);
+        };
+        found.extend(mentions);
+        Ok(ids)
+    }
+
+    /// The ids a statement finds, `None` if more than [`SEARCH_IDS_MAX`]. Takes `args`, then its
+    /// limit.
+    fn ids_up_to_max(
+        &self,
+        sql: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Option<Vec<i64>>, StoreError> {
+        let limit = SEARCH_IDS_MAX + 1;
+        let args: Vec<&dyn rusqlite::ToSql> = args
+            .iter()
+            .copied()
+            .chain([&limit as &dyn rusqlite::ToSql])
+            .collect();
+        let mut statement = self.conn.prepare(sql)?;
+        let ids: Vec<i64> = statement
+            .query_map(&*args, |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok((ids.len() <= SEARCH_IDS_MAX).then_some(ids))
     }
 
     pub fn set_starred(&self, id: i64, starred: bool) -> Result<Option<Message>, StoreError> {
@@ -969,7 +1340,8 @@ impl Store {
     /// Starred messages of all chats (or one), newest first.
     pub fn starred_messages(&self, conversation: Option<&str>) -> Result<Vec<Message>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE starred = 1 AND (?1 IS NULL OR conversation = ?1)
+            "SELECT {} FROM messages INDEXED BY messages_starred
+             WHERE starred = 1 AND (?1 IS NULL OR conversation = ?1)
              ORDER BY created_at DESC, id DESC",
             columns()
         ))?;
@@ -977,27 +1349,65 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The file messages of a conversation whose [`media_kind`] is in `kinds`, newest first:
-    /// the chat's media gallery (Android's `mediagallery`).
+    /// A page of the file messages of a conversation whose [`media_kind`] is in `kinds`, newest
+    /// first, each with its kind: the chat's media gallery (Android's `mediagallery`). `before`
+    /// goes on from where a page ended; `true`: there is more. Rows of other kinds are passed over
+    /// here, so a page costs about as much whatever the filter, as long as it finds its rows.
     pub fn conversation_media(
         &self,
         conversation: &str,
         kinds: &[&str],
-    ) -> Result<Vec<Message>, StoreError> {
+        before: Option<MediaCursor>,
+        limit: usize,
+    ) -> Result<(MediaPage, bool), StoreError> {
+        let mut page = Vec::new();
+        if limit == 0 {
+            return Ok((page, false));
+        }
+        let (key, id) = before.unwrap_or((i64::MAX, i64::MAX));
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {} FROM messages WHERE conversation = ?1 AND kind = 'file'
+            "SELECT {} FROM messages INDEXED BY messages_media
+             WHERE conversation = ?1 AND kind = 'file' AND (sort_key, id) < (?2, ?3)
              ORDER BY sort_key DESC, id DESC",
             columns()
         ))?;
-        let rows = statement.query_map(params![conversation], from_row)?;
-        let mut media = Vec::new();
+        let rows = statement.query_map(params![conversation, key, id], from_row)?;
         for message in rows {
             let message = message?;
-            if kinds.contains(&media_kind(&message.body)) {
-                media.push(message);
+            let kind = media_kind(&message.body);
+            if kinds.contains(&kind) {
+                if page.len() == limit {
+                    return Ok((page, true));
+                }
+                page.push((message, kind));
             }
         }
-        Ok(media)
+        Ok((page, false))
+    }
+
+    /// How many file messages of a conversation there are of each [`media_kind`] it has.
+    pub fn conversation_media_counts(
+        &self,
+        conversation: &str,
+    ) -> Result<HashMap<&'static str, i64>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT CASE WHEN json_valid(body) THEN json_extract(body, '$.mediaType') END,
+                    CASE WHEN json_valid(body) THEN json_extract(body, '$.rendering') END,
+                    count(*)
+             FROM messages INDEXED BY messages_media
+             WHERE conversation = ?1 AND kind = 'file'
+             GROUP BY 1, 2",
+        )?;
+        let mut rows = statement.query([conversation])?;
+        let mut counts = HashMap::new();
+        while let Some(row) = rows.next()? {
+            // Whatever isn't text in these fields counts as absent, as in `media_kind`.
+            let media_type = row.get_ref(0)?.as_str().unwrap_or_default();
+            let rendering = row.get_ref(1)?.as_str().unwrap_or_default();
+            let kind = kind_of_media(media_type, rendering == "file");
+            *counts.entry(kind).or_insert(0) += row.get::<_, i64>(2)?;
+        }
+        Ok(counts)
     }
 
     /// Mark incoming messages of a conversation as read; returns their message ids.
@@ -1025,41 +1435,94 @@ impl Store {
         Ok(())
     }
 
-    pub fn mark_conversation_read(&self, conversation: &str) -> Result<Vec<u64>, StoreError> {
-        let mut statement = self.conn.prepare(
-            "SELECT message_id FROM messages WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
+    /// The sender of this message asked for no delivery receipts.
+    pub fn set_no_receipts(&self, sender: &str, message_id: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE messages SET no_receipts = 1
+             WHERE conversation = ?1 AND message_id = ?2 AND outgoing = 0",
+            params![sender, message_id.cast_signed()],
         )?;
-        let ids: Vec<u64> = statement
-            .query_map(params![conversation, INCOMING_UNREAD], |row| {
-                row.get::<_, i64>(0).map(i64::cast_unsigned)
+        Ok(())
+    }
+
+    /// Mark a chat's incoming messages read; those that weren't. The second time there are none,
+    /// so what the others have to hear of it is queued with this
+    /// ([`crate::reactions::OUTBOX_READ_RECEIPT`]).
+    pub fn mark_conversation_read(
+        &self,
+        conversation: &str,
+    ) -> Result<Vec<ReadMessage>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, message_id, no_receipts FROM messages INDEXED BY messages_unread
+             WHERE conversation = ?1 AND outgoing = 0 AND state = 0",
+        )?;
+        let read: Vec<ReadMessage> = statement
+            .query_map([conversation], |row| {
+                Ok(ReadMessage {
+                    id: row.get(0)?,
+                    message_id: row.get::<_, i64>(1)?.cast_unsigned(),
+                    no_receipts: row.get(2)?,
+                })
             })?
             .collect::<Result<_, _>>()?;
         self.conn.execute(
-            "UPDATE messages SET state = ?3, updated_at = ?4, read_at = ?4
-             WHERE conversation = ?1 AND outgoing = 0 AND state = ?2",
-            params![conversation, INCOMING_UNREAD, INCOMING_READ, now_ms()],
+            "UPDATE messages INDEXED BY messages_unread
+             SET state = ?2, updated_at = ?3, read_at = ?3
+             WHERE conversation = ?1 AND outgoing = 0 AND state = 0",
+            params![conversation, INCOMING_READ, now_ms()],
         )?;
         // Reading the chat takes the hand-set mark away, as on Android.
         self.set_marked_unread(conversation, false)?;
-        Ok(ids)
+        Ok(read)
+    }
+
+    /// The key of every chat holding more than the app's own status lines (a call is a message).
+    pub fn chats_with_conversation(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT conversation FROM messages
+             WHERE kind <> 'status' OR body LIKE 'call|%'",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The key of every chat that holds a message, private ones too.
+    pub fn chats_with_messages(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT chat FROM chat_summaries")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The chats with unread messages and how many, in the order of `conversations()`.
+    pub fn unread_chats(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.chat, s.unread
+             FROM chat_summaries s JOIN messages m ON m.id = s.last_id
+             WHERE s.unread > 0
+             ORDER BY COALESCE(m.received_at, m.created_at) DESC, m.id DESC",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// One row per conversation: last message and unread count, newest first. Chats without
-    /// messages get a stand-in row (id 0): emptied chats (kind `empty`, from when they were
-    /// emptied) and groups and distribution lists with no history yet (kind `none`, from their
+    /// messages get a stand-in row (id 0): emptied chats and those a backup brought without their
+    /// messages (kind `empty`, from when they were emptied or last changed) and groups and distribution lists with no history yet (kind `none`, from their
     /// creation) — unlike a contact, they are chats of their own as soon as they exist
     /// (Android lists every group too; a Safe restore brings groups without any messages).
     pub fn conversations(&self) -> Result<Vec<(Message, i64)>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
             // One row per chat straight from the summary the triggers keep (migration 33):
             // its newest message by history position and its unread count, no scan over the
-            // messages. The order is that message's time, with a deterministic tie-break.
+            // messages. The order is when that message arrived (`Message::arrived_at`; a sender's
+            // wrong clock must not pin a chat or bury a new message), with a deterministic
+            // tie-break.
             "SELECT {}, s.unread
              FROM chat_summaries s JOIN messages m ON m.id = s.last_id
-             ORDER BY m.created_at DESC, m.id DESC",
+             ORDER BY COALESCE(m.received_at, m.created_at) DESC, m.id DESC",
             columns()
         ))?;
-        let rows = statement.query_map([], |row| Ok((from_row(row)?, row.get::<_, i64>(18)?)))?;
+        let rows = statement.query_map([], |row| Ok((from_row(row)?, row.get::<_, i64>(19)?)))?;
         let mut list: Vec<(Message, i64)> = rows.collect::<Result<_, _>>()?;
         let mut markers: Vec<Message> = Vec::new();
         let mut statement = self.conn.prepare(
@@ -1100,21 +1563,40 @@ impl Store {
         for entry in markers {
             let place = list
                 .iter()
-                .position(|(m, _)| m.created_at < entry.created_at)
+                .position(|(m, _)| m.arrived_at() < entry.arrived_at())
                 .unwrap_or(list.len());
             list.insert(place, (entry, 0));
         }
         Ok(list)
     }
 
-    /// Delete a chat's messages and forget it (see [`Self::empty_conversation`] to keep it).
+    /// Delete a chat: its messages and what is kept for the chat as such, its pin, archive and
+    /// unread marks and its draft, so that it starts anew if it comes back (ADR 0022). What belongs
+    /// to the contact or group (notification choice, tone) and the private mark stay; see
+    /// [`Self::empty_conversation`] to keep the chat.
     pub fn delete_conversation(&self, conversation: &str) -> Result<(), StoreError> {
+        let step = self.step()?;
+        self.delete_chat_rows(conversation)?;
+        step.commit()?;
+        Ok(())
+    }
+
+    /// [`Self::delete_conversation`]'s rows, in the caller's transaction.
+    pub(crate) fn delete_chat_rows(&self, conversation: &str) -> Result<(), StoreError> {
+        for table in [
+            "messages",
+            "emptied_chats",
+            "pinned_chats",
+            "archived_chats",
+            "marked_unread_chats",
+        ] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE conversation = ?1"),
+                [conversation],
+            )?;
+        }
         self.conn.execute(
-            "DELETE FROM messages WHERE conversation = ?1",
-            [conversation],
-        )?;
-        self.conn.execute(
-            "DELETE FROM emptied_chats WHERE conversation = ?1",
+            "DELETE FROM settings WHERE key IN ('draft:' || ?1, 'draftQuote:' || ?1)",
             [conversation],
         )?;
         Ok(())
@@ -1129,6 +1611,24 @@ impl Store {
         self.conn.execute(
             "INSERT OR REPLACE INTO emptied_chats (conversation, at) VALUES (?1, ?2)",
             params![conversation, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// A chat a backup brings without its messages, last changed at `at` (ms): listed from then on
+    /// like an emptied one, as Android lists restored chats by their `lastUpdate`. A chat that
+    /// already has a time of its own keeps it; no usable time, no entry.
+    pub fn note_restored_chat(
+        &self,
+        conversation: &str,
+        at: Option<i64>,
+    ) -> Result<(), StoreError> {
+        let Some(at) = at.filter(|at| *at > 0) else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "INSERT OR IGNORE INTO emptied_chats (conversation, at) VALUES (?1, ?2)",
+            params![conversation, at],
         )?;
         Ok(())
     }
@@ -1174,23 +1674,41 @@ impl Store {
         )?)
     }
 
-    /// Replace a text message's text; `edited_at` `None` for a message nobody has seen yet.
+    /// Replace a message's text, or a file's caption; `edited_at` `None` for a message nobody has
+    /// seen yet. Other kinds stay as they are.
     pub fn edit_message(
         &self,
         id: i64,
         text: &str,
         edited_at: Option<i64>,
     ) -> Result<Option<Message>, StoreError> {
-        // An edit without the quote prefix keeps the quote of the original.
-        let text = match (self.message(id)?, split_quote(text).0) {
-            (Some(original), None) => with_quote(split_quote(&original.body).0, text),
-            _ => text.to_owned(),
+        let Some(original) = self.message(id)? else {
+            return Ok(None);
         };
-        self.conn.execute(
-            "UPDATE messages SET body = ?2, edited_at = coalesce(?3, edited_at), updated_at = ?4
-             WHERE id = ?1 AND kind = 'text'",
-            params![id, text, edited_at, now_ms()],
-        )?;
+        match original.kind.as_str() {
+            "text" => {
+                // An edit without the quote prefix keeps the quote of the original.
+                let text = match split_quote(text).0 {
+                    None => with_quote(split_quote(&original.body).0, text),
+                    Some(_) => text.to_owned(),
+                };
+                self.conn.execute(
+                    "UPDATE messages SET body = ?2, edited_at = coalesce(?3, edited_at),
+                         updated_at = ?4
+                     WHERE id = ?1",
+                    params![id, text, edited_at, now_ms()],
+                )?;
+            }
+            "file" => {
+                self.conn.execute(
+                    "UPDATE messages SET body = json_set(body, '$.caption', ?2),
+                         edited_at = coalesce(?3, edited_at), updated_at = ?4
+                     WHERE id = ?1 AND json_valid(body)",
+                    params![id, text, edited_at, now_ms()],
+                )?;
+            }
+            _ => {}
+        }
         self.message(id)
     }
 
@@ -1200,16 +1718,37 @@ impl Store {
             .execute("DELETE FROM reactions WHERE message = ?1", [id])?;
         self.conn
             .execute("DELETE FROM files WHERE message = ?1", [id])?;
+        // Whatever refers to it by ID has nothing to find any more: a poll takes no more votes.
+        self.conn
+            .execute("DELETE FROM polls WHERE message = ?1", [id])?;
+        // Nothing of it is left to send, to anyone.
         self.conn.execute(
-            "UPDATE messages SET kind = 'deleted', body = '', edited_at = ?2, updated_at = ?3
+            "DELETE FROM pending_receivers WHERE (conversation, message_id) IN
+                 (SELECT conversation, message_id FROM messages WHERE id = ?1 AND outgoing = 1)",
+            [id],
+        )?;
+        self.conn.execute(
+            "UPDATE messages SET kind = 'deleted', body = '', edited_at = ?2, updated_at = ?3,
+                 state = CASE WHEN outgoing = 1 AND state = ?4 THEN ?5 ELSE state END
              WHERE id = ?1",
-            params![id, deleted_at, now_ms()],
+            params![
+                id,
+                deleted_at,
+                now_ms(),
+                OutgoingState::Pending as i64,
+                OutgoingState::Sent as i64
+            ],
         )?;
         self.message(id)
     }
 
     /// Remove a message from this device only (or one that was never sent).
     pub fn remove_message(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM pending_receivers WHERE (conversation, message_id) IN
+                 (SELECT conversation, message_id FROM messages WHERE id = ?1 AND outgoing = 1)",
+            [id],
+        )?;
         self.conn
             .execute("DELETE FROM messages WHERE id = ?1", [id])?;
         Ok(())
@@ -1300,17 +1839,17 @@ impl Store {
     /// were new.
     pub fn add_hashed_nonces(&self, d2d: bool, hashed: &[[u8; 32]]) -> Result<usize, StoreError> {
         let table = if d2d { "d2d_nonces" } else { "nonces" };
-        let tx = self.conn.unchecked_transaction()?;
+        let step = self.step()?;
         let mut added = 0;
         {
-            let mut statement = tx.prepare(&format!(
+            let mut statement = self.conn.prepare(&format!(
                 "INSERT OR IGNORE INTO {table} (nonce) VALUES (?1)"
             ))?;
             for nonce in hashed {
                 added += statement.execute([&nonce[..]])?;
             }
         }
-        tx.commit()?;
+        step.commit()?;
         Ok(added)
     }
 
@@ -1353,9 +1892,13 @@ mod tests {
         let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
         let hits = |query: &str| -> Vec<i64> {
             store
-                .search_messages(query, None, 50, |id| {
-                    (id == "0000ANNA").then(|| "Anna".into())
-                })
+                .search_messages(
+                    query,
+                    None,
+                    50,
+                    |_| true,
+                    |id| (id == "0000ANNA").then(|| "Anna".into()),
+                )
                 .unwrap()
                 .into_iter()
                 .map(|(m, _)| m.id)
@@ -1435,7 +1978,7 @@ mod tests {
         let names = |id: &str| (id == "00000BOB").then(|| "Bob".to_owned());
         let search = |query: &str, conversation: Option<&str>| {
             store
-                .search_messages(query, conversation, 10, names)
+                .search_messages(query, conversation, 10, |_| true, names)
                 .unwrap()
         };
         let ids = |found: Vec<(Message, String)>| {
@@ -1456,13 +1999,92 @@ mod tests {
         assert!(store.set_starred(hello.id, true).unwrap().unwrap().starred);
         assert_eq!(store.starred_messages(None).unwrap().len(), 1);
         assert!(store.starred_messages(Some("00000ANN")).unwrap().is_empty());
-        assert_eq!(
-            store
-                .conversation_messages_since("00000BOB", hello.id, 1)
-                .unwrap()
-                .len(),
-            3
-        );
+        // A hit can be opened: the window around it holds it.
+        let (around, _) = store
+            .conversation_messages_around("00000BOB", hello.id, 1)
+            .unwrap();
+        assert_eq!(around.iter().filter(|m| m.id == hello.id).count(), 1);
+    }
+
+    /// The chat page tells a new row from a change to one outside its window by `sortKey`:
+    /// a receipt or a star on an old message must not look newer than what came after it, and
+    /// only a message that really is new may be higher than everything.
+    #[test]
+    fn a_change_keeps_its_place_in_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let key = |m: &Message| m.to_json()["sortKey"].as_i64().unwrap();
+        let old = store
+            .insert_outgoing("00000BOB", 1, "text", "old of ours")
+            .unwrap();
+        let newest = store
+            .insert_incoming("00000BOB", 2, "text", "newest", 20)
+            .unwrap()
+            .unwrap();
+        assert!(key(&old) < key(&newest));
+
+        let receipt = store
+            .raise_outgoing_state("00000BOB", &[1], OutgoingState::Read)
+            .unwrap();
+        assert_eq!(receipt.len(), 1);
+        assert_eq!(key(&receipt[0]), key(&old), "a receipt doesn't move it");
+        let starred = store.set_starred(old.id, true).unwrap().unwrap();
+        assert_eq!(key(&starred), key(&old), "nor does anything else");
+
+        let added = store
+            .insert_incoming("00000BOB", 3, "text", "new", 5)
+            .unwrap()
+            .unwrap();
+        assert!(key(&added) > key(&newest), "whatever its own clock says");
+    }
+
+    /// A jump to an old message used to load everything newer than it at once.
+    #[test]
+    fn a_window_around_a_message_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let ids: Vec<i64> = (0..100_u64)
+            .map(|n| {
+                store
+                    .insert_incoming("00000BOB", n + 1, "text", "x", 10)
+                    .unwrap()
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        store
+            .insert_incoming("00000ANN", 1, "text", "other chat", 10)
+            .unwrap();
+        let window = |around: i64| {
+            let (messages, reaches_newest) = store
+                .conversation_messages_around("00000BOB", around, 5)
+                .unwrap();
+            let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+            (ids, reaches_newest)
+        };
+
+        // In the middle: the message and five on either side, in history order.
+        let (middle, reaches_newest) = window(ids[10]);
+        assert_eq!(middle, ids[5..=15]);
+        assert!(!reaches_newest);
+        // At the oldest end: nothing to fill the older side with.
+        assert_eq!(window(ids[0]).0, ids[..=5]);
+        // Exactly five left, and fewer: the window reaches the newest message.
+        let (near_end, reaches_newest) = window(ids[94]);
+        assert_eq!(near_end, ids[89..=99]);
+        assert!(reaches_newest);
+        assert_eq!(window(ids[99]).0, ids[94..]);
+        assert!(window(ids[99]).1);
+        // One more than fits: it doesn't.
+        assert!(!window(ids[93]).1);
+
+        // Gone, or of another chat: the newest messages, not someone else's.
+        let other = store.conversation_messages("00000ANN", 1).unwrap()[0].id;
+        for target in [other, -1] {
+            let (newest, reaches_newest) = window(target);
+            assert_eq!(newest, ids[89..]);
+            assert!(reaches_newest);
+        }
     }
 
     #[test]
@@ -1473,10 +2095,37 @@ mod tests {
         .unwrap();
         assert_eq!(location.latitude, 49.61);
         assert_eq!(location.accuracy_m, Some(12.5));
-        assert_eq!(location.name.as_deref(), Some("Place"));
-        assert_eq!(location.address, None);
+        // A name alone goes out as the address, the one line the recipient gets.
+        assert_eq!(location.name, None);
+        assert_eq!(location.address.as_deref(), Some("Place"));
+        let both = location_message(
+            r#"{"latitude":49.61,"longitude":6.13,"name":"Place","address":"Street 1"}"#,
+        )
+        .unwrap();
+        assert_eq!(both.name.as_deref(), Some("Place"));
+        assert_eq!(both.address.as_deref(), Some("Street 1"));
+        let none = location_message(r#"{"latitude":49.61,"longitude":6.13}"#).unwrap();
+        assert_eq!((none.name, none.address), (None, None));
         assert!(location_message(r#"{"latitude":91,"longitude":0}"#).is_none());
         assert!(location_message(r#"{"latitude":1}"#).is_none());
+    }
+
+    /// The place's name reaches the recipient: it is in the bytes that are sent.
+    #[test]
+    fn location_name_is_sent() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody},
+        };
+        let location =
+            location_message(r#"{"latitude":49.61,"longitude":6.13,"name":"Place"}"#).unwrap();
+        let (_, data) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: "ABCD1234".parse().unwrap(),
+                body: libthreema::model::message::ContactMessageBody::Location(location),
+            }));
+        let data = String::from_utf8(data).unwrap();
+        assert_eq!(data.lines().nth(1), Some("Place"), "{data}");
     }
 
     #[test]
@@ -1517,7 +2166,9 @@ mod tests {
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].0.message_id, 9);
         assert_eq!(conversations[0].1, 1, "one unread");
-        assert_eq!(store.mark_conversation_read("ECHOECHO").unwrap(), vec![9]);
+        let read = store.mark_conversation_read("ECHOECHO").unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].message_id, 9);
         assert_eq!(store.conversations().unwrap()[0].1, 0);
         assert_eq!(
             store.conversation_messages("ECHOECHO", 50).unwrap().len(),
@@ -1754,6 +2405,14 @@ mod tests {
         store
             .insert_incoming("BBBBBBBB", 2, "text", "hi", 2)
             .unwrap();
+        // Clearly earlier: in the same millisecond as the emptying, the order would be a tie.
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = received_at - 1000 WHERE conversation = ?1",
+                ["AAAAAAAA"],
+            )
+            .unwrap();
         store.empty_conversation("BBBBBBBB").unwrap();
         let list = store.conversations().unwrap();
         let kinds: Vec<(&str, &str)> = list
@@ -1778,6 +2437,43 @@ mod tests {
         // Deleting forgets it.
         store.delete_conversation("BBBBBBBB").unwrap();
         assert_eq!(store.conversations().unwrap().len(), 1);
+    }
+
+    /// When the person writes again, the chat starts anew; emptying it keeps it as it is.
+    #[test]
+    fn a_deleted_chat_takes_its_marks_along_and_an_emptied_one_keeps_them() {
+        use crate::chat_notifications::Policy;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        store.set_archived("BBBBBBBB", true).unwrap();
+        store.set_marked_unread("BBBBBBBB", true).unwrap();
+        store.set_setting("draft:BBBBBBBB", "unsent").unwrap();
+        store.set_setting("draftQuote:BBBBBBBB", "ff").unwrap();
+        store
+            .set_chat_notifications("BBBBBBBB", Some((Policy::Never, None)))
+            .unwrap();
+        store.set_chat_tone("BBBBBBBB", Some("a.ogg")).unwrap();
+        store.empty_conversation("BBBBBBBB").unwrap();
+        assert_eq!(store.archived_chats().unwrap(), ["BBBBBBBB"]);
+        assert_eq!(store.marked_unread_chats().unwrap().len(), 1);
+        assert!(store.setting("draft:BBBBBBBB").unwrap().is_some());
+
+        store.delete_conversation("BBBBBBBB").unwrap();
+        assert!(store.archived_chats().unwrap().is_empty());
+        assert!(store.marked_unread_chats().unwrap().is_empty());
+        assert_eq!(store.setting("draft:BBBBBBBB").unwrap(), None);
+        assert_eq!(store.setting("draftQuote:BBBBBBBB").unwrap(), None);
+        // (A pin ends an archive mark, a private mark both.)
+        store.set_pinned("BBBBBBBB", true).unwrap();
+        store.delete_conversation("BBBBBBBB").unwrap();
+        assert!(store.pinned_chats().unwrap().is_empty());
+        assert!(store.conversations().unwrap().is_empty(), "no empty row");
+        store.set_private("BBBBBBBB", true).unwrap();
+        store.delete_conversation("BBBBBBBB").unwrap();
+        // These belong to the contact, and the mark keeps hiding what comes next.
+        assert!(store.chat_notifications("BBBBBBBB").unwrap().is_some());
+        assert_eq!(store.chat_tones().unwrap().len(), 1);
+        assert!(store.is_private("BBBBBBBB").unwrap());
     }
 
     #[test]
@@ -1847,11 +2543,20 @@ mod tests {
             .unwrap();
         assert_eq!(older[0].body, "live one");
         assert_eq!(older[1].body, "between");
-        let since = store
-            .conversation_messages_since("00000BOB", older[1].id, 1)
+        // A window around a message follows history as well, across imported and live rows.
+        let (around, reaches_newest) = store
+            .conversation_messages_around("00000BOB", older[1].id, 1)
             .unwrap();
-        assert_eq!(since.first().unwrap().body, "between");
-        assert_eq!(since.last().unwrap().body, "newest");
+        let texts: Vec<&str> = around.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(texts, ["live one", "between", "live two"]);
+        assert!(!reaches_newest, "the imported newest one lies beyond it");
+
+        // The UI gets the same order: a row keeps its place in history in its JSON, and only a
+        // message newer than everything has the highest key.
+        let key = |m: &Message| m.to_json()["sortKey"].as_i64().unwrap();
+        let shown = store.conversation_messages("00000BOB", 50).unwrap();
+        assert!(shown.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])));
+        assert!(key(&live1) < key(shown.last().unwrap()), "an old live row");
 
         // Change detection stays by insertion: everything imported after the last live row.
         let changed = store
@@ -1904,6 +2609,10 @@ mod tests {
         store
             .insert_incoming("00000BOB", 1, "text", "hi", 20)
             .unwrap();
+        store
+            .conn
+            .execute("UPDATE messages SET received_at = created_at", [])
+            .unwrap();
 
         // The group and the list are listed without any message, placed by creation date
         // (a contact without messages is not).
@@ -1936,6 +2645,60 @@ mod tests {
         assert_eq!(state.0.kind, "empty");
     }
 
+    /// The chat list goes by when a message arrived. A sender's clock a year ahead doesn't pin
+    /// their chat on top, and a message dated long ago still comes up as the new one it is.
+    #[test]
+    fn chat_list_goes_by_arrival_not_by_the_senders_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let now = now_ms();
+        let year = 365 * 86_400_000;
+        let order = |store: &Store| -> Vec<String> {
+            let rows = store.conversations().unwrap();
+            rows.into_iter().map(|(m, _)| m.conversation).collect()
+        };
+        let ahead = store
+            .insert_incoming("AAAAAAAA", 1, "text", "from the future", now + year)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ahead.arrived_at(), ahead.received_at.unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET received_at = ?1 WHERE id = ?2",
+                params![now - 1000, ahead.id],
+            )
+            .unwrap();
+        store
+            .insert_incoming("BBBBBBBB", 2, "text", "from the past", now - year)
+            .unwrap();
+        assert_eq!(order(&store), ["BBBBBBBB", "AAAAAAAA"]);
+
+        // Our own message has no arrival time and goes by the one clock it has.
+        store
+            .insert_outgoing("CCCCCCCC", 3, "text", "ours")
+            .unwrap();
+        let own = store.conversations().unwrap().remove(0).0;
+        assert_eq!(own.conversation, "CCCCCCCC");
+        assert_eq!(own.arrived_at(), own.created_at);
+        assert_eq!(
+            own.to_json()["arrivedAt"],
+            serde_json::json!(own.created_at)
+        );
+
+        // A chat emptied just now compares its time with the same value: it stays above a message
+        // dated far ahead that arrived before it.
+        store
+            .insert_incoming("DDDDDDDD", 4, "text", "bye", now)
+            .unwrap();
+        store.empty_conversation("DDDDDDDD").unwrap();
+        store
+            .conn
+            .execute("UPDATE emptied_chats SET at = ?1", [now + 10_000])
+            .unwrap();
+        assert_eq!(order(&store)[0], "DDDDDDDD");
+    }
+
     #[test]
     fn conversation_media() {
         let dir = tempfile::tempdir().unwrap();
@@ -1966,24 +2729,370 @@ mod tests {
         store
             .insert_outgoing("00000BOB", 10, "file", &file("image/png", "media"))
             .unwrap();
-        let kinds: Vec<&str> = store
-            .conversation_media("ECHOECHO", &MEDIA_KINDS)
-            .unwrap()
-            .iter()
-            .map(|m| media_kind(&m.body))
-            .collect();
+        let page = |kinds: &[&str], before, limit| {
+            store
+                .conversation_media("ECHOECHO", kinds, before, limit)
+                .unwrap()
+        };
+        let (all, more) = page(&MEDIA_KINDS, None, 10);
         assert_eq!(
-            kinds,
+            all.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
             ["file", "audio", "voice", "video", "gif", "image"],
             "newest first"
         );
-        let picked: Vec<i64> = store
-            .conversation_media("ECHOECHO", &["image", "video"])
+        assert!(!more);
+        for (message, kind) in &all {
+            assert_eq!(media_kind(&message.body), *kind);
+        }
+        let (picked, more) = page(&["image", "video"], None, 10);
+        assert_eq!(
+            picked.iter().map(|(m, _)| m.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[0]]
+        );
+        assert!(!more);
+
+        // Page by page, with what comes between them passed over.
+        let (first, more) = page(&["file", "voice", "image"], None, 2);
+        assert_eq!(
+            first.iter().map(|(m, _)| m.id).collect::<Vec<_>>(),
+            vec![ids[5], ids[3]]
+        );
+        assert!(more);
+        let last = &first[1].0;
+        let cursor = Some((last.sort_key, last.id));
+        let (second, more) = page(&["file", "voice", "image"], cursor, 2);
+        assert_eq!(
+            second.iter().map(|(m, _)| m.id).collect::<Vec<_>>(),
+            vec![ids[0]]
+        );
+        assert!(!more);
+        // The row a page ended on may be gone by then.
+        store.remove_message(last.id).unwrap();
+        let (second, _) = page(&["file", "voice", "image"], cursor, 2);
+        assert_eq!(second[0].0.id, ids[0]);
+        assert!(page(&MEDIA_KINDS, None, 0).0.is_empty());
+
+        // Counted without reading them: the same as `media_kind` for anything at all in the field.
+        store
+            .insert_outgoing("ECHOECHO", 11, "file", "no json")
+            .unwrap();
+        store
+            .insert_outgoing("ECHOECHO", 12, "file", r#"{"mediaType":5,"rendering":7}"#)
+            .unwrap();
+        store
+            .insert_outgoing(
+                "ECHOECHO",
+                13,
+                "file",
+                r#"{"mediaType":"AUDIO/x","rendering":1}"#,
+            )
+            .unwrap();
+        let counts = store.conversation_media_counts("ECHOECHO").unwrap();
+        let mut by_hand: HashMap<&str, i64> = HashMap::new();
+        for (message, kind) in page(&MEDIA_KINDS, None, 100).0 {
+            assert_eq!(media_kind(&message.body), kind);
+            *by_hand.entry(kind).or_insert(0) += 1;
+        }
+        assert_eq!(counts, by_hand);
+        assert_eq!(
+            counts["file"],
+            2 + 1,
+            "the PDF was removed above? no: voice was"
+        );
+        assert!(
+            store
+                .conversation_media_counts("00000ANN")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// However many hits a word has, it comes to the same in the same order: few are sorted, more
+    /// are checked against a list on the walk from the newest on, and a common word needs no list.
+    /// Neither of the walks sorts, and messages with mentions always count.
+    #[test]
+    fn search_comes_to_the_same_however_common_the_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let step = store.step().unwrap();
+        for n in 0..=SEARCH_IDS_MAX as u64 {
+            // More than can be sorted of the one, more than can be listed of the other.
+            let body = if n <= SEARCH_SORTED_MAX as u64 {
+                "COMMON word in the middle"
+            } else {
+                "COMMON word"
+            };
+            store
+                .insert_incoming("00000ANN", 100 + n, "text", body, 100 + n as i64)
+                .unwrap();
+        }
+        let newest = SEARCH_IDS_MAX as u64 + 100;
+        // The newest of all, by the sender's clock; rows are in arrival order.
+        let far_ahead = 2 * SEARCH_IDS_MAX as i64;
+        for (id, body, kind, at) in [
+            (
+                1,
+                "a common Word, rare, in the middle",
+                "text",
+                far_ahead + 3,
+            ),
+            (2, "Hi @[00000CAT]", "text", far_ahead + 2),
+            (3, "nothing here", "text", far_ahead + 4),
+            (
+                4,
+                r#"{"name":"common rare middle.pdf"}"#,
+                "file",
+                far_ahead + 1,
+            ),
+        ] {
+            store
+                .insert_incoming("00000BOB", id, kind, body, at)
+                .unwrap();
+        }
+        step.commit().unwrap();
+        let search = |query: &str, chat, limit| {
+            store
+                .search_messages(
+                    query,
+                    chat,
+                    limit,
+                    |_| true,
+                    |id| (id == "00000CAT").then(|| "Common Rare Middle Cat".to_owned()),
+                )
+                .unwrap()
+                .iter()
+                .map(|(m, hit)| (m.message_id, hit.clone()))
+                .collect::<Vec<_>>()
+        };
+        let ids = |found: Vec<(u64, String)>| found.iter().map(|f| f.0).collect::<Vec<_>>();
+        let listed = |query: &str| store.search_candidates(query).unwrap().map(|ids| ids.len());
+        assert_eq!(listed("common"), None, "no list");
+        assert!(listed("middle").unwrap() > SEARCH_SORTED_MAX, "a long list");
+        assert!(listed("rare").unwrap() <= SEARCH_SORTED_MAX, "a short one");
+
+        // By time, across kinds, a mention by name; what's in the index and what isn't.
+        assert_eq!(ids(search("common", None, 3)), [1, 2, 4]);
+        assert_eq!(ids(search("middle", None, 3)), [1, 2, 4]);
+        assert_eq!(ids(search("RARE", None, 3)), [1, 2, 4]);
+        assert_eq!(search("middle", None, 3)[1].1, "Hi @[00000CAT]", "raw");
+        assert_eq!(ids(search("common", None, 4))[3], newest);
+        assert_eq!(
+            ids(search("middle", None, 4))[3],
+            100 + SEARCH_SORTED_MAX as u64,
+            "the newest of those that have it"
+        );
+
+        // One chat: its history order, here the order of arrival, and the walk ends with it.
+        for word in ["common", "middle", "rare"] {
+            assert_eq!(ids(search(word, Some("00000BOB"), 10)), [4, 2, 1], "{word}");
+            assert!(search(word, Some("00000DAN"), 3).is_empty());
+        }
+        assert_eq!(search("common", Some("00000ANN"), 3).len(), 3);
+        assert_eq!(search("middle", Some("00000ANN"), 3).len(), 3);
+        // Too short for the index.
+        assert_eq!(ids(search("Wo", Some("00000BOB"), 1)), [1]);
+        assert_eq!(ids(search("wo", None, 1)), [1]);
+
+        // What makes stopping worth it: no way sorts first.
+        for (in_chat, narrowed, arg) in [
+            (false, "", None),
+            (true, "", None),
+            (false, SEARCH_WALK_LIKE, Some("%wo%")),
+            (true, SEARCH_WALK_LIKE, Some("%wo%")),
+            (false, SEARCH_WALK_IN_LIST, Some("[1,2]")),
+            (true, SEARCH_WALK_IN_LIST, Some("[1,2]")),
+        ] {
+            let args = in_chat.then_some("00000BOB").into_iter().chain(arg);
+            // At the top level: the reactions column has a sorted subquery of its own.
+            let plan: Vec<(i64, String)> = store
+                .conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    search_walk(in_chat, narrowed)
+                ))
+                .unwrap()
+                .query_map(rusqlite::params_from_iter(args), |row| {
+                    Ok((row.get(1)?, row.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(
+                !plan
+                    .iter()
+                    .any(|(parent, line)| *parent == 0 && line.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+    }
+
+    /// A chat's hits that aren't to be listed don't use up the limit.
+    #[test]
+    fn search_leaves_out_what_is_not_listed_before_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        store
+            .insert_incoming("00000BOB", 1, "text", "needle", 1)
+            .unwrap();
+        for n in 2..5 {
+            store
+                .insert_incoming("00000ANN", n, "text", "needle", n as i64)
+                .unwrap();
+        }
+        let found = store
+            .search_messages("needle", None, 1, |chat| chat != "00000ANN", |_| None)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0.conversation, "00000BOB");
+    }
+
+    /// The lookups go by their indexes, and those follow every change: rows come in and go out of
+    /// them as their state changes. A query that stopped matching its index wouldn't even prepare.
+    #[test]
+    fn lookups_follow_their_indexes() {
+        use crate::app_media::{STATE_LOADING, STATE_LOCAL};
+        use crate::media::MediaPart;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+
+        let text = store.insert_outgoing("ECHOECHO", 1, "text", "hi").unwrap();
+        assert_eq!(store.pending_outgoing().unwrap()[0].id, text.id);
+        store
+            .raise_outgoing_state("ECHOECHO", &[1], OutgoingState::Sent)
+            .unwrap();
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        let body = json!({"thumbnailState": 0, "fileState": 0, "mediaType": "image/png"});
+        let file = store
+            .insert_incoming("00000BOB", 2, "file", &body.to_string(), 2)
             .unwrap()
-            .iter()
-            .map(|m| m.id)
-            .collect();
-        assert_eq!(picked, vec![ids[2], ids[0]]);
+            .unwrap();
+        let images = ["image".to_owned()];
+        let to_come = |store: &Store| store.media_to_download(&images, 0).unwrap();
+        assert_eq!(
+            to_come(&store),
+            [(file.id, MediaPart::Thumbnail), (file.id, MediaPart::File)]
+        );
+        store
+            .set_media_state(file.id, MediaPart::Thumbnail, STATE_LOCAL)
+            .unwrap();
+        assert_eq!(to_come(&store), [(file.id, MediaPart::File)]);
+        store
+            .set_media_state(file.id, MediaPart::File, STATE_LOADING)
+            .unwrap();
+        assert!(to_come(&store).is_empty());
+
+        // A body that isn't JSON is written and read like any other, and waits for nothing.
+        store
+            .insert_incoming("00000BOB", 3, "file", "no json", 3)
+            .unwrap();
+        assert!(to_come(&store).is_empty());
+        assert!(store.unfinished_uploads().unwrap().is_empty());
+
+        // Read and unread, starred or not.
+        let unread = store
+            .insert_incoming("00000BOB", 4, "text", "new", 4)
+            .unwrap()
+            .unwrap();
+        let (count, first) = store.unread_position("00000ANN").unwrap();
+        assert_eq!((count, first), (0, None));
+        assert_eq!(store.unread_position("00000BOB").unwrap().0, 3);
+        store.set_starred(unread.id, true).unwrap();
+        assert_eq!(store.starred_messages(None).unwrap()[0].id, unread.id);
+        assert_eq!(
+            store.starred_messages(Some("00000BOB")).unwrap()[0].id,
+            unread.id
+        );
+        assert!(store.starred_messages(Some("00000ANN")).unwrap().is_empty());
+        assert_eq!(store.mark_conversation_read("00000BOB").unwrap().len(), 3);
+        assert_eq!(store.unread_position("00000BOB").unwrap(), (0, None));
+        assert!(store.mark_conversation_read("00000BOB").unwrap().is_empty());
+    }
+
+    /// A message deleted for everyone while it was still going out takes nothing with it: no
+    /// clock, no queue entry, and a Reject of it stays without effect. Removing one leaves no
+    /// receivers behind.
+    #[test]
+    fn a_deleted_message_has_nothing_left_to_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let sent = store.insert_outgoing("ECHOECHO", 7, "text", "hi").unwrap();
+        store
+            .raise_outgoing_state("ECHOECHO", &[7], OutgoingState::Sent)
+            .unwrap();
+        store.mark_deleted(sent.id, 9).unwrap();
+        assert!(store.reset_outgoing("ECHOECHO", 7).unwrap().is_empty());
+        let row = store.message(sent.id).unwrap().unwrap();
+        assert_eq!(row.state, OutgoingState::Sent as i64);
+
+        let going = "g:ECHOECHO:0000000000000001";
+        let pending = store.insert_outgoing(going, 8, "text", "hi").unwrap();
+        store
+            .set_pending_receivers(going, 8, &["ABCD1234".to_owned()])
+            .unwrap();
+        let row = store.mark_deleted(pending.id, 9).unwrap().unwrap();
+        assert_eq!(row.state, OutgoingState::Sent as i64);
+        assert!(store.pending_receivers(going, 8).unwrap().is_empty());
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        // What an older version left: a placeholder back in the queue.
+        store
+            .conn
+            .execute("UPDATE messages SET state = 0 WHERE id = ?1", [pending.id])
+            .unwrap();
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        let removed = store.insert_outgoing(going, 10, "text", "hi").unwrap();
+        store
+            .set_pending_receivers(going, 10, &["ABCD1234".to_owned()])
+            .unwrap();
+        store.remove_message(removed.id).unwrap();
+        assert!(store.pending_receivers(going, 10).unwrap().is_empty());
+    }
+
+    /// Upgrading: what is waiting may be out already, what was sent needn't say so, and a
+    /// placeholder an older version put back into the queue comes out of it.
+    #[test]
+    fn the_written_out_migration_is_careful_with_whats_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let (waiting, sent, stuck) = {
+            let store = Store::open(&path, &[1; 32]).unwrap();
+            let waiting = store.insert_outgoing("ECHOECHO", 1, "text", "a").unwrap();
+            let sent = store.insert_outgoing("ECHOECHO", 2, "text", "b").unwrap();
+            store
+                .raise_outgoing_state("ECHOECHO", &[2], OutgoingState::Sent)
+                .unwrap();
+            let stuck = store.insert_outgoing("ECHOECHO", 3, "deleted", "").unwrap();
+            store
+                .set_pending_receivers("ECHOECHO", 3, &["ABCD1234".to_owned()])
+                .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX messages_pending; DROP INDEX messages_uploading;
+                     DROP INDEX messages_media_to_come; DROP INDEX messages_starred;
+                     DROP INDEX messages_by_time; DROP INDEX messages_media;
+                     DROP INDEX pending_receivers_by_receiver;
+                     DROP TABLE awaiting_reflection;
+                     ALTER TABLE messages DROP COLUMN written_out;
+                     ALTER TABLE web_sessions DROP COLUMN label;
+                     DROP TABLE picture_restored; DROP TABLE synced_pictures;
+                     DROP TABLE group_picture_sends;
+                     ALTER TABLE groups DROP COLUMN picture_pending;
+                     ALTER TABLE messages DROP COLUMN no_receipts;
+                     DROP TABLE reflected_waiting;
+                     PRAGMA user_version = 35;",
+                )
+                .unwrap();
+            (waiting.id, sent.id, stuck.id)
+        };
+        let store = Store::open(&path, &[1; 32]).unwrap();
+        let row = |id| store.message(id).unwrap().unwrap();
+        assert!(row(waiting).written_out);
+        assert!(!row(sent).written_out);
+        assert_eq!(row(stuck).state, OutgoingState::Sent as i64);
+        assert!(store.pending_receivers("ECHOECHO", 3).unwrap().is_empty());
     }
 
     #[test]
@@ -2076,6 +3185,54 @@ mod tests {
 
         store.remove_message(incoming.id).unwrap();
         assert!(store.message(incoming.id).unwrap().is_none());
+    }
+
+    /// Another client's edit of a caption takes the caption's place, with the edited mark and in
+    /// the search; the rest of the file stays. Nothing else about a message can be edited.
+    #[test]
+    fn an_edit_changes_a_files_caption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let body = serde_json::json!({"mediaType": "image/jpeg", "size": 5, "caption": "old"});
+        let file = store
+            .insert_incoming("ECHOECHO", 7, "file", &body.to_string(), 1)
+            .unwrap()
+            .unwrap();
+        let edited = store
+            .edit_message(file.id, "the right date", Some(5))
+            .unwrap()
+            .unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&edited.body).unwrap();
+        assert_eq!(stored["caption"], "the right date");
+        assert_eq!(stored["size"], 5);
+        assert_eq!(edited.edited_at, Some(5));
+        assert_eq!(
+            store
+                .search_messages("right", None, 10, |_| true, |_| None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .search_messages("old", None, 10, |_| true, |_| None)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(edit_applies_to("text") && edit_applies_to("file"));
+        for kind in ["location", "poll", "pollClosed", "status", "deleted"] {
+            assert!(!edit_applies_to(kind), "{kind}");
+        }
+        let location = store
+            .insert_incoming("ECHOECHO", 8, "location", "{}", 1)
+            .unwrap()
+            .unwrap();
+        let same = store
+            .edit_message(location.id, "x", Some(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!((same.body.as_str(), same.edited_at), ("{}", None));
     }
 
     #[test]
@@ -2182,7 +3339,7 @@ mod bench {
         time("search, no match", &|| {
             assert!(
                 store
-                    .search_messages("zzzz", None, 50, |_| None)
+                    .search_messages("zzzz", None, 50, |_| true, |_| None)
                     .unwrap()
                     .is_empty()
             );
@@ -2190,14 +3347,16 @@ mod bench {
         time("search, 50 hits of many", &|| {
             assert_eq!(
                 store
-                    .search_messages("chat 99", None, 50, |_| None)
+                    .search_messages("chat 99", None, 50, |_| true, |_| None)
                     .unwrap()
                     .len(),
                 50
             );
         });
         time("search, 2 characters (scan)", &|| {
-            store.search_messages("zz", None, 50, |_| None).unwrap();
+            store
+                .search_messages("zz", None, 50, |_| true, |_| None)
+                .unwrap();
         });
     }
 }

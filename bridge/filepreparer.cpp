@@ -8,7 +8,13 @@
 #include <QMimeDatabase>
 #include <QPainter>
 #include <QSettings>
+
+#include "filetype.h"
+#include "photoedit.h"
+
 #ifdef THREESEA_FULL
+#include <threesea_core.h>
+
 #include "videotranscoder.h"
 #endif
 
@@ -51,7 +57,9 @@ QByteArray encode(const QImage &image, const char *format, int quality)
     QByteArray bytes;
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
-    image.save(&buffer, format, quality);
+    QImage bare = PhotoEdit::withoutMetadata(image);
+    bare.save(&buffer, format, quality);
+    PhotoEdit::wipe(bare);
     return bytes;
 }
 
@@ -75,66 +83,90 @@ FilePreparer::FilePreparer(const QString &path, const QVariantMap &request, cons
 {
 }
 
+FilePreparer::FilePreparer(std::function<QImage()> picture, const QVariantMap &request)
+    : m_picture(std::move(picture))
+    , m_request(request)
+{
+}
+
 void FilePreparer::run()
 {
     QVariantMap request = m_request;
+    if (m_picture) {
+        QImage image = m_picture();
+        if (image.isNull()) {
+            emit prepared(request, QByteArray(), QByteArray(), QStringLiteral("the picture could not be read"));
+            return;
+        }
+        request.insert(QStringLiteral("name"), image.hasAlphaChannel() ? QStringLiteral("picture.png")
+                                                                       : QStringLiteral("picture.jpg"));
+        preparePicture(image, request);
+        PhotoEdit::wipe(image);
+        return;
+    }
     const QFileInfo info(m_path);
     if (!info.isFile()) {
         emit prepared(request, QByteArray(), QByteArray(), QStringLiteral("not a file"));
         return;
     }
-    const QString mediaType = QMimeDatabase().mimeTypeForFile(info).name();
+    const bool asMedia = request.value(QStringLiteral("rendering")).toString() == QLatin1String("media");
+    const QString mediaType = asMedia ? FileType::mediaTypeOf(info) : QMimeDatabase().mimeTypeForFile(info).name();
     request.insert(QStringLiteral("name"), info.fileName());
     request.insert(QStringLiteral("mediaType"), mediaType);
 
     // Videos as media (Threema shows them with their thumbnail and plays them), scaled down
-    // where Settings → Media & storage → Video size asks for it and the phone can.
-    const QImage videoFrame = m_videoFrame.isNull() ? QImage() : opaquePart(m_videoFrame);
-    if (mediaType.startsWith(QLatin1String("video/")) && !videoFrame.isNull()
-            && request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")) {
+    // where Settings → Media & storage → Video size asks for it and the phone can. Also without a
+    // thumbnail (the thumbnailer failed, or took too long): the core still has to see them, to
+    // take out their metadata, as it doesn't for files.
+    if (mediaType.startsWith(QLatin1String("video/")) && asMedia) {
+        // The frame is only the thumbnail, a square whatever the video is: the core takes the
+        // size it announces from the file it sends.
         QString path = m_path;
-        int width = videoFrame.width();
-        int height = videoFrame.height();
 #ifdef THREESEA_FULL
         const int videoSize = QSettings().value(QStringLiteral("videoSize"), 0).toInt();
         const int edge = VideoTranscoder::edgeForSetting(videoSize);
-        if (edge > 0 && !m_scratchPath.isEmpty() && qMax(width, height) > edge
+        uint32_t width = 0;
+        uint32_t height = 0;
+        // An unknown size may well be too large: then scaling is tried, and it says if it can't.
+        const bool sizeKnown = threesea_video_size(m_path.toUtf8().constData(), &width, &height);
+        if (edge > 0 && !m_scratchPath.isEmpty() && (!sizeKnown || qMax(width, height) > static_cast<uint32_t>(edge))
                 && VideoTranscoder::scaleDown(m_path, videoSize, m_scratchPath)) {
             path = m_scratchPath;
-            const qreal factor = qreal(edge) / qMax(width, height);
-            // Even numbers: encoders work on pairs of lines.
-            width = 2 * qRound(width * factor / 2);
-            height = 2 * qRound(height * factor / 2);
             request.insert(QStringLiteral("mediaType"), QStringLiteral("video/mp4"));
-            request.insert(QStringLiteral("name"), info.completeBaseName() + QStringLiteral(".mp4"));
         }
 #endif
         request.insert(QStringLiteral("path"), path);
-        request.insert(QStringLiteral("width"), width);
-        request.insert(QStringLiteral("height"), height);
-        const QImage frame = limited(videoFrame, ThumbnailSide).convertToFormat(QImage::Format_RGB32);
-        emit prepared(request, QByteArray(), encode(frame, "JPEG", 80), QString());
+        const QImage frame = m_videoFrame.isNull() ? QImage() : opaquePart(m_videoFrame);
+        const QByteArray thumbnail = frame.isNull()
+            ? QByteArray()
+            : encode(limited(frame, ThumbnailSide).convertToFormat(QImage::Format_RGB32), "JPEG", 80);
+        emit prepared(request, QByteArray(), thumbnail, QString());
         return;
     }
 
-    // GIFs as media (Android's animated images): sent unchanged, the first frame as thumbnail.
-    if (mediaType == QLatin1String("image/gif")
-            && request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")) {
+    // GIFs as media (Android's animated images): their frames unchanged (the core takes out the
+    // rest), the first frame as thumbnail.
+    if (mediaType == QLatin1String("image/gif") && asMedia) {
         QImageReader reader(m_path);
         const QImage first = reader.read();
-        if (!first.isNull()) {
-            request.insert(QStringLiteral("path"), m_path);
-            request.insert(QStringLiteral("width"), first.width());
-            request.insert(QStringLiteral("height"), first.height());
-            emit prepared(request, QByteArray(), encode(jpegThumbnail(first), "JPEG", 80), QString());
+        if (first.isNull()) {
+            emit prepared(request, QByteArray(), QByteArray(), pictureKeepsMetadata());
             return;
         }
+        request.insert(QStringLiteral("path"), m_path);
+        request.insert(QStringLiteral("width"), first.width());
+        request.insert(QStringLiteral("height"), first.height());
+        emit prepared(request, QByteArray(), encode(jpegThumbnail(first), "JPEG", 80), QString());
+        return;
     }
 
-    const bool photo = request.value(QStringLiteral("rendering")).toString() == QLatin1String("media")
-                       && (mediaType == QLatin1String("image/jpeg") || mediaType == QLatin1String("image/png")
-                           || mediaType == QLatin1String("image/webp") || mediaType == QLatin1String("image/bmp"));
-    if (!photo) {
+    // A drawing has text inside it, and a raster of it would no longer be what was chosen.
+    if (asMedia && mediaType == QLatin1String("image/svg+xml")) {
+        emit prepared(request, QByteArray(), QByteArray(), pictureKeepsMetadata());
+        return;
+    }
+
+    if (!asMedia || !FileType::isPicture(mediaType)) {
         // Sent as it is.
         request.insert(QStringLiteral("rendering"), QStringLiteral("file"));
         request.insert(QStringLiteral("path"), m_path);
@@ -144,26 +176,35 @@ void FilePreparer::run()
 
     QImageReader reader(m_path);
     reader.setAutoTransform(true); // apply the EXIF rotation before EXIF is dropped
-    QImage image = reader.read();
+    const QImage image = reader.read();
     if (image.isNull()) {
-        emit prepared(request, QByteArray(), QByteArray(), reader.errorString());
+        emit prepared(request, QByteArray(), QByteArray(), pictureKeepsMetadata());
         return;
     }
+    preparePicture(image, request);
+}
+
+QString FilePreparer::pictureKeepsMetadata()
+{
+    return QStringLiteral("pictureKeepsMetadata");
+}
+
+void FilePreparer::preparePicture(const QImage &picture, QVariantMap request)
+{
     // Settings → Media & storage → Image size (Android's: default 1600 px; 0: original).
     const int maxSide = QSettings().value(QStringLiteral("imageSize"), 1600).toInt();
-    if (maxSide > 0) {
-        image = limited(image, maxSide);
-    }
+    QImage image = maxSide > 0 ? limited(picture, maxSide) : picture;
     const bool transparent = image.hasAlphaChannel();
     const QByteArray data = transparent ? encode(image, "PNG", -1) : encode(image, "JPEG", 85);
     request.insert(QStringLiteral("mediaType"),
                    transparent ? QStringLiteral("image/png") : QStringLiteral("image/jpeg"));
-    if (!transparent) {
-        QString name = info.completeBaseName() + QStringLiteral(".jpg");
-        request.insert(QStringLiteral("name"), name);
-    }
     request.insert(QStringLiteral("width"), image.width());
     request.insert(QStringLiteral("height"), image.height());
 
-    emit prepared(request, data, encode(jpegThumbnail(image), "JPEG", 80), QString());
+    QImage thumbnail = jpegThumbnail(image);
+    const QByteArray thumbnailBytes = encode(thumbnail, "JPEG", 80);
+    emit prepared(request, data, thumbnailBytes, QString());
+    // A scaled copy of ours, and the thumbnail. (`image` itself, if not scaled, is the caller's.)
+    PhotoEdit::wipe(thumbnail);
+    PhotoEdit::wipe(image);
 }

@@ -6,7 +6,8 @@
 //!   other host fails the TLS handshake.
 //! - Normal WebPKI validation (Mozilla roots) **and** SPKI pinning of the server certificate,
 //!   using upstream's pin sets (`app/src/main/res/xml/network_security_config.xml`).
-//! - No redirects to other hosts are possible, because they would fail the same checks.
+//! - Redirects are followed only to Threema hosts, at most [`MAX_REDIRECTS`] of them: another
+//!   host doesn't even get a DNS lookup or a TLS greeting.
 
 use std::sync::Arc;
 
@@ -67,7 +68,15 @@ const PINS: &[(&str, &[&str])] = &[
 ];
 
 /// The largest response body read: an encrypted blob of the largest size, with room to spare.
-const MAX_RESPONSE: usize = crate::media::MAX_BLOB_SIZE + 64 * 1024;
+pub(crate) const MAX_RESPONSE: usize = crate::media::MAX_BLOB_SIZE + 64 * 1024;
+
+/// Redirects followed for one request (each to a Threema host).
+const MAX_REDIRECTS: usize = 5;
+
+/// May a request that was redirected `hops` times so far go on to `target`?
+fn redirect_allowed(target: &str, hops: usize) -> bool {
+    hops < MAX_REDIRECTS && is_threema_url(target)
+}
 
 /// Whether `url` (https:// or wss://) names a Threema host. Checked before connecting: the
 /// certificate check would refuse any other host too, but only after DNS, TCP and the TLS
@@ -90,6 +99,28 @@ fn pins_for_host(host: &str) -> Option<&'static [&'static str]> {
                     .is_some_and(|prefix| prefix.ends_with('.'))
         })
         .map(|(_, pins)| *pins)
+}
+
+/// The only place the map renderer (MapLibre, bundled; scripts/maplibre) may fetch from: Threema's
+/// map server, as on Android (style, TileJSON, vector tiles, glyphs, sprite all live there).
+pub const MAP_ORIGIN: &str = "https://map.threema.ch/";
+
+/// What the map renderer is given (ADR 0032): the one origin it may ask and the pins of that host
+/// in curl's `CURLOPT_PINNEDPUBLICKEY` form (`sha256//<base64>;…`), from [`PINS`], so the map has
+/// the same pins as everything else. MapLibre's patched downloader refuses every other URL before
+/// any lookup, and every certificate whose key isn't one of these.
+pub fn map_policy() -> serde_json::Value {
+    let host = reqwest::Url::parse(MAP_ORIGIN)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let pins = pins_for_host(&host)
+        .unwrap_or_default()
+        .iter()
+        .map(|pin| format!("sha256//{pin}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    serde_json::json!({ "origin": MAP_ORIGIN, "pins": pins })
 }
 
 /// Base64 SHA-256 of the certificate's DER-encoded SubjectPublicKeyInfo.
@@ -170,8 +201,36 @@ pub fn user_agent() -> String {
 
 /// HTTPS client restricted to Threema hosts with certificate pinning.
 /// Android's "IPv6 for messages" off: Threema's IPv4-only hosts instead of the dual-stack ones
-/// (`ds-apip`, `ds-blobp-…`, `ds.g-…`) that libthreema and we use by default.
+/// (`ds-apip`, `ds-blobp-…`, `ds.g-…`) that libthreema and we use by default, and only IPv4
+/// addresses of any other host ([`for_ip_version`]).
 pub static IPV4_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Of a host's addresses, those the IP version setting allows.
+pub(crate) fn for_ip_version(
+    addresses: impl IntoIterator<Item = std::net::SocketAddr>,
+    ipv4_only: bool,
+) -> Vec<std::net::SocketAddr> {
+    addresses
+        .into_iter()
+        .filter(|address| !(ipv4_only && address.is_ipv6()))
+        .collect()
+}
+
+/// Host names for HTTPS, following [`IPV4_ONLY`] for hosts `server_url` doesn't map: the mirror of
+/// a device group, a group call's server, Threema Safe.
+struct IpVersionResolver;
+
+impl reqwest::dns::Resolve for IpVersionResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let found = tokio::net::lookup_host((name.as_str(), 0)).await?;
+            let ipv4_only = IPV4_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+            let addresses: reqwest::dns::Addrs =
+                Box::new(for_ip_version(found, ipv4_only).into_iter());
+            Ok(addresses)
+        })
+    }
+}
 
 /// `url` (or a bare host name) for the IP version chosen in [`IPV4_ONLY`]: the dual-stack hosts
 /// lose their `ds-` / `ds.` prefix. Other hosts (Threema Safe, …) stay as they are.
@@ -203,13 +262,23 @@ pub fn server_url(url: &str) -> std::borrow::Cow<'_, str> {
 /// # Errors
 /// Only if the configuration cannot be built (a programming error).
 pub fn tls_config() -> Result<rustls::ClientConfig, String> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let roots = Arc::new(rustls::RootCertStore {
+    tls_config_with(mozilla_roots())
+}
+
+/// The certificate authorities of the Web, which every certificate must chain to.
+fn mozilla_roots() -> rustls::RootCertStore {
+    rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    });
-    let webpki = WebPkiServerVerifier::builder_with_provider(roots, Arc::clone(&provider))
-        .build()
-        .map_err(|e| e.to_string())?;
+    }
+}
+
+/// [`tls_config`], with these roots: all that differs under test.
+fn tls_config_with(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let webpki =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .map_err(|e| e.to_string())?;
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
@@ -297,13 +366,20 @@ pub fn tofu_tls_config(
     expected: Option<String>,
     seen: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<rustls::ClientConfig, String> {
+    tofu_tls_config_with(mozilla_roots(), expected, seen)
+}
+
+/// [`tofu_tls_config`], with these roots: all that differs under test.
+fn tofu_tls_config_with(
+    roots: rustls::RootCertStore,
+    expected: Option<String>,
+    seen: Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<rustls::ClientConfig, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let roots = Arc::new(rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    });
-    let webpki = WebPkiServerVerifier::builder_with_provider(roots, Arc::clone(&provider))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let webpki =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()
+            .map_err(|e| e.to_string())?;
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
@@ -314,6 +390,174 @@ pub fn tofu_tls_config(
             seen,
         }))
         .with_no_client_auth())
+}
+
+const RESPONSE_TOO_LARGE: &str = "response too large";
+
+/// Whether a request failed because the answer was over its limit.
+pub fn is_too_large(error: &HttpsError) -> bool {
+    matches!(error, HttpsError::InvalidResponse(message) if message == RESPONSE_TOO_LARGE)
+}
+
+/// A response body that may not grow past its limit: refused up front if the server says it
+/// would, else as soon as a chunk takes it there, so what a server sends can't fill the memory.
+struct LimitedBody {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl LimitedBody {
+    fn new(content_length: Option<u64>, limit: usize) -> Result<Self, HttpsError> {
+        if content_length.is_some_and(|length| length > limit as u64) {
+            return Err(HttpsError::InvalidResponse(RESPONSE_TOO_LARGE.into()));
+        }
+        // Told the size, it needn't grow by copying: a large blob would be there nearly twice.
+        let announced = content_length.map_or(0, |length| usize::try_from(length).unwrap_or(limit));
+        Ok(Self {
+            bytes: Vec::with_capacity(announced),
+            limit,
+        })
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<(), HttpsError> {
+        if self.bytes.len() + chunk.len() > self.limit {
+            return Err(HttpsError::InvalidResponse(RESPONSE_TOO_LARGE.into()));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(())
+    }
+}
+
+/// Connecting to a server (name lookup, TCP, TLS), whatever the request may take after that.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long data sent may go unacknowledged before the system gives the connection up. reqwest's
+/// 30 s would end an upload, to start again in full, at the first blackout of that length, so it
+/// is longer here than a blob's stall limit, which is what decides.
+const TCP_USER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How much of a transfer's body is handed over at a time. Taking the next piece says the connection
+/// took the last one, into the system's send buffer: that it has left the phone is more than we can
+/// see, so a very slow link can fail a stall limit (docs/protocol-notes.md, "Blob server").
+const BODY_PIECE: usize = 64 * 1024;
+
+/// How long the answer to a body may take once the connection took all of it. Longer than a stall:
+/// the system's send buffer still has to go out over what may be a slow link, and the server stores
+/// the blob before it answers.
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// By when a transfer has to have moved again.
+#[derive(Clone)]
+struct Progress(Arc<std::sync::Mutex<tokio::time::Instant>>);
+
+impl Progress {
+    fn new(within: std::time::Duration) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(
+            tokio::time::Instant::now() + within,
+        )))
+    }
+
+    fn moved(&self, within: std::time::Duration) {
+        if let Ok(mut deadline) = self.0.lock() {
+            *deadline = tokio::time::Instant::now() + within;
+        }
+    }
+
+    fn deadline(&self) -> tokio::time::Instant {
+        self.0
+            .lock()
+            .map_or_else(|_| tokio::time::Instant::now(), |deadline| *deadline)
+    }
+}
+
+/// A request body that reports each piece it hands over. Its exact size is known, so it goes out
+/// with a `content-length` as any other. It can be sent only once: reqwest hands a 307 or 308
+/// back as the response instead of following it, and doesn't send it again by itself on an HTTP/2
+/// refused stream, so that one fails as a network error does.
+struct ProgressBody {
+    rest: bytes::Bytes,
+    progress: Progress,
+    stall: std::time::Duration,
+    answer_wait: std::time::Duration,
+}
+
+impl http_body::Body for ProgressBody {
+    type Data = bytes::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.rest.is_empty() {
+            return std::task::Poll::Ready(None);
+        }
+        let piece = this.rest.split_to(BODY_PIECE.min(this.rest.len()));
+        this.progress.moved(if this.rest.is_empty() {
+            this.answer_wait
+        } else {
+            this.stall
+        });
+        std::task::Poll::Ready(Some(Ok(http_body::Frame::data(piece))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.rest.is_empty()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.rest.len() as u64)
+    }
+}
+
+/// Run a request for as long as it keeps moving: it ends with a timeout once nothing went out or
+/// came in for `stall` (`answer_wait`, not shorter, once the body is out), however far it got and
+/// however long it took so far.
+async fn until_stalled(
+    builder: reqwest::RequestBuilder,
+    body: Vec<u8>,
+    limit: usize,
+    stall: std::time::Duration,
+    answer_wait: std::time::Duration,
+) -> HttpsResult {
+    let progress = Progress::new(stall);
+    let builder = if body.is_empty() {
+        builder
+    } else {
+        builder.body(reqwest::Body::wrap(ProgressBody {
+            rest: body.into(),
+            progress: progress.clone(),
+            stall,
+            answer_wait,
+        }))
+    };
+    let moved = progress.clone();
+    let exchange = async move {
+        let mut response = builder.send().await.map_err(map_error)?;
+        moved.moved(stall);
+        let status = response.status().as_u16();
+        let mut body = LimitedBody::new(response.content_length(), limit)?;
+        while let Some(chunk) = response.chunk().await.map_err(map_error)? {
+            moved.moved(stall);
+            body.push(&chunk)?;
+        }
+        Ok(HttpsResponse {
+            status,
+            body: body.bytes,
+        })
+    };
+    tokio::pin!(exchange);
+    loop {
+        tokio::select! {
+            result = &mut exchange => return result,
+            () = tokio::time::sleep_until(progress.deadline()) => {
+                if progress.deadline() <= tokio::time::Instant::now() {
+                    return Err(HttpsError::Timeout("no progress".into()));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -328,58 +572,103 @@ impl HttpsClient {
     /// Fails only if the TLS configuration cannot be built (a programming error).
     pub fn new() -> Result<Self, HttpsError> {
         let tls = tls_config().map_err(HttpsError::InvalidRequest)?;
+        Self::with(tls, Arc::new(IpVersionResolver))
+    }
+
+    /// The client, with this TLS and these name lookups: all that differs under test.
+    fn with(
+        tls: rustls::ClientConfig,
+        resolver: Arc<dyn reqwest::dns::Resolve>,
+    ) -> Result<Self, HttpsError> {
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .user_agent(user_agent())
             .https_only(true)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .tcp_user_timeout(TCP_USER_TIMEOUT)
+            .dns_resolver(resolver)
+            // Stopping hands the redirect back as the response: an unexpected status for callers.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .map_err(|e| HttpsError::InvalidRequest(e.to_string()))?;
         Ok(Self { client })
     }
 
-    /// Execute a libthreema [`HttpsRequest`].
+    /// Execute a libthreema [`HttpsRequest`], reading up to the largest answer Threema's servers
+    /// give (a blob), not whatever a server sends.
     pub async fn send(&self, request: HttpsRequest) -> HttpsResult {
-        let method = match request.method {
+        self.send_limited(request, MAX_RESPONSE).await
+    }
+
+    /// Like [`Self::send`], refusing an answer of more than `limit` bytes while it comes in; see
+    /// [`is_too_large`].
+    pub async fn send_limited(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
+        #[cfg(test)]
+        stalled_if_asked().await;
+        #[cfg(test)]
+        if let Some(answer) = test_answer(&request) {
+            return answer.await;
+        }
+        let builder = self
+            .builder(request.method, &request.url, request.headers)?
+            .timeout(request.timeout)
+            .body(request.body);
+        let mut response = builder.send().await.map_err(map_error)?;
+        let status = response.status().as_u16();
+        let mut body = LimitedBody::new(response.content_length(), limit)?;
+        while let Some(chunk) = response.chunk().await.map_err(map_error)? {
+            body.push(&chunk)?;
+        }
+        Ok(HttpsResponse {
+            status,
+            body: body.bytes,
+        })
+    }
+
+    /// Like [`Self::send_limited`], for a transfer that takes as long as the link needs:
+    /// `request.timeout` is how long nothing may move, not how long the whole may take.
+    pub async fn transfer(&self, request: HttpsRequest, limit: usize) -> HttpsResult {
+        #[cfg(test)]
+        stalled_if_asked().await;
+        #[cfg(test)]
+        if let Some(answer) = test_answer(&request) {
+            return answer.await;
+        }
+        let builder = self.builder(request.method, &request.url, request.headers)?;
+        until_stalled(builder, request.body, limit, request.timeout, ANSWER_WAIT).await
+    }
+
+    fn builder(
+        &self,
+        method: HttpsMethod,
+        url: &str,
+        headers: Vec<libthreema::https::HttpsHeader>,
+    ) -> Result<reqwest::RequestBuilder, HttpsError> {
+        let method = match method {
             HttpsMethod::Delete => reqwest::Method::DELETE,
             HttpsMethod::Get => reqwest::Method::GET,
             HttpsMethod::Post => reqwest::Method::POST,
             HttpsMethod::Put => reqwest::Method::PUT,
         };
-        let url = server_url(&request.url);
+        let url = server_url(url);
         if !is_threema_url(&url) {
             return Err(HttpsError::InvalidRequest("not a Threema host".into()));
         }
-        let mut builder = self
-            .client
-            .request(method, url.as_ref())
-            .timeout(request.timeout)
-            .body(request.body);
-        for header in request.headers {
+        let mut builder = self.client.request(method, url.as_ref());
+        for header in headers {
             // We send our own user agent instead of libthreema's.
             if header.name.eq_ignore_ascii_case("user-agent") {
                 continue;
             }
             builder = builder.header(header.name, header.value);
         }
-        let mut response = builder.send().await.map_err(map_error)?;
-        let status = response.status().as_u16();
-        // Read up to the largest answer Threema's servers give (a blob), not whatever a server
-        // sends (security audit 2026-10-27, S06).
-        let too_large = || HttpsError::InvalidResponse("response too large".into());
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE as u64)
-        {
-            return Err(too_large());
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(map_error)? {
-            if body.len() + chunk.len() > MAX_RESPONSE {
-                return Err(too_large());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(HttpsResponse { status, body })
+        Ok(builder)
     }
 
     /// POST a JSON body and return the response (for directory endpoints libthreema lacks).
@@ -409,7 +698,7 @@ fn map_error(error: reqwest::Error) -> HttpsError {
     // Never include URLs with query data in errors that may reach logs: strip them.
     let kind: fn(String) -> HttpsError = if error.is_timeout() {
         HttpsError::Timeout
-    } else if error.is_builder() || error.is_request() {
+    } else if error.is_builder() {
         HttpsError::InvalidRequest
     } else if error.is_body() || error.is_decode() {
         HttpsError::InvalidResponse
@@ -417,6 +706,68 @@ fn map_error(error: reqwest::Error) -> HttpsError {
         HttpsError::Unreachable
     };
     kind(error.without_url().to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    static STALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// From now on this thread's requests get no answer, as on a mobile link that has stalled.
+#[cfg(test)]
+pub(crate) fn stall_requests() {
+    STALLED.set(true);
+}
+
+#[cfg(test)]
+async fn stalled_if_asked() {
+    if STALLED.get() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// What a test's stand-in for Threema's servers says to a request, whenever it is ready to.
+#[cfg(test)]
+pub(crate) type TestAnswer = std::pin::Pin<Box<dyn Future<Output = HttpsResult>>>;
+
+#[cfg(test)]
+type TestServers = std::rc::Rc<dyn Fn(&HttpsRequest) -> TestAnswer>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SERVERS: std::cell::RefCell<Option<TestServers>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Until this is dropped, `servers` answers this thread's requests instead of the network.
+#[cfg(test)]
+pub(crate) struct TestServersInPlace;
+
+#[cfg(test)]
+impl Drop for TestServersInPlace {
+    fn drop(&mut self) {
+        TEST_SERVERS.set(None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn answer_requests_with(
+    servers: impl Fn(&HttpsRequest) -> TestAnswer + 'static,
+) -> TestServersInPlace {
+    TEST_SERVERS.set(Some(std::rc::Rc::new(servers)));
+    TestServersInPlace
+}
+
+/// A request a real client would refuse isn't one for the stand-in either.
+#[cfg(test)]
+fn test_answer(request: &HttpsRequest) -> Option<TestAnswer> {
+    let servers = TEST_SERVERS.with_borrow(Clone::clone)?;
+    if !is_threema_url(&server_url(&request.url)) {
+        return Some(Box::pin(std::future::ready(Err(
+            HttpsError::InvalidRequest("not a Threema host".into()),
+        ))));
+    }
+    Some(servers(request))
 }
 
 #[cfg(test)]
@@ -432,6 +783,26 @@ mod tests {
         assert_eq!(pins_for_host("a.sfu.threema.ch").unwrap().len(), 4);
         assert_eq!(pins_for_host("safe-12.threema.ch").unwrap().len(), 6);
         assert!(pins_for_host("evilthreema.ch").is_none());
+    }
+
+    #[test]
+    fn map_policy_is_threemas_map_server_with_its_pins() {
+        let policy = map_policy();
+        assert_eq!(policy["origin"], "https://map.threema.ch/");
+        let pins = policy["pins"].as_str().unwrap();
+        // The threema.ch set, word for word: one source for the core and the map.
+        let expected = pins_for_host("map.threema.ch").unwrap();
+        assert_eq!(pins.split(';').count(), expected.len());
+        for pin in expected {
+            assert!(
+                pins.split(';').any(|p| p == format!("sha256//{pin}")),
+                "{pin}"
+            );
+        }
+        // The origin ends in "/", so a prefix check can't be passed by another host
+        // ("https://map.threema.ch.evil.example/", "https://map.threema.ch@evil.example/") or port.
+        assert!(MAP_ORIGIN.ends_with(".ch/"));
+        assert!(is_threema_url(MAP_ORIGIN));
         assert!(is_threema_url("wss://rendezvous.threema.ch/abc"));
         assert!(is_threema_url("https://blob-mirror.threema.ch/x"));
         assert!(!is_threema_url("wss://rendezvous.example.com/abc"));
@@ -440,6 +811,242 @@ mod tests {
         assert!(!is_threema_url("not a url"));
         assert!(pins_for_host("threema.ch.evil.example").is_none());
         assert!(pins_for_host("example.org").is_none());
+    }
+
+    #[test]
+    fn a_response_of_a_known_size_needs_no_growing() {
+        let mut body = LimitedBody::new(Some(1000), 1000).unwrap();
+        assert!(body.bytes.capacity() >= 1000);
+        let room = body.bytes.as_ptr();
+        body.push(&[1; 400]).unwrap();
+        body.push(&[2; 600]).unwrap();
+        assert_eq!(body.bytes.as_ptr(), room, "it stayed where it was");
+    }
+
+    #[test]
+    fn a_response_stops_at_its_limit() {
+        // Said up front: not one byte is read.
+        assert!(is_too_large(&LimitedBody::new(Some(11), 10).err().unwrap()));
+        // Not said, or wrongly: refused once the chunks pass it.
+        let mut body = LimitedBody::new(None, 10).unwrap();
+        body.push(&[0; 6]).unwrap();
+        body.push(&[0; 4]).unwrap();
+        assert!(is_too_large(&body.push(&[0]).unwrap_err()));
+        assert_eq!(body.bytes.len(), 10);
+        let mut body = LimitedBody::new(Some(1), 10).unwrap();
+        assert!(is_too_large(&body.push(&[0; 11]).unwrap_err()));
+        assert!(!is_too_large(&HttpsError::InvalidResponse("other".into())));
+    }
+
+    /// A local server without TLS, as the pinned client reaches none: the limits are the same.
+    async fn serve<F, Fut>(handle: F) -> (reqwest::RequestBuilder, reqwest::RequestBuilder)
+    where
+        F: FnOnce(tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle(stream).await;
+        });
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls_config().unwrap())
+            .build()
+            .unwrap();
+        (client.get(&url), client.post(&url))
+    }
+
+    /// The request's head; the content that came with it stays in `rest`.
+    async fn read_head(stream: &mut tokio::net::TcpStream, rest: &mut Vec<u8>) -> String {
+        use tokio::io::AsyncReadExt as _;
+        loop {
+            if let Some(end) = rest.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&rest[..end]).to_lowercase();
+                rest.drain(..end + 4);
+                return head;
+            }
+            let mut piece = [0; 4096];
+            let read = stream.read(&mut piece).await.unwrap();
+            assert_ne!(read, 0);
+            rest.extend_from_slice(&piece[..read]);
+        }
+    }
+
+    async fn read_body(stream: &mut tokio::net::TcpStream, mut got: usize, length: usize) {
+        use tokio::io::AsyncReadExt as _;
+        let mut piece = vec![0; 1024 * 1024];
+        while got < length {
+            let read = stream.read(&mut piece).await.unwrap();
+            assert_ne!(read, 0);
+            got += read;
+        }
+    }
+
+    const SECOND: std::time::Duration = std::time::Duration::from_secs(1);
+    const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+    #[tokio::test]
+    async fn a_download_may_take_longer_than_its_stall_limit() {
+        use tokio::io::AsyncWriteExt as _;
+        let (get, _) = serve(|mut stream| async move {
+            read_head(&mut stream, &mut Vec::new()).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..6 {
+                stream.write_all(b"x").await.unwrap();
+                tokio::time::sleep(SECOND / 2).await;
+            }
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let response = until_stalled(get, Vec::new(), 100, 2 * SECOND, SECOND)
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"xxxxxx");
+        assert!(started.elapsed() > 2 * SECOND);
+    }
+
+    #[tokio::test]
+    async fn a_download_that_stops_moving_ends() {
+        use tokio::io::AsyncWriteExt as _;
+        let (get, _) = serve(|mut stream| async move {
+            read_head(&mut stream, &mut Vec::new()).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nx")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let result = until_stalled(get, Vec::new(), 100, SECOND / 2, SECOND).await;
+        assert!(matches!(result, Err(HttpsError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn an_upload_may_take_longer_than_its_stall_limit() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        const LENGTH: usize = 8 * 1024 * 1024;
+        let (_, post) = serve(|mut stream| async move {
+            let mut rest = Vec::new();
+            let head = read_head(&mut stream, &mut rest).await;
+            assert!(
+                head.contains(&format!("content-length: {LENGTH}")),
+                "{head}"
+            );
+            let (mut got, mut piece) = (rest.len(), vec![0; 1024 * 1024]);
+            while got < LENGTH {
+                tokio::time::sleep(SECOND / 2).await;
+                let read = stream.read(&mut piece).await.unwrap();
+                assert_ne!(read, 0);
+                got += read;
+            }
+            stream.write_all(OK).await.unwrap();
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let response = until_stalled(post, vec![1; LENGTH], 100, 2 * SECOND, 30 * SECOND)
+            .await
+            .unwrap();
+        assert_eq!(response.body, b"ok");
+        assert!(started.elapsed() > 2 * SECOND);
+    }
+
+    #[tokio::test]
+    async fn an_upload_nobody_takes_ends() {
+        let (_, post) = serve(|mut stream| async move {
+            read_head(&mut stream, &mut Vec::new()).await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        // More than the system's buffers on both sides take in.
+        let body = vec![1; 64 * 1024 * 1024];
+        let result = until_stalled(post, body, 100, SECOND, 300 * SECOND);
+        let result = tokio::time::timeout(60 * SECOND, result).await.unwrap();
+        assert!(matches!(result, Err(HttpsError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn the_answer_to_an_upload_has_its_own_limit() {
+        use tokio::io::AsyncWriteExt as _;
+        const LENGTH: usize = 1024;
+        let (_, post) = serve(|mut stream| async move {
+            let mut rest = Vec::new();
+            read_head(&mut stream, &mut rest).await;
+            read_body(&mut stream, rest.len(), LENGTH).await;
+            tokio::time::sleep(2 * SECOND).await;
+            stream.write_all(OK).await.unwrap();
+        })
+        .await;
+        let response = until_stalled(post, vec![1; LENGTH], 100, SECOND, 30 * SECOND).await;
+        assert_eq!(response.unwrap().status, 200);
+
+        let (_, post) = serve(|mut stream| async move {
+            let mut rest = Vec::new();
+            read_head(&mut stream, &mut rest).await;
+            read_body(&mut stream, rest.len(), LENGTH).await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let result = until_stalled(post, vec![1; LENGTH], 100, SECOND, 2 * SECOND);
+        let result = tokio::time::timeout(10 * SECOND, result).await.unwrap();
+        assert!(matches!(result, Err(HttpsError::Timeout(_))));
+    }
+
+    /// A test's stand-in answers only what a real client would send, and only while it is there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stand_in_answers_for_threema_hosts_only_while_it_is_in_place() {
+        let client = HttpsClient::new().unwrap();
+        let get = |url: &str| HttpsRequest {
+            timeout: std::time::Duration::from_secs(1),
+            url: url.to_owned(),
+            method: HttpsMethod::Get,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        {
+            let _in_place = answer_requests_with(|request| {
+                let body = request.url.clone().into_bytes();
+                Box::pin(async move { Ok(HttpsResponse { status: 200, body }) })
+            });
+            let answer = client
+                .send(get("https://ds-apip.threema.ch/x"))
+                .await
+                .unwrap();
+            assert_eq!(answer.body, b"https://ds-apip.threema.ch/x");
+            let refused = client.transfer(get("https://example.org/x"), 10).await;
+            assert!(matches!(refused, Err(HttpsError::InvalidRequest(_))));
+        }
+        assert!(TEST_SERVERS.with_borrow(Option::is_none));
+    }
+
+    #[test]
+    fn redirects_stay_on_threema_hosts() {
+        assert!(redirect_allowed("https://ds-blobp-1f.threema.ch/1f00", 0));
+        assert!(redirect_allowed("https://threema.com/", MAX_REDIRECTS - 1));
+        assert!(!redirect_allowed("https://threema.com/", MAX_REDIRECTS));
+        assert!(!redirect_allowed("https://example.com/", 0));
+        assert!(!redirect_allowed("https://threema.ch.example.com/", 0));
+    }
+
+    #[test]
+    fn ipv4_only_keeps_only_ipv4_addresses() {
+        let v4: std::net::SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let v6: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        assert_eq!(for_ip_version([v6, v4], false), [v6, v4]);
+        assert_eq!(for_ip_version([v6, v4], true), [v4]);
+        assert!(for_ip_version([v6], true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_resolver_finds_addresses() {
+        use reqwest::dns::{Name, Resolve};
+        use std::str::FromStr;
+        let name = Name::from_str("127.0.0.1").unwrap();
+        let found: Vec<_> = IpVersionResolver.resolve(name).await.unwrap().collect();
+        assert_eq!(found, ["127.0.0.1:0".parse().unwrap()]);
     }
 
     #[test]
@@ -468,6 +1075,27 @@ mod tests {
         assert_eq!(server_url(urls[0]), urls[0]);
     }
 
+    /// reqwest calls every failure of sending a request one: a connection too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_server_that_cannot_be_reached_is_told_apart_from_a_bad_request() {
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls_config().unwrap())
+            .build()
+            .unwrap();
+        let refused = client
+            .get(format!("http://{closed}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(map_error(refused), HttpsError::Unreachable(_)));
+        let bad = client.get("not a url").send().await.unwrap_err();
+        assert!(matches!(map_error(bad), HttpsError::InvalidRequest(_)));
+    }
+
     #[test]
     fn spki_hash_of_current_threema_ch_certificate_is_pinned() {
         // Leaf certificate served by apip.threema.ch on 2026-10-21.
@@ -482,3 +1110,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "https_pinning_tests.rs"]
+mod pinning_tests;

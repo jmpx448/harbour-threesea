@@ -29,6 +29,60 @@ pub struct VideoParams {
     pub height: u32,
 }
 
+/// The largest remote video picture we decode. Android sends at most the MAX profile (1920x1080,
+/// either way up); a VP8 key frame can declare up to 16383x16383 in a few bytes, and decoder and
+/// conversion would then ask for gigabytes.
+const MAX_REMOTE_VIDEO_SIDE: u32 = 2560;
+const MAX_REMOTE_VIDEO_PIXELS: u32 = 2560 * 1440;
+
+/// What to do with a received VP8 frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vp8Verdict {
+    /// Decode it.
+    Pass,
+    /// Waiting for a usable key frame: drop it.
+    Drop,
+    /// A key frame that is too large or malformed: drop it, and what follows until a good one.
+    Refuse,
+}
+
+/// Lets only pictures of a sensible size reach the decoder (RFC 6386 9.1: a frame tag whose
+/// lowest bit is clear means a key frame, whose bytes 3..6 are the start code and 6..10 the
+/// 14-bit width and height, with 2 bits of scaling each). `waiting`: this stream has no accepted
+/// key frame yet or lost it; starts out true.
+pub fn vp8_filter(frame: &[u8], waiting: &mut bool) -> Vp8Verdict {
+    let Some(tag) = frame.first() else {
+        return Vp8Verdict::Drop;
+    };
+    if tag & 1 != 0 {
+        return if *waiting {
+            Vp8Verdict::Drop
+        } else {
+            Vp8Verdict::Pass
+        };
+    }
+    let size = match frame {
+        [_, _, _, 0x9d, 0x01, 0x2a, w0, w1, h0, h1, ..] => Some((
+            u32::from(u16::from_le_bytes([*w0, *w1]) & 0x3fff),
+            u32::from(u16::from_le_bytes([*h0, *h1]) & 0x3fff),
+        )),
+        _ => None,
+    };
+    let fits = size.is_some_and(|(width, height)| {
+        width > 0
+            && height > 0
+            && width <= MAX_REMOTE_VIDEO_SIDE
+            && height <= MAX_REMOTE_VIDEO_SIDE
+            && width * height <= MAX_REMOTE_VIDEO_PIXELS
+    });
+    *waiting = !fits;
+    if fits {
+        Vp8Verdict::Pass
+    } else {
+        Vp8Verdict::Refuse
+    }
+}
+
 impl VideoParams {
     #[must_use]
     pub const fn low() -> Self {
@@ -195,6 +249,84 @@ pub fn encode_quality(params: &VideoParams) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_frame(width: u16, height: u16) -> Vec<u8> {
+        let mut frame = vec![0x10, 0, 0, 0x9d, 0x01, 0x2a];
+        frame.extend_from_slice(&width.to_le_bytes());
+        frame.extend_from_slice(&height.to_le_bytes());
+        frame.extend_from_slice(&[0; 20]);
+        frame
+    }
+
+    const DELTA: &[u8] = &[0x31, 0, 0, 1, 2, 3];
+
+    #[test]
+    fn vp8_key_frames_of_a_sensible_size_pass() {
+        for (width, height) in [(640, 480), (1920, 1080), (1080, 1920), (2560, 1440), (1, 1)] {
+            let mut waiting = true;
+            assert_eq!(
+                vp8_filter(&key_frame(width, height), &mut waiting),
+                Vp8Verdict::Pass,
+                "{width}x{height}"
+            );
+            assert!(!waiting);
+            assert_eq!(vp8_filter(DELTA, &mut waiting), Vp8Verdict::Pass);
+        }
+        // The two upper bits are scaling, not size.
+        let mut waiting = true;
+        assert_eq!(
+            vp8_filter(&key_frame(640 | 0xc000, 480 | 0x4000), &mut waiting),
+            Vp8Verdict::Pass
+        );
+    }
+
+    #[test]
+    fn vp8_huge_key_frames_stop_the_stream_until_a_good_one() {
+        let mut waiting = false;
+        for (width, height) in [
+            (16383, 16383),
+            (2561, 2),
+            (2, 2561),
+            (2560, 2560),
+            (0, 480),
+            (640, 0),
+        ] {
+            waiting = false;
+            assert_eq!(
+                vp8_filter(&key_frame(width, height), &mut waiting),
+                Vp8Verdict::Refuse,
+                "{width}x{height}"
+            );
+            assert!(waiting);
+            assert_eq!(vp8_filter(DELTA, &mut waiting), Vp8Verdict::Drop);
+        }
+        assert!(waiting);
+        assert_eq!(
+            vp8_filter(&key_frame(640, 480), &mut waiting),
+            Vp8Verdict::Pass
+        );
+        assert_eq!(vp8_filter(DELTA, &mut waiting), Vp8Verdict::Pass);
+    }
+
+    #[test]
+    fn vp8_broken_frames_are_dropped() {
+        let mut waiting = true;
+        // Deltas before any key frame, and nothing at all.
+        assert_eq!(vp8_filter(DELTA, &mut waiting), Vp8Verdict::Drop);
+        assert_eq!(vp8_filter(&[], &mut waiting), Vp8Verdict::Drop);
+        waiting = false;
+        assert_eq!(vp8_filter(&[], &mut waiting), Vp8Verdict::Drop);
+        assert!(!waiting);
+        // A key frame too short to hold a size, or without the start code.
+        assert_eq!(
+            vp8_filter(&[0x10, 0, 0, 0x9d, 0x01, 0x2a, 1, 1, 1], &mut waiting),
+            Vp8Verdict::Refuse
+        );
+        let mut frame = key_frame(640, 480);
+        frame[3] = 0;
+        assert_eq!(vp8_filter(&frame, &mut waiting), Vp8Verdict::Refuse);
+        assert!(waiting);
+    }
 
     #[test]
     fn common_profile_takes_the_lower_one() {

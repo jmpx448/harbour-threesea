@@ -180,7 +180,7 @@ impl State {
 
         // Handle the result
         let identity_info = directory::handle_create_identity_result(response.result)?;
-        info!(identity = ?identity_info.identity, "Identity created");
+        info!("Identity created");
         match &context.flavor {
             Flavor::Consumer => Ok((
                 Self::Done,

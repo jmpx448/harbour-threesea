@@ -43,6 +43,11 @@ public:
     Q_INVOKABLE void dropFirst(int rows);
     Q_INVOKABLE QVariantMap get(int index) const;
     Q_INVOKABLE int indexOfKey(const QVariant &key) const;
+    // The first row whose `field` is `value`, or -1. No row crosses into QML on the way.
+    Q_INVOKABLE int indexOfField(const QString &field, const QVariant &value) const;
+    // One field of a row, without copying the whole row into QML as get() does; undefined in
+    // QML if there is no such row or field.
+    Q_INVOKABLE QVariant fieldAt(int row, const QString &field) const;
     // Remove the row with this key, if any.
     Q_INVOKABLE void remove(const QVariant &key);
     Q_INVOKABLE void clear();

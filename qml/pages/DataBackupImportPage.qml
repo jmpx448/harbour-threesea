@@ -15,6 +15,8 @@ Page {
 
     property string filePath
     property string password
+    // Over a restore of the ID from this backup (DataBackupRestorePage), for the results page.
+    property bool restored: false
 
     // "metadata", "history", then "done"
     property string phase: ""
@@ -32,7 +34,13 @@ Page {
     Component.onDestruction: password = ""
 
     // Started once the page is shown, not when the dialog preloads it.
-    onStatusChanged: if (status === PageStatus.Active && phase === "") importMetadata()
+    // A restore of the ID (DataBackupRestorePage) has brought the first part along with it.
+    onStatusChanged: {
+        if (status === PageStatus.Active && phase === "") {
+            if (imported) importHistory()
+            else importMetadata()
+        }
+    }
 
     function importMetadata() {
         phase = "metadata"
@@ -43,7 +51,7 @@ Page {
                 page.imported = result
                 page.importHistory()
             } else {
-                page.finish(null, Errors.text(kind, message))
+                page.finish(null, Errors.text(kind, message), kind)
             }
         })
     }
@@ -53,32 +61,38 @@ Page {
         backend.call("androidBackupImport",
                      { path: filePath, password: password, scope: "history" },
                      function(ok, result, kind, message) {
-            if (!ok) page.finish(null, Errors.text(kind, message))
+            if (!ok) page.finish(null, Errors.text(kind, message), kind)
         })
     }
 
-    function finish(summary, error) {
+    function finish(summary, error, errorKind) {
         phase = "done"
         password = ""
         resultTimer.summary = summary
         resultTimer.error = error || ""
+        resultTimer.errorKind = errorKind || ""
         resultTimer.start()
     }
 
-    // To the results once the page stack is idle (a fast import may end during the push).
+    // To the results once the page stack is idle (a fast import may end during the push) and
+    // the app is unlocked.
     Timer {
         id: resultTimer
         property var summary: null
         property string error
+        property string errorKind
         interval: 100
         repeat: true
         onTriggered: {
-            if (pageStack.busy) return
+            // Replace takes the top page: only this one, not the lock page over it.
+            if (pageStack.busy || window.locked || pageStack.currentPage !== page) return
             stop()
             pageStack.replace(Qt.resolvedUrl("DataBackupResultPage.qml"), {
                 "imported": page.imported,
+                "restored": page.restored,
                 "summary": summary,
-                "error": error
+                "error": error,
+                "errorKind": errorKind
             })
         }
     }
@@ -97,8 +111,8 @@ Page {
                     page.mediaShare = 0
                 }
             } else if (name === "androidBackupDone") {
-                if (data.ok) page.finish(data.summary, "")
-                else page.finish(null, Errors.text(data.kind, ""))
+                if (data.ok) page.finish(data.summary, "", "")
+                else page.finish(null, Errors.text(data.kind, ""), data.kind)
             }
         }
     }

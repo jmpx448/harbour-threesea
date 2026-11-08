@@ -19,6 +19,32 @@ pub(crate) const MIGRATION: &str = "
         nonce BLOB PRIMARY KEY NOT NULL
     ) WITHOUT ROWID;";
 
+/// Schema: reflected incoming messages whose sender this device has no contact for yet. Their
+/// envelope is acknowledged and counts as seen, so this is all that is left of them.
+pub(crate) const MIGRATION_REFLECTED_WAITING: &str = "
+    CREATE TABLE reflected_waiting (
+        id            INTEGER PRIMARY KEY,
+        sender        TEXT NOT NULL,
+        conversation  TEXT NOT NULL,
+        message_id    INTEGER NOT NULL,
+        created_at    INTEGER NOT NULL,
+        read_at       INTEGER,
+        message       BLOB NOT NULL
+    );";
+
+/// A reflected incoming message waiting for its sender's contact.
+pub struct WaitingReflected {
+    pub id: i64,
+    pub sender: String,
+    pub conversation: String,
+    pub message_id: u64,
+    pub created_at: i64,
+    /// Read on another device meanwhile.
+    pub read_at: Option<i64>,
+    /// The encoded `d2d::IncomingMessage`.
+    pub message: Vec<u8>,
+}
+
 /// Schema (store migration 23): sync envelopes waiting for the mediator (changed while offline or
 /// before the reflection went through); removed once committed.
 pub(crate) const MIGRATION_SYNC_QUEUE: &str = "
@@ -140,6 +166,23 @@ impl Store {
         Ok(())
     }
 
+    /// Queue something for the other devices. Part of the caller's store step, if it is in one.
+    pub(crate) fn queue_sync_content(
+        &self,
+        scope: libthreema::protobuf::d2d::transaction_scope::Scope,
+        content: libthreema::protobuf::d2d::envelope::Content,
+    ) -> Result<(), StoreError> {
+        use prost::Message as _;
+        #[expect(deprecated, reason = "Padding is still part of the envelope")]
+        let envelope = libthreema::protobuf::d2d::Envelope {
+            padding: Vec::new(),
+            device_id: 0,
+            protocol_version: 0,
+            content: Some(content),
+        };
+        self.queue_sync(scope as i32, &envelope.encode_to_vec())
+    }
+
     /// The oldest queued sync: (id, scope, content).
     pub fn next_sync(&self) -> Result<Option<(i64, i32, Vec<u8>)>, StoreError> {
         Ok(self
@@ -161,6 +204,145 @@ impl Store {
     /// Multi-device off: nothing left to reflect.
     pub fn clear_sync_queue(&self) -> Result<(), StoreError> {
         self.conn.execute("DELETE FROM d2d_sync_queue", [])?;
+        Ok(())
+    }
+
+    /// Keep a reflected incoming message until its sender has a contact (`id` is assigned).
+    pub fn keep_reflected(&self, waiting: &WaitingReflected) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO reflected_waiting (sender, conversation, message_id, created_at, message)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                waiting.sender,
+                waiting.conversation,
+                // Stored like a message's id: its bits.
+                waiting.message_id.cast_signed(),
+                waiting.created_at,
+                waiting.message
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A message that came late to its chat goes where its time says, among the others. A keyed
+    /// position as for imported history (store migration 28).
+    pub fn place_by_time(&self, conversation: &str, message_id: u64) -> Result<(), StoreError> {
+        let Some(message) = self.message_by_id(conversation, false, message_id)? else {
+            return Ok(());
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT sort_key, created_at FROM messages WHERE conversation = ?1 AND id <> ?2
+             ORDER BY sort_key, id",
+        )?;
+        let others = statement
+            .query_map(rusqlite::params![conversation, message.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<(i64, i64)>, _>>()?;
+        let key = crate::android_backup::place::Placer::new(others, 1).place(message.created_at);
+        self.conn.execute(
+            "UPDATE messages SET sort_key = ?1 WHERE id = ?2",
+            rusqlite::params![key, message.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn reflected_waiting_count(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM reflected_waiting", [], |row| {
+                row.get(0)
+            })?)
+    }
+
+    /// How many reflected messages never got to wait for their sender, as too many were waiting.
+    pub fn reflected_left_out(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .setting(crate::store::keys::REFLECTED_LEFT_OUT)?
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn clear_reflected_left_out(&self) -> Result<(), StoreError> {
+        self.set_setting(crate::store::keys::REFLECTED_LEFT_OUT, "0")
+    }
+
+    /// One more of those: the count now.
+    pub fn note_reflected_left_out(&self) -> Result<i64, StoreError> {
+        let count = self.reflected_left_out()?.saturating_add(1);
+        self.set_setting(crate::store::keys::REFLECTED_LEFT_OUT, &count.to_string())?;
+        Ok(count)
+    }
+
+    pub fn has_reflected_waiting(&self, sender: &str) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM reflected_waiting WHERE sender = ?1)",
+            [sender],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// What is kept, oldest first.
+    pub fn reflected_waiting(&self) -> Result<Vec<WaitingReflected>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, sender, conversation, message_id, created_at, read_at, message
+             FROM reflected_waiting ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(WaitingReflected {
+                id: row.get(0)?,
+                sender: row.get(1)?,
+                conversation: row.get(2)?,
+                message_id: row.get::<_, i64>(3)?.cast_unsigned(),
+                created_at: row.get(4)?,
+                read_at: row.get(5)?,
+                message: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// These were read on another device, should they be among the waiting.
+    pub fn note_waiting_read(
+        &self,
+        conversation: &str,
+        message_ids: &[u64],
+        at: i64,
+    ) -> Result<(), StoreError> {
+        for message_id in message_ids {
+            self.conn.execute(
+                "UPDATE reflected_waiting SET read_at = ?1
+                 WHERE conversation = ?2 AND message_id = ?3",
+                rusqlite::params![at, conversation, message_id.cast_signed()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Keep messages: those older than `cutoff` go. How many did.
+    pub fn reflected_forget_older(&self, cutoff: i64) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "DELETE FROM reflected_waiting WHERE created_at < ?1",
+            [cutoff],
+        )?)
+    }
+
+    /// `sender` won't get a contact, or is blocked: what waited for them goes, and with it the
+    /// lookup that was for it.
+    pub fn reflected_forget_sender(&self, sender: &str) -> Result<(), StoreError> {
+        let forgotten = self
+            .conn
+            .execute("DELETE FROM reflected_waiting WHERE sender = ?1", [sender])?;
+        if forgotten > 0 {
+            tracing::warn!(forgotten, "reflected messages that waited dropped");
+            self.member_lookups_answered(&[sender])?;
+        }
+        Ok(())
+    }
+
+    pub fn reflected_done(&self, id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM reflected_waiting WHERE id = ?1", [id])?;
         Ok(())
     }
 

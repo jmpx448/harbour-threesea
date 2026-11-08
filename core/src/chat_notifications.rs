@@ -13,12 +13,28 @@ use crate::{
     store::{Store, StoreError},
 };
 
+/// How the status line of a group call someone else started begins (`…|their name`).
+pub(crate) const GROUP_CALL_STARTED: &str = "groupCallStarted|";
+
+/// That status line: a status, since anyone can write those words in a message.
+pub(crate) fn is_group_call_started(message: &Message) -> bool {
+    message.kind == "status" && message.body.starts_with(GROUP_CALL_STARTED)
+}
+
 /// Schema (store migration 12).
 pub(crate) const MIGRATION: &str = "
     CREATE TABLE chat_notifications (
         conversation  TEXT PRIMARY KEY NOT NULL,
         policy        TEXT NOT NULL,
         until         INTEGER
+    ) WITHOUT ROWID;";
+
+/// Schema (store migration 34): the sound of a chat. A table of its own: a row in the one above
+/// goes as soon as the chat's notifications are back on, and comes with a policy.
+pub(crate) const MIGRATION_TONES: &str = "
+    CREATE TABLE chat_tones (
+        conversation  TEXT PRIMARY KEY NOT NULL,
+        tone          TEXT NOT NULL
     ) WITHOUT ROWID;";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +85,31 @@ impl Store {
         }))
     }
 
+    /// Every chat's setting that hasn't expired: one query instead of one per chat.
+    pub fn all_chat_notifications(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (Policy, Option<i64>)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT conversation, policy, until FROM chat_notifications
+             WHERE until IS NULL OR until > ?1",
+        )?;
+        let rows = statement.query_map([now_ms()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        let mut settings = std::collections::HashMap::new();
+        for row in rows {
+            let (conversation, policy, until) = row?;
+            if let Some(policy) = Policy::parse(&policy) {
+                settings.insert(conversation, (policy, until));
+            }
+        }
+        Ok(settings)
+    }
+
     /// Every chat whose notifications are off or limited right now (the chat list's bell):
     /// one query instead of one per chat.
     pub fn muted_chats(&self) -> Result<std::collections::HashSet<String>, StoreError> {
@@ -100,7 +141,42 @@ impl Store {
         Ok(())
     }
 
+    /// `""` or none: the tone of all chats.
+    pub fn set_chat_tone(&self, conversation: &str, tone: Option<&str>) -> Result<(), StoreError> {
+        match tone.filter(|tone| !tone.is_empty()) {
+            Some(tone) => self.conn.execute(
+                "INSERT OR REPLACE INTO chat_tones (conversation, tone) VALUES (?1, ?2)",
+                params![conversation, tone],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM chat_tones WHERE conversation = ?1",
+                [conversation],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// The chats with a tone of their own.
+    pub fn chat_tones(&self) -> Result<std::collections::HashMap<String, String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT conversation, tone FROM chat_tones")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// `{policy: "never"|"mentioned"|null, until: ms|null}` for the UI.
+    /// The contact or group these were for is gone.
+    pub fn forget_chat_choices(&self, conversation: &str) -> Result<(), StoreError> {
+        for table in ["chat_notifications", "chat_tones"] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE conversation = ?1"),
+                [conversation],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn chat_notifications_json(&self, conversation: &str) -> Value {
         match self.chat_notifications(conversation).ok().flatten() {
             Some((policy, until)) => json!({ "policy": policy.as_str(), "until": until }),
@@ -110,16 +186,22 @@ impl Store {
 
     /// Whether an incoming message should notify (the global switch is the UI's).
     pub fn should_notify(&self, message: &Message) -> bool {
-        // Of the status lines only missed calls (app_calls.rs) are worth a notification.
+        // Of the status lines only missed calls (app_calls.rs) and group calls others start
+        // (app_group_calls.rs) are worth a notification.
         if message.outgoing
-            || (message.kind == "status" && !message.body.starts_with("call|missed|"))
+            || (message.kind == "status"
+                && !message.body.starts_with("call|missed|")
+                && !is_group_call_started(message))
         {
             return false;
         }
         match self.chat_notifications(&message.conversation) {
             Ok(None) | Err(_) => true,
             Ok(Some((Policy::Never, _))) => false,
-            Ok(Some((Policy::Mentioned, _))) => self.mentions_me(message),
+            // A call mentions nobody and is for everyone; like Android, only muting stops it.
+            Ok(Some((Policy::Mentioned, _))) => {
+                is_group_call_started(message) || self.mentions_me(message)
+            }
         }
     }
 
@@ -166,6 +248,27 @@ mod tests {
         );
         store.set_chat_notifications("g:abc", None).unwrap();
         assert_eq!(store.chat_notifications("g:abc").unwrap(), None);
+    }
+
+    #[test]
+    fn tones_are_kept_apart_from_the_mute_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        assert!(store.chat_tones().unwrap().is_empty());
+        store.set_chat_tone("00000BOB", Some("/tone.ogg")).unwrap();
+        store
+            .set_chat_notifications("00000BOB", Some((Policy::Never, None)))
+            .unwrap();
+        store.set_chat_notifications("00000BOB", None).unwrap();
+        assert_eq!(store.chat_tones().unwrap()["00000BOB"], "/tone.ogg");
+        assert_eq!(store.chat_notifications("00000BOB").unwrap(), None);
+        store.set_chat_tone("00000BOB", Some("/other.ogg")).unwrap();
+        assert_eq!(store.chat_tones().unwrap()["00000BOB"], "/other.ogg");
+        store.set_chat_tone("00000BOB", Some("")).unwrap();
+        assert!(store.chat_tones().unwrap().is_empty());
+        store.set_chat_tone("g:abc", Some("/tone.ogg")).unwrap();
+        store.wipe().unwrap();
+        assert!(store.chat_tones().unwrap().is_empty());
     }
 
     #[test]

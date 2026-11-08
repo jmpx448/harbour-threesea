@@ -29,6 +29,10 @@ Page {
     }
 
     Component.onCompleted: load()
+    Connections {
+        target: backend
+        onCoreEvent: if (name === "settingsChanged") page.load()
+    }
 
     SilicaListView {
         anchors.fill: parent

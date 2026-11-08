@@ -9,8 +9,13 @@ Dialog {
 
     property alias password: passwordField.text
     property string quality: ""   // tooShort | tooLong | weak | ok, from the core
+    // Asked of a new ID (the chat list): going on without Threema Safe takes a choice of its own.
+    property bool firstRun: false
+    // Threema Safe is on already, and this replaces its password.
+    property bool changing: false
+    readonly property bool skip: firstRun && skipSwitch.checked
 
-    canAccept: (quality === "ok" || quality === "weak") && repeatField.text === passwordField.text
+    canAccept: skip || ((quality === "ok" || quality === "weak") && repeatField.text === passwordField.text)
 
     Timer {
         id: checkLater
@@ -29,18 +34,28 @@ Dialog {
             spacing: Theme.paddingLarge
 
             DialogHeader {
-                //% "Enable"
-                acceptText: qsTrId("threesea-he-enable")
+                acceptText: dialog.skip
+                            //% "Continue"
+                            ? qsTrId("threesea-he-continue")
+                            : dialog.changing
+                              //% "Change"
+                              ? qsTrId("threesea-he-change")
+                              //% "Enable"
+                              : qsTrId("threesea-he-enable")
             }
 
             InfoLabel {
-                //% "Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, once a day. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered."
-                text: qsTrId("threesea-la-safe-password-intro")
+                text: dialog.changing
+                      //% "Choose a new password for Threema Safe. A new backup replaces the one made with the old password. Only your password (at least 8 characters) unlocks it: if you forget it, the backup cannot be recovered."
+                      ? qsTrId("threesea-la-safe-password-change-intro")
+                //% "Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, updated when something changes. For your chats, use Data backup. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered."
+                      : qsTrId("threesea-la-safe-password-intro-changes")
             }
 
             PasswordField {
                 id: passwordField
                 width: parent.width
+                visible: !dialog.skip
                 //% "Password"
                 label: qsTrId("threesea-la-password")
                 onTextChanged: { dialog.quality = ""; checkLater.restart() }
@@ -51,6 +66,7 @@ Dialog {
             PasswordField {
                 id: repeatField
                 width: parent.width
+                visible: !dialog.skip
                 //% "Repeat password"
                 label: qsTrId("threesea-la-repeat-password")
                 errorHighlight: text.length > 0 && text !== passwordField.text
@@ -60,13 +76,23 @@ Dialog {
             }
 
             ErrorLabel {
-                text: dialog.quality === "weak"
+                text: dialog.skip ? ""
+                      : dialog.quality === "weak"
                       //% "This password is easy to guess. Choose a stronger one, or accept to use it anyway."
                       ? qsTrId("threesea-la-safe-password-weak")
                       : dialog.quality === "tooLong"
                         //% "The password is too long."
                         ? qsTrId("threesea-la-error-password-long")
                         : ""
+            }
+
+            TextSwitch {
+                id: skipSwitch
+                visible: dialog.firstRun
+                //% "Continue without a backup"
+                text: qsTrId("threesea-la-safe-setup-skip")
+                //% "Your ID, contacts and groups then exist on this phone alone, and go with it. Settings, Backup can turn Threema Safe on or export an ID backup at any time."
+                description: qsTrId("threesea-la-safe-setup-skip-description")
             }
         }
 

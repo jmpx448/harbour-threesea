@@ -8,6 +8,8 @@
 //!   `https://threema.id/compose?…`: write to someone (no `id`: choose the chat).
 //! - `threema://add?id=<ID>`, `https://go.threema.ch/add?id=<ID>`: add a contact.
 //! - `threema://license?key=…`, `https://go.threema.ch/license?key=…`: license key (setup only).
+//! - `threema://link_mobileno?code=…`: the code of a pending phone link, from Threema's SMS
+//!   (`SMSVerificationLinkActivity`, `VerifyMobileNumberUseCase`).
 
 use serde_json::{Value, json};
 use url::Url;
@@ -35,6 +37,17 @@ pub enum Link {
     License {
         key: String,
     },
+    VerifyMobile {
+        code: String,
+    },
+}
+
+/// `VerifyMobileNumberUseCase.isValidCodeFormat`.
+const MAX_MOBILE_CODE_DIGITS: usize = 8;
+
+fn mobile_code(code: &str) -> Option<String> {
+    let valid = code.len() <= MAX_MOBILE_CODE_DIGITS && code.bytes().all(|b| b.is_ascii_digit());
+    valid.then(|| code.to_owned())
 }
 
 impl Link {
@@ -48,6 +61,7 @@ impl Link {
             }
             Self::Add { identity } => json!({ "action": "add", "identity": identity }),
             Self::License { key } => json!({ "action": "license", "key": key }),
+            Self::VerifyMobile { code } => json!({ "action": "verifyMobile", "code": code }),
         }
     }
 }
@@ -94,6 +108,10 @@ pub fn parse(url: &str) -> Option<Link> {
             identity: identity(&query("id")?)?,
         }),
         "license" => Some(Link::License { key: query("key")? }),
+        // Only as Threema's own scheme, as in Android's manifest.
+        "link_mobileno" if url.scheme() == SCHEME => Some(Link::VerifyMobile {
+            code: mobile_code(&query("code")?)?,
+        }),
         _ => None,
     }
 }
@@ -145,6 +163,27 @@ mod tests {
             })
         );
         assert_eq!(parse("threema://compose?id=nope&text=x"), None);
+    }
+
+    #[test]
+    fn phone_verification_links() {
+        assert_eq!(
+            parse("threema://link_mobileno?code=12345678"),
+            Some(Link::VerifyMobile {
+                code: "12345678".into()
+            })
+        );
+        assert_eq!(
+            parse("threema://link_mobileno?code=123456")
+                .unwrap()
+                .to_json()["action"],
+            "verifyMobile"
+        );
+        assert_eq!(parse("threema://link_mobileno?code=123456789"), None);
+        assert_eq!(parse("threema://link_mobileno?code=12a4"), None);
+        assert_eq!(parse("threema://link_mobileno?code="), None);
+        assert_eq!(parse("threema://link_mobileno"), None);
+        assert_eq!(parse("https://go.threema.ch/link_mobileno?code=1234"), None);
     }
 
     #[test]

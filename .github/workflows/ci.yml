@@ -1,14 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# Checks on every push and pull request (scripts/check.sh). Pull requests into `release` are
-# also built with the Sailfish SDK, so a release can't fail on the build after merging.
+# On every push and pull request that changes more than Markdown files: the checks
+# (scripts/check.sh), libthreema's own tests, the C ABI
+# under AddressSanitizer (scripts/test-ffi-asan.sh, nightly), every
+# test in the Sailfish SDK (scripts/run-sdk-tests.sh: list models, pages, app lock, SecretStore,
+# notification tokens, ...; the call engine built only), and both flavours built for all three
+# architectures, the Lite ones through the Jolla Store's validator. A C++ or QML change that
+# stops building, or a test that breaks, shows on the push that did it.
+# The release workflow calls this as its gate (release_gate): everything but the builds, which it
+# makes itself, and then the texts must all be translated.
 name: CI
 
 on:
   push:
+    paths-ignore:
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
-  # The release workflow runs the same checks before it builds (and publishes nothing without).
   workflow_call:
+    inputs:
+      release_gate:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,24 +39,100 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The TLS pin check (scripts/check-pins.py) reads upstream's file from the
+          # threema-android submodule; with CI set (GitHub sets it) a missing file fails it.
           submodules: true
           persist-credentials: false
       - name: Rust toolchain (rust-toolchain.toml) and protoc
         run: |
           rustup show active-toolchain || rustup toolchain install
           echo "PROTOC=$(scripts/fetch-protoc.sh)" >> "$GITHUB_ENV"
+      - name: Rust build output from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: rust-checks-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-checks-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: cargo-audit from the cache
+        id: cargo-audit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-ubuntu-24.04
       - name: cargo-audit
+        if: steps.cargo-audit.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Crates of every target
+        # The licence notices (scripts/make-notices.py) read them offline; building only fetches
+        # the runner's own.
+        run: cargo fetch --locked
       - name: Checks
-        run: scripts/check.sh
+        # Into a release, every text has to be in translations/ as well.
+        run: |
+          if [ "$RELEASE" = true ]; then scripts/check.sh --release; else scripts/check.sh; fi
+        env:
+          CARGO_INCREMENTAL: 0
+          RELEASE: ${{ inputs.release_gate || github.base_ref == 'release' || github.ref == 'refs/heads/release' }}
+
+  libthreema:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml) and protoc
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          echo "PROTOC=$(scripts/fetch-protoc.sh)" >> "$GITHUB_ENV"
+      - name: libthreema's tests
+        run: scripts/libthreema-tests.sh
+
+  ffi-asan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The core compiles in Android's list of bad passwords from the threema-android submodule.
+          submodules: true
+          persist-credentials: false
+      - name: Nightly toolchain and protoc
+        run: |
+          rustup toolchain install nightly --profile minimal
+          echo "PROTOC=$(scripts/fetch-protoc.sh)" >> "$GITHUB_ENV"
+      - name: The C ABI under AddressSanitizer
+        run: scripts/test-ffi-asan.sh
+
+  sdk-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Sailfish SDK image
+        run: |
+          scripts/ci-prepare-sdk.sh
+          docker build --build-arg SFOS_VERSION=5.1.0.11 -t harbour-threesea-sdk:5.1.0.11 scripts/sdk
+      - name: Map renderer (i486, for scripts/test-mapview.sh) from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/maplibre/5.1.0.11-i486
+          key: maplibre-i486-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh', 'scripts/maplibre/patches/**') }}
+      - name: Every scripts/test-*.sh
+        run: scripts/run-sdk-tests.sh
+        env:
+          SDK_TEST_JOBS: 3
 
   sdk-build:
-    if: github.event_name == 'pull_request' && github.base_ref == 'release'
-    needs: checks
+    if: ${{ !inputs.release_gate }}
     runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         flavour: [full, lite]
+        arch: [aarch64, armv7hl, i486]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,9 +140,28 @@ jobs:
           persist-credentials: false
       - name: Sailfish SDK image
         run: scripts/ci-prepare-sdk.sh
-      - name: Build (i486)
-        run: FLAVOUR=${{ matrix.flavour }} FLAVOUR_SUFFIX=0 scripts/sdk-build.sh i486
+      # The map renderer takes long to build; its result is kept per architecture and pin.
+      # Releases build it afresh (release.yml).
+      - name: Map renderer from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/maplibre/5.1.0.11-${{ matrix.arch }}
+          key: maplibre-${{ matrix.arch }}-${{ hashFiles('scripts/maplibre/versions', 'scripts/maplibre/build.sh', 'scripts/maplibre/patches/**') }}
+      # The crates; our own are built anew, as a checkout makes their files newer.
+      - name: Rust build output from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/cargo-home
+            target/release
+            target/*-unknown-linux-*
+          key: rust-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Build
+        run: FLAVOUR=${{ matrix.flavour }} FLAVOUR_SUFFIX=0 scripts/sdk-build.sh ${{ matrix.arch }}
       # The Lite flavour is what the Jolla Store takes: Jolla's own validator must pass.
       - name: Harbour validation (Lite)
         if: matrix.flavour == 'lite'
-        run: scripts/validate-rpm.sh RPMS/lite/harbour-threesea-*-1.i486.rpm
+        run: scripts/validate-rpm.sh RPMS/lite/harbour-threesea-*-1.${{ matrix.arch }}.rpm
+      - name: Look inside the package
+        run: scripts/check-package.sh RPMS/${{ matrix.flavour }}/harbour-threesea-[0-9]*-1.${{ matrix.arch }}.rpm

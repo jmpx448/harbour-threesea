@@ -3,8 +3,11 @@
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QGuiApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickView>
 #include <QScopedPointer>
 #include <QSettings>
@@ -20,14 +23,19 @@
 #include <sailfishapp.h>
 
 #include "animatedimage.h"
+#include "applifecycle.h"
 #include "callmanager.h"
+#include "callroute.h"
 #include "callvideo.h"
 #include "groupcallmanager.h"
 #include "dbusinterface.h"
 #include "emojiimageprovider.h"
 #include "emojihighlighter.h"
+#include "endofprocess.h"
 #include "enterkeyfilter.h"
 #include "jsonlistmodel.h"
+#include "listfilter.h"
+#include "maplogfilter.h"
 #include "mediaimageprovider.h"
 #include "proximitymonitor.h"
 #include "softsound.h"
@@ -38,6 +46,7 @@
 
 #include "videoplayer.h"
 #include "voiceplayer.h"
+#include "voicerecorder.h"
 
 #include <threesea_core.h>
 
@@ -47,8 +56,10 @@ namespace {
 // core's own lines; the previous handler keeps them going to the journal as before.
 QtMessageHandler previousMessageHandler = nullptr;
 
-void forwardMessageToLog(QtMsgType type, const QMessageLogContext &context, const QString &message)
+void forwardMessageToLog(QtMsgType type, const QMessageLogContext &context, const QString &rawMessage)
 {
+    // The map renderer's records never with their text, here or in the journal.
+    const QString message = withoutMapDetails(rawMessage);
     // Only warnings and worse: Qt's own debug/info stream is a firehose of internals that
     // would drown the core's lines (and the journal keeps carrying everything anyway).
     if (type != QtDebugMsg && type != QtInfoMsg) {
@@ -70,6 +81,24 @@ void onTerm(int)
     if (::write(termSocket[0], &byte, 1) < 0) {
         // Nothing to do in a signal handler.
     }
+}
+
+// The map (ADR 0032): what the bundled renderer's downloader may fetch, from the core's pin table.
+// MapLibre reads both variables for every request; without them it fetches nothing.
+void applyMapPolicy()
+{
+    char *policy = threesea_map_policy();
+    const QJsonObject object = QJsonDocument::fromJson(QByteArray(policy)).object();
+    threesea_string_free(policy);
+    const QByteArray origin = object.value(QStringLiteral("origin")).toString().toUtf8();
+    const QByteArray pins = object.value(QStringLiteral("pins")).toString().toUtf8();
+    if (origin.isEmpty() || pins.isEmpty()) {
+        qunsetenv("THREESEA_MAP_ORIGIN");
+        qunsetenv("THREESEA_MAP_PINS");
+        return;
+    }
+    qputenv("THREESEA_MAP_ORIGIN", origin);
+    qputenv("THREESEA_MAP_PINS", pins);
 }
 
 void quitOnTerm(QObject *parent)
@@ -94,18 +123,20 @@ void quitOnTerm(QObject *parent)
     ::sigaction(SIGTERM, &action, nullptr);
 }
 
-// If an instance is already running (possibly without a window, see below), ask it to show
-// itself and return true.
-bool activateRunningInstance()
+// Whether an instance owns the name (possibly without a window, see below).
+bool instanceRunning()
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
-    if (!bus.interface() || !bus.interface()->isServiceRegistered(QString::fromLatin1(DBusInterface::serviceName()))) {
-        return false;
-    }
+    return bus.interface() && bus.interface()->isServiceRegistered(QString::fromLatin1(DBusInterface::serviceName()));
+}
+
+// Asks the running instance to show itself. Says whether it answered.
+bool activateRunningInstance()
+{
     QDBusMessage call = QDBusMessage::createMethodCall(
         QString::fromLatin1(DBusInterface::serviceName()), QString::fromLatin1(DBusInterface::objectPath()),
         QString::fromLatin1(DBusInterface::interfaceName()), QStringLiteral("activate"));
-    return bus.call(call, QDBus::Block, 3000).type() == QDBusMessage::ReplyMessage;
+    return QDBusConnection::sessionBus().call(call, QDBus::Block, 3000).type() == QDBusMessage::ReplyMessage;
 }
 
 } // namespace
@@ -146,8 +177,11 @@ int main(int argc, char *argv[])
     QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope,
                        QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation));
 
-    if (activateRunningInstance()) {
-        return 0;
+    // One process for the store: two would log in with the same ID and throw each other out, and
+    // each would empty the other's captures. So this one ends also if the other is busy and doesn't
+    // answer in time; it may still act on the call.
+    if (instanceRunning()) {
+        return activateRunningInstance() ? 0 : 1;
     }
     quitOnTerm(app.data());
     ThreeseBackend::applyQtLogLevel();
@@ -160,12 +194,16 @@ int main(int argc, char *argv[])
     app->setQuitOnLastWindowClosed(!keepRunning);
 
     qmlRegisterType<JsonListModel>("harbour.threesea", 1, 0, "JsonListModel");
+    qmlRegisterType<ListFilter>("harbour.threesea", 1, 0, "ListFilter");
     qmlRegisterType<EnterKeyFilter>("harbour.threesea", 1, 0, "EnterKeyFilter");
     qmlRegisterType<EmojiHighlighter>("harbour.threesea", 1, 0, "EmojiHighlighter");
     qmlRegisterType<AnimatedImage>("harbour.threesea", 1, 0, "AnimatedMedia");
     qmlRegisterType<CallVideo>("harbour.threesea", 1, 0, "CallVideo");
 
+    applyMapPolicy();
     QScopedPointer<QQuickView> view(SailfishApp::createView());
+    // The map renderer's QML module, bundled privately (scripts/maplibre).
+    view->engine()->addImportPath(SailfishApp::pathTo(QStringLiteral("lib/qml")).toLocalFile());
     // Outlives the engine (destroyed after main returns).
     static OfflineNetworkFactory offlineNetwork;
     view->engine()->setNetworkAccessManagerFactory(&offlineNetwork);
@@ -185,14 +223,68 @@ int main(int argc, char *argv[])
     // Closing the window means done with it, also when the process stays for the connection.
     // The close itself, not visibleChanged: the window also goes invisible when it is minimized,
     // and playing on from the cover is what the system's media controls are for.
-    view->installEventFilter(new CloseWatcher([voicePlayer, videoPlayer]() {
+    // A recording goes too: with the window closed nothing shows that the microphone is on.
+    VoiceRecorder *voiceRecorder = backend->voiceRecorder();
+    view->installEventFilter(new CloseWatcher([voicePlayer, videoPlayer, voiceRecorder]() {
         voicePlayer->stop();
         videoPlayer->stop();
+        voiceRecorder->cancel();
     }, view->engine()));
 
     CallManager *calls = new CallManager(backend, view->engine());
     view->rootContext()->setContextProperty(QStringLiteral("calls"), calls);
-    view->rootContext()->setContextProperty(QStringLiteral("groupCalls"), new GroupCallManager(backend, view->engine()));
+    GroupCallManager *groupCalls = new GroupCallManager(backend, view->engine());
+    view->rootContext()->setContextProperty(QStringLiteral("groupCalls"), groupCalls);
+    CallRoute *callRoute = new CallRoute(view->engine());
+    view->rootContext()->setContextProperty(QStringLiteral("callRoute"), callRoute);
+    const auto followCalls = [calls, groupCalls, callRoute]() {
+        const QString one = calls->state();
+        const QString group = groupCalls->state();
+        const bool inGroup = group == QLatin1String("joining") || group == QLatin1String("connecting")
+            || group == QLatin1String("connected");
+        const bool inCall = one != QLatin1String("idle") && one != QLatin1String("incoming")
+            && one != QLatin1String("ended");
+        // Only a camera that is on takes a call away from the ear, as on Android: `video` only says
+        // both sides can do video, which Android's voice calls say too.
+        callRoute->setCall(inCall || inGroup, (inCall && (calls->camera() || calls->remoteCamera()))
+                                                  || (inGroup && groupCalls->camera()));
+    };
+    QObject::connect(calls, &CallManager::stateChanged, callRoute, followCalls);
+    QObject::connect(calls, &CallManager::cameraChanged, callRoute, followCalls);
+    QObject::connect(calls, &CallManager::remoteChanged, callRoute, followCalls);
+    QObject::connect(groupCalls, &GroupCallManager::stateChanged, callRoute, followCalls);
+    QObject::connect(groupCalls, &GroupCallManager::cameraChanged, callRoute, followCalls);
+    // One call has the microphone (like Android): both pipelines would capture it, and a group
+    // would hear the private call. Here, not in the pages' buttons: the cover and a notification
+    // get past those.
+    QObject::connect(calls, &CallManager::aboutToTakeMicrophone, groupCalls, &GroupCallManager::leave);
+    QObject::connect(groupCalls, &GroupCallManager::aboutToTakeMicrophone, calls, &CallManager::endCallWithMicrophone);
+    // Without a window there is no cover and no call page to show that the microphone is on.
+    view->installEventFilter(new CloseWatcher([calls, groupCalls]() {
+        calls->endCallWithMicrophone();
+        groupCalls->leave();
+    }, view->engine()));
+    // Removing the ID: nothing of it goes on playing, recording or calling, from the moment the
+    // PIN is accepted (the device group alone can take a minute) and in any case once it happens.
+    const auto stopPlayers = [voicePlayer, videoPlayer, voiceRecorder]() {
+        voicePlayer->stop();
+        videoPlayer->stop();
+        voiceRecorder->cancel();
+    };
+    QObject::connect(backend, &ThreeseBackend::dataRemovalStarted, view->engine(), [calls, groupCalls, stopPlayers]() {
+        if (calls->state() == QLatin1String("incoming")) {
+            calls->reject();
+        } else {
+            calls->endCallWithMicrophone();
+        }
+        groupCalls->leave();
+        stopPlayers();
+    });
+    QObject::connect(backend, &ThreeseBackend::dataRemoved, view->engine(), [calls, groupCalls, stopPlayers]() {
+        calls->forget();
+        groupCalls->forget();
+        stopPlayers();
+    });
     // An incoming call brings the window up (also when it was closed, the Full flavour's background run).
     QObject::connect(calls, &CallManager::incoming, view.data(), [&view]() {
         view->showFullScreen();
@@ -236,16 +328,38 @@ int main(int argc, char *argv[])
     showUnlessCalled.setSingleShot(true);
     QObject::connect(&showUnlessCalled, &QTimer::timeout, view.data(), [&view]() { view->show(); });
     QObject::connect(dbus, &DBusInterface::called, &showUnlessCalled, &QTimer::stop);
-    QObject::connect(dbus, &DBusInterface::backgroundRequested, app.data(), [keepRunning]() {
-        if (!keepRunning) {
-            QCoreApplication::quit();
-        }
-    });
+    AppLifecycle *lifecycle = new AppLifecycle(view.data(), [backend]() { return backend->keepRunning(); },
+                                               InstallCheck(SailfishApp::pathToMainQml().toLocalFile().toLocal8Bit()),
+                                               view->engine());
+    view->rootContext()->setContextProperty(QStringLiteral("lifecycle"), lifecycle);
+    dbus->setWindowGuard([lifecycle]() { return lifecycle->refuseWindow(); });
+    QObject::connect(dbus, &DBusInterface::backgroundRequested, lifecycle, &AppLifecycle::leaveIfUnwanted);
 
     view->setSource(SailfishApp::pathToMainQml());
     showUnlessCalled.start(2000);
     // Own the D-Bus name only now: when the launcher started us via D-Bus activation, its
     // activate()/openChat() call is queued by the bus until then and must reach the loaded UI.
-    dbus->registerOnBus();
-    return app->exec();
+    if (!dbus->registerOnBus()) {
+        // Another instance got the name while this one was loading. The core starts in the event
+        // loop, so nothing of the store has been touched here.
+        if (instanceRunning()) {
+            activateRunningInstance();
+        }
+        return 1;
+    }
+    QMetaObject::invokeMethod(view->rootObject(), "nameOwned");
+    const int result = app->exec();
+
+    // The event loop has ended, so the window doesn't draw any more. The pages go first, as they
+    // hand the core what they still hold (bridge/endofprocess.h). The name stays until the
+    // process is gone: nothing starts beside a core that is still stopping, and a start the bus
+    // began while this one holds the launcher's lock would stay pending for minutes. A call in this
+    // time gets no answer.
+    if (!endOfProcess(*view, *backend)) {
+        // The core or a worker task is stuck and still reports to what the destructors would
+        // free. The store takes this like any crash.
+        qWarning("threesea: ending without waiting for the core");
+        ::_exit(result);
+    }
+    return result;
 }

@@ -71,7 +71,7 @@ Add a Rust `android_backup` module for ZIP/CSV decoding, versioned records and v
 
 Use Rust ZIP and CSV libraries instead of shelling out to `unzip`, Java or an Android runtime. The [zip crate](https://docs.rs/zip/latest/zip/) documents `aes-crypto` for AE-1/AE-2 plus deflate support; [csv ReaderBuilder](https://docs.rs/csv/latest/csv/struct.ReaderBuilder.html) supports configurable escapes and headers. These are dependency candidates, not a tested dependency selection. Pin compatible versions, minimize features, review licenses, run the repository dependency checks, and cross-build with the pinned Rust/Sailfish targets. Explicitly prove Zip4j interoperability and non-ASCII password behavior with a fixture.
 
-Expose “Import Android data backup” in Settings → Backup, so that a restored ID can be merged with its Android history. Use the existing Sailfish picker pattern to choose a local ZIP, enter the password locally, inspect, then review counts/warnings and apply. The first implementation can require an existing unlocked identity matching the archive; do not silently add a new-identity onboarding workflow to this task. Keep the ID-backup text page separate.
+Expose “Import Android data backup” in Settings → Backup, so that a restored ID can be merged with its Android history. Use the existing Sailfish picker pattern to choose a local ZIP, enter the password locally, inspect, then review counts/warnings and apply. The import requires an existing unlocked identity matching the archive; a device with no ID gets that identity first from the same archive (`androidBackupRestore`, "Restore from Data backup" on the first page), then the same import. Keep the ID-backup text page separate.
 
 Proposed command lifecycle: start inspection → poll/receive progress → receive preview plus opaque job token → apply token → progress → completion summary; cancel/retry explicitly. A token binds to the same validated archive bytes and chosen options, not merely a mutable path. Passwords must not enter logs, command-line arguments, persisted settings or reports. Keep secrets out of generic Debug output and clear QML password fields on completion/cancel. Clear password-owning buffers where supported.
 
@@ -89,7 +89,7 @@ Keep the import source immutable for a job or revalidate its fingerprint before 
 
 ### Historical records must have no sending side effects
 
-Use dedicated historical inserts. Do not call `sendText`, `sendFile`, `createGroup`, receive-message providers or `setGroupPicture` to recreate old data. Those paths can queue sends, receipts, uploads, notifications, photo requests, resyncs or D2D reflections.
+Use dedicated historical inserts. Do not call `sendText`, `sendFile`, `createGroup`, receive-message providers or `setGroupPicture` to recreate old data. Those paths can queue sends, receipts, uploads, notifications, photo requests, resyncs or D2D reflections. The one exception is deliberate: with other devices linked, the metadata import reflects the contacts and groups it added and the own and group pictures it filled in (`App::reflect_imported`), or later messages would name a group those devices don't know; old messages stay here.
 
 Imported outgoing `PENDING`/`SENDING` rows must not enter `Store::pending_outgoing` (currently selects outgoing state 0). Preserve them as failed/unsent historical items, with a separate explicit user action if resend is offered. Preserve incoming read/unread state without issuing delivery/read receipts or notification banners. Recompute unread counts after import and refresh models through aggregate completion events, not thousands of `messageAdded` notifications.
 
@@ -100,7 +100,7 @@ Do not copy Android device sessions, D2D keys or forward-security ratchets into 
 | Entity | Default behavior |
 | --- | --- |
 | Own identity | Must match both current ID and derived public key; mismatch aborts before writes. Do not recreate identity, reset license or erase Safe credentials. |
-| Contacts | Add missing valid records from archive keys offline; reconcile with current public keys. Never overwrite a key mismatch or downgrade verification. Preserve newer local names/policies/blocks; count conflicts. Import revoked historical contacts without making them sendable. |
+| Contacts | Add missing valid records from archive keys offline; reconcile with current public keys. Never overwrite a key mismatch or downgrade verification. Preserve newer local names/policies/blocks; count conflicts, and leave out the chat, group messages, reactions and picture the archive holds in that contact's name. A group the import creates still keeps such a contact as creator or member, with the group's name and picture from the archive, and their votes stay in another person's poll. Import revoked historical contacts without making them sendable. |
 | Groups | Key by normalized creator and the existing little-endian 8-byte ID convention, not `group_uid`. Add missing metadata offline. Fill missing data, preserve newer known local membership/left status, and report ambiguous conflicts. An old backup must not rejoin a left group. |
 | Pictures | Fill absent images by default; preserve an existing newer local picture. Distinguish contact-defined pictures from local overrides. Current core has one contact picture slot: add a separate override/source policy or report that only one layer was imported. Do not silently replace contact-defined images with local address-book pictures. |
 | Own picture | Import absent own image into `me`, regenerate Safe-size copy using existing policy when needed, advance version, and invalidate upload/distribution cache only when image actually changes. No automatic distribution during import. |
@@ -130,6 +130,30 @@ Separate change detection from position in history: a higher row ID can still be
 ## Validation and archive handling
 
 Treat the ZIP as untrusted local input: passwords alone do not establish record validity. Bound entry count, expanded bytes, per-record/field size and image dimensions. Validate actual byte counts while reading, rather than trusting central-directory sizes or compression ratios alone. Reject duplicate logical entries, path traversal, absolute paths, symlinks and unsupported entry methods. Never extract archive filenames directly to arbitrary filesystem paths. Read each encrypted entry to EOF and verify authentication/integrity before accepting it.
+
+### What the password covers
+
+The format is WinZip AE-2 per entry: a correct password proves each entry's *content* is authentic, and nothing else. Entry names, the set of entries, their order and the central directory are not covered, and every backup with the same password has entries that verify. So someone who can write to the file (shared storage, a cloud folder) but has no password can, without being noticed by any check:
+
+- rename entries: `message_<a>.csv` and `message_<b>.csv` swap, and one contact's messages land in another's chat under the other's name; renaming `message_media_<uid>` shows one message's picture in another;
+- remove entries: a chat, its media, or `nonces.csv`, which drops the replay protection for what Android already received;
+- put in entries from an older backup with the same password, under their own names or others.
+
+This is the format's limit, shared with Android's own restore, and Threesea can't close it while reading Android's files. What the reader does:
+
+- it refuses duplicate names and entries that share bytes, so an entry can't be shadowed by a second record and every reader of the file sees the same content;
+- the result page says when `nonces.csv` is missing, since that takes something away from the user;
+- two cross-checks give hints on the result page: rows whose `uid` another chat of the same kind already holds, and group chats whose incoming rows mostly come from people outside the group. They notice crude copies and swaps only. No hint is not evidence of an untouched file, and a hint can have an innocent cause (a group whose writers all left).
+
+Keep the backup file where others can't write to it, as you would with the messages inside.
+
+### Memory
+
+Decrypted entries, CSV tables, message rows and blob keys are wiped when dropped, and their buffers don't grow by leaving freed copies behind. What is not wiped: the zip crate's internal buffers (the inflate window), and the converted text on its way into the store, as for any received message.
+
+### Bounds
+
+The CSV reader refuses a table beyond fixed limits for field, row, row count and cell count (`android_backup/csv.rs`), in time linear in the text; tables are read and parsed on a blocking thread.
 
 Preview must distinguish wrong password/corruption, unsupported format, identity mismatch, malformed metadata, absent optional media, and insufficient free space. Report compatibility issues by file category/record number and reason without disclosing private contents. Preview should state verified counts versus estimates and whether all selected media have been authenticated. A “successful” full restore must not silently omit unsupported message families.
 

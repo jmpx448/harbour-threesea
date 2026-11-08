@@ -9,12 +9,22 @@ hand. `main` is where work happens; `release` only ever receives merges from `ma
    `Cargo.toml` (`[workspace.package] version`) and `harbour-threesea.pro` (`VERSION`), and add a
    section `## [<version>] - <date>` to `CHANGELOG.md` (it becomes the release notes).
    `scripts/release-version.sh --new-tag` checks all of this locally.
-2. Open a pull request from `main` into `release`. CI runs the checks and builds both flavours
-   for i486 with the Sailfish SDK.
+   If the store's schema changed since the last release (`MIGRATIONS` in `core/src/store.rs` got
+   longer), keep the new release's schema as a fixture, so that every later version is tested
+   on a database with its data in it:
+   `THREESEA_SCHEMA_OUT=$PWD/core/tests/fixtures/store-schema-<version>.sql cargo test -p
+   threesea-core --lib write_a_releases_schema -- --ignored`, and add the version, its
+   migration count and the file to `RELEASED` in `core/src/store_upgrade_tests.rs`.
+2. Open a pull request from `main` into `release`. CI runs the checks (now also requiring every
+   text in `translations/`, `scripts/check.sh --release`), libthreema's and the SDK tests, and
+   builds both flavours for all three architectures, as it does on every push.
 3. Merge it. `.github/workflows/release.yml` then (only on `release`, also when started by hand):
-   - runs all of CI's checks again (the same workflow); nothing is built without them,
+   - runs all of CI's checks and tests again (the same workflow, without its builds); nothing is
+     built without them,
    - checks the version again (and that the tag `v<version>` doesn't exist yet),
-   - builds Full and Lite for aarch64, armv7hl and i486,
+   - builds Full and Lite for aarch64, armv7hl and i486, and looks inside each RPM
+     (`scripts/check-package.sh`: the licence texts are there, and no demo data in the aarch64 and
+     armv7hl ones; the i486 builds are for the emulator and carry it on purpose),
    - writes `SHA256SUMS` and a build provenance attestation per RPM,
    - creates the tag `v<version>` on the merged commit and the GitHub release with the 6 RPMs.
 
@@ -28,7 +38,12 @@ A failed release workflow changes nothing (the tag and release are made last); f
 
 - Settings → Actions → General → Workflow permissions: "Read and write permissions" (the release
   job creates the tag and the release; the other jobs are read-only by their own settings).
-- Settings → Code security: enable "Private vulnerability reporting" (SECURITY.md points there).
+- Settings → Code security: enable "Private vulnerability reporting" (SECURITY.md points there),
+  and "Dependabot alerts" (advisories for the crates in Cargo.lock; `.github/dependabot.yml`
+  only proposes updates of the workflows' actions).
+- After the first push with the current `.github/workflows/ci.yml`: check that the runners had room
+  for the SDK image (about 16 GB) in the `sdk-tests` job and in each of the six builds; the
+  workflows have not run on GitHub since they were extended.
 - Your account: Settings → Emails → "Keep my email addresses private" and "Block command line
   pushes that expose my email".
 
@@ -47,7 +62,10 @@ Settings → Rules → Rulesets → **New ruleset** → **New branch ruleset**:
      reviewer; with collaborators, 1).
    - **Require status checks to pass** → Add checks: `checks` and the two `sdk-build` jobs
      (`sdk-build (full)`, `sdk-build (lite)`); they can be picked once they have run once.
-     Tick "Require branches to be up to date before merging".
+     Leave "Require branches to be up to date before merging" **off**: every merge makes a
+     merge commit on `release` that `main` doesn't have, so with it on, the next pull request
+     would be blocked until `release` is merged back into `main` ("Update branch"). It adds
+     nothing here: the release workflow runs all checks again on the merged commit.
 5. Create.
 
 For `main`, a second ruleset with only "Restrict deletions" and "Block force pushes" keeps its
@@ -63,6 +81,13 @@ devices, `armv7hl` for older ones), then in the terminal:
 remove the installed one first (`devel-su pkcon remove harbour-threesea`; the data stays in the
 home directory), then install the other.
 
+An app that keeps running notices a new or removed package by itself, by a file of the package in
+/usr/share: without a window it ends within minutes or at the next tap on its icon (a notification
+then opens the new version, or another tap), and with a window it says so and ends when that is
+closed. Lite has no package scripts for this (Harbour restricts them); Full's stop and restart the
+running instance at the end of the transaction, too. Versions before this keep running on the old
+files until they are closed or the phone restarts.
+
 The launcher keeps an app's icon in memory, so a new icon in an update shows only after the home
 screen restarts: reboot, or `systemctl --user restart lipstick` in the terminal.
 
@@ -73,14 +98,19 @@ Harbour allows. Jolla's own validator says it is in order
 (`scripts/validate-rpm.sh`, which runs `rpmvalidation` inside the SDK image):
 
 ```sh
-FLAVOUR=lite FLAVOUR_SUFFIX=0 scripts/sdk-build.sh aarch64 armv7hl
+STORE=1 FLAVOUR=lite FLAVOUR_SUFFIX=0 scripts/sdk-build.sh aarch64 armv7hl
 scripts/validate-rpm.sh RPMS/lite/harbour-threesea-<version>-1.aarch64.rpm
+scripts/check-package.sh --store RPMS/lite/harbour-threesea-<version>-1.aarch64.rpm
 ```
 
-`FLAVOUR_SUFFIX=0` keeps the plain file name: the store insists on
-`harbour-threesea-<version>-<release>.<arch>.rpm`, while a release on GitHub carries the
-flavour in the name (`…-lite-…`) so both can sit side by side. CI runs the validator on every
-Lite build, so a change that would be refused shows up at once.
+`STORE=1` leaves out the GitHub update check (ADR 0014): a store brings its own updates.
+`check-package.sh --store` makes sure of it (no GitHub host in the package, no dialog asking for
+it) and that no demo data is in it. `FLAVOUR_SUFFIX=0` keeps the plain file name: the store
+insists on `harbour-threesea-<version>-<release>.<arch>.rpm`, while a release on GitHub carries
+the flavour in the name (`…-lite-…`) so both can sit side by side. CI builds Lite for all three
+architectures on every push and runs the validator on each, so a change that would be refused
+shows up at once; those are builds for GitHub (with the update check), and the store's build
+above is made and validated by hand.
 
 What the validator checks and passes today (2026-10-30): file name and package name, the
 `.desktop` file, the icons, the installed paths, the libraries linked, the RPATH, sandboxing
@@ -95,7 +125,15 @@ Still to be done by hand, and only by the maintainer:
    page and the README already say so).
 3. The store reviews by hand as well; expect questions about the Threema name. The launcher
    name is "Threesea" for exactly that reason.
-4. Chum (for the Full flavour) stays blocked on Rust: OBS builds from source and the SFOS
+4. Decide the Sailjail `OrganizationName` before the first store release. It is `org.threesea`
+   today (`harbour-threesea.desktop`, `bridge/main.cpp`, the D-Bus names in
+   `bridge/dbusinterface.cpp`, the systemd unit and the spec's scriptlets), and Sailjail derives the
+   app's data folder (`~/.local/share/org.threesea/harbour-threesea`) and its Secrets access from
+   it. Keeping it costs nothing. Changing it would make every installed copy start empty, without
+   its ID, chats or database key, unless the update moves the data folder and the key in Secrets
+   over first; the D-Bus names and the notifications' actions change with it. The question is open
+   in CLAUDE.md §11 until the maintainer decides.
+5. Chum (for the Full flavour) stays blocked on Rust: OBS builds from source and the SFOS
    5.1/5.2 repositories only have Rust 1.75, while libthreema needs 1.95 (docs/decisions,
    CLAUDE.md §11).
 

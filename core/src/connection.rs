@@ -11,18 +11,20 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 
 use libthreema::{
     common::{
-        ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, DeviceCookie, FeatureMask,
-        GroupIdentity, MessageId, Nonce, ThreemaId,
+        ChatServerGroup, ClientInfo, CspDeviceId, D2xDeviceId, Delta, DeviceCookie, GroupIdentity,
+        MessageFlags, MessageId, Nonce, ThreemaId,
         config::{Config, Flavor},
         keys::{ClientKey, PublicKey},
     },
     csp::{
         CspProtocol, CspProtocolContextInit, CspProtocolInstruction, CspStateUpdate,
-        payload::{EchoPayload, IncomingPayload, MessageWithMetadataBox, OutgoingPayload},
+        payload::{
+            EchoPayload, IncomingPayload, MessageAck, MessageWithMetadataBox, OutgoingPayload,
+        },
     },
     csp_e2e::{
-        CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, D2mRole, D2xContextInit,
-        ReflectId,
+        CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, CspE2eProtocolError, D2mRole,
+        D2xContextInit, ReflectId,
         contacts::{
             create::{CreateContactsInstruction, CreateContactsResponse},
             lookup::ContactsLookupResponse,
@@ -30,7 +32,10 @@ use libthreema::{
         },
         fs::{self as fs_protocol, FsSessionStore as _, FsStatus},
         message::task::{
-            incoming::{IncomingMessageInstruction, IncomingMessageLoop, IncomingMessageResponse},
+            incoming::{
+                IncomingMessageInstruction, IncomingMessageLoop, IncomingMessageResponse,
+                IncomingMessageTask,
+            },
             outgoing::{
                 encode_message_body, encode_outgoing_contact_message,
                 encode_outgoing_contact_message_encapsulated, encode_outgoing_fs_control_message,
@@ -79,19 +84,88 @@ use crate::{
     websocket::WebSocketError,
 };
 
-/// Send an echo request after this much silence; give up if nothing arrives for twice as long.
+/// Send an echo request after this much silence; give up if it isn't answered in as long again.
 const ECHO_INTERVAL: Duration = Duration::from_secs(60);
+/// A handler that reads nothing can outlast an echo's deadline with the answer already in the
+/// socket: this long to read it before the connection counts as dead.
+const ECHO_LAST_LOOK: Duration = Duration::from_secs(1);
 /// How long the notification of a message another device received first waits for that
 /// device's "read": long enough for a reply typed there, short enough to still feel live.
 const NOTIFY_GRACE: Duration = Duration::from_secs(8);
 /// Typing indicators older than this when the connection gets to them are not sent.
 const TYPING_MAX_AGE: Duration = Duration::from_secs(5);
+/// Message IDs in one reflected read update: under the 7000 bytes the protocol wants of a message,
+/// for the longer entries, a group's.
+const READ_UPDATE_IDS_MAX: usize = 128;
+/// How often one contact's feature mask is looked up because of what it sent: anyone can send
+/// any number of Rejects, and each of a burst would ask the directory the same.
+const FS_MASK_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// The same for an Init against a stored "no". The "no" from a moment ago may be from a linking
+/// on the peer's side that has been rolled back since, which is just when an Init arrives.
+const FS_MASK_INIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// The lookup holds up the incoming messages, like looking up an unknown sender.
+const FS_MASK_LOOKUP_LIMIT: Duration = Duration::from_secs(10);
+/// How long a member's or a reflected message sender's lookup may hold up the connection: what it
+/// is for stays noted and is tried again later.
+const MEMBER_LOOKUP_LIMIT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The whole way into the mediator: lookup, addresses in turn (`dial`), TLS and its login. An
+/// IPv6 address that takes all its 3 s still leaves IPv4 its own 15 s.
+const MEDIATOR_CONNECT_LIMIT: Duration = Duration::from_secs(25);
+/// How long a transaction may take to begin, other devices' transactions included.
+const TRANSACTION_BEGIN_LIMIT: Duration = Duration::from_secs(90);
+/// How long the mediator gets for one answer.
+const D2M_REPLY_LIMIT: Duration = Duration::from_secs(30);
+/// How long the data for a new device may take to go over the relay: its pictures can be many
+/// and the uplink slow (each chunk also has a limit of its own, `rendezvous::WRITE_TIMEOUT`).
+const JOIN_TRANSFER_LIMIT: Duration = Duration::from_secs(300);
+/// How long the new device may take to register after it has all the data.
+const JOIN_REGISTER_LIMIT: Duration = Duration::from_secs(180);
+/// How long the core waits for the connection's answer on a join: everything the connection
+/// may spend on it, its first connection through the mediator and a minute to spare. Only a
+/// connection that no longer works gets here: the join itself always answers within this.
+pub(crate) const JOIN_REPLY_LIMIT: Duration = Duration::from_secs(
+    MEDIATOR_CONNECT_LIMIT.as_secs()
+        + TRANSACTION_BEGIN_LIMIT.as_secs()
+        + JOIN_TRANSFER_LIMIT.as_secs()
+        + JOIN_REGISTER_LIMIT.as_secs()
+        + crate::rendezvous::CLOSE_TIMEOUT.as_secs()
+        + D2M_REPLY_LIMIT.as_secs()
+        + 60,
+);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// How long we stay away when a server told us not to come back by ourselves.
+/// The least wait while the store fails: a new connection brings the message it failed on again,
+/// and a wake-up or "Connect now" tries at once anyway.
+const STORAGE_BACKOFF: Duration = Duration::from_secs(30);
+/// The mediator's close code for the chat server having closed its connection (md-d2m.struct.yml).
+const MEDIATOR_CHAT_SERVER_CLOSED: u16 = 4000;
+/// How long we stay away when a server told us not to come back by ourselves. Only "Connect now"
+/// ends this early: what wakes the connection by itself would be coming back by ourselves.
 const HOLD_OFF: Duration = Duration::from_secs(600);
+/// A login may fail on a bad network, and a server can have a bad minute: it takes this many refused
+/// in a row, over at least this long, before the user is told that the server is refusing.
+const REFUSED_LOGINS_TO_TELL: u32 = 3;
+const REFUSED_LOGINS_SPAN: Duration = Duration::from_secs(5 * 60);
+/// How many times the chat server may say "Another connection" with us coming back regardless
+/// (Android's `MonitoringLayer`); after that two of them are fighting over the ID.
+const ANOTHER_CONNECTION_IGNORED: u32 = 3;
+/// A session this long wasn't part of a fight, and starts that count over.
+const ANOTHER_CONNECTION_FORGOTTEN: Duration = HOLD_OFF;
+/// How long an echo gets after a wake-up: the device stays up for this, the usual interval would
+/// outlast that.
+const WAKE_ECHO_LIMIT: Duration = Duration::from_secs(15);
+/// A wake-up is over this long after the last thing received, so that what comes in a burst gets
+/// handled with the device up.
+const WAKE_QUIET: Duration = Duration::from_secs(2);
+/// A wake-up that found the connection dead waits for the next attempt if it comes this soon.
+const WAKE_RETRY_SOON: Duration = Duration::from_secs(2);
 /// A session this long was a working connection: the next attempts start over.
-const STABLE_SESSION: Duration = Duration::from_secs(60);
+pub(crate) const STABLE_SESSION: Duration = Duration::from_secs(60);
+/// libthreema's rule for `RateLimitExceeded`: no new connection attempt before this.
+const RATE_LIMIT_FLOOR: Duration = Duration::from_secs(10);
+/// How far the wait grows while every login meets the rate limit again: each one repeats the
+/// lookup that failed, because the message waits for it.
+const RATE_LIMIT_MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 /// Connection state as shown in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,40 +187,52 @@ impl ConnectionState {
 
 /// From the app to the connection.
 pub enum ToConnection {
-    /// A message was queued in the store (state pending): send it if connected.
+    /// Contacts changed: a reflected message may have been waiting for one of them.
+    ApplyWaitingReflected,
+    /// A message or an outbox entry was queued in the store: send it if connected.
     SendPending,
-    /// Send read receipts for these incoming message ids of a conversation.
-    ReadReceipts {
-        identity: String,
-        message_ids: Vec<u64>,
-    },
     /// Send a typing indicator (ephemeral: dropped by the server if the contact is offline).
     Typing {
         identity: String,
         typing: bool,
         at: Instant,
     },
-    /// Connect now if disconnected; if connected, verify the connection with an echo (15 s).
+    /// Answered once everything sent before this has been handled; dropped while disconnected.
+    Flush(oneshot::Sender<()>),
+    /// By itself (timer, network change, back in the app): connect now if disconnected, unless a
+    /// server told us to stay away; if connected, verify the connection with an echo. Answered with
+    /// [`FromConnection::WakeSettled`].
     Wake,
+    /// The user asked ("Connect now"): the same, and it also ends a wait a server asked for.
+    ConnectNow,
     /// Drop the connection and connect again at once (the server addresses changed).
     Reconnect,
     /// Multi-device: the linked devices (fails without the mediator).
-    Devices(oneshot::Sender<Result<Vec<LinkedDevice>, String>>),
+    Devices(oneshot::Sender<Result<Vec<LinkedDevice>, DeviceGroupError>>),
     /// Multi-device: send the essential data to a new device over its rendezvous link, inside a
     /// NEW_DEVICE_SYNC transaction (device join, ADR 0011).
     NewDeviceSync {
         link: Box<crate::rendezvous::RendezvousLink>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<JoinOutcome>,
     },
     /// Multi-device: a sync envelope (contact, group, profile, settings changed here) for the
     /// other devices, inside a transaction of its scope (Android's `Reflect*SyncTask`).
     /// (They are queued in the store first.)
     ReflectSync,
-    /// Multi-device: remove these devices from the group (Android's `DropDevicesSteps`); with our
-    /// own id, multi-device ends here and the connection goes back to the chat server.
+    /// Multi-device: remove devices from the group (Android's `DropDevicesSteps`): these, or
+    /// with `None` all the others. Once no other device would remain, or with our own id,
+    /// multi-device ends here and the connection goes back to the chat server (so no ids at
+    /// all is Android's "deactivate if alone").
     DropDevices {
-        ids: Vec<u64>,
-        reply: oneshot::Sender<Result<(), String>>,
+        ids: Option<Vec<u64>>,
+        reply: oneshot::Sender<Result<DropOutcome, DeviceGroupError>>,
+    },
+    /// A forward secrecy control message, from outside the incoming messages: the Terminate for
+    /// a deleted contact. Dropped while disconnected: the contact's next message is rejected.
+    FsControl {
+        peer: String,
+        peer_key: Option<PublicKey>,
+        envelope: Vec<u8>,
     },
     /// A call signalling message (ADR 0012); dropped while disconnected, the call times out.
     CallSignal {
@@ -155,12 +241,70 @@ pub enum ToConnection {
     },
 }
 
+/// Why the connection couldn't answer a question about the device group.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceGroupError {
+    /// No working connection now (the UI says to check the network).
+    #[error("not connected")]
+    NotConnected,
+    /// The server or the protocol said no.
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<ConnectionError> for DeviceGroupError {
+    fn from(error: ConnectionError) -> Self {
+        match error {
+            ConnectionError::Io(_)
+            | ConnectionError::Timeout
+            | ConnectionError::Stopped
+            | ConnectionError::Reconnect => Self::NotConnected,
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
+/// How a device join ended. What matters after a failure is whether the identity has left this
+/// device: until then nothing happened that needs undoing on the mediator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinOutcome {
+    /// The new device has registered.
+    Joined,
+    /// Failed before the essential data went out.
+    FailedBeforeHandover(String),
+    /// Failed with the essential data out (or on its way): the new device may have the ID and
+    /// may be in the group, or get there yet.
+    FailedAfterHandover(String),
+}
+
+impl JoinOutcome {
+    /// `registered` is all that decides success: a commit that fails afterwards only releases
+    /// the lock late, and the new device is in the group either way.
+    fn from_steps(handed_over: bool, registered: Result<(), String>) -> Self {
+        match registered {
+            Ok(()) => Self::Joined,
+            Err(reason) if handed_over => Self::FailedAfterHandover(reason),
+            Err(reason) => Self::FailedBeforeHandover(reason),
+        }
+    }
+}
+
+/// What removing devices left: what the mediator listed minus what it confirmed removed.
+#[derive(Debug, Clone)]
+pub struct DropOutcome {
+    pub remaining: Vec<LinkedDevice>,
+    /// This device left as well: multi-device is off.
+    pub left_group: bool,
+}
+
 /// A device of the device group (multi-device), for the Linked devices page.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkedDevice {
     /// Hex (a u64 doesn't fit a JavaScript number).
     pub id: String,
+    #[serde(skip)]
+    pub raw_id: u64,
     /// This device.
     pub current: bool,
     pub label: String,
@@ -174,15 +318,51 @@ pub struct LinkedDevice {
     pub last_disconnect_at: Option<u64>,
 }
 
+/// What Threema's servers said, or why they don't let us in: for the user to know until the next
+/// login, as from outside it all looks like a bad network otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfflineReason {
+    /// A close error, in the words of the chat server (Android's `ServerMessageModel`).
+    Server(String),
+    /// An alert, in the words of the chat server: the connection goes on.
+    ServerAlert(String),
+    /// The mediator closed the connection with a code that rules out reconnecting by itself: the
+    /// UI words it, by the code.
+    Mediator(u16),
+    /// The chat server keeps closing the connection during login, without a word.
+    LoginRefused,
+    /// Another device keeps taking over this ID, so logins are held off. Sent at each of them, as
+    /// each next login clears it from the UI; `first`: the one the user is alerted about.
+    AnotherConnection { first: bool },
+}
+
+impl OfflineReason {
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Server(text) | Self::ServerAlert(text) => {
+                serde_json::json!({ "kind": "server", "text": text })
+            }
+            Self::Mediator(code) => serde_json::json!({ "kind": "mediator", "code": code }),
+            Self::LoginRefused => serde_json::json!({ "kind": "loginRefused" }),
+            Self::AnotherConnection { first } => {
+                serde_json::json!({ "kind": "anotherConnection", "first": first })
+            }
+        }
+    }
+}
+
 /// From the connection to the app/UI.
 pub enum FromConnection {
     State(ConnectionState),
     Event(Box<CoreEvent>),
-    /// The server closed the connection with a message for the user.
-    ServerMessage {
-        message: String,
-        can_reconnect: bool,
-    },
+    /// Something the user should know, for as long as the next login is away.
+    OfflineReason(OfflineReason),
+    /// The servers have begun handing out what they kept while we were away (`true`), or are
+    /// through with it (`false`): it comes as a burst, and it is one piece of news.
+    Backlog(bool),
+    /// What a wake-up was for has happened or won't soon: the device may sleep again.
+    WakeSettled,
 }
 
 /// Everything the connection needs; owned by the connection task.
@@ -198,6 +378,290 @@ pub struct ConnectionSetup {
     pub device_cookie: DeviceCookie,
     /// Who we are to the chat server and the mediator.
     pub client_info: ClientInfo,
+    /// Feature mask lookups for forward secrecy's sake; outlive a connection.
+    pub fs_mask_checks: FsMaskChecks,
+    /// Where the store is failing; the UI has been told.
+    pub storage_failing: StorageFailing,
+    pub failing_items: FailingItems,
+    /// Answers to what has been received that the last connection couldn't send
+    /// ([`waits_for_the_next_connection`]). In the store too (`FS_EVENTS_CARRIED`); here for when
+    /// writing that failed, as it may well.
+    pub carried_events: RefCell<Vec<CoreEvent>>,
+    /// What a wake-up is waiting for; it may take a new connection to find out.
+    pub wake_hold: WakeHold,
+    /// The upload of our picture, beside the connection; outlives one.
+    pub picture_uploads: Rc<PictureUploads>,
+}
+
+/// After a failed upload of our picture, how long messages go out without another try.
+const PICTURE_UPLOAD_PAUSE: Duration = Duration::from_secs(10 * 60);
+
+/// Our profile picture on its way to the blob server, for those who don't have it yet. Its own
+/// task: a blob server out of reach may take minutes to say so, and nothing else the connection
+/// does has to wait for that. Their messages go ahead and the picture comes after them.
+#[derive(Default)]
+pub struct PictureUploads {
+    running: core::cell::Cell<bool>,
+    paused_until: core::cell::Cell<Option<Instant>>,
+    /// Who gets the picture when it is up. In memory: the next message after a restart asks again.
+    waiting: RefCell<std::collections::BTreeSet<String>>,
+    finished: tokio::sync::Notify,
+}
+
+impl PictureUploads {
+    /// Whether an upload may start now; if so it counts as running.
+    fn start(&self, now: Instant) -> bool {
+        if self.running.get() || self.paused_until.get().is_some_and(|until| now < until) {
+            return false;
+        }
+        self.running.set(true);
+        self.paused_until.set(None);
+        true
+    }
+
+    /// The upload is through, either way. A picture that has changed meanwhile is not the one to
+    /// give anyone: those waiting try again and start one of the new picture.
+    fn ended(
+        &self,
+        store: &Store,
+        version_before: Option<&str>,
+        upload: Result<crate::profile_pictures::Upload, crate::media::MediaError>,
+        now: Instant,
+    ) {
+        self.running.set(false);
+        let noted = match upload {
+            Ok(upload) => store
+                .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+                .and_then(|version| {
+                    if version.as_deref() == version_before {
+                        store.set_picture_upload(Some(&upload))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|error| tracing::warn!(%error, "profile picture upload not noted")),
+            Err(error) => {
+                tracing::warn!(%error, "profile picture upload failed");
+                Err(())
+            }
+        };
+        if noted.is_err() {
+            self.paused_until.set(Some(now + PICTURE_UPLOAD_PAUSE));
+        }
+        self.finished.notify_one();
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum WakeWait {
+    #[default]
+    Nothing,
+    /// For the first sign of life.
+    Answer,
+    /// Something came in: until this, unless more does.
+    QuietUntil(Instant),
+}
+
+/// How far the last wake-up has got. The device is held awake for it, which costs battery every
+/// few minutes, and letting go too early leaves a dead connection dead until the next time. So it
+/// lasts until something has been received and has stopped coming, or until nothing can come soon.
+/// After a login that takes the servers saying they have handed out what they kept (like Android's
+/// `BaseServerConnection`, which holds on until the queue is sent); if they never do, the UI's limit
+/// ends it.
+#[derive(Default)]
+pub struct WakeHold {
+    wait: core::cell::Cell<WakeWait>,
+    /// The chat server's queue isn't through yet.
+    chat_queue_open: core::cell::Cell<bool>,
+    /// The mediator's queue isn't through yet.
+    reflection_queue_open: core::cell::Cell<bool>,
+}
+
+impl WakeHold {
+    fn asked(&self) {
+        // Nothing was waiting for those queues, on a session that may be hours old.
+        if self.wait.get() == WakeWait::Nothing {
+            self.chat_queue_open.set(false);
+            self.reflection_queue_open.set(false);
+        }
+        self.wait.set(WakeWait::Answer);
+    }
+
+    /// A new session. Through the mediator the chat server only hands out to the leader.
+    fn logged_in(&self, through_mediator: bool) {
+        self.chat_queue_open.set(!through_mediator);
+        self.reflection_queue_open.set(through_mediator);
+        self.wait_for_the_queues();
+    }
+
+    fn promoted_to_leader(&self) {
+        self.chat_queue_open.set(true);
+        self.wait_for_the_queues();
+    }
+
+    fn wait_for_the_queues(&self) {
+        if self.wait.get() != WakeWait::Nothing {
+            self.wait.set(WakeWait::Answer);
+        }
+    }
+
+    fn chat_queue_through(&self, now: Instant) {
+        self.chat_queue_open.set(false);
+        self.heard(now);
+    }
+
+    fn reflection_queue_through(&self, now: Instant) {
+        self.reflection_queue_open.set(false);
+        self.heard(now);
+    }
+
+    /// The connection works, as far as it can be seen from here.
+    fn heard(&self, now: Instant) {
+        if self.wait.get() != WakeWait::Nothing
+            && !self.chat_queue_open.get()
+            && !self.reflection_queue_open.get()
+        {
+            self.wait.set(WakeWait::QuietUntil(now + WAKE_QUIET));
+        }
+    }
+
+    fn settles_at(&self) -> Option<Instant> {
+        match self.wait.get() {
+            WakeWait::QuietUntil(at) => Some(at),
+            WakeWait::Nothing | WakeWait::Answer => None,
+        }
+    }
+
+    fn settle(&self, tx: &mpsc::UnboundedSender<FromConnection>) {
+        if self.wait.take() != WakeWait::Nothing {
+            let _ = tx.send(FromConnection::WakeSettled);
+        }
+    }
+}
+
+/// Which queues the servers are still handing out to this session. [`WakeHold`] knows something
+/// like it, but only while a wake-up is waiting.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct Backlog {
+    chat_queue: bool,
+    reflection_queue: bool,
+}
+
+impl Backlog {
+    const fn is_open(self) -> bool {
+        self.chat_queue || self.reflection_queue
+    }
+}
+
+/// What was being done when the store failed. Each of these has its own way of showing that it
+/// works again, and only that may end the notice: a multi-device login, for one, runs through the
+/// mediator's queue every time and only then comes to the chat server's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageStep {
+    /// Handling what the chat server sent. Over when a message got through or its queue is empty.
+    Incoming,
+    /// Applying what another device reflected. Over when one got applied or the queue is empty.
+    Reflected,
+    /// Anything else. Over when a connection gets through what it does at the start.
+    Other,
+}
+
+/// Which of the [`StorageStep`]s the store is failing in.
+#[derive(Default)]
+pub struct StorageFailing(core::cell::Cell<[bool; 3]>);
+
+impl StorageFailing {
+    /// Whether this is the first failure of a streak.
+    fn failed(&self, step: StorageStep) -> bool {
+        let mut failing = self.0.get();
+        let first = !failing.contains(&true);
+        failing[step as usize] = true;
+        self.0.set(failing);
+        first
+    }
+
+    /// Whether this ended the streak.
+    fn works(&self, step: StorageStep) -> bool {
+        let mut failing = self.0.get();
+        let was_failing = core::mem::take(&mut failing[step as usize]);
+        self.0.set(failing);
+        was_failing && !failing.contains(&true)
+    }
+}
+
+/// A message or reflected envelope is given up on when it has failed this many times in a row in
+/// a way that says trying again won't help ([`ConnectionError::fails_every_time`]). It would hold
+/// up all that comes after it, for good: one bug of ours must not stop someone's whole inbox.
+const TRIES_BEFORE_DROPPING: u32 = 3;
+/// More than this many failing at once isn't one bad message; start counting over.
+const FAILING_ITEMS_MAX: usize = 64;
+
+/// What came in and failed.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum FailingItem {
+    Message {
+        sender: String,
+        id: u64,
+    },
+    /// By the nonce the encrypted envelope starts with.
+    Envelope(Vec<u8>),
+}
+
+/// How often each of them has failed in a row; outlives a connection.
+#[derive(Default)]
+pub struct FailingItems(RefCell<std::collections::HashMap<FailingItem, u32>>);
+
+impl FailingItems {
+    /// One more failure: how many that makes.
+    fn failed(&self, item: &FailingItem) -> u32 {
+        let mut items = self.0.borrow_mut();
+        if items.len() >= FAILING_ITEMS_MAX {
+            items.clear();
+        }
+        let failures = items.entry(item.clone()).or_default();
+        *failures += 1;
+        *failures
+    }
+
+    fn forget(&self, item: &FailingItem) {
+        let _ = self.0.borrow_mut().remove(item);
+    }
+}
+
+/// When a contact's feature mask was last looked up for forward secrecy's sake, and whether we can
+/// go by what that found.
+#[derive(Default)]
+pub struct FsMaskChecks(RefCell<std::collections::HashMap<String, (Instant, bool)>>);
+
+impl FsMaskChecks {
+    /// Whether the last lookup answered, if there was one within `interval`.
+    fn recent(&self, peer: &str, now: Instant, interval: Duration) -> Option<bool> {
+        let checks = self.0.borrow();
+        let (at, answered) = checks.get(peer)?;
+        (now.saturating_duration_since(*at) < interval).then_some(*answered)
+    }
+
+    fn record(&self, peer: &str, now: Instant, answered: bool) {
+        let _ = self.0.borrow_mut().insert(peer.to_owned(), (now, answered));
+    }
+
+    /// The last answer may be out of date: no going by it, and no new lookup before its time.
+    fn distrust(&self, peer: &str) {
+        if let Some((_, answered)) = self.0.borrow_mut().get_mut(peer) {
+            *answered = false;
+        }
+    }
+}
+
+/// What a look at a contact's feature mask came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskCheck {
+    /// The directory has just answered.
+    Fresh,
+    /// It answered a moment ago; asked again, it would too soon.
+    Recent,
+    /// No answer we can go by: the stored mask may be stale.
+    Unknown,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -208,6 +672,12 @@ enum ConnectionError {
     Protocol(String),
     #[error("connection timed out")]
     Timeout,
+    /// A directory lookup inside libthreema's message task met its rate limit.
+    #[error("rate limited")]
+    RateLimited,
+    /// The chat server closed the connection after our login, instead of answering it.
+    #[error("login refused")]
+    LoginRefused,
     #[error("closed by server: {message}")]
     Closed {
         message: String,
@@ -220,13 +690,204 @@ enum ConnectionError {
     /// The mediator closed the connection (its close codes: md-d2m.struct.yml).
     #[error("closed by the mediator ({code}): {reason}")]
     MediatorClosed { code: u16, reason: String },
+    /// Our store failed (SQLite's code): nothing the network can help with.
+    #[error("storage failed ({code})")]
+    Storage { code: i32, step: StorageStep },
+    /// libthreema gave up on a message for a reason of its own, neither storage nor network.
+    #[error("incoming message: {0}")]
+    IncomingMessage(String),
+}
+
+/// What tells a reflected envelope from the others: the random nonce at its start.
+fn envelope_nonce(envelope: &[u8]) -> Vec<u8> {
+    envelope.iter().take(24).copied().collect()
+}
+
+fn storage_error(error: crate::store::StoreError) -> ConnectionError {
+    ConnectionError::Storage {
+        code: error.sqlite_code(),
+        step: StorageStep::Other,
+    }
+}
+
+impl ConnectionError {
+    /// If the store failed: while doing this.
+    fn while_doing(self, step: StorageStep) -> Self {
+        match self {
+            Self::Storage { code, .. } => Self::Storage { code, step },
+            other => other,
+        }
+    }
+
+    /// Trying again won't help: this comes from what is being handled, not from the state of the
+    /// device or the network.
+    fn fails_every_time(&self) -> bool {
+        match self {
+            Self::Storage { code, .. } => crate::store::fails_every_time(*code),
+            Self::IncomingMessage(_) => true,
+            _ => false,
+        }
+    }
+
+    /// What failed was the connection, not what it was doing: that can be done on the next one.
+    /// (Anything else could fail the same way every time, and end every connection.)
+    fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_)
+                | Self::Timeout
+                | Self::LoginRefused
+                | Self::Closed { .. }
+                | Self::Stopped
+                | Self::Reconnect
+                | Self::MediatorClosed { .. }
+        )
+    }
+}
+
+/// Handling this event takes the connection. Nothing else may wait for that: whatever the store
+/// holds, the UI hears of even if the connection is gone.
+fn needs_the_connection(event: &CoreEvent) -> bool {
+    matches!(
+        event,
+        CoreEvent::FsControl { .. }
+            | CoreEvent::FsStatus { .. }
+            | CoreEvent::OutboxChanged
+            | CoreEvent::ReceiptQueued { .. }
+    )
+}
+
+/// Handled by the message's own connection, before the next message of a burst; if that connection
+/// ends, the app sees to it (`UnknownMembers`), or the next one does (`SyncQueued`).
+fn runs_before_the_next_message(event: &CoreEvent) -> bool {
+    matches!(event, CoreEvent::SyncQueued | CoreEvent::UnknownMembers(_))
+}
+
+/// An event nothing else in the store stands for: the message that caused it is acknowledged, with
+/// its nonce noted, so libthreema won't answer again. An answer lost here is a session the peer
+/// never gets to use or a message of theirs that stays "sent", and a lost report of a Reject is a
+/// session gone and our message not sent again.
+fn waits_for_the_next_connection(event: &CoreEvent) -> bool {
+    matches!(
+        event,
+        CoreEvent::FsControl { .. } | CoreEvent::FsStatus { .. }
+    )
+}
+
+/// How such an event lies in the store, encrypted like everything there. All it holds: IDs, and a
+/// control envelope (Accept, Reject or Terminate), which has a session id, a public key, the id of
+/// a rejected message and its group, and never a message's content.
+fn carried_to_json(event: &CoreEvent) -> Option<serde_json::Value> {
+    use serde_json::json;
+    match event {
+        CoreEvent::FsControl {
+            peer,
+            peer_key,
+            envelope,
+        } => Some(json!({
+            "peer": peer,
+            "peerKey": peer_key.map(|key| key.to_string()),
+            "envelope": data_encoding::HEXLOWER.encode(envelope),
+        })),
+        CoreEvent::FsStatus { peer, status } => {
+            let mut stored = match status {
+                FsStatus::Established => json!({"status": "established"}),
+                FsStatus::Reset => json!({"status": "reset"}),
+                FsStatus::MessageWithoutFs => json!({"status": "messageWithoutFs"}),
+                FsStatus::Terminated { session_known } => {
+                    json!({"status": "terminated", "sessionKnown": session_known})
+                }
+                FsStatus::MessageRejected {
+                    message_id,
+                    group_identity,
+                    session_known,
+                } => json!({
+                    "status": "messageRejected",
+                    "messageId": format!("{message_id:016x}"),
+                    "group": group_identity.as_ref().map(crate::groups::key),
+                    "sessionKnown": session_known,
+                }),
+            };
+            stored["peer"] = json!(peer);
+            Some(stored)
+        }
+        _ => None,
+    }
+}
+
+fn carried_from_json(stored: &serde_json::Value) -> Option<CoreEvent> {
+    let peer = stored["peer"].as_str()?.to_owned();
+    let session_known = stored["sessionKnown"].as_bool().unwrap_or(true);
+    if let Some(envelope) = stored["envelope"].as_str() {
+        let peer_key = match stored["peerKey"].as_str() {
+            Some(key) => {
+                let key = data_encoding::HEXLOWER.decode(key.as_bytes()).ok()?;
+                Some(PublicKey::try_from(key.as_slice()).ok()?)
+            }
+            None => None,
+        };
+        return Some(CoreEvent::FsControl {
+            peer,
+            peer_key,
+            envelope: data_encoding::HEXLOWER.decode(envelope.as_bytes()).ok()?,
+        });
+    }
+    let status = match stored["status"].as_str()? {
+        "established" => FsStatus::Established,
+        "reset" => FsStatus::Reset,
+        "messageWithoutFs" => FsStatus::MessageWithoutFs,
+        "terminated" => FsStatus::Terminated { session_known },
+        "messageRejected" => FsStatus::MessageRejected {
+            message_id: u64::from_str_radix(stored["messageId"].as_str()?, 16).ok()?,
+            group_identity: stored["group"].as_str().and_then(crate::groups::parse_key),
+            session_known,
+        },
+        _ => return None,
+    };
+    Some(CoreEvent::FsStatus { peer, status })
+}
+
+/// What a connection ended on, for the next one, also after a restart.
+fn save_carried_events(
+    store: &crate::store::Store,
+    events: &[CoreEvent],
+) -> Result<(), crate::store::StoreError> {
+    use crate::store::keys::FS_EVENTS_CARRIED;
+    if events.is_empty() {
+        return store.delete_setting(FS_EVENTS_CARRIED);
+    }
+    let stored: Vec<_> = events.iter().filter_map(carried_to_json).collect();
+    store.set_setting(
+        FS_EVENTS_CARRIED,
+        &serde_json::Value::from(stored).to_string(),
+    )
+}
+
+fn saved_carried_events(
+    store: &crate::store::Store,
+) -> Result<Vec<CoreEvent>, crate::store::StoreError> {
+    let saved = store.setting(crate::store::keys::FS_EVENTS_CARRIED)?;
+    Ok(saved
+        .and_then(|saved| serde_json::from_str::<Vec<serde_json::Value>>(&saved).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(carried_from_json)
+        .collect())
 }
 
 impl From<TransportError> for ConnectionError {
     fn from(error: TransportError) -> Self {
         match error {
             TransportError::Io(error) => Self::Io(error),
-            TransportError::Closed => Self::Protocol("connection closed".into()),
+            TransportError::Closed => Self::Io(std::io::ErrorKind::ConnectionAborted.into()),
+            TransportError::WriteTimeout => Self::Timeout,
+            // The socket itself, or its end without a close code.
+            TransportError::WebSocket(WebSocketError::Socket(error)) => {
+                Self::Io(std::io::Error::other(error))
+            }
+            TransportError::WebSocket(WebSocketError::Closed { code: None, .. }) => {
+                Self::Io(std::io::ErrorKind::ConnectionAborted.into())
+            }
             TransportError::WebSocket(WebSocketError::Closed {
                 code: Some(code),
                 reason,
@@ -250,6 +911,31 @@ fn d2d_conversation(conversation: &str) -> Option<libthreema::protobuf::d2d::Con
     Some(ConversationId { id: Some(id) })
 }
 
+/// Our picture to the blob server. See [`PictureUploads`].
+async fn upload_own_picture(
+    store: Rc<Store>,
+    https: HttpsClient,
+    uploads: Rc<PictureUploads>,
+    picture: Zeroizing<Vec<u8>>,
+) {
+    let version = store
+        .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+        .ok()
+        .flatten();
+    let mut key = [0_u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    let blob = crate::media::encrypt_blob(&key, crate::media::MediaPart::File, &picture);
+    let upload = crate::media::upload(&https, &blob, true)
+        .await
+        .map(|blob_id| crate::profile_pictures::Upload {
+            blob_id,
+            key,
+            size: u32::try_from(picture.len()).unwrap_or(u32::MAX),
+            uploaded_at: crate::messages::now_ms(),
+        });
+    uploads.ended(&store, version.as_deref(), upload, Instant::now());
+}
+
 /// A mediator payload's kind, for logs (its content may be private).
 fn d2m_name(payload: &D2mIncoming) -> &'static str {
     match payload {
@@ -268,8 +954,313 @@ fn d2m_name(payload: &D2mIncoming) -> &'static str {
     }
 }
 
+/// What libthreema reports, in which a provider's storage failure is only text.
 fn protocol_error(error: impl std::fmt::Display) -> ConnectionError {
-    ConnectionError::Protocol(error.to_string())
+    let error = error.to_string();
+    match crate::providers::storage_code(&error) {
+        Some(code) => ConnectionError::Storage {
+            code,
+            step: StorageStep::Other,
+        },
+        None => ConnectionError::Protocol(error),
+    }
+}
+
+/// What our messages say about our nickname. Without one, they tell contacts to drop the name
+/// they know; for an ID whose user hasn't answered yet (restored from an ID backup, which holds no
+/// nickname), that would be the app's doing, so they say nothing.
+fn nickname_delta(nickname: Option<&str>, unanswered: bool) -> Delta<&str> {
+    match nickname {
+        Some(nickname) => Delta::Update(nickname),
+        None if unanswered => Delta::Unchanged,
+        None => Delta::Remove,
+    }
+}
+
+/// Like [`protocol_error`], but a rate limit stays what it is (it has its own wait), and what isn't
+/// the network's or a server's doing is the message's.
+fn e2e_error(error: CspE2eProtocolError) -> ConnectionError {
+    match error {
+        CspE2eProtocolError::RateLimitExceeded => ConnectionError::RateLimited,
+        CspE2eProtocolError::NetworkError(_)
+        | CspE2eProtocolError::ServerError(_)
+        | CspE2eProtocolError::InvalidCredentials => protocol_error(error),
+        other => match protocol_error(other) {
+            ConnectionError::Protocol(text) => ConnectionError::IncomingMessage(text),
+            storage => storage,
+        },
+    }
+}
+
+/// A message without forward secrecy reports it before the message is stored, and its line goes
+/// into the chat after the message: the events have to say so in that order too, or a live chat
+/// shows the line above the message until it is opened again.
+fn status_after_messages(mut events: Vec<CoreEvent>) -> Vec<CoreEvent> {
+    events.sort_by_key(|event| {
+        matches!(
+            event,
+            CoreEvent::FsStatus {
+                status: FsStatus::MessageWithoutFs,
+                ..
+            }
+        )
+    });
+    events
+}
+
+/// What became of a rejected message.
+#[derive(Default)]
+struct Requeued {
+    /// Something waits in the store: send it.
+    send: bool,
+    /// The rejected message goes out again.
+    resending: bool,
+    /// The messages put back in the queue, for the UI.
+    changed: Vec<Message>,
+    /// The group whose state goes out to the peer instead.
+    state_of: Option<String>,
+}
+
+/// Put a rejected message back in the queue, if it is ours to send again (only the store, no
+/// sending). With a group named it goes by that group, without one by the ID: a group message of
+/// ours for a member, or the 1:1 message, which like on Android needs a new session.
+fn requeue_rejected(
+    store: &crate::store::Store,
+    user: &str,
+    peer: &str,
+    message_id: u64,
+    group_identity: Option<GroupIdentity>,
+) -> Result<Requeued, crate::store::StoreError> {
+    if let Some(group_identity) = group_identity {
+        let rejected = crate::groups::message_rejected(
+            store,
+            user,
+            peer,
+            group_identity,
+            message_id,
+            &|identity| store.is_explicitly_blocked(identity),
+        )?;
+        return Ok(Requeued {
+            send: rejected.send,
+            resending: rejected.resending,
+            changed: Vec::new(),
+            state_of: rejected
+                .state_sent
+                .then(|| crate::groups::key(&group_identity)),
+        });
+    }
+    let in_group = store.requeue_group_receiver(peer, message_id)?;
+    let changed = store.reset_outgoing(peer, message_id)?;
+    let resending = in_group || !changed.is_empty();
+    Ok(Requeued {
+        send: resending,
+        resending,
+        changed,
+        state_of: None,
+    })
+}
+
+/// The status line for a message that came without forward secrecy on a session that has it.
+const FS_MESSAGE_WITHOUT: &str = "fsMessageWithoutFs";
+
+/// The status line for a forward secrecy event, if it gets one. Lines only appear for sessions
+/// that existed, and say what happened as far as we know it: a contact that ended a session has
+/// not necessarily turned anything off, that is for the feature mask to say, and "sent again"
+/// is only said of messages that really are.
+fn fs_status_line(status: &FsStatus, supports_fs: bool, resending: bool) -> Option<&'static str> {
+    match status {
+        FsStatus::Established => supports_fs.then_some("fsEstablished"),
+        FsStatus::Reset => Some("fsReset"),
+        FsStatus::MessageWithoutFs if supports_fs => Some(FS_MESSAGE_WITHOUT),
+        FsStatus::MessageWithoutFs => Some("fsUnavailable"),
+        FsStatus::MessageRejected {
+            session_known: false,
+            ..
+        }
+        | FsStatus::Terminated {
+            session_known: false,
+        } => None,
+        FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } if !supports_fs => {
+            Some("fsUnavailable")
+        }
+        FsStatus::MessageRejected { .. } if resending => Some("fsMessageRejected"),
+        FsStatus::MessageRejected { .. } | FsStatus::Terminated { .. } => Some("fsReset"),
+    }
+}
+
+/// Android shows the servers' words as HTML. They stay plain text here, which nothing gets to parse
+/// or load: what is markup goes, and what would show as markup becomes what it stands for.
+fn plain_server_text(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        plain.push_str(&rest[..start]);
+        let tag = &rest[start + 1..];
+        let opens_a_tag =
+            tag.starts_with(|c: char| c.is_ascii_alphabetic() || c == '/' || c == '!');
+        match tag.find('>').filter(|_| opens_a_tag) {
+            Some(end) => {
+                let name = tag[..end].trim_end_matches('/').trim().to_ascii_lowercase();
+                if name == "br" || name == "/p" {
+                    plain.push('\n');
+                }
+                rest = &tag[end + 1..];
+            }
+            // A lone "<", as in "a < b".
+            None => {
+                plain.push('<');
+                rest = tag;
+            }
+        }
+    }
+    plain.push_str(rest);
+    // `&amp;` last: "&amp;lt;" stands for the text "&lt;".
+    [
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+    ]
+    .iter()
+    .fold(plain, |text, (entity, character)| {
+        text.replace(entity, character)
+    })
+    .trim()
+    .to_owned()
+}
+
+/// What the chat server's words tell the user; nothing, if there aren't any.
+fn server_reason(message: &str) -> Option<OfflineReason> {
+    let text = plain_server_text(message);
+    (!text.is_empty()).then_some(OfflineReason::Server(text))
+}
+
+/// "Another connection" is often our own earlier connection after a change of network, and another
+/// device has a warning of its own, the device cookie's. Android checks for it just like this.
+fn is_another_connection(message: &str) -> bool {
+    message.contains("Another connection")
+}
+
+/// What a close error tells the user. Not "Another connection" (Android's
+/// `IncomingMessageProcessorImpl` leaves it out too).
+fn close_reason(message: &str) -> Option<OfflineReason> {
+    if is_another_connection(message) {
+        None
+    } else {
+        server_reason(message)
+    }
+}
+
+/// How often the server has said "Another connection" lately.
+#[derive(Default)]
+struct AnotherConnection {
+    closes: u32,
+    /// This fight has been brought to the user's attention.
+    told: bool,
+}
+
+impl AnotherConnection {
+    /// It said so again, after a session this long. Whether to stay away, if it asks us to: not
+    /// the first few times, as on Android, since it mostly is a change of network, and coming back
+    /// after a moment beats ten minutes offline without a word. A real fight over the ID doesn't
+    /// go on past those: then a login every [`HOLD_OFF`] at most, however long this runs.
+    fn stay_away(&mut self, session: Duration) -> bool {
+        if session > ANOTHER_CONNECTION_FORGOTTEN {
+            self.closes = 0;
+            self.told = false;
+        }
+        self.closes = self.closes.saturating_add(1);
+        self.closes > ANOTHER_CONNECTION_IGNORED
+    }
+
+    /// What the user hears of the close [`Self::stay_away`] just counted: nothing, unless we really
+    /// do stay away because of it.
+    fn reason(&mut self, can_reconnect: bool) -> Option<OfflineReason> {
+        (!can_reconnect && self.closes > ANOTHER_CONNECTION_IGNORED).then(|| {
+            OfflineReason::AnotherConnection {
+                first: !std::mem::replace(&mut self.told, true),
+            }
+        })
+    }
+}
+
+/// What it means when reading failed during the handshake. After our login the server has an
+/// answer to give, and closing the connection instead is how it says no. It doesn't send a word
+/// before the login is through, so there is no reason to go by. Through the mediator that end of
+/// the chat server's connection comes as a close code.
+fn handshake_read_failed(login_sent: bool, error: ConnectionError) -> ConnectionError {
+    match error {
+        ConnectionError::Io(ref io)
+            if login_sent
+                && matches!(
+                    io.kind(),
+                    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                ) =>
+        {
+            ConnectionError::LoginRefused
+        }
+        ConnectionError::MediatorClosed {
+            code: MEDIATOR_CHAT_SERVER_CLOSED,
+            ..
+        } if login_sent => ConnectionError::LoginRefused,
+        other => other,
+    }
+}
+
+/// Logins refused one after the other, with nothing else going wrong in between.
+#[derive(Default)]
+struct RefusedLogins {
+    /// The first of them, and how many so far.
+    streak: Option<(Stopwatch, u32)>,
+    told: bool,
+}
+
+impl RefusedLogins {
+    /// One more. Returns whether it is the first, and whether to tell the user now: once per streak.
+    fn refused(&mut self) -> (bool, bool) {
+        let first = self.streak.is_none();
+        let (began, count) = self.streak.get_or_insert_with(|| (Stopwatch::start(), 0));
+        *count = count.saturating_add(1);
+        let tell = !self.told
+            && *count >= REFUSED_LOGINS_TO_TELL
+            && began.elapsed() >= REFUSED_LOGINS_SPAN;
+        self.told |= tell;
+        (first, tell)
+    }
+
+    fn over(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// The event queue as it was, back in place on leaving a scope unless [`Self::disarm`]ed: for writes
+/// that are undone on the way out, so that nothing they announced stays announced.
+struct EventsKept<'a> {
+    events: &'a EventSink,
+    before: Option<Vec<CoreEvent>>,
+}
+
+impl<'a> EventsKept<'a> {
+    fn new(events: &'a EventSink) -> Self {
+        Self {
+            events,
+            before: Some(events.borrow().clone()),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.before = None;
+    }
+}
+
+impl Drop for EventsKept<'_> {
+    fn drop(&mut self) {
+        if let Some(before) = self.before.take() {
+            *self.events.borrow_mut() = before;
+        }
+    }
 }
 
 /// The wait before the next attempt, given the wait so far and how long the session lasted. A
@@ -284,6 +1275,135 @@ fn backoff_after_session(backoff: Duration, session: Duration) -> Duration {
     }
 }
 
+/// How long something took, sleep of the device included: tokio's clock stands still for that, and
+/// a session in a pocket would never get to look like one that worked.
+struct Stopwatch {
+    awake: Instant,
+    wall: std::time::SystemTime,
+}
+
+impl Stopwatch {
+    fn start() -> Self {
+        Self {
+            awake: Instant::now(),
+            wall: std::time::SystemTime::now(),
+        }
+    }
+
+    /// The system clock may be set back: then it's what tokio's clock says.
+    fn elapsed(&self) -> Duration {
+        self.awake
+            .elapsed()
+            .max(self.wall.elapsed().unwrap_or_default())
+    }
+}
+
+/// Whether a wake-up keeps the device up for the next attempt, after a session or a failed login:
+/// only if that comes soon, and only after something that got through. Otherwise a wake-up that
+/// found the connection dead would let the device sleep with nothing connected for another round.
+fn next_attempt_is_worth_holding_for(came_up: bool, backoff: Duration) -> bool {
+    came_up && backoff <= WAKE_RETRY_SOON
+}
+
+/// The wait after the one just over.
+fn next_backoff(backoff: Duration, rate_limited: bool) -> Duration {
+    let most = if rate_limited {
+        RATE_LIMIT_MAX_BACKOFF
+    } else {
+        MAX_BACKOFF
+    };
+    (backoff * 2).min(most)
+}
+
+/// To the user nothing else tells a failing store from a bad network: one word per streak, however
+/// many connections it takes.
+fn note_storage_failure(
+    setup: &ConnectionSetup,
+    tx: &mpsc::UnboundedSender<FromConnection>,
+    code: i32,
+    step: StorageStep,
+) {
+    if !setup.storage_failing.failed(step) {
+        tracing::info!(code, "storage still failing");
+    } else {
+        tracing::error!(code, "storage failed while connected");
+        let event = CoreEvent::StorageProblem { active: true };
+        let _ = tx.send(FromConnection::Event(Box::new(event)));
+    }
+}
+
+/// Whether a wake-up that came by itself ends this wait. After a server told us to stay away it
+/// doesn't, until that time has passed by the clock: the wait's own timer stands still while the
+/// device sleeps, and would stretch ten minutes to hours in a pocket.
+fn wake_ends_wait(backoff: Duration, waited_by_the_clock: Duration) -> bool {
+    backoff < HOLD_OFF || waited_by_the_clock >= backoff
+}
+
+/// Wait for the backoff, or end it on a wake-up: after a rate limit, as soon as its floor allows.
+/// `false`: the app has gone away.
+async fn wait_for_next_attempt(
+    backoff: Duration,
+    earliest: Option<Instant>,
+    rx: &mut mpsc::UnboundedReceiver<ToConnection>,
+    tx: &mpsc::UnboundedSender<FromConnection>,
+    wake_hold: &WakeHold,
+) -> bool {
+    let began = std::time::SystemTime::now();
+    let wait = sleep(backoff);
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            () = &mut wait => return true,
+            message = rx.recv() => match message {
+                None => return false,
+                Some(ToConnection::ConnectNow | ToConnection::Reconnect) => match earliest {
+                    Some(at) if Instant::now() < at => wait.as_mut().reset(at),
+                    _ => return true,
+                },
+                Some(ToConnection::Wake) => {
+                    wake_hold.asked();
+                    let waited = began.elapsed().unwrap_or_default();
+                    match earliest {
+                        _ if !wake_ends_wait(backoff, waited) => wake_hold.settle(tx),
+                        Some(at) if Instant::now() < at => {
+                            wait.as_mut().reset(at);
+                            wake_hold.settle(tx);
+                        }
+                        _ => return true,
+                    }
+                }
+                Some(ToConnection::Devices(reply)) => {
+                    let _ = reply.send(Err(DeviceGroupError::NotConnected));
+                }
+                Some(ToConnection::DropDevices { reply, .. }) => {
+                    let _ = reply.send(Err(DeviceGroupError::NotConnected));
+                }
+                // Lost while offline (like Android's tasks, which need a connection too).
+                // Queued in the store: sent after connecting.
+                Some(ToConnection::ReflectSync) => {}
+                // Looked at after connecting.
+                Some(ToConnection::ApplyWaitingReflected) => {}
+                Some(ToConnection::NewDeviceSync { reply, .. }) => {
+                    // The mediator connection after activating multi-device did not come
+                    // up: the join cannot run (the UI rolls the activation back).
+                    tracing::warn!("device join failed: not connected");
+                    let reason = DeviceGroupError::NotConnected.to_string();
+                    let _ = reply.send(JoinOutcome::FailedBeforeHandover(reason));
+                }
+                // What this announces is in the store and goes out after connecting.
+                Some(ToConnection::SendPending) => {}
+                // Only worth anything now.
+                Some(
+                    ToConnection::Typing { .. }
+                    | ToConnection::Flush(_)
+                    | ToConnection::FsControl { .. }
+                    | ToConnection::CallSignal { .. },
+                ) => {}
+            },
+        }
+    }
+}
+
 /// Run the connection until the app goes away (`rx` closed). Reconnects with backoff.
 pub async fn run(
     setup: ConnectionSetup,
@@ -291,13 +1411,26 @@ pub async fn run(
     tx: mpsc::UnboundedSender<FromConnection>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    let mut refused_logins = RefusedLogins::default();
+    let mut another_connection = AnotherConnection::default();
     loop {
         let _ = tx.send(FromConnection::State(ConnectionState::Connecting));
-        let started = Instant::now();
-        let result = Session::run(&setup, &mut rx, &tx).await;
+        let started = Stopwatch::start();
+        let session = Session::connect(&setup, &tx).await;
+        let came_up = session.is_ok();
+        let result = match session {
+            Ok(session) => session.run(&mut rx).await,
+            Err(error) => Err(error),
+        };
         let _ = tx.send(FromConnection::State(ConnectionState::Disconnected));
+        // Anything else means it wasn't one refusal after the other.
+        if !matches!(result, Err(ConnectionError::LoginRefused)) {
+            refused_logins.over();
+        }
+        let rate_limited = matches!(result, Err(ConnectionError::RateLimited));
         match result {
             Err(ConnectionError::Stopped) => return,
+            Err(ConnectionError::RateLimited) => setup.store.rest_directory_calls(),
             Err(ConnectionError::Reconnect) => {
                 backoff = Duration::from_secs(1);
                 continue;
@@ -307,12 +1440,20 @@ pub async fn run(
                 can_reconnect,
             }) => {
                 tracing::warn!(can_reconnect, "chat server closed the connection");
-                let _ = tx.send(FromConnection::ServerMessage {
-                    message,
-                    can_reconnect,
-                });
-                if !can_reconnect {
-                    // E.g. another device took over this ID. Don't fight it; wait for a wake-up.
+                if let Some(reason) = close_reason(&message) {
+                    let _ = tx.send(FromConnection::OfflineReason(reason));
+                }
+                let stay_away = if is_another_connection(&message) {
+                    let stay_away = another_connection.stay_away(started.elapsed());
+                    if let Some(reason) = another_connection.reason(can_reconnect) {
+                        let _ = tx.send(FromConnection::OfflineReason(reason));
+                    }
+                    stay_away
+                } else {
+                    true
+                };
+                if !can_reconnect && stay_away {
+                    // E.g. another device keeps taking over this ID. Don't fight it.
                     backoff = HOLD_OFF;
                 }
             }
@@ -333,53 +1474,134 @@ pub async fn run(
                 continue;
             }
             // 41xx: don't reconnect by ourselves (version, device limit, duplicate connection,
-            // reflection queue full); wait for a wake-up.
+            // reflection queue full).
             Err(ConnectionError::MediatorClosed { code, reason })
                 if (4100..4200).contains(&code) =>
             {
                 // log-ok: Threema's mediator's own text
                 tracing::warn!(code, %reason, "mediator closed the connection");
+                let _ = tx.send(FromConnection::OfflineReason(OfflineReason::Mediator(code)));
                 backoff = HOLD_OFF;
+            }
+            // One word per streak in the log, which it would otherwise fill by the day.
+            Err(ConnectionError::LoginRefused) => {
+                let (first, tell) = refused_logins.refused();
+                if first {
+                    tracing::warn!("chat server closed the connection during login");
+                } else {
+                    tracing::info!("login refused again");
+                }
+                if tell {
+                    tracing::warn!("logins keep being refused");
+                    let reason = OfflineReason::LoginRefused;
+                    let _ = tx.send(FromConnection::OfflineReason(reason));
+                }
+            }
+            // A server's answer we can't make sense of, not a bad network.
+            Err(error @ ConnectionError::Protocol(_)) if !came_up => {
+                tracing::warn!(%error, "login failed");
+            }
+            // No use trying harder.
+            Err(ConnectionError::Storage { code, step }) => {
+                note_storage_failure(&setup, &tx, code, step);
+                backoff = backoff.max(STORAGE_BACKOFF);
             }
             Err(error) => tracing::info!(%error, "chat server connection lost"),
             Ok(()) => {}
         }
-        backoff = backoff_after_session(backoff, started.elapsed());
-        // Wait for the backoff, or reconnect immediately on a wake-up.
-        let wait = sleep(backoff);
-        tokio::pin!(wait);
-        loop {
-            tokio::select! {
-                () = &mut wait => break,
-                message = rx.recv() => match message {
-                    None => return,
-                    Some(ToConnection::Wake | ToConnection::Reconnect) => break,
-                    Some(ToConnection::Devices(reply)) => {
-                        let _ = reply.send(Err("not connected".into()));
-                    }
-                    Some(ToConnection::DropDevices { reply, .. }) => {
-                        let _ = reply.send(Err("not connected".into()));
-                    }
-                    // Lost while offline (like Android's tasks, which need a connection too).
-                    // Queued in the store: sent after connecting.
-                    Some(ToConnection::ReflectSync) => {}
-                    Some(ToConnection::NewDeviceSync { reply, .. }) => {
-                        // The mediator connection after activating multi-device did not come
-                        // up: the join cannot run (the UI rolls the activation back).
-                        tracing::warn!("device join failed: not connected");
-                        let _ = reply.send(Err("not connected".into()));
-                    }
-                    Some(_) => {}, // queued in the store, sent after connecting
-                },
-            }
+        // A login that failed isn't a session, however long the device slept in the middle of it.
+        let session_length = if came_up {
+            started.elapsed()
+        } else {
+            Duration::ZERO
+        };
+        backoff = backoff_after_session(backoff, session_length);
+        let earliest = rate_limited.then(|| {
+            backoff = backoff.max(RATE_LIMIT_FLOOR);
+            tokio::time::Instant::now() + RATE_LIMIT_FLOOR
+        });
+        if !next_attempt_is_worth_holding_for(came_up, backoff) {
+            setup.wake_hold.settle(&tx);
         }
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        if !wait_for_next_attempt(backoff, earliest, &mut rx, &tx, &setup.wake_hold).await {
+            return;
+        }
+        backoff = next_backoff(backoff, rate_limited);
     }
+}
+
+/// Which devices to remove, from what the mediator lists now (Android's `runDropDevicesSteps`):
+/// only ones that are in the group; none named means all of them. When that leaves no other
+/// device, this one goes too: multi-device ends rather than lingering with forward security off.
+fn plan_drop(requested: Option<&[u64]>, others: &[u64], own: u64) -> (Vec<u64>, bool) {
+    let to_drop: Vec<u64> = match requested {
+        Some(ids) => others
+            .iter()
+            .copied()
+            .filter(|other| ids.contains(other))
+            .collect(),
+        None => others.to_vec(),
+    };
+    let drop_self =
+        to_drop.len() == others.len() || requested.is_some_and(|ids| ids.contains(&own));
+    (to_drop, drop_self)
+}
+
+/// Whether the connection is alive: anything read counts, wherever it was read, and an echo gets
+/// its full time from when it went out. Time a long handler spent without reading says nothing
+/// about the connection.
+#[derive(Debug, Clone, Copy)]
+struct Liveness {
+    last_received: Instant,
+    /// An echo is out and this is when it must have been answered by.
+    echo_deadline: Option<Instant>,
+}
+
+impl Liveness {
+    const fn new(now: Instant) -> Self {
+        Self {
+            last_received: now,
+            echo_deadline: None,
+        }
+    }
+
+    const fn received(&mut self, now: Instant) {
+        self.last_received = now;
+        self.echo_deadline = None;
+    }
+
+    const fn awaiting_echo(&self) -> bool {
+        self.echo_deadline.is_some()
+    }
+
+    /// An echo went out, to be answered within `time`.
+    fn echo_sent(&mut self, now: Instant, time: Duration) {
+        self.echo_deadline = Some(now + time);
+    }
+
+    /// The echo that is out has to be answered by then at the latest.
+    fn echo_due_by(&mut self, at: Instant) {
+        self.echo_deadline = self.echo_deadline.map(|deadline| deadline.min(at));
+    }
+
+    /// When to act: send an echo after the silence, or give up on the one that is out.
+    fn deadline(&self) -> Instant {
+        self.echo_deadline
+            .unwrap_or(self.last_received + ECHO_INTERVAL)
+    }
+}
+
+/// An echo's time ran out: what the read brings within [`ECHO_LAST_LOOK`], or the timeout.
+async fn last_look_for_echo<T>(read: impl Future<Output = T>) -> Result<T, ConnectionError> {
+    tokio::time::timeout(ECHO_LAST_LOOK, read)
+        .await
+        .map_err(|_| ConnectionError::Timeout)
 }
 
 struct Session<'a> {
     setup: &'a ConnectionSetup,
     transport: Transport,
+    liveness: Liveness,
     /// Mediator payloads that arrived during the CSP handshake or while waiting for a
     /// specific one, handled in order afterwards.
     d2m_queue: std::collections::VecDeque<D2mIncoming>,
@@ -395,10 +1617,20 @@ struct Session<'a> {
     /// The mediator's backlog after login is not handed out completely yet: what it holds
     /// is decided at the end, when the read updates in it have arrived too.
     reflection_backlog: bool,
+    /// What the UI has been told is still coming ([`FromConnection::Backlog`]).
+    backlog: Backlog,
     /// Our reflect ids (apart from libthreema's, which count from 0 per connection).
     next_reflect_id: u32,
     /// Outgoing messages reflected on this connection: (conversation, message id).
     reflected: std::collections::HashSet<(String, u64)>,
+    /// Our picture (`None`: its removal) on its way to a contact: (receiver, message id).
+    pictures_awaiting_ack:
+        std::collections::HashMap<(String, u64), Option<libthreema::common::BlobId>>,
+    /// A lookup of group members or senders failed or took too long on this connection.
+    directory_unanswering: bool,
+    /// The nonces told to the other devices for messages still to be encoded: (receiver, message
+    /// id).
+    planned_nonces: RefCell<std::collections::HashMap<(String, u64), Nonce>>,
     csp: CspProtocol,
     e2e: CspE2eProtocol,
     events: EventSink,
@@ -409,57 +1641,77 @@ struct Session<'a> {
 
 impl Drop for Session<'_> {
     /// The connection ends with notifications still held: they are not lost, whatever is
-    /// unread notifies now.
+    /// unread notifies now. So do the events of what has been received, whichever step failed:
+    /// the store has it, and the server won't send it again.
     fn drop(&mut self) {
+        self.emit_events_unless(needs_the_connection);
         self.release_held_notifications(true);
+        self.set_backlog(Backlog::default());
+        let mut carried = self.setup.carried_events.borrow_mut();
+        carried.extend(
+            self.events
+                .borrow_mut()
+                .drain(..)
+                .filter(waits_for_the_next_connection),
+        );
+        if let Err(error) = save_carried_events(&self.setup.store, &carried) {
+            tracing::warn!(
+                code = error.sqlite_code(),
+                "saving what is left to send failed"
+            );
+        }
     }
 }
 
 impl<'a> Session<'a> {
     async fn run(
-        setup: &'a ConnectionSetup,
+        mut self,
         rx: &mut mpsc::UnboundedReceiver<ToConnection>,
-        tx: &'a mpsc::UnboundedSender<FromConnection>,
     ) -> Result<(), ConnectionError> {
-        let mut session = Self::connect(setup, tx).await?;
-        let _ = tx.send(FromConnection::State(ConnectionState::Connected));
+        let _ = self
+            .tx
+            .send(FromConnection::State(ConnectionState::Connected));
         tracing::info!("connected to chat server");
-        while let Some(payload) = session.d2m_queue.pop_front() {
-            session.handle_d2m(payload).await?;
+        self.setup.wake_hold.logged_in(self.transport.is_mediator());
+        // Through the mediator the chat server only hands out to the leader.
+        let through_mediator = self.transport.is_mediator();
+        self.set_backlog(Backlog {
+            chat_queue: !through_mediator,
+            reflection_queue: through_mediator,
+        });
+        while let Some(payload) = self.d2m_queue.pop_front() {
+            self.handle_d2m(payload).await?;
         }
-        session.terminate_fs_if_pending().await?;
-        session.reflect_queued_syncs().await?;
-        session.send_pending().await?;
-        session.payload_loop(rx).await
+        self.resume_carried_events().await?;
+        self.apply_waiting_reflected().await?;
+        self.terminate_fs_if_pending().await?;
+        self.reflect_queued_syncs().await?;
+        self.send_pending().await?;
+        self.storage_works(StorageStep::Other);
+        self.payload_loop(rx).await
     }
 
     /// TCP straight to the chat server (no multi-device).
     async fn connect_direct(setup: &ConnectionSetup) -> Result<TcpStream, ConnectionError> {
-        let mut last_error = None;
-        let mut stream = None;
-        for address in setup
+        let hosts: Vec<_> = setup
             .config
             .chat_server_address
             .addresses(setup.server_group)
-        {
-            let host = crate::https::server_url(&address.0);
-            match timeout(
-                CONNECT_TIMEOUT,
-                TcpStream::connect((host.as_ref(), address.1)),
-            )
+            .into_iter()
+            .map(|address| (crate::https::server_url(&address.0).into_owned(), address.1))
+            .collect();
+        let endpoints: Vec<_> = hosts
+            .iter()
+            .map(|(host, port)| (host.as_str(), *port))
+            .collect();
+        let stream = crate::dial::connect_tcp(&endpoints)
             .await
-            {
-                Ok(Ok(s)) => {
-                    // log-ok: Threema's server and port
-                    tracing::info!(%host, port = address.1, "chat server reached");
-                    stream = Some(s);
-                    break;
-                }
-                Ok(Err(error)) => last_error = Some(ConnectionError::Io(error)),
-                Err(_) => last_error = Some(ConnectionError::Timeout),
-            }
-        }
-        let stream = stream.ok_or_else(|| last_error.unwrap_or(ConnectionError::Timeout))?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::TimedOut => ConnectionError::Timeout,
+                _ => ConnectionError::Io(error),
+            })?;
+        // log-ok: Threema's server's address
+        tracing::info!(address = ?stream.peer_addr().ok(), "chat server reached");
         stream.set_nodelay(true)?;
         Ok(stream)
     }
@@ -469,11 +1721,11 @@ impl<'a> Session<'a> {
         tx: &'a mpsc::UnboundedSender<FromConnection>,
     ) -> Result<Session<'a>, ConnectionError> {
         // Multi-device (ADR 0011): through the mediator, without forward security (SE-199).
-        let multi_device = setup.store.multi_device().map_err(protocol_error)?;
+        let multi_device = setup.store.multi_device().map_err(storage_error)?;
         let fs_disabled = setup
             .store
             .forward_security_disabled()
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         let device_group_key = multi_device
             .as_ref()
             .map(|properties| {
@@ -485,7 +1737,7 @@ impl<'a> Session<'a> {
         let transport = match (&multi_device, device_group_key) {
             (Some(properties), Some(device_group_key)) => {
                 let mediator = timeout(
-                    CONNECT_TIMEOUT,
+                    MEDIATOR_CONNECT_LIMIT,
                     Mediator::connect(
                         &setup.config,
                         MediatorLogin {
@@ -496,7 +1748,7 @@ impl<'a> Session<'a> {
                             device_label: setup
                                 .store
                                 .setting(crate::multidevice::SETTING_DEVICE_LABEL)
-                                .map_err(protocol_error)?
+                                .map_err(storage_error)?
                                 .filter(|label| !label.is_empty())
                                 .unwrap_or_else(|| crate::multidevice::DEVICE_LABEL.to_owned()),
                             client_info: setup.client_info.clone(),
@@ -514,20 +1766,30 @@ impl<'a> Session<'a> {
                 );
                 if !properties.registered {
                     // The slot exists now; from here on the mediator must know us.
-                    let mut registered = setup.store.multi_device().map_err(protocol_error)?;
+                    let mut registered = setup.store.multi_device().map_err(storage_error)?;
                     if let Some(registered) = registered.as_mut() {
                         registered.registered = true;
                         setup
                             .store
                             .set_multi_device(Some(registered))
-                            .map_err(protocol_error)?;
+                            .map_err(storage_error)?;
                     }
                 }
                 Transport::Mediator(Box::new(mediator))
             }
             _ => Transport::Direct(Self::connect_direct(setup).await?),
         };
+        Self::log_in(setup, tx, transport, multi_device, fs_disabled).await
+    }
 
+    /// The session over a transport that has just reached its server, to the end of the handshake.
+    async fn log_in(
+        setup: &'a ConnectionSetup,
+        tx: &'a mpsc::UnboundedSender<FromConnection>,
+        transport: Transport,
+        multi_device: Option<crate::multidevice::Properties>,
+        fs_disabled: bool,
+    ) -> Result<Session<'a>, ConnectionError> {
         let client_key = ClientKey::from(*setup.client_key);
         let (csp, client_hello) = CspProtocol::new(
             CspProtocolContextInit {
@@ -554,19 +1816,16 @@ impl<'a> Session<'a> {
                 client_key,
                 flavor: Flavor::Consumer,
                 nonce_storage: Box::new(RefCell::new(StoreNonces(Rc::clone(store)))),
+                fs_sessions: Some(Box::new(RefCell::new(StoreFs {
+                    store: Rc::clone(store),
+                    my_identity: setup.identity,
+                    events: Rc::clone(&events),
+                }))),
                 // No sessions with multi-device (SE-199) or when the user switched forward
-                // security off (Settings → Advanced): incoming FS messages are then rejected
-                // and the session terminated, so the peer falls back, like Android with a
-                // device group.
-                fs_sessions: if multi_device.is_some() || fs_disabled {
-                    None
-                } else {
-                    Some(Box::new(RefCell::new(StoreFs {
-                        store: Rc::clone(store),
-                        my_identity: setup.identity,
-                        events: Rc::clone(&events),
-                    })))
-                },
+                // security off (Settings → Advanced). Contacts may not know yet and messages may
+                // already wait on the server: those get a Reject, so that they are sent again
+                // without, and aren't lost until the contact's mask refreshes.
+                fs_answering_only: multi_device.is_some() || fs_disabled,
             },
             d2x: match &multi_device {
                 Some(properties) => Some(D2xContextInit {
@@ -593,20 +1852,26 @@ impl<'a> Session<'a> {
                 store: Rc::clone(store),
                 events: Rc::clone(&events),
                 user: setup.identity,
+                from_sync: false,
             })),
         });
 
         let mut session = Session {
             setup,
             transport,
+            liveness: Liveness::new(Instant::now()),
             d2m_queue: std::collections::VecDeque::new(),
             multi_device,
             fs_disabled,
             fs_resent: std::collections::HashSet::new(),
             held: Vec::new(),
             reflection_backlog: true,
+            backlog: Backlog::default(),
             next_reflect_id: 0x8000_0000,
             reflected: std::collections::HashSet::new(),
+            pictures_awaiting_ack: std::collections::HashMap::new(),
+            directory_unanswering: false,
+            planned_nonces: RefCell::default(),
             csp,
             e2e,
             events,
@@ -619,11 +1884,20 @@ impl<'a> Session<'a> {
         Ok(session)
     }
 
+    /// The next thing from the server; whichever step reads it, it shows the connection works.
+    async fn read_inbound(&mut self, buffer: &mut [u8]) -> Result<Inbound, TransportError> {
+        let inbound = self.transport.read(buffer).await?;
+        self.liveness.received(Instant::now());
+        self.setup.wake_hold.heard(Instant::now());
+        Ok(inbound)
+    }
+
     /// client-hello → server-hello → login → login-ack (through the mediator: proxied, while
     /// mediator payloads are queued for later).
     async fn handshake(&mut self, client_hello: Vec<u8>) -> Result<(), ConnectionError> {
         self.transport.write_csp(&client_hello).await?;
         let mut buffer = vec![0_u8; 8192];
+        let mut login_sent = false;
         loop {
             while let Some(instruction) = self.csp.poll().map_err(protocol_error)? {
                 if instruction.incoming_payload.is_some() {
@@ -631,12 +1905,14 @@ impl<'a> Session<'a> {
                 }
                 if let Some(frame) = instruction.outgoing_frame {
                     self.transport.write_csp(&frame.0).await?;
+                    login_sent = true;
                 }
                 if let Some(CspStateUpdate::PostHandshake(_)) = instruction.state_update {
                     return Ok(());
                 }
             }
-            match self.transport.read(&mut buffer).await? {
+            let inbound = self.read_inbound(&mut buffer).await;
+            match inbound.map_err(|error| handshake_read_failed(login_sent, error.into()))? {
                 Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
                 Inbound::D2m(payload) => self.d2m_queue.push_back(payload),
             }
@@ -648,15 +1924,22 @@ impl<'a> Session<'a> {
         self.handle_instruction(instruction).await
     }
 
-    /// Send every pending outgoing message from the store, then the outbox.
+    /// Send every pending outgoing message from the store, then the outbox. In a group the user's
+    /// order holds across the two: members discard a text for a group whose setup is still to
+    /// come, and a text after our leave. So what was queued before a group message goes first.
     async fn send_pending(&mut self) -> Result<(), ConnectionError> {
-        for message in self
-            .setup
-            .store
-            .pending_outgoing()
-            .map_err(protocol_error)?
-        {
+        for message in self.setup.store.pending_outgoing().map_err(storage_error)? {
             let group = crate::groups::parse_key(&message.conversation);
+            if group.is_some() {
+                for entry in self
+                    .setup
+                    .store
+                    .outbox_until(&message.conversation, message.created_at)
+                    .map_err(storage_error)?
+                {
+                    self.send_outbox_entry(entry).await?;
+                }
+            }
             if group.is_none()
                 && self
                     .awaiting_ack
@@ -665,6 +1948,16 @@ impl<'a> Session<'a> {
             {
                 continue;
             }
+            // As it is now: the awaits below let a command run, an edit or a removal among them.
+            let Some(message) = self
+                .setup
+                .store
+                .message(message.id)
+                .map_err(storage_error)?
+                .filter(|now| now.state == OutgoingState::Pending as i64 && now.kind != "deleted")
+            else {
+                continue;
+            };
             let body = match message.kind.as_str() {
                 "text" => ContactMessageBody::Text(TextMessage {
                     text: message.body.clone(),
@@ -713,7 +2006,7 @@ impl<'a> Session<'a> {
                         .setup
                         .store
                         .file_keys(message.id)
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                     match keys
                         .and_then(|keys| crate::app_media::outgoing_file_message(&body, &keys))
                     {
@@ -730,6 +2023,15 @@ impl<'a> Session<'a> {
                 let Some(body) = to_group_body(body) else {
                     continue;
                 };
+                if !self.fits_a_frame(&Outgoing::Group(group, body.clone())) {
+                    tracing::warn!(
+                        kind = message.kind,
+                        "message too long for a frame; not sent"
+                    );
+                    self.fail_outgoing(message.id)?;
+                    continue;
+                }
+                self.note_written_out(message.id)?;
                 if self
                     .send_to_group(
                         &message.conversation,
@@ -749,29 +2051,47 @@ impl<'a> Session<'a> {
                             &[message.message_id],
                             OutgoingState::Sent,
                         )
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                     if !changed.is_empty() {
                         self.emit(CoreEvent::MessagesChanged(changed));
                     }
                 }
                 continue;
             }
+            let body = Outgoing::Contact(body);
+            // Queued before the contact was blocked or revoked: not sent, and nothing about it
+            // reaches the other devices or the contact.
+            if !self.may_receive(&message.conversation, &body)? {
+                self.fail_outgoing(message.id)?;
+                continue;
+            }
+            if !self.fits_a_frame(&body) {
+                tracing::warn!(
+                    kind = message.kind,
+                    "message too long for a frame; not sent"
+                );
+                self.fail_outgoing(message.id)?;
+                continue;
+            }
+            self.note_written_out(message.id)?;
             if matches!(
-                body,
-                ContactMessageBody::Text(_)
-                    | ContactMessageBody::Location(_)
-                    | ContactMessageBody::File(_)
-                    | ContactMessageBody::PollSetup(_)
-                    | ContactMessageBody::PollVote(_)
+                &body,
+                Outgoing::Contact(
+                    ContactMessageBody::Text(_)
+                        | ContactMessageBody::Location(_)
+                        | ContactMessageBody::File(_)
+                        | ContactMessageBody::PollSetup(_)
+                        | ContactMessageBody::PollVote(_)
+                )
             ) {
                 self.distribute_picture(&message.conversation).await?;
             }
-            let body = Outgoing::Contact(body);
             self.reflect_outgoing(
                 &message.conversation,
                 message.message_id,
                 message.created_at,
                 &body,
+                core::slice::from_ref(&message.conversation),
             )
             .await?;
             match self
@@ -791,98 +2111,156 @@ impl<'a> Session<'a> {
                     self.awaiting_ack
                         .push((message.conversation.clone(), message.message_id));
                 }
-                Ok(None) => {
-                    if let Some(failed) = self
-                        .setup
-                        .store
-                        .set_outgoing_failed(message.id)
-                        .map_err(protocol_error)?
-                    {
-                        self.emit(CoreEvent::MessagesChanged(vec![failed]));
-                    }
-                }
+                Ok(None) => self.fail_outgoing(message.id)?,
                 Err(error) => return Err(error),
             }
         }
         self.send_outbox().await
     }
 
+    /// A message that won't go out, and the chat hears so.
+    fn fail_outgoing(&self, id: i64) -> Result<(), ConnectionError> {
+        if let Some(failed) = self
+            .setup
+            .store
+            .set_outgoing_failed(id)
+            .map_err(storage_error)?
+        {
+            self.emit(CoreEvent::MessagesChanged(vec![failed]));
+        }
+        Ok(())
+    }
+
+    /// Whether `body` fits a frame, however it is wrapped. Something longer never goes out: the
+    /// server's answer to it isn't known, and it would be tried again at every login, with
+    /// everything queued behind it waiting.
+    fn fits_a_frame(&self, body: &Outgoing) -> bool {
+        body_fits_a_frame(self.setup.identity, body)
+    }
+
+    /// Before a message's first byte goes out: someone may have it from here on, and the chat hears
+    /// so, as offering Edit depends on it.
+    fn note_written_out(&self, id: i64) -> Result<(), ConnectionError> {
+        if let Some(changed) = self
+            .setup
+            .store
+            .set_written_out(id)
+            .map_err(storage_error)?
+        {
+            self.emit(CoreEvent::MessagesChanged(vec![changed]));
+        }
+        Ok(())
+    }
+
     /// The _Profile Picture Distribution Steps_ for `receiver`: our picture (uploaded once per
-    /// week) or a removal, if they don't have the current state yet. Failures only skip it.
+    /// week) or a removal, if they don't have the current state yet. An upload that is needed goes
+    /// on beside the connection, and they get the picture when it is done.
     async fn distribute_picture(&mut self, receiver: &str) -> Result<(), ConnectionError> {
-        use crate::profile_pictures::{Distribution, OWN_PICTURE, Upload};
+        use crate::profile_pictures::{Distribution, OWN_PICTURE};
+        // On its way to them: a burst of messages doesn't send it again.
+        if self
+            .pictures_awaiting_ack
+            .keys()
+            .any(|(to, _)| to == receiver)
+        {
+            return Ok(());
+        }
+        // Not even recorded as sent: they get it if they are unblocked.
+        if !crate::providers::may_receive(&self.setup.store, &self.setup.config, receiver, false)
+            .map_err(storage_error)?
+        {
+            return Ok(());
+        }
         let store = Rc::clone(&self.setup.store);
         let own = self.setup.media.read_picture(OWN_PICTURE).ok().flatten();
-        let body = match store
+        let (body, blob_id) = match store
             .picture_distribution(receiver, own.is_some())
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
         {
             Distribution::None => return Ok(()),
-            Distribution::Delete => {
-                store.picture_sent(receiver, None).map_err(protocol_error)?;
-                ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage)
-            }
+            Distribution::Delete => (
+                ContactMessageBody::DeleteProfilePicture(DeleteProfilePictureMessage),
+                None,
+            ),
             Distribution::Set(upload) => {
                 let upload = match (upload, own) {
                     (Some(upload), _) => upload,
                     (None, Some(picture)) => {
-                        let mut key = [0_u8; 32];
-                        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
-                        let blob = crate::media::encrypt_blob(
-                            &key,
-                            crate::media::MediaPart::File,
-                            &picture,
-                        );
-                        let blob_id =
-                            match crate::media::upload(&self.setup.https, &blob, true).await {
-                                Ok(id) => id,
-                                Err(error) => {
-                                    tracing::warn!(%error, "profile picture upload failed");
-                                    return Ok(());
-                                }
-                            };
-                        let upload = Upload {
-                            blob_id,
-                            key,
-                            size: u32::try_from(picture.len()).unwrap_or(u32::MAX),
-                            uploaded_at: crate::messages::now_ms(),
-                        };
-                        store
-                            .set_picture_upload(Some(&upload))
-                            .map_err(protocol_error)?;
-                        upload
+                        let uploads = &self.setup.picture_uploads;
+                        uploads.waiting.borrow_mut().insert(receiver.to_owned());
+                        if uploads.start(Instant::now()) {
+                            tokio::task::spawn_local(upload_own_picture(
+                                Rc::clone(&store),
+                                self.setup.https.clone(),
+                                Rc::clone(uploads),
+                                picture,
+                            ));
+                        }
+                        return Ok(());
                     }
                     (None, None) => return Ok(()),
                 };
-                store
-                    .picture_sent(receiver, Some(&upload.blob_id))
-                    .map_err(protocol_error)?;
-                ContactMessageBody::SetProfilePicture(SetProfilePictureMessage {
-                    blob_id: upload.blob_id,
-                    size: upload.size,
-                    key: upload.key,
-                })
+                (
+                    ContactMessageBody::SetProfilePicture(SetProfilePictureMessage {
+                        blob_id: upload.blob_id,
+                        size: upload.size,
+                        key: upload.key,
+                    }),
+                    Some(upload.blob_id),
+                )
             }
         };
         let created_at = crate::messages::now_ms();
-        for payload in self
+        let message_id = MessageId::random().0;
+        // Encoded first: what can't go out (a broken session) must not reach the other devices,
+        // which would take a removal as done, and with a new id at every message.
+        let receivers = [receiver.to_owned()];
+        let nonces = if self.multi_device.is_some() {
+            self.plan_nonces(message_id, &receivers)?
+        } else {
+            Vec::new()
+        };
+        let payloads = self
             .encode(
                 receiver,
-                MessageId::random().0,
+                message_id,
                 created_at,
-                Outgoing::Contact(body),
+                Outgoing::Contact(body.clone()),
             )
             .await?
-            .unwrap_or_default()
-        {
+            .unwrap_or_default();
+        if payloads.is_empty() {
+            self.planned_nonces
+                .borrow_mut()
+                .remove(&(receiver.to_owned(), message_id));
+            return Ok(());
+        }
+        let body = Outgoing::Contact(body);
+        self.reflect_outgoing_under(receiver, message_id, created_at, &body, nonces)
+            .await?;
+        for payload in payloads {
             self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
                 .await?;
+        }
+        // Noted as sent when the server has it. A connection lost before that: the next one sends it.
+        self.pictures_awaiting_ack
+            .insert((receiver.to_owned(), message_id), blob_id);
+        Ok(())
+    }
+
+    /// Our picture is up, or the upload has ended anyway: whoever waits for it gets it. If it
+    /// failed they stay waiting for the next try.
+    async fn send_waiting_pictures(&mut self) -> Result<(), ConnectionError> {
+        let waiting = self.setup.picture_uploads.waiting.take();
+        for receiver in waiting {
+            self.distribute_picture(&receiver).await?;
         }
         Ok(())
     }
 
     /// Send a group message (same id for everyone) to the members that don't have it yet;
-    /// `true` if nobody is left. Members we have no contact for yet are tried again later.
+    /// `true` if nobody is left. Members we have no contact for yet are tried again later;
+    /// revoked and (unless the message is exempt) blocked ones never get it.
     async fn send_to_group(
         &mut self,
         key: &str,
@@ -891,18 +2269,33 @@ impl<'a> Session<'a> {
         created_at: i64,
         body: &GroupMessageBody,
     ) -> Result<bool, ConnectionError> {
-        let receivers = self
-            .setup
-            .store
-            .pending_receivers(key, message_id)
-            .map_err(protocol_error)?;
+        let receivers = crate::providers::group_receivers(
+            &self.setup.store,
+            &self.setup.config,
+            key,
+            message_id,
+            body.is_exempt_from_blocking(),
+            !goes_to_non_members(body),
+        )
+        .map_err(storage_error)?;
         // Before the members: our own other devices want it even when there are none — a notes
         // group (Threema's group of one) would otherwise never reach Threema Desktop.
+        let going_out: Vec<String> = receivers
+            .iter()
+            .filter(|receiver| {
+                !self
+                    .awaiting_ack
+                    .iter()
+                    .any(|(to, id)| to == *receiver && *id == message_id)
+            })
+            .cloned()
+            .collect();
         self.reflect_outgoing(
             key,
             message_id,
             created_at,
             &Outgoing::Group(group, body.clone()),
+            &going_out,
         )
         .await?;
         if receivers.is_empty() {
@@ -919,12 +2312,18 @@ impl<'a> Session<'a> {
             if distributes_profile(body) {
                 self.distribute_picture(&receiver).await?;
             }
+            let features = self
+                .setup
+                .store
+                .contact(&receiver)
+                .map_err(storage_error)?
+                .map(|contact| contact.feature_mask);
             match self
                 .encode(
                     &receiver,
                     message_id,
                     created_at,
-                    Outgoing::Group(group, body.clone()),
+                    Outgoing::Group(group, body_for_receiver(body, features)),
                 )
                 .await?
             {
@@ -935,7 +2334,7 @@ impl<'a> Session<'a> {
                     }
                     self.awaiting_ack.push((receiver, message_id));
                 }
-                None => tracing::info!("group member without a contact yet, sending later"),
+                None => tracing::info!("group member can't be sent to yet, sending later"),
             }
         }
         Ok(false)
@@ -944,73 +2343,97 @@ impl<'a> Session<'a> {
     /// Send the outbox (reactions, edits, deletions, group control): removed once the server
     /// acknowledged it (for every receiver of a group), or if unsendable.
     async fn send_outbox(&mut self) -> Result<(), ConnectionError> {
-        for entry in self.setup.store.outbox().map_err(protocol_error)? {
-            if let Some(group) = crate::groups::parse_key(&entry.conversation) {
-                let Some(body) = outbox_group_body(&entry) else {
-                    tracing::warn!(kind = entry.kind, "dropping unsendable group outbox entry");
-                    self.setup
-                        .store
-                        .outbox_remove(&entry.conversation, entry.message_id)
-                        .map_err(protocol_error)?;
-                    continue;
-                };
-                if self
-                    .send_to_group(
-                        &entry.conversation,
-                        group,
-                        entry.message_id,
-                        entry.created_at,
-                        &body,
-                    )
-                    .await?
-                {
-                    self.setup
-                        .store
-                        .outbox_remove(&entry.conversation, entry.message_id)
-                        .map_err(protocol_error)?;
-                }
-                continue;
-            }
-            if self
-                .awaiting_ack
-                .iter()
-                .any(|(to, id)| *to == entry.conversation && *id == entry.message_id)
-            {
-                continue;
-            }
-            let encoded = match outbox_body(&entry) {
-                Some(body) => {
-                    self.reflect_outgoing(
-                        &entry.conversation,
-                        entry.message_id,
-                        entry.created_at,
-                        &Outgoing::Contact(body.clone()),
-                    )
-                    .await?;
-                    self.encode(
-                        &entry.conversation,
-                        entry.message_id,
-                        entry.created_at,
-                        Outgoing::Contact(body),
-                    )
-                    .await?
-                }
-                None => None,
-            };
-            if let Some(payloads) = encoded {
-                for payload in payloads {
-                    self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
-                        .await?;
-                }
-                self.awaiting_ack
-                    .push((entry.conversation.clone(), entry.message_id));
-            } else {
-                tracing::warn!(kind = entry.kind, "dropping unsendable outbox entry");
+        for entry in self.setup.store.outbox().map_err(storage_error)? {
+            self.send_outbox_entry(entry).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_outbox_entry(
+        &mut self,
+        entry: reactions::OutboxEntry,
+    ) -> Result<(), ConnectionError> {
+        if entry.kind == reactions::OUTBOX_READ_UPDATE {
+            let message_ids = reactions::read_report_ids(&entry.body);
+            self.reflect_read(&entry.conversation, &message_ids, entry.created_at)
+                .await?;
+            self.setup
+                .store
+                .outbox_remove(&entry.conversation, entry.message_id)
+                .map_err(storage_error)?;
+            return Ok(());
+        }
+        if let Some(group) = crate::groups::parse_key(&entry.conversation) {
+            let body = outbox_group_body(&entry)
+                .filter(|body| self.fits_a_frame(&Outgoing::Group(group, body.clone())));
+            let Some(body) = body else {
+                tracing::warn!(kind = entry.kind, "dropping unsendable group outbox entry");
                 self.setup
                     .store
                     .outbox_remove(&entry.conversation, entry.message_id)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
+                return Ok(());
+            };
+            if self
+                .send_to_group(
+                    &entry.conversation,
+                    group,
+                    entry.message_id,
+                    outbox_sent_as_of(&entry),
+                    &body,
+                )
+                .await?
+            {
+                self.setup
+                    .store
+                    .outbox_remove(&entry.conversation, entry.message_id)
+                    .map_err(storage_error)?;
             }
+            return Ok(());
+        }
+        if self
+            .awaiting_ack
+            .iter()
+            .any(|(to, id)| *to == entry.conversation && *id == entry.message_id)
+        {
+            return Ok(());
+        }
+        let encoded = match outbox_body(&entry) {
+            Some(body)
+                if self.may_receive(&entry.conversation, &Outgoing::Contact(body.clone()))?
+                    && self.fits_a_frame(&Outgoing::Contact(body.clone())) =>
+            {
+                self.reflect_outgoing(
+                    &entry.conversation,
+                    entry.message_id,
+                    entry.created_at,
+                    &Outgoing::Contact(body.clone()),
+                    core::slice::from_ref(&entry.conversation),
+                )
+                .await?;
+                self.encode(
+                    &entry.conversation,
+                    entry.message_id,
+                    entry.created_at,
+                    Outgoing::Contact(body),
+                )
+                .await?
+            }
+            _ => None,
+        };
+        if let Some(payloads) = encoded {
+            for payload in payloads {
+                self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
+                    .await?;
+            }
+            self.awaiting_ack
+                .push((entry.conversation.clone(), entry.message_id));
+        } else {
+            tracing::warn!(kind = entry.kind, "dropping unsendable outbox entry");
+            self.setup
+                .store
+                .outbox_remove(&entry.conversation, entry.message_id)
+                .map_err(storage_error)?;
         }
         Ok(())
     }
@@ -1023,7 +2446,7 @@ impl<'a> Session<'a> {
                 .setup
                 .store
                 .has_nonce(&nonce.0)
-                .map_err(protocol_error)?
+                .map_err(storage_error)?
             {
                 break nonce;
             }
@@ -1031,8 +2454,28 @@ impl<'a> Session<'a> {
         self.setup
             .store
             .add_nonces(&[&nonce.0])
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         Ok(nonce)
+    }
+
+    /// A fresh nonce per receiver of a message, for the reflection (md-d2d.proto: reflect, then
+    /// send under those nonces) and for [`Self::encode`] to use.
+    fn plan_nonces(
+        &self,
+        message_id: u64,
+        receivers: &[String],
+    ) -> Result<Vec<Vec<u8>>, ConnectionError> {
+        receivers
+            .iter()
+            .map(|receiver| {
+                let nonce = self.fresh_nonce()?;
+                let bytes = nonce.0.to_vec();
+                self.planned_nonces
+                    .borrow_mut()
+                    .insert((receiver.clone(), message_id), nonce);
+                Ok(bytes)
+            })
+            .collect()
     }
 
     fn fs_store(&self) -> StoreFs {
@@ -1047,17 +2490,25 @@ impl<'a> Session<'a> {
     fn encode_control(
         &self,
         receiver: &str,
+        peer_key: Option<PublicKey>,
         envelope: &[u8],
     ) -> Result<Option<MessageWithMetadataBox>, ConnectionError> {
-        let Some(contact) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
+        let Some((identity, public_key)) = crate::providers::control_receiver(
+            &self.setup.store,
+            &self.setup.config,
+            receiver,
+            peer_key,
+        )
+        .map_err(storage_error)?
+        else {
             return Ok(None);
         };
         let nonce = self.fresh_nonce()?;
         match encode_outgoing_fs_control_message(
             self.setup.identity,
             &ClientKey::from(*self.setup.client_key),
-            contact.identity,
-            &contact.public_key,
+            identity,
+            &public_key,
             envelope,
             u64::try_from(crate::messages::now_ms()).unwrap_or(0),
             nonce,
@@ -1070,9 +2521,23 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Whether `body` may go to `receiver` (see [`crate::providers::may_receive`]).
+    fn may_receive(&self, receiver: &str, body: &Outgoing) -> Result<bool, ConnectionError> {
+        crate::providers::may_receive(
+            &self.setup.store,
+            &self.setup.config,
+            receiver,
+            body.is_exempt_from_blocking(),
+        )
+        .map_err(storage_error)
+    }
+
     /// Encode a message to a contact: forward-security encapsulated if the contact supports it
-    /// (with an `Init` first for a new session), otherwise plain. `Ok(None)` if it can never be
-    /// sent (unknown/revoked contact).
+    /// (with an `Init` first for a new session), otherwise plain. `Ok(None)` if it can't be sent:
+    /// an unknown or revoked contact, a blocked one unless the message is exempt, or a body too
+    /// long for a frame (group messages are checked before they get here, as there `None` means
+    /// "later"). Every message passes here, so receipts, typing, picture requests and call signals
+    /// stay away from them too, and no forward secrecy session starts.
     async fn encode(
         &self,
         receiver: &str,
@@ -1080,33 +2545,68 @@ impl<'a> Session<'a> {
         created_at: i64,
         body: Outgoing,
     ) -> Result<Option<Vec<MessageWithMetadataBox>>, ConnectionError> {
-        let Some(contact) = self.setup.store.contact(receiver).map_err(protocol_error)? else {
+        let Some(contact) = self.setup.store.contact(receiver).map_err(storage_error)? else {
             return Ok(None);
         };
+        if !self.may_receive(receiver, &body)? {
+            return Ok(None);
+        }
+        if !self.fits_a_frame(&body) {
+            tracing::warn!("message too long for a frame; not sent");
+            return Ok(None);
+        }
         let receiver_identity = contact.identity;
         let receiver_key: PublicKey = contact.public_key;
         let nickname = self
             .setup
             .store
             .setting(crate::store::keys::NICKNAME)
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
+        let nickname_unanswered = self
+            .setup
+            .store
+            .setting(crate::store::keys::NICKNAME_UNANSWERED)
+            .map_err(storage_error)?
+            .is_some();
         let client_key = ClientKey::from(*self.setup.client_key);
         let mut payloads = Vec::new();
 
         // Forward security, if the contact supports it.
         let mut envelope = None;
-        // An existing session proves support even if our copy of the feature mask is stale (the
-        // peer may have just enabled FS, e.g. by unlinking a multi-device client).
-        let has_session = self
-            .fs_store()
-            .get_best(receiver_identity)
-            .map_err(protocol_error)?
-            .is_some();
         // Never with multi-device (SE-199): the other devices couldn't follow the ratchet.
         // Nor when the user switched forward security off (Settings → Advanced).
-        let use_fs = !self.transport.is_mediator()
-            && !self.fs_disabled
-            && (has_session || contact.feature_mask.0 & FeatureMask::FORWARD_SECURITY_SUPPORT != 0);
+        let fs_on = !self.transport.is_mediator() && !self.fs_disabled;
+        // A session against a stored "no": the mask is stale, or the session is left over. The
+        // directory decides, and without its answer the session stays.
+        let mut contact = contact;
+        if fs_on
+            && !crate::contacts::has_fs_support(&contact)
+            && self.has_fs_session(receiver_identity)
+        {
+            let check = self
+                .check_feature_mask(receiver, FS_MASK_CHECK_INTERVAL)
+                .await?;
+            let Some(fresh) = self.setup.store.contact(receiver).map_err(storage_error)? else {
+                return Ok(None);
+            };
+            contact = fresh;
+            if check != MaskCheck::Unknown && !crate::contacts::has_fs_support(&contact) {
+                // Nothing here may keep this message from going out without forward secrecy.
+                match self.end_fs_sessions(receiver) {
+                    Ok(controls) => {
+                        if !controls.is_empty() {
+                            self.show_fs_line(receiver, "fsUnavailable")?;
+                        }
+                        payloads.extend(controls);
+                    }
+                    Err(error) => tracing::warn!(%error, "cannot end forward secrecy sessions"),
+                }
+            }
+        }
+        // The feature mask alone decides, like Android: a session is no proof, since a peer that
+        // dropped forward security answers everything in it with a Terminate or nothing at all.
+        // That the mask can be stale the other way round is seen to when an Init arrives.
+        let use_fs = fs_on && crate::contacts::has_fs_support(&contact);
         // log-ok: the contact's feature mask only
         tracing::debug!(
             feature_mask = contact.feature_mask.0,
@@ -1125,34 +2625,62 @@ impl<'a> Session<'a> {
                 })
             }
         };
+        // Nothing is awaited from here on: what this message writes, the ratchet of its session and
+        // its nonces, makes one commit. If that fails, nothing goes out and the ratchet is as it was.
+        let step = self.setup.store.step().map_err(storage_error)?;
+        let events_kept = EventsKept::new(&self.events);
+        let mut line = None;
         if use_fs {
             let (inner_type, inner_data) = encode_message_body(&body);
-            match fs_protocol::encapsulate(
+            let group_identity = if let OutgoingMessageBody::Group(group) = &body {
+                Some((&group.group_identity).into())
+            } else {
+                None
+            };
+            match crate::fs_store::encapsulate_or_replace(
                 &mut self.fs_store(),
-                self.setup.identity,
                 &client_key,
                 receiver_identity,
                 &receiver_key,
                 inner_type,
                 &inner_data,
+                group_identity,
                 u64::try_from(crate::messages::now_ms()).unwrap_or(0),
             ) {
-                Ok(encapsulation) => {
+                Ok((encapsulation, replaced)) => {
+                    if replaced {
+                        // First the Terminate for the old session, then the new one's Init.
+                        payloads.extend(self.take_fs_controls(receiver)?);
+                        line = self.fs_line(receiver, "fsReset")?;
+                    }
                     for control in encapsulation.prelude {
-                        payloads.extend(self.encode_control(receiver, &control)?);
+                        payloads.extend(self.encode_control(
+                            receiver,
+                            Some(receiver_key),
+                            &control,
+                        )?);
                     }
                     envelope = encapsulation.envelope;
                 }
-                // Never fall back silently for a broken session: try again on the next send.
+                // Never fall back silently for a broken session. This contact's message stays
+                // unsent; everyone else's, and everything incoming, must not depend on it.
                 Err(error) => {
-                    return Err(ConnectionError::Protocol(format!(
-                        "forward security: {error}"
-                    )));
+                    tracing::warn!(%error, "cannot encapsulate; message not sent");
+                    step.commit().map_err(storage_error)?;
+                    events_kept.disarm();
+                    return Ok(None);
                 }
             }
         }
 
-        let nonce = self.fresh_nonce()?;
+        let planned = self
+            .planned_nonces
+            .borrow_mut()
+            .remove(&(receiver.to_owned(), message_id));
+        let nonce = match planned {
+            Some(nonce) => nonce,
+            None => self.fresh_nonce()?,
+        };
         let message = OutgoingMessage {
             id: MessageId(message_id),
             overrides: MessageOverrides::default(),
@@ -1163,7 +2691,7 @@ impl<'a> Session<'a> {
             Some(envelope) => encode_outgoing_contact_message_encapsulated(
                 self.setup.identity,
                 &client_key,
-                nickname.as_deref(),
+                nickname_delta(nickname.as_deref(), nickname_unanswered),
                 receiver_identity,
                 &receiver_key,
                 &message,
@@ -1173,13 +2701,19 @@ impl<'a> Session<'a> {
             None => encode_outgoing_contact_message(
                 self.setup.identity,
                 &client_key,
-                nickname.as_deref(),
+                nickname_delta(nickname.as_deref(), nickname_unanswered),
                 receiver_identity,
                 &receiver_key,
                 &message,
                 nonce,
             ),
         };
+        step.commit().map_err(storage_error)?;
+        events_kept.disarm();
+        // Only now that its row holds.
+        if let Some(message) = line {
+            self.emit(CoreEvent::MessageAdded { message });
+        }
         match encoded {
             Ok(payload) => {
                 payloads.push(payload);
@@ -1190,39 +2724,6 @@ impl<'a> Session<'a> {
                 Ok(None)
             }
         }
-    }
-
-    async fn send_receipt(
-        &mut self,
-        receiver: &str,
-        receipt_type: DeliveryReceiptType,
-        message_ids: Vec<u64>,
-    ) -> Result<(), ConnectionError> {
-        if message_ids.is_empty() {
-            return Ok(());
-        }
-        if matches!(receipt_type, DeliveryReceiptType::Read) {
-            self.reflect_read(receiver, &message_ids).await?;
-        }
-        let body = ContactMessageBody::DeliveryReceipt(DeliveryReceiptMessage {
-            receipt_type,
-            message_ids: message_ids.into_iter().map(MessageId).collect(),
-        });
-        let created_at = crate::messages::now_ms();
-        for payload in self
-            .encode(
-                receiver,
-                MessageId::random().0,
-                created_at,
-                Outgoing::Contact(body),
-            )
-            .await?
-            .unwrap_or_default()
-        {
-            self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
-                .await?;
-        }
-        Ok(())
     }
 
     async fn send_typing(
@@ -1286,16 +2787,28 @@ impl<'a> Session<'a> {
         event: CoreEvent,
     ) -> Result<Option<CoreEvent>, ConnectionError> {
         match event {
-            CoreEvent::FsControl { peer, envelope } => {
-                if let Some(payload) = self.encode_control(&peer, &envelope)? {
+            CoreEvent::FsControl {
+                peer,
+                peer_key,
+                envelope,
+            } => {
+                if let Some(payload) = self.encode_control(&peer, peer_key, &envelope)? {
                     self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
                         .await?;
                 }
                 Ok(None)
             }
             CoreEvent::FsStatus { peer, status } => {
-                let store = &self.setup.store;
-                if let FsStatus::MessageRejected { message_id } = status {
+                let store = Rc::clone(&self.setup.store);
+                // In the store before anything that can take a while or fail: the Reject has been
+                // acknowledged, and a message left "sent" now would be lost without a trace.
+                let mut requeued = Requeued::default();
+                if let FsStatus::MessageRejected {
+                    message_id,
+                    group_identity,
+                    ..
+                } = status
+                {
                     // Once per message and connection: a peer that rejects the re-send too
                     // would otherwise bounce the message back and forth without end — the
                     // second rejection leaves it failed for the user to resend by hand.
@@ -1303,54 +2816,322 @@ impl<'a> Session<'a> {
                         tracing::warn!("message rejected again; left failed");
                         if let Some(message) = store
                             .message_by_id(&peer, true, message_id)
-                            .map_err(protocol_error)?
+                            .map_err(storage_error)?
                             && let Some(failed) = store
                                 .set_outgoing_failed(message.id)
-                                .map_err(protocol_error)?
+                                .map_err(storage_error)?
                         {
                             self.emit(CoreEvent::MessagesChanged(vec![failed]));
                         }
                     } else {
-                        // A group message: the peer gets it again.
-                        if store
-                            .requeue_group_receiver(&peer, message_id)
-                            .map_err(protocol_error)?
-                        {
-                            self.send_pending().await?;
+                        requeued = requeue_rejected(
+                            &store,
+                            &self.setup.identity.to_string(),
+                            &peer,
+                            message_id,
+                            group_identity,
+                        )
+                        .map_err(storage_error)?;
+                        if !requeued.changed.is_empty() {
+                            self.emit(CoreEvent::MessagesChanged(core::mem::take(
+                                &mut requeued.changed,
+                            )));
                         }
-                        // Like Android: the message needs to be sent again (new session).
-                        let reset = store
-                            .reset_outgoing(&peer, message_id)
-                            .map_err(protocol_error)?;
-                        if !reset.is_empty() {
-                            self.emit(CoreEvent::MessagesChanged(reset));
-                            self.send_pending().await?;
+                        if let Some(conversation) = requeued.state_of.take() {
+                            self.emit(CoreEvent::SendGroupPictures);
+                            self.emit(CoreEvent::AnnounceGroupCall {
+                                conversation,
+                                receivers: vec![peer.clone()],
+                            });
                         }
                     }
                 }
-                let code = match status {
-                    FsStatus::Established => "fsEstablished",
-                    FsStatus::Reset | FsStatus::MessageRejected { .. } => "fsReset",
-                    FsStatus::Terminated => "fsTerminated",
+                let supports_fs = self.fs_support_after(&peer, &status).await?;
+                if requeued.send {
+                    self.send_pending().await?;
+                }
+                if !crate::providers::shows_fs_status(&store, &self.setup.config, &peer)
+                    .map_err(storage_error)?
+                {
+                    return Ok(None);
+                }
+                let Some(code) = fs_status_line(&status, supports_fs, requeued.resending) else {
+                    return Ok(None);
                 };
+                // A session is no news where there is nothing else: after a restore, every
+                // contact's Accept would start a chat, or move a restored one to the top.
+                if code == "fsEstablished"
+                    && store.message_count(&peer).map_err(storage_error)? == 0
+                {
+                    return Ok(None);
+                }
+                // A visible message adds a row and so gets its line, as on Android; a run of
+                // receipts or typing adds none and gets one.
+                if code == FS_MESSAGE_WITHOUT
+                    && store.newest_is_status(&peer, code).map_err(storage_error)?
+                {
+                    return Ok(None);
+                }
                 Ok(store
                     .insert_status(&peer, code)
-                    .map_err(protocol_error)?
-                    .map(|message| CoreEvent::MessageAdded {
-                        message,
-                        send_delivery_receipt: false,
-                    }))
+                    .map_err(storage_error)?
+                    .map(|message| CoreEvent::MessageAdded { message }))
             }
             CoreEvent::OutboxChanged => {
                 self.send_pending().await?;
+                Ok(None)
+            }
+            // This one alone: a burst of messages would otherwise go through all of the outbox for
+            // each of them.
+            CoreEvent::ReceiptQueued {
+                receiver,
+                receipt_id,
+            } => {
+                let entry = self
+                    .setup
+                    .store
+                    .outbox_entry(&receiver, receipt_id)
+                    .map_err(storage_error)?;
+                if let Some(entry) = entry {
+                    self.send_outbox_entry(entry).await?;
+                }
                 Ok(None)
             }
             other => Ok(Some(other)),
         }
     }
 
+    /// Look up `peer`'s feature mask, unless that was done within `interval`. Without an answer
+    /// the stored mask stays.
+    async fn check_feature_mask(
+        &self,
+        peer: &str,
+        interval: Duration,
+    ) -> Result<MaskCheck, ConnectionError> {
+        let now = Instant::now();
+        let checks = &self.setup.fs_mask_checks;
+        if let Some(answered) = checks.recent(peer, now, interval) {
+            return Ok(if answered {
+                MaskCheck::Recent
+            } else {
+                MaskCheck::Unknown
+            });
+        }
+        let store = &self.setup.store;
+        if store.contact(peer).map_err(storage_error)?.is_none() || store.directory_resting() {
+            return Ok(MaskCheck::Unknown);
+        }
+        let identities = [peer.to_owned()];
+        let lookup = crate::contacts::lookup(&self.setup.https, &self.setup.config, &identities);
+        let found = match tokio::time::timeout(FS_MASK_LOOKUP_LIMIT, lookup).await {
+            Ok(Ok(found)) => found,
+            Ok(Err(error)) => {
+                if matches!(error, crate::directory::DirectoryError::RateLimited) {
+                    store.rest_directory_calls();
+                }
+                tracing::warn!(%error, "feature mask lookup failed");
+                checks.record(peer, now, false);
+                return Ok(MaskCheck::Unknown);
+            }
+            Err(_) => {
+                tracing::warn!("feature mask lookup timed out");
+                checks.record(peer, now, false);
+                return Ok(MaskCheck::Unknown);
+            }
+        };
+        let mut changed = false;
+        for (_, result) in found {
+            changed |= store
+                .store_lookup(&self.setup.config, peer, result)
+                .map_err(storage_error)?;
+        }
+        if changed {
+            self.emit(CoreEvent::ContactsChanged);
+            self.emit(CoreEvent::SyncQueued);
+        }
+        checks.record(peer, now, true);
+        Ok(MaskCheck::Fresh)
+    }
+
+    /// Whether we have a session with `identity`. Not being able to tell isn't worth more than a
+    /// log line here: it only decides whether to look closer at a contact without forward secrecy.
+    fn has_fs_session(&self, identity: libthreema::common::ThreemaId) -> bool {
+        match self.fs_store().get_best(identity) {
+            Ok(session) => session.is_some(),
+            Err(error) => {
+                tracing::warn!(%error, "cannot read forward secrecy sessions");
+                false
+            }
+        }
+    }
+
+    /// What `status` says about the peer's forward secrecy support, like Android's
+    /// `ForwardSecurityMessageProcessor`: a peer that ended a session or rejected a message may
+    /// have dropped it (linked a device), so its mask is looked up at once; and if the directory
+    /// says no, what is left of the sessions ends too. An Init from someone whose stored mask says
+    /// no means the mask is stale, or else the Init is: only a lookup made now can tell.
+    async fn fs_support_after(
+        &mut self,
+        peer: &str,
+        status: &FsStatus,
+    ) -> Result<bool, ConnectionError> {
+        let stored = |session: &Self| -> Result<bool, ConnectionError> {
+            let contact = session.setup.store.contact(peer).map_err(storage_error)?;
+            // Without a contact there is nothing to go by and nobody to show a line to.
+            Ok(contact.is_none_or(|contact| crate::contacts::has_fs_support(&contact)))
+        };
+        let ending = match status {
+            FsStatus::Reset => return stored(self),
+            FsStatus::Established => {
+                if stored(self)? {
+                    return Ok(true);
+                }
+                match self
+                    .check_feature_mask(peer, FS_MASK_INIT_CHECK_INTERVAL)
+                    .await?
+                {
+                    MaskCheck::Fresh => true,
+                    MaskCheck::Recent => {
+                        self.setup.fs_mask_checks.distrust(peer);
+                        false
+                    }
+                    MaskCheck::Unknown => false,
+                }
+            }
+            // Whoever holds the contact's long-term key can send without forward secrecy too, so
+            // that goes by what the directory says as well.
+            FsStatus::MessageRejected { .. }
+            | FsStatus::Terminated { .. }
+            | FsStatus::MessageWithoutFs => {
+                self.check_feature_mask(peer, FS_MASK_CHECK_INTERVAL)
+                    .await?
+                    != MaskCheck::Unknown
+            }
+        };
+        let supports_fs = stored(self)?;
+        if ending && !supports_fs {
+            for payload in self.end_fs_sessions(peer)? {
+                self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
+                    .await?;
+            }
+        }
+        Ok(supports_fs)
+    }
+
+    /// `peer` has no forward secrecy (any more): end the sessions we still have and tell it, so
+    /// that it refreshes what it knows about us too. What to send first, if anything.
+    fn end_fs_sessions(&self, peer: &str) -> Result<Vec<MessageWithMetadataBox>, ConnectionError> {
+        use libthreema::{common::ThreemaId, protobuf::csp_e2e_fs::terminate::Cause};
+        let Ok(identity) = peer.parse::<ThreemaId>() else {
+            return Ok(Vec::new());
+        };
+        if self
+            .fs_store()
+            .get_best(identity)
+            .map_err(protocol_error)?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        tracing::info!("contact has no forward secrecy; sessions ended");
+        fs_protocol::terminate_all_with_cause(
+            &mut self.fs_store(),
+            identity,
+            Cause::DisabledByRemote,
+        )
+        .map_err(protocol_error)?;
+        self.take_fs_controls(peer)
+    }
+
+    /// A forward secrecy status line, from where no event passes through [`Self::handle_fs_event`].
+    fn show_fs_line(&self, peer: &str, code: &str) -> Result<(), ConnectionError> {
+        if let Some(message) = self.fs_line(peer, code)? {
+            self.emit(CoreEvent::MessageAdded { message });
+        }
+        Ok(())
+    }
+
+    /// Such a line stored, if this chat shows them; its announcement is up to the caller.
+    fn fs_line(&self, peer: &str, code: &str) -> Result<Option<Message>, ConnectionError> {
+        let store = &self.setup.store;
+        if !crate::providers::shows_fs_status(store, &self.setup.config, peer)
+            .map_err(storage_error)?
+        {
+            return Ok(None);
+        }
+        store.insert_status(peer, code).map_err(storage_error)
+    }
+
+    /// The control messages for `peer` waiting in the event queue, encoded, so that they go out
+    /// ahead of whatever is being sent now.
+    fn take_fs_controls(&self, peer: &str) -> Result<Vec<MessageWithMetadataBox>, ConnectionError> {
+        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
+        let mut payloads = Vec::new();
+        for event in events {
+            match event {
+                CoreEvent::FsControl {
+                    peer: receiver,
+                    peer_key,
+                    envelope,
+                } if receiver == peer => {
+                    payloads.extend(self.encode_control(peer, peer_key, &envelope)?);
+                }
+                other => self.events.borrow_mut().push(other),
+            }
+        }
+        Ok(payloads)
+    }
+
     fn emit(&self, event: CoreEvent) {
         let _ = self.tx.send(FromConnection::Event(Box::new(event)));
+    }
+
+    /// The UI hears when there begins to be a backlog and when there is none left.
+    fn set_backlog(&mut self, backlog: Backlog) {
+        if backlog.is_open() != self.backlog.is_open() {
+            let _ = self.tx.send(FromConnection::Backlog(backlog.is_open()));
+        }
+        self.backlog = backlog;
+    }
+
+    /// Hand on the events that don't need the connection (`later`), so that it can't lose them.
+    fn emit_events_unless(&self, later: fn(&CoreEvent) -> bool) {
+        let events = core::mem::take(&mut *self.events.borrow_mut());
+        let (kept, now): (Vec<_>, Vec<_>) = events.into_iter().partition(later);
+        *self.events.borrow_mut() = kept;
+        for event in now {
+            self.emit(event);
+        }
+    }
+
+    /// What a message stored just now leaves for the UI.
+    fn emit_stored_message_events(&self) {
+        self.emit_events_unless(|event| {
+            needs_the_connection(event) || runs_before_the_next_message(event)
+        });
+    }
+
+    /// What the last connection couldn't send, even if the app has been restarted since. It stays
+    /// in the store until it is done: if this connection ends too, [`Self::drop`] replaces it.
+    async fn resume_carried_events(&mut self) -> Result<(), ConnectionError> {
+        let mut carried = core::mem::take(&mut *self.setup.carried_events.borrow_mut());
+        if carried.is_empty() {
+            carried = saved_carried_events(&self.setup.store).map_err(storage_error)?;
+        }
+        if carried.is_empty() {
+            return Ok(());
+        }
+        self.events.borrow_mut().extend(carried);
+        self.after_incoming().await?;
+        save_carried_events(&self.setup.store, &[]).map_err(storage_error)
+    }
+
+    /// This step went fine: if the store was failing in it, that is over.
+    fn storage_works(&self, step: StorageStep) {
+        if self.setup.storage_failing.works(step) {
+            tracing::info!("storage works again");
+            self.emit(CoreEvent::StorageProblem { active: false });
+        }
     }
 
     /// After multi-device was turned on: end every forward security session and tell the peers
@@ -1361,7 +3142,7 @@ impl<'a> Session<'a> {
         let store = Rc::clone(&self.setup.store);
         if store
             .setting(crate::multidevice::SETTING_FS_TERMINATE)
-            .map_err(protocol_error)?
+            .map_err(storage_error)?
             .is_none()
         {
             return Ok(());
@@ -1374,10 +3155,10 @@ impl<'a> Session<'a> {
             tracing::info!("forward security is on again; pending termination dropped");
             store
                 .delete_setting(crate::multidevice::SETTING_FS_TERMINATE)
-                .map_err(protocol_error)?;
+                .map_err(storage_error)?;
             return Ok(());
         }
-        let peers = store.fs_peers().map_err(protocol_error)?;
+        let peers = store.fs_peers().map_err(storage_error)?;
         for peer in &peers {
             let Ok(peer) = peer.parse::<ThreemaId>() else {
                 continue;
@@ -1389,15 +3170,10 @@ impl<'a> Session<'a> {
             )
             .map_err(protocol_error)?;
         }
-        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
-        for event in events {
-            if let Some(event) = Box::pin(self.handle_fs_event(event)).await? {
-                self.emit(event);
-            }
-        }
+        self.after_incoming().await?;
         store
             .delete_setting(crate::multidevice::SETTING_FS_TERMINATE)
-            .map_err(protocol_error)?;
+            .map_err(storage_error)?;
         tracing::info!(peers = peers.len(), "forward security sessions terminated");
         Ok(())
     }
@@ -1519,6 +3295,20 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// An envelope encrypted for the device group, its nonce noted as used: a replay of it is
+    /// refused here, and a device joining later gets the nonce along.
+    fn seal_envelope(&self, envelope: &[u8]) -> Result<Vec<u8>, ConnectionError> {
+        let (nonce, encrypted) = self
+            .device_group_key()?
+            .encrypt_envelope(envelope)
+            .map_err(protocol_error)?;
+        self.setup
+            .store
+            .add_d2d_nonce(&nonce)
+            .map_err(storage_error)?;
+        Ok(encrypted)
+    }
+
     /// Reflect a D2D envelope content to the other devices and wait for the mediator's ack
     /// (multi-device only; without it nothing happens).
     async fn reflect(
@@ -1538,10 +3328,7 @@ impl<'a> Session<'a> {
             protocol_version: libthreema::protobuf::d2d::ProtocolVersion::V03 as u32,
             content: Some(content),
         };
-        let (_, encrypted) = self
-            .device_group_key()?
-            .encrypt_envelope(&envelope.encode_to_vec())
-            .map_err(protocol_error)?;
+        let encrypted = self.seal_envelope(&envelope.encode_to_vec())?;
         let id = self.next_reflect_id;
         self.next_reflect_id = self.next_reflect_id.wrapping_add(1).max(0x8000_0000);
         self.transport
@@ -1567,7 +3354,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         let store = Rc::clone(&self.setup.store);
-        while let Some((id, scope, content)) = store.next_sync().map_err(protocol_error)? {
+        while let Some((id, scope, content)) = store.next_sync().map_err(storage_error)? {
             let decoded = Envelope::decode(content.as_slice())
                 .ok()
                 .and_then(|envelope| envelope.content)
@@ -1578,19 +3365,42 @@ impl<'a> Session<'a> {
                 self.commit_transaction().await?;
                 reflected?;
             }
-            store.sync_done(id).map_err(protocol_error)?;
+            store.sync_done(id).map_err(storage_error)?;
         }
         Ok(())
     }
 
     /// Our outgoing message for the other devices (Android: `reflectMessage` before sending).
-    /// Once per message and connection.
+    /// Once per message and connection. `receivers`: who it goes to now, whose nonces go along
+    /// (picked here).
     async fn reflect_outgoing(
         &mut self,
         conversation: &str,
         message_id: u64,
         created_at: i64,
         body: &Outgoing,
+        receivers: &[String],
+    ) -> Result<(), ConnectionError> {
+        if self.multi_device.is_none()
+            || self
+                .reflected
+                .contains(&(conversation.to_owned(), message_id))
+        {
+            return Ok(());
+        }
+        let nonces = self.plan_nonces(message_id, receivers)?;
+        self.reflect_outgoing_under(conversation, message_id, created_at, body, nonces)
+            .await
+    }
+
+    /// [`Self::reflect_outgoing`] with the nonces picked already.
+    async fn reflect_outgoing_under(
+        &mut self,
+        conversation: &str,
+        message_id: u64,
+        created_at: i64,
+        body: &Outgoing,
+        nonces: Vec<Vec<u8>>,
     ) -> Result<(), ConnectionError> {
         use libthreema::protobuf::d2d::{OutgoingMessage, envelope::Content};
         if self.multi_device.is_none()
@@ -1625,7 +3435,7 @@ impl<'a> Session<'a> {
             created_at: u64::try_from(created_at).unwrap_or_default(),
             r#type: i32::from(message_type),
             body: data,
-            nonces: Vec::new(),
+            nonces,
         }))
         .await
     }
@@ -1658,56 +3468,94 @@ impl<'a> Session<'a> {
         .await
     }
 
-    /// Messages read here: read on the other devices too.
+    /// Messages read here (at `read_at`): read on the other devices too. Removed from the queue
+    /// by the caller once the mediator has them; repeating it does no harm.
     async fn reflect_read(
         &mut self,
         conversation: &str,
         message_ids: &[u64],
+        read_at: i64,
     ) -> Result<(), ConnectionError> {
-        use libthreema::protobuf::d2d::{
-            IncomingMessageUpdate,
-            envelope::Content,
-            incoming_message_update::{Read, Update, update},
-        };
-        if self.multi_device.is_none() || message_ids.is_empty() {
+        use libthreema::protobuf::d2d::envelope::Content;
+        if self.multi_device.is_none() {
             return Ok(());
         }
         let Some(conversation_id) = d2d_conversation(conversation) else {
             return Ok(());
         };
-        let at = u64::try_from(crate::messages::now_ms()).unwrap_or_default();
-        self.reflect(Content::IncomingMessageUpdate(IncomingMessageUpdate {
-            updates: message_ids
-                .iter()
-                .map(|&message_id| Update {
-                    conversation: Some(conversation_id.clone()),
-                    message_id,
-                    update: Some(update::Update::Read(Read { at })),
-                })
-                .collect(),
-        }))
-        .await
+        let at = u64::try_from(read_at).unwrap_or_default();
+        for bundle in message_ids.chunks(READ_UPDATE_IDS_MAX) {
+            self.reflect(Content::IncomingMessageUpdate(read_update(
+                &conversation_id,
+                bundle,
+                at,
+            )))
+            .await?;
+        }
+        Ok(())
     }
 
-    /// Another device's reflection: apply it, then acknowledge (also when it can't be used,
-    /// or the mediator would send it again at every login).
+    /// Another device's reflection: apply it, then acknowledge (also when it can't be used, or the
+    /// mediator would send it again at every login; but not when our store failed on it).
     async fn handle_reflected(
         &mut self,
         reflected: libthreema::d2m::payload::Reflected,
     ) -> Result<(), ConnectionError> {
         let device_group_key = self.device_group_key()?;
         let store = Rc::clone(&self.setup.store);
-        match crate::reflected::open(&store, &device_group_key, &reflected.envelope) {
-            Ok(envelope) => {
-                // log-ok: the kind of content, not the content
-                tracing::info!(
-                    content = crate::reflected::content_name(envelope.content.as_ref()),
-                    "reflected"
+        let opened = crate::reflected::open(&store, &device_group_key, &reflected.envelope);
+        let brings_contact = opened.as_ref().is_ok_and(|opened| {
+            matches!(
+                opened.envelope.content,
+                Some(libthreema::protobuf::d2d::envelope::Content::ContactSync(_))
+            )
+        });
+        let applied = opened.and_then(|opened| {
+            // log-ok: the kind of content, not the content
+            tracing::info!(
+                content = crate::reflected::content_name(opened.envelope.content.as_ref()),
+                "reflected"
+            );
+            crate::reflected::apply_once(&store, self.setup.identity, opened, &self.events)
+        });
+        match applied {
+            Ok(()) => self.storage_works(StorageStep::Reflected),
+            // Unacknowledged, it comes again at the next login: this is its only way here.
+            Err(error) if error.storage_code().is_some() => {
+                let code = error.storage_code().unwrap_or_default();
+                let failure = ConnectionError::Storage {
+                    code,
+                    step: StorageStep::Reflected,
+                };
+                if !failure.fails_every_time() {
+                    return Err(failure);
+                }
+                // Holding on to it would hold up the mediator's queue, and with it the promotion
+                // to leader and all that comes from the chat server.
+                let failures = self
+                    .setup
+                    .failing_items
+                    .failed(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
+                if failures < TRIES_BEFORE_DROPPING {
+                    tracing::warn!(
+                        code,
+                        failures,
+                        "a reflected envelope failed, it comes again"
+                    );
+                    return Err(failure);
+                }
+                tracing::error!(
+                    code,
+                    failures,
+                    "a reflected envelope keeps failing and is dropped"
                 );
-                if let Err(error) =
-                    crate::reflected::apply(&store, self.setup.identity, envelope, &self.events)
-                {
-                    tracing::warn!(%error, "reflected envelope not applied");
+                if let Err(error) = crate::reflected::note_dropped(
+                    &store,
+                    self.setup.identity,
+                    &device_group_key,
+                    &reflected.envelope,
+                ) {
+                    tracing::warn!(%error, "noting a dropped envelope failed");
                 }
             }
             Err(error) => tracing::warn!(
@@ -1718,6 +3566,24 @@ impl<'a> Session<'a> {
                 "reflected envelope dropped"
             ),
         }
+        self.setup
+            .failing_items
+            .forget(&FailingItem::Envelope(envelope_nonce(&reflected.envelope)));
+        if brings_contact
+            && let Err(error) =
+                crate::reflected::apply_waiting(&store, &self.setup.config, &self.events)
+        {
+            tracing::warn!(%error, "applying reflected messages that waited failed");
+        }
+        // The mediator hands out old typing indicators again at login (see below): not news.
+        if self.reflection_backlog {
+            self.events
+                .borrow_mut()
+                .retain(|event| !matches!(event, CoreEvent::Typing { .. }));
+        }
+        self.hold_reflected_notifications();
+        // Applied, so the UI hears of it even if the acknowledgement is what fails.
+        self.emit_events_unless(needs_the_connection);
         // Every one, ephemeral ones (typing) too, like Android (IncomingReflectedMessageTask):
         // md-d2m.struct.yml says not to acknowledge those, but the mediator keeps them queued
         // until acknowledged and hands them out again at every login.
@@ -1728,10 +3594,14 @@ impl<'a> Session<'a> {
                 },
             ))
             .await?;
-        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
-        for event in events {
-            // A message another device received first: its notification waits a moment.
-            if let CoreEvent::MessageAdded { message, .. } = &event
+        self.after_incoming().await
+    }
+
+    /// A message another device received first: its notification waits a moment, as it may be read
+    /// there already.
+    fn hold_reflected_notifications(&mut self) {
+        for event in self.events.borrow().iter() {
+            if let CoreEvent::MessageAdded { message, .. } = event
                 && !message.outgoing
             {
                 self.setup
@@ -1741,11 +3611,19 @@ impl<'a> Session<'a> {
                     .insert(message.id);
                 self.held.push((message.id, Instant::now() + NOTIFY_GRACE));
             }
-            if let Some(event) = Box::pin(self.handle_fs_event(event)).await? {
-                self.emit(event);
-            }
         }
-        Ok(())
+    }
+
+    /// Apply the reflected messages that waited for a contact, now that one may be there. Silent if
+    /// none did, so that a change of contacts leading here can't lead here again.
+    async fn apply_waiting_reflected(&mut self) -> Result<(), ConnectionError> {
+        if let Err(error) =
+            crate::reflected::apply_waiting(&self.setup.store, &self.setup.config, &self.events)
+        {
+            tracing::warn!(%error, "applying reflected messages that waited failed");
+        }
+        self.hold_reflected_notifications();
+        self.after_incoming().await
     }
 
     /// Notify the held messages that are due (all of them when `all`) and still unread.
@@ -1764,16 +3642,16 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Read until a mediator payload `wanted` arrives (30 s at most); everything else is kept:
+    /// Read until a mediator payload `wanted` arrives (`D2M_REPLY_LIMIT` at most); everything else is kept:
     /// CSP bytes go to libthreema, other mediator payloads to the queue.
     async fn await_d2m(
         &mut self,
         wanted: impl Fn(&D2mIncoming) -> bool,
     ) -> Result<D2mIncoming, ConnectionError> {
         let mut buffer = vec![0_u8; 8192];
-        timeout(Duration::from_secs(30), async {
+        timeout(D2M_REPLY_LIMIT, async {
             loop {
-                match self.transport.read(&mut buffer).await? {
+                match self.read_inbound(&mut buffer).await? {
                     Inbound::Csp(bytes) => {
                         self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?
                     }
@@ -1795,46 +3673,52 @@ impl<'a> Session<'a> {
             .ok_or_else(|| ConnectionError::Protocol("multi-device is not active".into()))
     }
 
-    /// Lock the device group for `scope` (retrying after other devices' transactions), for the
-    /// server's maximum time.
+    /// Lock the device group for `scope` (retrying after other devices' transactions, within
+    /// `TRANSACTION_BEGIN_LIMIT`), for the server's maximum time.
     async fn begin_transaction(
         &mut self,
         scope: libthreema::protobuf::d2d::transaction_scope::Scope,
     ) -> Result<(), ConnectionError> {
         use prost::Message as _;
-        loop {
-            let scope_bytes = libthreema::protobuf::d2d::TransactionScope {
-                scope: scope as i32,
-            }
-            .encode_to_vec();
-            let encrypted_scope = self
-                .device_group_key()?
-                .encrypt_transaction_scope(&scope_bytes)
-                .map_err(protocol_error)?;
-            self.transport
-                .send_d2m(D2mOutgoing::BeginTransaction(BeginTransaction {
-                    encrypted_scope,
-                    // The server's maximum (Android: TRANSACTION_TTL_MAX).
-                    ttl: None,
-                }))
-                .await?;
-            match self
-                .await_d2m(|payload| {
-                    matches!(
-                        payload,
-                        D2mIncoming::BeginTransactionAck | D2mIncoming::TransactionRejected(_)
-                    )
-                })
-                .await?
-            {
-                D2mIncoming::BeginTransactionAck => return Ok(()),
-                _ => {
-                    // Another device holds the lock: try again once it is released.
-                    self.await_d2m(|payload| matches!(payload, D2mIncoming::TransactionEnded(_)))
+        timeout(TRANSACTION_BEGIN_LIMIT, async {
+            loop {
+                let scope_bytes = libthreema::protobuf::d2d::TransactionScope {
+                    scope: scope as i32,
+                }
+                .encode_to_vec();
+                let encrypted_scope = self
+                    .device_group_key()?
+                    .encrypt_transaction_scope(&scope_bytes)
+                    .map_err(protocol_error)?;
+                self.transport
+                    .send_d2m(D2mOutgoing::BeginTransaction(BeginTransaction {
+                        encrypted_scope,
+                        // The server's maximum (Android: TRANSACTION_TTL_MAX).
+                        ttl: None,
+                    }))
+                    .await?;
+                match self
+                    .await_d2m(|payload| {
+                        matches!(
+                            payload,
+                            D2mIncoming::BeginTransactionAck | D2mIncoming::TransactionRejected(_)
+                        )
+                    })
+                    .await?
+                {
+                    D2mIncoming::BeginTransactionAck => return Ok(()),
+                    _ => {
+                        // Another device holds the lock: try again once it is released.
+                        self.await_d2m(|payload| {
+                            matches!(payload, D2mIncoming::TransactionEnded(_))
+                        })
                         .await?;
+                    }
                 }
             }
-        }
+        })
+        .await
+        .map_err(|_| ConnectionError::Timeout)?
     }
 
     async fn commit_transaction(&mut self) -> Result<(), ConnectionError> {
@@ -1877,6 +3761,7 @@ impl<'a> Session<'a> {
                 };
                 LinkedDevice {
                     id: format!("{:016x}", id.0),
+                    raw_id: id.0,
                     current: own == Some(id.0),
                     label: decoded
                         .as_ref()
@@ -1907,22 +3792,32 @@ impl<'a> Session<'a> {
     /// The device join's data transfer (md-d2d-join.proto, Android's `DeviceLinkingPartTwoTask`):
     /// while the transaction is held nothing incoming is processed (CSP bytes and mediator
     /// payloads wait), then commit. A failure on the link still commits, which releases the lock.
+    /// Every step has a limit (`JOIN_REPLY_LIMIT` is their sum). The second result: start a new
+    /// connection, because a lock may still be held here.
     async fn new_device_sync(
         &mut self,
         mut link: crate::rendezvous::RendezvousLink,
-    ) -> Result<(), ConnectionError> {
+    ) -> (JoinOutcome, bool) {
         use libthreema::protobuf::d2d::transaction_scope::Scope;
         let Some(dgk) = self
             .multi_device
             .as_ref()
             .and_then(crate::multidevice::Properties::dgk)
         else {
-            return Err(ConnectionError::Protocol(
-                "multi-device is not active".into(),
-            ));
+            link.close().await;
+            let reason = "multi-device is not active".to_owned();
+            return (JoinOutcome::FailedBeforeHandover(reason), false);
         };
-        self.begin_transaction(Scope::NewDeviceSync).await?;
-        let transfer = async {
+        if let Err(error) = self.begin_transaction(Scope::NewDeviceSync).await {
+            link.close().await;
+            let restart = matches!(error, ConnectionError::Timeout);
+            return (
+                JoinOutcome::FailedBeforeHandover(error.to_string()),
+                restart,
+            );
+        }
+        let mut handed_over = false;
+        let transfer = timeout(JOIN_TRANSFER_LIMIT, async {
             link.send(crate::join::begin_message()).await?;
             let data = crate::join::collect(&self.setup.store, &self.setup.media, &dgk)
                 .map_err(|e| crate::rendezvous::LinkError::Protocol(e.to_string()))?;
@@ -1930,27 +3825,38 @@ impl<'a> Session<'a> {
             for blob in data.blobs {
                 link.send(blob.to_vec()).await?;
             }
-            link.send(data.essential_data.to_vec()).await?;
+            // Moved, not copied: the link encrypts this buffer in place (with room for the tag,
+            // see join::collect), and a plain copy would hold the ID's private key.
+            let mut essential_data = data.essential_data;
+            // From the first byte on: part of it may arrive, and nothing here can tell how much.
+            handed_over = true;
+            link.send(std::mem::take(&mut *essential_data)).await?;
             Ok::<_, crate::rendezvous::LinkError>(())
-        }
+        })
         .await;
-        let result = match transfer {
-            Ok(()) => self.await_registered(&mut link).await,
-            Err(error) => Err(ConnectionError::Protocol(error.to_string())),
+        let registered = match transfer {
+            Ok(Ok(())) => self.await_registered(&mut link).await,
+            Ok(Err(error)) => Err(ConnectionError::Protocol(error.to_string())),
+            Err(_) => Err(ConnectionError::Timeout),
         };
         // ND may close now or keep it open for the history exchange (not supported: we close).
         link.close().await;
-        self.commit_transaction().await?;
-        result
+        let commit = self.commit_transaction().await;
+        if let Err(error) = &commit {
+            tracing::warn!(%error, "committing the device join failed");
+        }
+        let outcome = JoinOutcome::from_steps(handed_over, registered.map_err(|e| e.to_string()));
+        (outcome, commit.is_err())
     }
 
-    /// Wait (3 minutes at most) for the new device's `Registered`, keeping the mediator read.
+    /// Wait (`JOIN_REGISTER_LIMIT` at most) for the new device's `Registered`, keeping the
+    /// mediator read.
     async fn await_registered(
         &mut self,
         link: &mut crate::rendezvous::RendezvousLink,
     ) -> Result<(), ConnectionError> {
         let mut buffer = vec![0_u8; 8192];
-        timeout(Duration::from_secs(180), async {
+        timeout(JOIN_REGISTER_LIMIT, async {
             loop {
                 tokio::select! {
                     data = link.receive() => {
@@ -1961,7 +3867,7 @@ impl<'a> Session<'a> {
                         }
                         return Err(ConnectionError::Protocol("unexpected message from the new device".into()));
                     }
-                    read = self.transport.read(&mut buffer) => match read? {
+                    read = self.read_inbound(&mut buffer) => match read? {
                         Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
                         Inbound::D2m(payload) => self.d2m_queue.push_back(payload),
                     },
@@ -1972,15 +3878,26 @@ impl<'a> Session<'a> {
         .map_err(|_| ConnectionError::Timeout)?
     }
 
-    /// Drop devices inside a `DROP_DEVICE` transaction (Android's `runDropDevicesSteps`). Our own
-    /// id goes last: the mediator answers that by closing the connection (4113, "dropped by
-    /// itself"), which ends the transaction too; that counts as done.
-    async fn drop_devices(&mut self, ids: &[u64]) -> Result<(), ConnectionError> {
+    /// Drop devices inside a `DROP_DEVICE` transaction (Android's `runDropDevicesSteps`), deciding
+    /// from the mediator's list there. Our own id goes last: the mediator answers that by closing
+    /// the connection (4113, "dropped by itself"), which ends the transaction too; that counts
+    /// as done.
+    async fn drop_devices(&mut self, ids: Option<&[u64]>) -> Result<DropOutcome, ConnectionError> {
         use libthreema::protobuf::d2d::transaction_scope::Scope;
-        let own = self.multi_device.as_ref().map(|p| p.mediator_device_id);
-        let (own_ids, others): (Vec<u64>, Vec<u64>) = ids.iter().partition(|id| Some(**id) == own);
+        let own = self
+            .multi_device
+            .as_ref()
+            .map(|p| p.mediator_device_id)
+            .ok_or_else(|| ConnectionError::Protocol("multi-device is not active".into()))?;
         self.begin_transaction(Scope::DropDevice).await?;
-        for id in others {
+        let mut devices = self.devices().await?;
+        let others: Vec<u64> = devices
+            .iter()
+            .filter(|device| !device.current)
+            .map(|device| device.raw_id)
+            .collect();
+        let (to_drop, drop_self) = plan_drop(ids, &others, own);
+        for &id in &to_drop {
             self.transport
                 .send_d2m(D2mOutgoing::DropDevice(D2xDeviceId(id)))
                 .await?;
@@ -1989,9 +3906,14 @@ impl<'a> Session<'a> {
             )
             .await?;
         }
-        let Some(own) = own_ids.first().copied() else {
-            return self.commit_transaction().await;
-        };
+        devices.retain(|device| !to_drop.contains(&device.raw_id));
+        if !drop_self {
+            self.commit_transaction().await?;
+            return Ok(DropOutcome {
+                remaining: devices,
+                left_group: false,
+            });
+        }
         self.transport
             .send_d2m(D2mOutgoing::DropDevice(D2xDeviceId(own)))
             .await?;
@@ -2001,7 +3923,10 @@ impl<'a> Session<'a> {
             )
             .await
         {
-            Ok(_) | Err(ConnectionError::MediatorClosed { code: 4113, .. }) => Ok(()),
+            Ok(_) | Err(ConnectionError::MediatorClosed { code: 4113, .. }) => Ok(DropOutcome {
+                remaining: Vec::new(),
+                left_group: true,
+            }),
             Err(error) => Err(error),
         }
     }
@@ -2014,9 +3939,22 @@ impl<'a> Session<'a> {
                 // The backlog is in, read updates included: what is still unread notifies.
                 self.reflection_backlog = false;
                 self.release_held_notifications(true);
+                self.set_backlog(Backlog {
+                    reflection_queue: false,
+                    ..self.backlog
+                });
+                self.storage_works(StorageStep::Reflected);
+                self.setup
+                    .wake_hold
+                    .reflection_queue_through(Instant::now());
             }
             // Only the leader receives from the chat server (Android's MonitoringLayer).
             D2mIncoming::RolePromotedToLeader => {
+                self.setup.wake_hold.promoted_to_leader();
+                self.set_backlog(Backlog {
+                    chat_queue: true,
+                    ..self.backlog
+                });
                 self.e2e
                     .update_d2m_state(D2mRole::Leader)
                     .map_err(protocol_error)?;
@@ -2031,13 +3969,19 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    async fn handle_inbound(&mut self, inbound: Inbound) -> Result<(), ConnectionError> {
+        match inbound {
+            Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
+            Inbound::D2m(payload) => self.handle_d2m(payload).await?,
+        }
+        Ok(())
+    }
+
     async fn payload_loop(
         &mut self,
         rx: &mut mpsc::UnboundedReceiver<ToConnection>,
     ) -> Result<(), ConnectionError> {
         let mut read_buffer = vec![0_u8; 8192];
-        let mut last_received = Instant::now();
-        let mut echo_sent = false;
         loop {
             // Process everything libthreema can already do before waiting.
             while let Some(instruction) = self.csp.poll().map_err(protocol_error)? {
@@ -2046,86 +3990,123 @@ impl<'a> Session<'a> {
             while let Some(payload) = self.d2m_queue.pop_front() {
                 self.handle_d2m(payload).await?;
             }
-            let idle_deadline = last_received
-                + if echo_sent {
-                    ECHO_INTERVAL * 2
-                } else {
-                    ECHO_INTERVAL
-                };
+            let idle_deadline = self.liveness.deadline();
             // The next held notification (live forwarded messages; the backlog waits for the
             // end of the mediator's queue instead).
             let next_held = (!self.reflection_backlog)
                 .then(|| self.held.iter().map(|(_, at)| *at).min())
                 .flatten();
+            let setup = self.setup;
+            // A notification that is being held goes out with the device up.
+            let wake_settles = self
+                .setup
+                .wake_hold
+                .settles_at()
+                .map(|at| self.held.iter().map(|(_, due)| *due).fold(at, Ord::max));
             tokio::select! {
+                () = async {
+                    match wake_settles {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.setup.wake_hold.settle(self.tx),
                 () = async {
                     match next_held {
                         Some(at) => tokio::time::sleep_until(at).await,
                         None => std::future::pending().await,
                     }
                 } => self.release_held_notifications(false),
-                read = self.transport.read(&mut read_buffer) => {
-                    last_received = Instant::now();
-                    echo_sent = false;
-                    match read? {
-                        Inbound::Csp(bytes) => self.csp.add_chunks(&[&bytes]).map_err(protocol_error)?,
-                        Inbound::D2m(payload) => self.handle_d2m(payload).await?,
-                    }
-                },
+                () = setup.picture_uploads.finished.notified() => self.send_waiting_pictures().await?,
+                read = self.read_inbound(&mut read_buffer) => self.handle_inbound(read?).await?,
                 message = rx.recv() => match message {
                     None => return Err(ConnectionError::Stopped),
                     Some(ToConnection::SendPending) => self.send_pending().await?,
-                    Some(ToConnection::ReadReceipts { identity, message_ids }) => {
-                        self.send_receipt(&identity, DeliveryReceiptType::Read, message_ids).await?;
-                    },
                     // Queued while disconnected: stale by now, the contact's timer has expired anyway.
                     Some(ToConnection::Typing { identity, typing, at }) => if at.elapsed() < TYPING_MAX_AGE {
                         self.send_typing(&identity, typing).await?;
                     },
                     Some(ToConnection::Reconnect) => return Err(ConnectionError::Reconnect),
                     Some(ToConnection::NewDeviceSync { link, reply }) => {
-                        let result = self.new_device_sync(*link).await;
-                        if let Err(error) = &result {
-                            tracing::warn!(%error, "device join failed");
+                        let (outcome, restart) = self.new_device_sync(*link).await;
+                        if let JoinOutcome::FailedBeforeHandover(reason)
+                        | JoinOutcome::FailedAfterHandover(reason) = &outcome
+                        {
+                            // log-ok: our own connection errors and the mediator's text
+                            tracing::warn!(%reason, "device join failed");
                         }
-                        let _ = reply.send(result.map_err(|error| error.to_string()));
-                    },
-                    Some(ToConnection::ReflectSync) => self.reflect_queued_syncs().await?,
-                    Some(ToConnection::CallSignal { peer, signal }) => {
-                        self.send_call_signal(&peer, &signal).await?;
-                    },
-                    Some(ToConnection::Devices(reply)) => {
-                        let devices = self.devices().await;
-                        let _ = reply.send(devices.map_err(|error| error.to_string()));
-                    },
-                    Some(ToConnection::DropDevices { ids, reply }) => {
-                        let own = self.multi_device.as_ref().map(|p| p.mediator_device_id);
-                        let result = self.drop_devices(&ids).await;
-                        let dropped_self = result.is_ok() && own.is_some_and(|own| ids.contains(&own));
-                        let _ = reply.send(result.map_err(|error| error.to_string()));
-                        if dropped_self {
-                            // Like Android's removeMultiDeviceLocally: forget the group, then
-                            // connect directly again (forward security comes back with it).
-                            self.setup.store.set_multi_device(None).map_err(protocol_error)?;
-                            self.emit(CoreEvent::MultiDeviceChanged);
+                        let _ = reply.send(outcome);
+                        if restart {
                             return Err(ConnectionError::Reconnect);
                         }
                     },
+                    Some(ToConnection::ReflectSync) => self.reflect_queued_syncs().await?,
+                    Some(ToConnection::ApplyWaitingReflected) => {
+                        self.apply_waiting_reflected().await?;
+                    }
+                    Some(ToConnection::CallSignal { peer, signal }) => {
+                        self.send_call_signal(&peer, &signal).await?;
+                    },
+                    Some(ToConnection::FsControl { peer, peer_key, envelope }) => {
+                        if let Some(payload) = self.encode_control(&peer, peer_key, &envelope)? {
+                            self.send_payload(&OutgoingPayload::MessageWithMetadataBox(payload))
+                                .await?;
+                        }
+                    },
+                    Some(ToConnection::Flush(reply)) => {
+                        let _ = reply.send(());
+                    },
+                    Some(ToConnection::Devices(reply)) => {
+                        let devices = self.devices().await;
+                        let _ = reply.send(devices.map_err(DeviceGroupError::from));
+                    },
+                    Some(ToConnection::DropDevices { ids, reply }) => match self.drop_devices(ids.as_deref()).await {
+                        Ok(outcome) => {
+                            let left_group = outcome.left_group;
+                            if left_group {
+                                // Like Android's removeMultiDeviceLocally: forget the group, then
+                                // connect directly again (forward security comes back with it:
+                                // the core publishes the feature mask on this event).
+                                self.setup.store.set_multi_device(None).map_err(storage_error)?;
+                                self.emit(CoreEvent::MultiDeviceChanged);
+                            }
+                            let _ = reply.send(Ok(outcome));
+                            if left_group {
+                                return Err(ConnectionError::Reconnect);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "removing devices failed");
+                            // A timeout leaves it open what the mediator did with the transaction:
+                            // a new connection releases it.
+                            let restart = matches!(error, ConnectionError::Timeout);
+                            let _ = reply.send(Err(error.into()));
+                            if restart {
+                                return Err(ConnectionError::Reconnect);
+                            }
+                        }
+                    },
                     // Woken up (e.g. after the device slept): check the connection is still alive.
-                    Some(ToConnection::Wake) => if !echo_sent {
-                        self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
-                        echo_sent = true;
-                        // Give the echo 15 s (instead of the usual interval) to come back.
-                        let grace = ECHO_INTERVAL * 2 - Duration::from_secs(15);
-                        last_received = Instant::now().checked_sub(grace).unwrap_or(last_received);
+                    Some(ToConnection::Wake | ToConnection::ConnectNow) => {
+                        self.setup.wake_hold.asked();
+                        if self.liveness.awaiting_echo() {
+                            // Out since before the device slept, perhaps, with most of its time left.
+                            self.liveness.echo_due_by(Instant::now() + WAKE_ECHO_LIMIT);
+                        } else {
+                            self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
+                            self.liveness.echo_sent(Instant::now(), WAKE_ECHO_LIMIT);
+                        }
                     },
                 },
                 () = tokio::time::sleep_until(idle_deadline) => {
-                    if echo_sent {
-                        return Err(ConnectionError::Timeout);
+                    if self.liveness.awaiting_echo() {
+                        // select! picks at random among what is ready, so a read that is ready
+                        // too doesn't settle it by itself.
+                        let read = last_look_for_echo(self.read_inbound(&mut read_buffer)).await?;
+                        self.handle_inbound(read?).await?;
+                    } else {
+                        self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
+                        self.liveness.echo_sent(Instant::now(), ECHO_INTERVAL);
                     }
-                    self.send_payload(&OutgoingPayload::EchoRequest(EchoPayload(Vec::new()))).await?;
-                    echo_sent = true;
                 },
             }
         }
@@ -2153,24 +4134,32 @@ impl<'a> Session<'a> {
                 self.awaiting_ack
                     .retain(|(to, id)| !(*to == receiver && *id == ack.id.0));
                 let store = &self.setup.store;
+                if let Some(blob_id) = self
+                    .pictures_awaiting_ack
+                    .remove(&(receiver.clone(), ack.id.0))
+                {
+                    store
+                        .picture_sent(&receiver, blob_id.as_ref())
+                        .map_err(storage_error)?;
+                }
                 store
                     .outbox_remove(&receiver, ack.id.0)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
                 let mut changed = store
                     .raise_outgoing_state(&receiver, &[ack.id.0], OutgoingState::Sent)
-                    .map_err(protocol_error)?;
+                    .map_err(storage_error)?;
                 // Group messages: sent once every member has it.
                 for conversation in store
                     .receiver_done(&receiver, ack.id.0)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                 {
                     store
                         .outbox_remove(&conversation, ack.id.0)
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                     changed.extend(
                         store
                             .raise_outgoing_state(&conversation, &[ack.id.0], OutgoingState::Sent)
-                            .map_err(protocol_error)?,
+                            .map_err(storage_error)?,
                     );
                 }
                 // Multi-device: tell the other devices (once per message: a group message once
@@ -2195,12 +4184,22 @@ impl<'a> Session<'a> {
                 });
             }
             IncomingPayload::ServerAlert(alert) => {
-                let _ = self.tx.send(FromConnection::ServerMessage {
-                    message: alert.0,
-                    can_reconnect: true,
-                });
+                tracing::info!("chat server sent an alert");
+                let text = plain_server_text(&alert.0);
+                if !text.is_empty() {
+                    let reason = OfflineReason::ServerAlert(text);
+                    let _ = self.tx.send(FromConnection::OfflineReason(reason));
+                }
             }
-            IncomingPayload::QueueSendComplete => tracing::debug!("message queue drained"),
+            IncomingPayload::QueueSendComplete => {
+                tracing::debug!("message queue drained");
+                self.set_backlog(Backlog {
+                    chat_queue: false,
+                    ..self.backlog
+                });
+                self.storage_works(StorageStep::Incoming);
+                self.setup.wake_hold.chat_queue_through(Instant::now());
+            }
             // Like Android's TaskManager: warn (unless our own cookie is new) and clear the
             // server's flag. Left set, every login of every device in the group gets it again
             // (Threema Desktop: "Connection from another device detected", on every start).
@@ -2208,13 +4207,13 @@ impl<'a> Session<'a> {
                 let store = &self.setup.store;
                 let fresh = store
                     .setting(crate::store::keys::DEVICE_COOKIE_FRESH)
-                    .map_err(protocol_error)?
+                    .map_err(storage_error)?
                     .is_some();
                 if fresh {
                     tracing::info!("device cookie change indication for our new cookie");
                     store
                         .delete_setting(crate::store::keys::DEVICE_COOKIE_FRESH)
-                        .map_err(protocol_error)?;
+                        .map_err(storage_error)?;
                 } else {
                     tracing::warn!("device cookie change indication: another device used this ID");
                     self.emit(CoreEvent::DeviceCookieChanged);
@@ -2232,9 +4231,57 @@ impl<'a> Session<'a> {
         &mut self,
         message: MessageWithMetadataBox,
     ) -> Result<(), ConnectionError> {
+        let (sender_identity, id, flags) = (message.sender_identity, message.id, message.flags.0);
+        let item = FailingItem::Message {
+            sender: sender_identity.to_string(),
+            id: id.0,
+        };
+        let ack = match self.run_incoming_task(message).await {
+            Ok(ack) => {
+                self.storage_works(StorageStep::Incoming);
+                ack
+            }
+            Err(error) => {
+                let error = error.while_doing(StorageStep::Incoming);
+                if !error.fails_every_time() {
+                    if matches!(error, ConnectionError::Protocol(_)) {
+                        tracing::warn!("an incoming message failed, it comes again");
+                    }
+                    return Err(error);
+                }
+                // As Android does right away, whatever failed: only the server can hold it, and
+                // it holds up the rest of the queue until it is acknowledged.
+                let failures = self.setup.failing_items.failed(&item);
+                if failures < TRIES_BEFORE_DROPPING {
+                    tracing::warn!(failures, "an incoming message failed, it comes again");
+                    return Err(error);
+                }
+                tracing::error!(failures, "an incoming message keeps failing and is dropped");
+                (flags & MessageFlags::NO_SERVER_ACKNOWLEDGEMENT == 0).then_some(MessageAck {
+                    sender_identity,
+                    id,
+                })
+            }
+        };
+        // It's in the store by now: before anything that can fail on the network.
+        self.emit_stored_message_events();
+        if let Some(ack) = ack {
+            self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
+        }
+        self.setup.failing_items.forget(&item);
+        self.after_incoming().await
+    }
+
+    /// libthreema's incoming message task, to its end. What is left to do is the acknowledgement,
+    /// if any.
+    async fn run_incoming_task(
+        &mut self,
+        message: MessageWithMetadataBox,
+    ) -> Result<Option<MessageAck>, ConnectionError> {
+        let (sender, message_id) = (message.sender_identity.to_string(), message.id.0);
         let mut task = self.e2e.handle_incoming_message(message);
         let result = loop {
-            match task.poll(self.e2e.context()).map_err(protocol_error)? {
+            match self.poll_incoming(&mut task)? {
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::FetchSender(
                     lookup,
                 )) => {
@@ -2245,13 +4292,15 @@ impl<'a> Session<'a> {
                             work_directory_result: None,
                         },
                     ))
-                    .map_err(protocol_error)?;
+                    .map_err(e2e_error)?;
                 }
                 // Multi-device: reflect to the other devices before acknowledging; contacts are
                 // created/updated in a transaction.
                 IncomingMessageLoop::Instruction(IncomingMessageInstruction::ReflectMessage(
                     instruction,
                 )) => {
+                    // The message is stored: the wait for the mediator is no reason to hold it back.
+                    self.emit_stored_message_events();
                     let response = self.run_reflect(instruction).await?;
                     task.response(IncomingMessageResponse::ReflectMessage(response))
                         .map_err(protocol_error)?;
@@ -2295,35 +4344,128 @@ impl<'a> Session<'a> {
                 IncomingMessageLoop::Done(result) => break result,
             }
         };
-        if let Some(ack) = result.outgoing_message_ack {
-            self.send_payload(&OutgoingPayload::MessageAck(ack)).await?;
+        if self.multi_device.is_some() {
+            self.setup
+                .store
+                .reflection_done(&sender, message_id)
+                .map_err(storage_error)?;
         }
-        let events: Vec<CoreEvent> = self.events.borrow_mut().drain(..).collect();
-        for event in events {
-            let Some(event) = Box::pin(self.handle_fs_event(event)).await? else {
-                continue;
-            };
-            if let CoreEvent::MessageAdded {
-                message:
-                    Message {
-                        conversation,
-                        message_id,
-                        ..
-                    },
-                send_delivery_receipt: true,
-            } = &event
-            {
-                let (conversation, message_id) = (conversation.clone(), *message_id);
-                self.send_receipt(
-                    &conversation,
-                    DeliveryReceiptType::Received,
-                    vec![message_id],
-                )
-                .await?;
+        Ok(result.outgoing_message_ack)
+    }
+
+    /// One go of libthreema's task for an incoming message, up to what it has to wait for: its
+    /// writes (the message, its nonce, the ratchet of its session) make one commit, so a backlog
+    /// doesn't sync the flash for each of them. They stand or fall together, and it all comes
+    /// again from the server if they fall: nothing is announced then.
+    fn poll_incoming(
+        &mut self,
+        task: &mut IncomingMessageTask,
+    ) -> Result<IncomingMessageLoop, ConnectionError> {
+        let announced = self.events.borrow().len();
+        let store = Rc::clone(&self.setup.store);
+        let step = store.step().map_err(storage_error)?;
+        let polled = task.poll(self.e2e.context()).map_err(e2e_error);
+        let polled = polled.and_then(|polled| {
+            step.commit().map_err(storage_error)?;
+            Ok(polled)
+        });
+        if polled.is_err() {
+            self.events.borrow_mut().truncate(announced);
+        }
+        polled
+    }
+
+    /// Look up group members we have no contact for (`app_groups::resolve_members`) and send
+    /// whatever waited for them.
+    async fn resolve_members(&mut self, identities: &[String]) -> Result<(), ConnectionError> {
+        let setup = self.setup;
+        let lookup = crate::app_groups::resolve_members(
+            &setup.https,
+            &setup.config,
+            &setup.store,
+            identities,
+        );
+        self.resolve_members_by(identities, lookup).await
+    }
+
+    /// [`Self::resolve_members`] with the directory's part given. Failed or too slow, it isn't asked
+    /// again on this connection, as this holds up what comes next: what it was for stays noted for
+    /// the login's and maintenance's tries.
+    async fn resolve_members_by(
+        &mut self,
+        identities: &[String],
+        lookup: impl core::future::Future<Output = Option<crate::app_groups::ResolvedMembers>>,
+    ) -> Result<(), ConnectionError> {
+        if let Err(error) = self.setup.store.owe_member_lookups(identities) {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
+        if self.setup.store.directory_resting() || self.directory_unanswering {
+            return Ok(());
+        }
+        let Ok(Some(resolved)) = tokio::time::timeout(MEMBER_LOOKUP_LIMIT, lookup).await else {
+            self.directory_unanswering = true;
+            return Ok(());
+        };
+        if resolved.synced {
+            self.reflect_queued_syncs().await?;
+        }
+        if resolved.groups_changed {
+            self.emit(CoreEvent::GroupsChanged);
+        }
+        self.emit(CoreEvent::ContactsChanged);
+        for message in resolved.lines {
+            self.emit(CoreEvent::MessageAdded { message });
+        }
+        self.send_pending().await
+    }
+
+    /// What handling an incoming message left to do. If that fails, what is still to come stays
+    /// in the event queue (and what was just tried, if only the connection failed it) for
+    /// [`Self::drop`] to see to.
+    async fn after_incoming(&mut self) -> Result<(), ConnectionError> {
+        let events = status_after_messages(self.events.borrow_mut().drain(..).collect());
+        let mut events = std::collections::VecDeque::from(events);
+        while let Some(event) = events.pop_front() {
+            if let Err(error) = self.after_incoming_event(event.clone()).await {
+                if error.is_connection_lost() {
+                    events.push_front(event);
+                }
+                let mut queue = self.events.borrow_mut();
+                let newer = core::mem::take(&mut *queue);
+                queue.extend(events);
+                queue.extend(newer);
+                return Err(error);
             }
-            self.emit(event);
         }
         Ok(())
+    }
+
+    async fn after_incoming_event(&mut self, event: CoreEvent) -> Result<(), ConnectionError> {
+        match event {
+            // A group change goes out before the next message of a burst is even looked at, or
+            // the other devices get a message for a group they don't have yet, and drop it.
+            CoreEvent::SyncQueued => self.reflect_queued_syncs().await,
+            // Before the next message too, which may be from one of them, and so that what we
+            // send to the group reaches them. A failed lookup is tried again later (`on_connected`,
+            // `maintenance`); the setup is acknowledged by now and won't come again.
+            CoreEvent::UnknownMembers(identities) => self.resolve_members(&identities).await,
+            event => {
+                if let Some(event) = Box::pin(self.handle_fs_event(event)).await? {
+                    self.emit(event);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Group messages that aren't for the members: to say that someone is out of the group (leave,
+/// empty setup), or to the creator, who needn't be listed in a damaged group (sync request).
+fn goes_to_non_members(body: &GroupMessageBody) -> bool {
+    match body {
+        GroupMessageBody::Leave(_) | GroupMessageBody::SyncRequest(_) => true,
+        GroupMessageBody::Setup(setup) => setup.members.is_empty(),
+        _ => false,
     }
 }
 
@@ -2337,6 +4479,79 @@ fn distributes_profile(body: &GroupMessageBody) -> bool {
             | GroupMessageBody::PollSetup(_)
             | GroupMessageBody::PollVote(_)
     )
+}
+
+/// What one member gets of a group message: the message itself, except that a member without
+/// `REACTION_SUPPORT` gets a reaction as the thumbs up or down it maps to, if it does (the group
+/// reaction steps in `csp-e2e.proto`). Any other reaction goes to them as it is, which the steps
+/// intend; Android leaves them out instead.
+fn body_for_receiver(
+    body: &GroupMessageBody,
+    features: Option<libthreema::common::FeatureMask>,
+) -> GroupMessageBody {
+    if let GroupMessageBody::Reaction(ReactionMessage {
+        message_id,
+        action: ReactionAction::Apply(emoji),
+    }) = body
+        && features
+            .is_some_and(|mask| mask.0 & libthreema::common::FeatureMask::REACTION_SUPPORT == 0)
+        && let Some(reaction_type) = reactions::legacy_reaction(emoji)
+    {
+        return GroupMessageBody::LegacyReaction(LegacyReactionMessage {
+            reaction_type,
+            message_ids: vec![*message_id],
+        });
+    }
+    body.clone()
+}
+
+/// Whether `body` fits a frame, however it is wrapped. `identity` is anyone's: the receiver doesn't
+/// matter for the encoding.
+fn body_fits_a_frame(identity: ThreemaId, body: &Outgoing) -> bool {
+    let body = match body {
+        Outgoing::Contact(body) => OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+            receiver_identity: identity,
+            body: body.clone(),
+        }),
+        Outgoing::Group(group_identity, body) => {
+            OutgoingMessageBody::Group(OutgoingGroupMessageBody {
+                group_identity: *group_identity,
+                body: body.clone(),
+            })
+        }
+    };
+    encode_message_body(&body).1.len() <= crate::messages::MESSAGE_BODY_MAX
+}
+
+/// Whether this file message to `chat` will fit a frame when its upload is done.
+pub(crate) fn file_fits_a_frame(chat: &str, file: libthreema::model::message::FileMessage) -> bool {
+    let body = match crate::groups::parse_key(chat) {
+        Some(group) => Outgoing::Group(group, GroupMessageBody::File(file)),
+        None => Outgoing::Contact(ContactMessageBody::File(file)),
+    };
+    ThreemaId::try_from("ECHOECHO").is_ok_and(|anyone| body_fits_a_frame(anyone, &body))
+}
+
+/// A chat's messages read at `at`, for the other devices.
+fn read_update(
+    conversation: &libthreema::protobuf::d2d::ConversationId,
+    message_ids: &[u64],
+    at: u64,
+) -> libthreema::protobuf::d2d::IncomingMessageUpdate {
+    use libthreema::protobuf::d2d::{
+        IncomingMessageUpdate,
+        incoming_message_update::{Read, Update, update},
+    };
+    IncomingMessageUpdate {
+        updates: message_ids
+            .iter()
+            .map(|&message_id| Update {
+                conversation: Some(conversation.clone()),
+                message_id,
+                update: Some(update::Update::Read(Read { at })),
+            })
+            .collect(),
+    }
 }
 
 /// The group variant of a message body (what can be sent to groups at all).
@@ -2365,8 +4580,15 @@ fn to_group_body(body: ContactMessageBody) -> Option<GroupMessageBody> {
     })
 }
 
+/// A group outbox entry's timestamp on the wire: when it was queued, or for a repeat of a call's
+/// start the call's own start (csp.struct.yml). `created_at` stays when it was queued, as the
+/// order of what we send goes by that.
+fn outbox_sent_as_of(entry: &reactions::OutboxEntry) -> i64 {
+    entry.body["startedAt"].as_i64().unwrap_or(entry.created_at)
+}
+
 /// The body of a group outbox entry (control messages, or a reaction/edit/deletion).
-fn outbox_group_body(entry: &reactions::OutboxEntry) -> Option<GroupMessageBody> {
+pub(crate) fn outbox_group_body(entry: &reactions::OutboxEntry) -> Option<GroupMessageBody> {
     use crate::groups::{
         OUTBOX_GROUP_DELETE_PICTURE, OUTBOX_GROUP_LEAVE, OUTBOX_GROUP_NAME, OUTBOX_GROUP_SETUP,
         OUTBOX_GROUP_SYNC_REQUEST,
@@ -2416,6 +4638,15 @@ pub(crate) enum Outgoing {
     Group(GroupIdentity, GroupMessageBody),
 }
 
+impl Outgoing {
+    fn is_exempt_from_blocking(&self) -> bool {
+        match self {
+            Self::Contact(body) => body.is_exempt_from_blocking(),
+            Self::Group(_, body) => body.is_exempt_from_blocking(),
+        }
+    }
+}
+
 /// The message body of an outbox entry (see [`reactions::OUTBOX_REACTION`] and friends).
 fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
     let poll_id = entry.body["pollId"]
@@ -2449,6 +4680,21 @@ fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
             text: entry.body["text"].as_str()?.to_owned(),
         })),
         reactions::OUTBOX_DELETE => Some(ContactMessageBody::Delete(DeleteMessage { message_id })),
+        reactions::OUTBOX_DELIVERY_RECEIPT => Some(ContactMessageBody::DeliveryReceipt(
+            DeliveryReceiptMessage {
+                receipt_type: DeliveryReceiptType::Received,
+                message_ids: vec![message_id],
+            },
+        )),
+        reactions::OUTBOX_READ_RECEIPT => Some(ContactMessageBody::DeliveryReceipt(
+            DeliveryReceiptMessage {
+                receipt_type: DeliveryReceiptType::Read,
+                message_ids: reactions::read_report_ids(&entry.body)
+                    .into_iter()
+                    .map(MessageId)
+                    .collect(),
+            },
+        )),
         crate::profile_pictures::OUTBOX_REQUEST_PICTURE => Some(
             ContactMessageBody::RequestProfilePicture(RequestProfilePictureMessage),
         ),
@@ -2462,6 +4708,163 @@ fn outbox_body(entry: &reactions::OutboxEntry) -> Option<ContactMessageBody> {
             poll: entry.body["poll"].as_str()?.to_owned(),
         })),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests;
+
+#[cfg(test)]
+mod fs_status_tests {
+    use super::*;
+
+    #[test]
+    fn a_mask_check_counts_for_its_interval_and_a_distrusted_one_gives_no_answer() {
+        let checks = FsMaskChecks::default();
+        let start = Instant::now();
+        let minute = Duration::from_secs(60);
+        assert_eq!(checks.recent("ABCD1234", start, minute), None);
+
+        checks.record("ABCD1234", start, true);
+        assert_eq!(checks.recent("ABCD1234", start, minute), Some(true));
+        assert_eq!(checks.recent("EFGH5678", start, minute), None);
+        let later = start + Duration::from_secs(30);
+        assert_eq!(checks.recent("ABCD1234", later, minute), Some(true));
+        // An Init looks sooner than others do.
+        assert_eq!(
+            checks.recent("ABCD1234", later, FS_MASK_INIT_CHECK_INTERVAL),
+            None
+        );
+
+        // An Init within its own interval: no going by that "no", and no extra lookup either.
+        checks.distrust("ABCD1234");
+        assert_eq!(checks.recent("ABCD1234", later, minute), Some(false));
+        // A failed or distrusted lookup is tried again after the interval.
+        let after = start + minute;
+        assert_eq!(checks.recent("ABCD1234", after, minute), None);
+    }
+
+    #[test]
+    fn the_line_for_a_message_without_forward_secrecy_follows_the_message() {
+        let without = || CoreEvent::FsStatus {
+            peer: "ABCD1234".into(),
+            status: FsStatus::MessageWithoutFs,
+        };
+        let established = || CoreEvent::FsStatus {
+            peer: "ABCD1234".into(),
+            status: FsStatus::Established,
+        };
+        let events =
+            status_after_messages(vec![without(), established(), CoreEvent::ContactsChanged]);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                CoreEvent::FsStatus {
+                    status: FsStatus::Established,
+                    ..
+                },
+                CoreEvent::ContactsChanged,
+                CoreEvent::FsStatus {
+                    status: FsStatus::MessageWithoutFs,
+                    ..
+                },
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_rejected_message_is_back_in_the_queue_with_nothing_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO messages
+                     (conversation, message_id, outgoing, kind, body, created_at, updated_at, state)
+                 VALUES ('ABCD1234', 7, 1, 'text', 'hi', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        assert!(store.pending_outgoing().unwrap().is_empty());
+
+        let requeued = requeue_rejected(&store, "EFGH5678", "ABCD1234", 7, None).unwrap();
+        assert!(requeued.send && requeued.resending);
+        assert_eq!(requeued.changed.len(), 1);
+        assert_eq!(store.pending_outgoing().unwrap().len(), 1);
+
+        // What isn't ours to send: nothing to do, and no claim that it goes out.
+        let requeued = requeue_rejected(&store, "EFGH5678", "ABCD1234", 8, None).unwrap();
+        assert!(!requeued.send && !requeued.resending && requeued.changed.is_empty());
+    }
+
+    fn rejected(session_known: bool) -> FsStatus {
+        FsStatus::MessageRejected {
+            message_id: 1,
+            group_identity: None,
+            session_known,
+        }
+    }
+
+    #[test]
+    fn lines_only_for_sessions_that_existed() {
+        assert_eq!(fs_status_line(&rejected(false), true, true), None);
+        assert_eq!(fs_status_line(&rejected(false), false, true), None);
+        let terminated = FsStatus::Terminated {
+            session_known: false,
+        };
+        assert_eq!(fs_status_line(&terminated, false, false), None);
+    }
+
+    #[test]
+    fn a_rejected_message_is_only_said_to_go_out_again_if_it_does() {
+        assert_eq!(
+            fs_status_line(&rejected(true), true, true),
+            Some("fsMessageRejected")
+        );
+        assert_eq!(
+            fs_status_line(&rejected(true), true, false),
+            Some("fsReset")
+        );
+    }
+
+    #[test]
+    fn the_feature_mask_says_why_a_session_ended() {
+        let terminated = FsStatus::Terminated {
+            session_known: true,
+        };
+        assert_eq!(fs_status_line(&terminated, true, false), Some("fsReset"));
+        assert_eq!(
+            fs_status_line(&terminated, false, false),
+            Some("fsUnavailable")
+        );
+        assert_eq!(
+            fs_status_line(&rejected(true), false, true),
+            Some("fsUnavailable")
+        );
+    }
+
+    #[test]
+    fn a_message_without_forward_secrecy_warns_while_the_contact_supports_it() {
+        assert_eq!(
+            fs_status_line(&FsStatus::MessageWithoutFs, true, false),
+            Some(FS_MESSAGE_WITHOUT)
+        );
+        assert_eq!(
+            fs_status_line(&FsStatus::MessageWithoutFs, false, false),
+            Some("fsUnavailable")
+        );
+    }
+
+    #[test]
+    fn forward_secrecy_is_only_called_active_if_the_mask_agrees() {
+        assert_eq!(
+            fs_status_line(&FsStatus::Established, true, false),
+            Some("fsEstablished")
+        );
+        assert_eq!(fs_status_line(&FsStatus::Established, false, false), None);
     }
 }
 
@@ -2485,5 +4888,2802 @@ mod backoff_tests {
     fn told_to_stay_away_holds_however_long_the_session_was() {
         assert_eq!(backoff_after_session(HOLD_OFF, LONG), HOLD_OFF);
         assert_eq!(backoff_after_session(HOLD_OFF, SHORT), HOLD_OFF);
+    }
+
+    #[test]
+    fn only_a_user_who_answered_tells_contacts_to_drop_the_name() {
+        assert_eq!(
+            nickname_delta(Some("Tester"), false),
+            Delta::Update("Tester")
+        );
+        assert_eq!(
+            nickname_delta(Some("Tester"), true),
+            Delta::Update("Tester")
+        );
+        assert_eq!(nickname_delta(None, false), Delta::Remove);
+        assert_eq!(nickname_delta(None, true), Delta::Unchanged);
+    }
+
+    #[test]
+    fn a_rate_limit_keeps_its_identity_and_gets_a_longer_wait() {
+        assert!(matches!(
+            e2e_error(CspE2eProtocolError::RateLimitExceeded),
+            ConnectionError::RateLimited
+        ));
+        assert!(matches!(
+            e2e_error(CspE2eProtocolError::NetworkError("gone".into())),
+            ConnectionError::Protocol(_)
+        ));
+
+        // Login after login meets the limit: the wait keeps growing past the usual cap.
+        let mut wait = RATE_LIMIT_FLOOR;
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            wait = next_backoff(wait, true);
+            waits.push(wait.as_secs());
+        }
+        assert_eq!(waits, [20, 40, 80, 160, 300, 300]);
+        // Over: back to the usual cap.
+        assert_eq!(next_backoff(RATE_LIMIT_MAX_BACKOFF, false), MAX_BACKOFF);
+        assert_eq!(
+            next_backoff(Duration::from_secs(1), false),
+            Duration::from_secs(2)
+        );
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn silence_asks_with_an_echo_and_its_time_runs_out() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        assert!(!liveness.awaiting_echo());
+        assert_eq!(liveness.deadline(), start + ECHO_INTERVAL);
+        liveness.echo_sent(start + ECHO_INTERVAL, ECHO_INTERVAL);
+        assert!(liveness.awaiting_echo());
+        assert_eq!(liveness.deadline(), start + ECHO_INTERVAL * 2);
+    }
+
+    #[test]
+    fn data_read_inside_a_long_handler_counts() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        // A link's registration ran for 3 minutes, reading the mediator all along.
+        let later = start + Duration::from_secs(180);
+        liveness.received(later);
+        assert_eq!(liveness.deadline(), later + ECHO_INTERVAL);
+        assert!(!liveness.awaiting_echo());
+    }
+
+    #[test]
+    fn a_handler_that_read_nothing_gets_an_echo_before_any_timeout() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        // Past the old limit of twice the interval: still only time to ask.
+        let later = start + ECHO_INTERVAL * 3;
+        assert!(liveness.deadline() <= later);
+        assert!(!liveness.awaiting_echo(), "the first thing due is an echo");
+        liveness.echo_sent(later, ECHO_INTERVAL);
+        assert_eq!(
+            liveness.deadline(),
+            later + ECHO_INTERVAL,
+            "the echo has its full time"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_answer_in_the_socket_beats_the_passed_deadline() {
+        let read = last_look_for_echo(std::future::ready(7)).await;
+        assert!(matches!(read, Ok(7)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_answer_within_the_last_look_is_a_timeout() {
+        let read = last_look_for_echo(std::future::pending::<()>()).await;
+        assert!(matches!(read, Err(ConnectionError::Timeout)));
+    }
+
+    #[test]
+    fn a_wake_up_cuts_short_the_time_of_an_echo_that_is_out() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        liveness.echo_sent(start, ECHO_INTERVAL);
+        // The device slept with most of the minute left: nobody is up for that long.
+        liveness.echo_due_by(start + WAKE_ECHO_LIMIT);
+        assert_eq!(liveness.deadline(), start + WAKE_ECHO_LIMIT);
+        // Another wake-up doesn't give it more.
+        liveness.echo_due_by(start + WAKE_ECHO_LIMIT * 2);
+        assert_eq!(liveness.deadline(), start + WAKE_ECHO_LIMIT);
+    }
+
+    #[test]
+    fn an_answer_ends_the_wait_for_an_echo() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        liveness.echo_sent(start, Duration::from_secs(15));
+        assert_eq!(liveness.deadline(), start + Duration::from_secs(15));
+        let answered = start + Duration::from_secs(1);
+        liveness.received(answered);
+        assert!(!liveness.awaiting_echo());
+        assert_eq!(liveness.deadline(), answered + ECHO_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    struct Waiting {
+        to: mpsc::UnboundedSender<ToConnection>,
+        rx: mpsc::UnboundedReceiver<ToConnection>,
+        tx: mpsc::UnboundedSender<FromConnection>,
+        from: mpsc::UnboundedReceiver<FromConnection>,
+        hold: WakeHold,
+    }
+
+    fn waiting() -> Waiting {
+        let (to, rx) = mpsc::unbounded_channel();
+        let (tx, from) = mpsc::unbounded_channel();
+        Waiting {
+            to,
+            rx,
+            tx,
+            from,
+            hold: WakeHold::default(),
+        }
+    }
+
+    impl Waiting {
+        /// How long the wait lasted, given what is in the channel when it begins.
+        async fn lasted(&mut self, backoff: Duration, earliest: Option<Instant>) -> Duration {
+            let start = Instant::now();
+            let goes_on =
+                wait_for_next_attempt(backoff, earliest, &mut self.rx, &self.tx, &self.hold).await;
+            assert!(goes_on);
+            start.elapsed()
+        }
+
+        fn settled(&mut self) -> bool {
+            matches!(self.from.try_recv(), Ok(FromConnection::WakeSettled))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_ends_the_ordinary_wait_and_stays_for_the_attempt() {
+        let mut wait = waiting();
+        wait.to.send(ToConnection::Wake).unwrap();
+        assert_eq!(wait.lasted(WAIT, None).await, Duration::ZERO);
+        assert!(!wait.settled(), "its outcome is the attempt's");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_by_itself_leaves_the_wait_a_server_asked_for() {
+        let mut wait = waiting();
+        wait.to.send(ToConnection::Wake).unwrap();
+        wait.to.send(ToConnection::Wake).unwrap();
+        assert_eq!(wait.lasted(HOLD_OFF, None).await, HOLD_OFF);
+        assert!(wait.settled(), "the device can go back to sleep");
+        assert!(wait.settled());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn connect_now_ends_the_wait_a_server_asked_for() {
+        let mut wait = waiting();
+        wait.to.send(ToConnection::ConnectNow).unwrap();
+        assert_eq!(wait.lasted(HOLD_OFF, None).await, Duration::ZERO);
+    }
+
+    /// The IPv6 switch, the forward secrecy switch, a device's name, multi-device on and off: all
+    /// of these need the new connection now, whatever it was waiting for. A link's next step
+    /// waits for that connection in the queue.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_changed_setting_ends_any_wait() {
+        for backoff in [WAIT, HOLD_OFF] {
+            let mut wait = waiting();
+            wait.to.send(ToConnection::Reconnect).unwrap();
+            wait.to.send(ToConnection::SendPending).unwrap();
+            assert_eq!(wait.lasted(backoff, None).await, Duration::ZERO);
+            assert!(matches!(wait.rx.try_recv(), Ok(ToConnection::SendPending)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn nothing_comes_before_the_floor_of_a_rate_limit() {
+        for wake in [
+            ToConnection::Wake,
+            ToConnection::ConnectNow,
+            ToConnection::Reconnect,
+        ] {
+            let mut wait = waiting();
+            wait.to.send(wake).unwrap();
+            let floor = Instant::now() + RATE_LIMIT_FLOOR;
+            assert_eq!(wait.lasted(WAIT, Some(floor)).await, RATE_LIMIT_FLOOR);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_app_going_away_ends_the_wait() {
+        let mut wait = waiting();
+        drop(wait.to);
+        assert!(!wait_for_next_attempt(HOLD_OFF, None, &mut wait.rx, &wait.tx, &wait.hold).await);
+    }
+
+    #[test]
+    fn the_clock_counts_for_the_wait_while_the_device_slept() {
+        assert!(wake_ends_wait(MAX_BACKOFF, Duration::ZERO));
+        assert!(wake_ends_wait(RATE_LIMIT_MAX_BACKOFF, Duration::ZERO));
+        assert!(!wake_ends_wait(HOLD_OFF, HOLD_OFF / 2));
+        assert!(wake_ends_wait(HOLD_OFF, HOLD_OFF));
+    }
+
+    /// A network whose address translation forgets us between wake-ups: every wake-up finds the
+    /// connection dead after a session that was minutes long by the clock, and little by tokio's.
+    /// Each must stay for the new connection, or only every second one gets it back.
+    #[test]
+    fn every_wake_up_of_a_pocket_gets_its_connection_back() {
+        let mut backoff = Duration::from_secs(1);
+        for _ in 0..6 {
+            let session = Stopwatch {
+                awake: Instant::now(),
+                wall: std::time::SystemTime::now() - Duration::from_secs(300),
+            };
+            backoff = backoff_after_session(backoff, session.elapsed());
+            assert!(next_attempt_is_worth_holding_for(true, backoff));
+            backoff = next_backoff(backoff, false);
+        }
+    }
+
+    #[test]
+    fn a_stopwatch_goes_by_whichever_clock_went_further() {
+        let awake = Stopwatch {
+            awake: Instant::now() - Duration::from_secs(90),
+            wall: std::time::SystemTime::now() + Duration::from_secs(3600),
+        };
+        assert!(awake.elapsed() >= Duration::from_secs(90), "clock set back");
+    }
+
+    #[test]
+    fn a_wake_up_stays_only_for_an_attempt_that_is_near() {
+        assert!(next_attempt_is_worth_holding_for(true, WAKE_RETRY_SOON));
+        assert!(!next_attempt_is_worth_holding_for(
+            true,
+            WAKE_RETRY_SOON * 2
+        ));
+        assert!(!next_attempt_is_worth_holding_for(false, WAKE_RETRY_SOON));
+        assert!(!next_attempt_is_worth_holding_for(true, HOLD_OFF));
+    }
+
+    #[test]
+    fn after_a_login_it_takes_the_chat_servers_queue() {
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.asked();
+        hold.logged_in(false);
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), None, "messages are still coming");
+        hold.chat_queue_through(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+    }
+
+    #[test]
+    fn through_the_mediator_it_takes_its_queue_and_the_leaders() {
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.asked();
+        hold.logged_in(true);
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), None);
+
+        // Another device leads: nothing more is coming from the chat server.
+        hold.reflection_queue_through(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+
+        // We lead after all: now it has a queue for us.
+        hold.promoted_to_leader();
+        assert_eq!(hold.settles_at(), None);
+        hold.chat_queue_through(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+    }
+
+    /// Nobody was waiting when the session began, so its queues needn't have been noted as through
+    /// by anything that counts: an echo's answer is enough for a wake-up hours later.
+    #[test]
+    fn a_later_wake_up_only_needs_an_answer() {
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.logged_in(false);
+        hold.asked();
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+    }
+
+    #[test]
+    fn a_wake_up_lasts_until_things_have_stopped_coming() {
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let hold = WakeHold::default();
+        let start = Instant::now();
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), None, "not waiting for anything");
+
+        hold.asked();
+        assert_eq!(hold.settles_at(), None, "no answer yet");
+        hold.heard(start);
+        assert_eq!(hold.settles_at(), Some(start + WAKE_QUIET));
+        let later = start + Duration::from_secs(1);
+        hold.heard(later);
+        assert_eq!(hold.settles_at(), Some(later + WAKE_QUIET), "more came");
+
+        hold.settle(&tx);
+        assert!(matches!(from.try_recv(), Ok(FromConnection::WakeSettled)));
+        assert_eq!(hold.settles_at(), None);
+        hold.settle(&tx);
+        assert!(from.try_recv().is_err(), "said once");
+    }
+}
+
+#[cfg(test)]
+mod device_group_error_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_lost_connection_counts_as_offline() {
+        for lost in [
+            ConnectionError::Timeout,
+            ConnectionError::Reconnect,
+            ConnectionError::from(TransportError::Closed),
+            ConnectionError::from(TransportError::WriteTimeout),
+            ConnectionError::from(TransportError::Io(
+                std::io::ErrorKind::ConnectionReset.into(),
+            )),
+            ConnectionError::from(TransportError::WebSocket(WebSocketError::Closed {
+                code: None,
+                reason: "end of stream".into(),
+            })),
+        ] {
+            assert_eq!(DeviceGroupError::from(lost), DeviceGroupError::NotConnected);
+        }
+        for refused in [
+            ConnectionError::Protocol("expected devices info".into()),
+            ConnectionError::MediatorClosed {
+                code: 4114,
+                reason: String::new(),
+            },
+            ConnectionError::Closed {
+                message: "maintenance".into(),
+                can_reconnect: true,
+            },
+        ] {
+            assert!(matches!(
+                DeviceGroupError::from(refused),
+                DeviceGroupError::Failed(_)
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod drop_plan_tests {
+    use super::*;
+
+    const OWN: u64 = 1;
+    const DESKTOP: u64 = 2;
+    const LAPTOP: u64 = 3;
+    const GONE: u64 = 4;
+
+    #[test]
+    fn removing_the_last_other_device_ends_multi_device() {
+        assert_eq!(
+            plan_drop(Some(&[DESKTOP]), &[DESKTOP], OWN),
+            (vec![DESKTOP], true)
+        );
+    }
+
+    #[test]
+    fn removing_one_of_two_keeps_the_group() {
+        assert_eq!(
+            plan_drop(Some(&[DESKTOP]), &[DESKTOP, LAPTOP], OWN),
+            (vec![DESKTOP], false)
+        );
+    }
+
+    #[test]
+    fn removing_all_named_ends_multi_device() {
+        assert_eq!(
+            plan_drop(Some(&[DESKTOP, LAPTOP]), &[LAPTOP, DESKTOP], OWN),
+            (vec![LAPTOP, DESKTOP], true)
+        );
+    }
+
+    #[test]
+    fn deactivating_removes_whatever_the_mediator_lists() {
+        assert_eq!(
+            plan_drop(None, &[DESKTOP, LAPTOP], OWN),
+            (vec![DESKTOP, LAPTOP], true)
+        );
+        assert_eq!(plan_drop(None, &[], OWN), (Vec::new(), true));
+    }
+
+    #[test]
+    fn a_device_that_is_gone_already_is_not_dropped_again() {
+        assert_eq!(
+            plan_drop(Some(&[GONE]), &[DESKTOP], OWN),
+            (Vec::new(), false)
+        );
+        // ... and if it was the last one, this device is alone.
+        assert_eq!(plan_drop(Some(&[GONE]), &[], OWN), (Vec::new(), true));
+    }
+
+    #[test]
+    fn alone_ends_multi_device_and_with_others_nothing_happens() {
+        assert_eq!(plan_drop(Some(&[]), &[], OWN), (Vec::new(), true));
+        assert_eq!(plan_drop(Some(&[]), &[DESKTOP], OWN), (Vec::new(), false));
+    }
+
+    #[test]
+    fn this_device_alone_may_leave_while_others_stay() {
+        assert_eq!(plan_drop(Some(&[OWN]), &[DESKTOP], OWN), (Vec::new(), true));
+    }
+}
+
+#[cfg(test)]
+mod sync_order_tests {
+    use libthreema::model::{
+        message::{
+            GroupMessageBody, GroupSetupMessage, IncomingGroupMessageBody, IncomingMessage,
+            IncomingMessageBody, TextMessage,
+        },
+        provider::ConversationProvider as _,
+    };
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+    use crate::{
+        app::{App, StartConfig},
+        store::StoredIdentity,
+    };
+
+    const USER: &str = "USER0001";
+    const CREATOR: &str = "ABCD1234";
+
+    pub(super) fn app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: USER.into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        (dir, app)
+    }
+
+    /// A contact whose stored mask says no, with a forward secrecy session left, and what it takes
+    /// to talk to it: no lookup goes out as long as `fs_mask_checks` has an entry.
+    fn contact_without_fs_support(app: &App) -> (ConnectionSetup, libthreema::common::ThreemaId) {
+        let mut contact = crate::contacts::test_contact(CREATOR);
+        contact.feature_mask = libthreema::common::FeatureMask(0);
+        app.store.upsert_contact(&contact).unwrap();
+        let identity = app.store.identity().unwrap().unwrap();
+        let setup = ConnectionSetup {
+            store: Rc::clone(&app.store),
+            media: Arc::clone(&app.media),
+            https: app.https.clone(),
+            config: Arc::clone(&app.config),
+            identity: identity.threema_id.parse().unwrap(),
+            client_key: Zeroizing::new(*identity.client_key),
+            server_group: ChatServerGroup::try_from(identity.server_group.as_str()).unwrap(),
+            device_cookie: DeviceCookie([1; 16]),
+            client_info: app.version.client_info(),
+            fs_mask_checks: FsMaskChecks::default(),
+            storage_failing: StorageFailing::default(),
+            failing_items: FailingItems::default(),
+            carried_events: RefCell::default(),
+            wake_hold: WakeHold::default(),
+            picture_uploads: Rc::default(),
+        };
+        let mut fs = StoreFs {
+            store: Rc::clone(&setup.store),
+            my_identity: setup.identity,
+            events: EventSink::default(),
+        };
+        fs_protocol::encapsulate(
+            &mut fs,
+            setup.identity,
+            &ClientKey::from(*setup.client_key),
+            contact.identity,
+            &contact.public_key,
+            0x01,
+            b"hello",
+            None,
+            1,
+        )
+        .unwrap();
+        (setup, contact.identity)
+    }
+
+    fn text() -> Outgoing {
+        Outgoing::Contact(ContactMessageBody::Text(TextMessage { text: "hi".into() }))
+    }
+
+    fn long_text(length: usize) -> ContactMessageBody {
+        ContactMessageBody::Text(TextMessage {
+            text: "x".repeat(length),
+        })
+    }
+
+    /// With forward secrecy, a long nickname and the most padding there can be, the longest body
+    /// fits a frame, 1:1 and in a group; what goes out adds its box and container to this.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_longest_body_fits_a_frame_however_it_is_wrapped() {
+        const WRAPPING: usize = 16 + 4;
+        const MOST_PADDING: usize = 255;
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        setup
+            .store
+            .set_setting(crate::store::keys::NICKNAME, &"n".repeat(32))
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let group = crate::groups::parse_key("g:USER0001:0000000000000001").unwrap();
+        let longest = || {
+            [
+                Outgoing::Contact(long_text(crate::messages::MESSAGE_BODY_MAX)),
+                Outgoing::Group(
+                    group,
+                    GroupMessageBody::Text(TextMessage {
+                        text: "x".repeat(crate::messages::MESSAGE_BODY_MAX - 16),
+                    }),
+                ),
+            ]
+        };
+        // The padding is random: the smallest of many is about the size without it.
+        let mut smallest = usize::MAX;
+        for id in 0..64 {
+            for body in longest() {
+                assert!(session.fits_a_frame(&body));
+                let sent = session.encode(CREATOR, id, 1, body).await.unwrap().unwrap();
+                let size = sent.last().unwrap().bytes.len();
+                assert!(size + WRAPPING <= 8192, "{size}");
+                smallest = smallest.min(size);
+            }
+        }
+        assert!(smallest + MOST_PADDING + WRAPPING <= 8192, "{smallest}");
+    }
+
+    /// Longer than a frame: not on the wire and not tried again at every login. In a group too,
+    /// where `encode` saying no would only mean "later".
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_frame_cannot_hold_fails_and_is_not_tried_again() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let too_long = "x".repeat(crate::messages::MESSAGE_BODY_MAX + 1);
+
+        assert!(
+            session
+                .encode(CREATOR, 1, 1, Outgoing::Contact(long_text(too_long.len())))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let group_key = "g:USER0001:0000000000000001";
+        store
+            .upsert_group(&crate::groups::Group {
+                key: group_key.to_owned(),
+                identity: crate::groups::parse_key(group_key).unwrap(),
+                name: "Crew".into(),
+                members: vec![CREATOR.to_owned()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let in_chat = store
+            .insert_outgoing(CREATOR, 2, "text", &too_long)
+            .unwrap();
+        let in_group = store
+            .insert_outgoing(group_key, 3, "text", &too_long)
+            .unwrap();
+        store
+            .set_pending_receivers(group_key, 3, &[CREATOR.to_owned()])
+            .unwrap();
+        // Nothing to write: this session could not.
+        session.send_pending().await.unwrap();
+        for id in [in_chat.id, in_group.id] {
+            let message = store.message(id).unwrap().unwrap();
+            assert_eq!(message.state, OutgoingState::Failed as i64);
+            assert!(!message.written_out);
+        }
+        assert!(session.awaiting_ack.is_empty());
+        assert!(store.pending_outgoing().unwrap().is_empty());
+    }
+
+    /// What the server's ack does.
+    async fn ack(session: &mut Session<'_>, receiver: &str, id: u64) {
+        session
+            .handle_instruction(CspProtocolInstruction {
+                state_update: None,
+                outgoing_frame: None,
+                incoming_payload: Some(IncomingPayload::MessageAck(MessageAck {
+                    sender_identity: receiver.parse().unwrap(),
+                    id: MessageId(id),
+                })),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Read in a tunnel, or during a backoff: the receipt is in the store, and stays there until
+    /// the server has it, however many connections that takes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_receipt_stays_in_the_store_until_the_server_has_it() {
+        let (_dir, mut app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        store
+            .insert_incoming(CREATOR, 1, "text", "hi", 1)
+            .unwrap()
+            .unwrap();
+        app.mark_read(CREATOR).unwrap();
+        let queued = store.outbox().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, reactions::OUTBOX_READ_RECEIPT);
+        assert_eq!(reactions::read_report_ids(&queued[0].body), [1]);
+        let receipt = queued[0].message_id;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Sending fails: this session has no working connection.
+        let mut lost = session(&setup, &tx).await;
+        assert!(lost.send_pending().await.is_err());
+        drop(lost);
+        assert_eq!(store.outbox().unwrap().len(), 1);
+
+        let mut next = session(&setup, &tx).await;
+        ack(&mut next, CREATOR, receipt).await;
+        assert!(store.outbox().unwrap().is_empty());
+    }
+
+    /// A queued read receipt goes out as one, with its message IDs.
+    #[test]
+    fn a_read_receipt_is_of_type_read_and_names_its_messages() {
+        let entry = reactions::OutboxEntry {
+            id: 1,
+            conversation: CREATOR.into(),
+            message_id: 1,
+            created_at: 1,
+            kind: reactions::OUTBOX_READ_RECEIPT.into(),
+            body: reactions::read_report_body(&[7, u64::MAX]),
+        };
+        let Some(ContactMessageBody::DeliveryReceipt(receipt)) = outbox_body(&entry) else {
+            panic!("not a delivery receipt");
+        };
+        assert!(matches!(receipt.receipt_type, DeliveryReceiptType::Read));
+        assert_eq!(receipt.message_ids, [MessageId(7), MessageId(u64::MAX)]);
+    }
+
+    /// Without other devices (any more) a read update has nowhere to go, and nothing waits for it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_update_leaves_the_outbox_without_a_message_to_anyone() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        store
+            .outbox_add(
+                CREATOR,
+                1,
+                reactions::OUTBOX_READ_UPDATE,
+                &reactions::read_report_body(&[9]),
+            )
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        session.send_pending().await.unwrap();
+        assert!(session.awaiting_ack.is_empty());
+        assert!(store.outbox().unwrap().is_empty());
+    }
+
+    /// The longest update there can be, for a group, stays under what the protocol wants of a
+    /// message.
+    #[test]
+    fn a_read_update_stays_small() {
+        use prost::Message as _;
+        let conversation = d2d_conversation("g:USER0001:ffffffffffffffff").unwrap();
+        let ids = vec![u64::MAX; READ_UPDATE_IDS_MAX];
+        let update = super::read_update(&conversation, &ids, u64::MAX);
+        assert!(update.encoded_len() < 7000, "{}", update.encoded_len());
+    }
+
+    /// In a mixed group the thumbs reach a member on an old client as what they understand; what
+    /// has no such form, and everything else, goes as it is.
+    #[test]
+    fn a_group_reaction_is_chosen_per_receiver() {
+        use libthreema::{common::FeatureMask, model::message::LegacyReactionType};
+        let reaction = |action| {
+            GroupMessageBody::Reaction(ReactionMessage {
+                message_id: MessageId(5),
+                action,
+            })
+        };
+        let thumb = reaction(ReactionAction::Apply("\u{1F44D}".to_owned()));
+        let (old, new) = (
+            Some(FeatureMask(0)),
+            Some(FeatureMask(FeatureMask::REACTION_SUPPORT)),
+        );
+
+        let GroupMessageBody::LegacyReaction(legacy) = body_for_receiver(&thumb, old) else {
+            panic!("expected the legacy form");
+        };
+        assert!(matches!(
+            legacy.reaction_type,
+            LegacyReactionType::Acknowledge
+        ));
+        assert_eq!(legacy.message_ids[0].0, 5);
+        assert!(matches!(
+            body_for_receiver(&thumb, new),
+            GroupMessageBody::Reaction(_)
+        ));
+        // Nobody to look the mask up for: `encode` keeps it for later anyway.
+        assert!(matches!(
+            body_for_receiver(&thumb, None),
+            GroupMessageBody::Reaction(_)
+        ));
+        // No legacy form: a heart, or taking a thumb back.
+        for action in [
+            ReactionAction::Apply("\u{2764}\u{fe0f}".to_owned()),
+            ReactionAction::Withdraw("\u{1F44D}".to_owned()),
+        ] {
+            assert!(matches!(
+                body_for_receiver(&reaction(action), old),
+                GroupMessageBody::Reaction(_)
+            ));
+        }
+        let text = GroupMessageBody::Text(TextMessage { text: "hi".into() });
+        assert!(matches!(
+            body_for_receiver(&text, old),
+            GroupMessageBody::Text(_)
+        ));
+    }
+
+    /// The mark that someone may have a message is on record before the first byte goes out, and
+    /// not for what stays home: a file still uploading, a contact no longer to be written to.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_send_is_on_record_as_begun_before_anything_goes_out() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let store = Rc::clone(&setup.store);
+        let group_key = "g:USER0001:0000000000000001";
+        store
+            .upsert_group(&crate::groups::Group {
+                key: group_key.to_owned(),
+                identity: crate::groups::parse_key(group_key).unwrap(),
+                name: "Crew".into(),
+                members: vec![CREATOR.to_owned()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let text = store.insert_outgoing(CREATOR, 1, "text", "hi").unwrap();
+        let in_group = store.insert_outgoing(group_key, 2, "text", "hi").unwrap();
+        store
+            .set_pending_receivers(group_key, 2, &[CREATOR.to_owned()])
+            .unwrap();
+        let file = store
+            .insert_outgoing(CREATOR, 3, "file", r#"{"uploadState": 1}"#)
+            .unwrap();
+        let written = |id: i64| store.message(id).unwrap().unwrap().written_out;
+        assert!(!written(text.id) && !written(in_group.id) && !written(file.id));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        // No handshake was made in this test, so the first payload ends the pass.
+        let _ = session.send_pending().await;
+        assert!(written(text.id));
+        assert!(!written(file.id));
+        // The chat hears of it, once: Edit depends on it.
+        let mut told = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let FromConnection::Event(event) = event
+                && let CoreEvent::MessagesChanged(changed) = *event
+            {
+                told.extend(changed.iter().filter(|m| m.written_out).map(|m| m.id));
+            }
+        }
+        assert_eq!(told, [text.id]);
+        assert!(store.set_written_out(text.id).unwrap().is_none());
+
+        // The group's turn, once the text is out of the way.
+        store.remove_message(text.id).unwrap();
+        let _ = session.send_pending().await;
+        assert!(written(in_group.id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_new_session_starts_no_chat_but_shows_in_one() {
+        let (_dir, app) = app();
+        let (setup, _peer) = contact_without_fs_support(&app);
+        let mut contact = setup.store.contact(CREATOR).unwrap().unwrap();
+        contact.feature_mask = libthreema::common::FeatureMask(
+            libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+        );
+        setup.store.upsert_contact(&contact).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let established = || CoreEvent::FsStatus {
+            peer: CREATOR.into(),
+            status: FsStatus::Established,
+        };
+        assert!(
+            session
+                .handle_fs_event(established())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
+
+        setup
+            .store
+            .insert_incoming(CREATOR, 1, "text", "hi", 5)
+            .unwrap();
+        assert!(
+            session
+                .handle_fs_event(established())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 2);
+    }
+
+    /// Counts the store's commits from here on.
+    fn count_commits(store: &Store) -> Arc<std::sync::atomic::AtomicU32> {
+        let commits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = Arc::clone(&commits);
+        store.conn.commit_hook(Some(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        }));
+        commits
+    }
+
+    /// A backlog shouldn't sync the flash for each thing a message writes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_message_writes_makes_one_commit() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let message = from_creator(&setup, 1, "hi");
+        let commits = count_commits(&setup.store);
+
+        session.run_incoming_task(message).await.unwrap();
+
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert!(setup.store.has_nonce(&[1; 24]).unwrap());
+    }
+
+    /// And it stands or falls as a whole: without its nonce nothing of a message is kept or
+    /// announced, and it comes again as if it had never been here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_that_fails_halfway_leaves_nothing() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let message = from_creator(&setup, 1, "hi");
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON nonces
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+
+        assert!(session.run_incoming_task(message).await.is_err());
+
+        assert!(!setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
+        assert!(session.events.borrow().is_empty());
+        assert!(setup.store.conn.is_autocommit(), "no step left open");
+
+        setup
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        let again = from_creator(&setup, 1, "hi");
+        session.run_incoming_task(again).await.unwrap();
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 1);
+        assert!(!session.events.borrow().is_empty());
+    }
+
+    /// A send that fails halfway is undone, and so is whatever it announced: the session it would
+    /// have replaced is still there, with no line in the chat saying otherwise.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_send_that_fails_halfway_announces_nothing() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let mut contact = setup.store.contact(CREATOR).unwrap().unwrap();
+        contact.feature_mask = libthreema::common::FeatureMask(
+            libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+        );
+        setup.store.upsert_contact(&contact).unwrap();
+        // A session of no state a session can be in: it gets replaced, with a line in the chat.
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "UPDATE fs_sessions SET my_2dh_key = NULL, my_2dh_counter = NULL,
+                     my_4dh_key = NULL, my_4dh_counter = NULL,
+                     peer_2dh_key = NULL, peer_2dh_counter = NULL,
+                     peer_4dh_key = NULL, peer_4dh_counter = NULL",
+            )
+            .unwrap();
+        let sessions = || -> Vec<Vec<u8>> {
+            setup
+                .store
+                .conn
+                .prepare("SELECT session_id FROM fs_sessions")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = sessions();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        // Whatever is still to be seen to before this send stays.
+        session.events.borrow_mut().push(CoreEvent::GroupsChanged);
+        let refuse = "CREATE TRIGGER refuse BEFORE INSERT ON nonces
+                      BEGIN SELECT RAISE(ABORT, 'disk full'); END;";
+        setup.store.conn.execute_batch(refuse).unwrap();
+
+        assert!(session.encode(CREATOR, 1, 1, text()).await.is_err());
+
+        assert!(setup.store.conn.is_autocommit(), "no step left open");
+        assert_eq!(sessions(), before, "undone");
+        assert_eq!(setup.store.message_count(CREATOR).unwrap(), 0);
+        {
+            let queued = session.events.borrow();
+            assert_eq!(queued.len(), 1, "{queued:?}");
+            assert!(matches!(queued[0], CoreEvent::GroupsChanged));
+        }
+        assert!(sent_to_ui(&mut rx).is_empty());
+
+        // This test is about that line: once it can be written, it is there.
+        setup
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(sessions(), before);
+        assert!(matches!(
+            sent_to_ui(&mut rx).as_slice(),
+            [CoreEvent::MessageAdded { message }] if message.body == "fsReset"
+        ));
+    }
+
+    /// Sending with forward security: the session, its ratchet and the nonces of what goes out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_an_encapsulated_message_writes_makes_one_commit() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let mut contact = setup.store.contact(CREATOR).unwrap().unwrap();
+        contact.feature_mask = libthreema::common::FeatureMask(
+            libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+        );
+        setup.store.upsert_contact(&contact).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let commits = count_commits(&setup.store);
+
+        let sent = session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!sent.is_empty());
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(setup.store.conn.is_autocommit());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_against_a_stored_no_ends_only_on_the_directorys_word() {
+        let (_dir, app) = app();
+        let (setup, peer) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let peers = || setup.store.fs_peers().unwrap().len();
+
+        // The lookup failed: the session stays, the message goes out plain.
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), false);
+        let sent = session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(peers(), 1);
+        assert!(session.fs_store().get_best(peer).unwrap().is_some());
+
+        // It answered, and the mask stands: a Terminate first, and the chat says so.
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), true);
+        let sent = session
+            .encode(CREATOR, 2, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(peers(), 0);
+        let newest: String = setup
+            .store
+            .conn
+            .query_row(
+                "SELECT body FROM messages WHERE conversation = ?1 ORDER BY id DESC LIMIT 1",
+                [CREATOR],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(newest, "fsUnavailable");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_init_does_not_go_by_the_no_from_a_moment_ago() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+
+        // The peer's linking got us a "no", was rolled back, and here is its Init.
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), true);
+        let event = CoreEvent::FsStatus {
+            peer: CREATOR.into(),
+            status: FsStatus::Established,
+        };
+        assert!(session.handle_fs_event(event).await.unwrap().is_none());
+        assert_eq!(setup.store.fs_peers().unwrap().len(), 1);
+
+        // Nor does sending, until a lookup has said.
+        let sent = session
+            .encode(CREATOR, 1, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(setup.store.fs_peers().unwrap().len(), 1);
+    }
+
+    /// A session after its handshake, on a plain socket: every mediator step fails on it, so a
+    /// reflection that is attempted shows as an error.
+    async fn session<'a>(
+        setup: &'a ConnectionSetup,
+        tx: &'a mpsc::UnboundedSender<FromConnection>,
+    ) -> Session<'a> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let events: EventSink = Rc::new(RefCell::new(Vec::new()));
+        let store = &setup.store;
+        let (csp, _) = CspProtocol::new(
+            CspProtocolContextInit {
+                permanent_server_keys: setup.config.chat_server_public_keys.clone(),
+                identity: setup.identity,
+                client_key: ClientKey::from(*setup.client_key),
+                client_info: setup.client_info.clone(),
+                device_cookie: Some(setup.device_cookie),
+                csp_device_id: None,
+            }
+            .try_into()
+            .unwrap(),
+        );
+        let mut e2e = CspE2eProtocol::new(CspE2eProtocolContextInit {
+            client_info: setup.client_info.clone(),
+            config: Arc::clone(&setup.config),
+            csp_e2e: CspE2eContextInit {
+                user_identity: setup.identity,
+                client_key: ClientKey::from(*setup.client_key),
+                flavor: Flavor::Consumer,
+                nonce_storage: Box::new(RefCell::new(StoreNonces(Rc::clone(store)))),
+                fs_sessions: None,
+                fs_answering_only: false,
+            },
+            d2x: store
+                .multi_device()
+                .unwrap()
+                .map(|properties| D2xContextInit {
+                    device_id: D2xDeviceId(properties.mediator_device_id),
+                    device_group_key: properties.device_group_key().unwrap(),
+                    nonce_storage: Box::new(RefCell::new(crate::multidevice::StoreD2dNonces(
+                        Rc::clone(store),
+                    ))),
+                }),
+            shortcut: Box::new(WebShortcuts {
+                events: Rc::clone(&events),
+            }),
+            settings: Box::new(RefCell::new(StoreSettings(Rc::clone(store)))),
+            contacts: Box::new(RefCell::new(StoreContacts {
+                store: Rc::clone(store),
+                user_identity: setup.identity,
+                events: Rc::clone(&events),
+            })),
+            conversations: Box::new(RefCell::new(StoreConversations {
+                store: Rc::clone(store),
+                events: Rc::clone(&events),
+                user: setup.identity,
+                from_sync: false,
+            })),
+        });
+        if store.multi_device().unwrap().is_some() {
+            e2e.update_d2m_state(D2mRole::Leader).unwrap();
+        }
+        Session {
+            setup,
+            transport: Transport::Direct(stream),
+            liveness: Liveness::new(Instant::now()),
+            d2m_queue: std::collections::VecDeque::new(),
+            multi_device: store.multi_device().unwrap(),
+            fs_disabled: false,
+            fs_resent: std::collections::HashSet::new(),
+            held: Vec::new(),
+            reflection_backlog: false,
+            backlog: Backlog::default(),
+            next_reflect_id: 0x8000_0000,
+            reflected: std::collections::HashSet::new(),
+            pictures_awaiting_ack: std::collections::HashMap::new(),
+            directory_unanswering: false,
+            planned_nonces: RefCell::default(),
+            csp,
+            e2e,
+            events,
+            tx,
+            awaiting_ack: Vec::new(),
+        }
+    }
+
+    /// A session whose echo is out, with the server's end of its socket.
+    async fn session_awaiting_echo<'a>(
+        setup: &'a ConnectionSetup,
+        tx: &'a mpsc::UnboundedSender<FromConnection>,
+    ) -> (Session<'a>, TcpStream) {
+        let mut session = session(setup, tx).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        session.transport = Transport::Direct(stream);
+        session.liveness.echo_sent(Instant::now(), ECHO_INTERVAL);
+        (session, server)
+    }
+
+    #[test]
+    fn another_connection_is_no_news_and_any_other_close_is() {
+        // Android's check: `contains`, whatever comes around it.
+        assert_eq!(close_reason("Another connection for this ID"), None);
+        assert_eq!(
+            close_reason("Your ID was revoked"),
+            Some(OfflineReason::Server("Your ID was revoked".into()))
+        );
+    }
+
+    /// Like Android: three times back at once, as it mostly is a change of network. Then a fight
+    /// over the ID, and ten minutes between logins for as long as it goes on.
+    #[test]
+    fn another_connection_is_ignored_a_few_times_and_not_in_a_fight() {
+        const SHORT: Duration = Duration::from_secs(30);
+        let mut another = AnotherConnection::default();
+        for _ in 0..ANOTHER_CONNECTION_IGNORED {
+            assert!(!another.stay_away(SHORT));
+        }
+        assert!(another.stay_away(SHORT));
+        assert!(another.stay_away(SHORT));
+        // Back after a hold, and kicked out at once: still the fight.
+        assert!(another.stay_away(Duration::from_secs(1)));
+        // A long session in between: this one is news again.
+        assert!(!another.stay_away(ANOTHER_CONNECTION_FORGOTTEN + SHORT));
+    }
+
+    /// Every hold-off says why, as a login in between clears it; only the first of a fight alerts.
+    #[test]
+    fn a_fight_over_the_id_is_told_once_and_shown_each_time() {
+        const SHORT: Duration = Duration::from_secs(30);
+        let mut another = AnotherConnection::default();
+        let mut close = |session, can_reconnect| {
+            another.stay_away(session);
+            another.reason(can_reconnect)
+        };
+        for _ in 0..ANOTHER_CONNECTION_IGNORED {
+            assert_eq!(close(SHORT, false), None);
+        }
+        // The server lets us come back: nothing is held off, so there is nothing to explain.
+        assert_eq!(close(SHORT, true), None);
+        let first = Some(OfflineReason::AnotherConnection { first: true });
+        let again = Some(OfflineReason::AnotherConnection { first: false });
+        assert_eq!(close(SHORT, false), first);
+        assert_eq!(close(SHORT, false), again);
+        // A long session ended that fight; the next is news.
+        assert_eq!(close(ANOTHER_CONNECTION_FORGOTTEN + SHORT, false), None);
+        for _ in 1..ANOTHER_CONNECTION_IGNORED {
+            assert_eq!(close(SHORT, false), None);
+        }
+        assert_eq!(close(SHORT, false), first);
+    }
+
+    /// Our picture and whoever is to get it, with a contact's `setup`.
+    fn picture_to_share(setup: &ConnectionSetup) {
+        use crate::profile_pictures::{OWN_PICTURE, Share};
+        setup.media.write_picture(OWN_PICTURE, b"jpeg").unwrap();
+        setup.store.bump_profile_picture_version().unwrap();
+        setup.store.set_picture_share(Share::Everyone).unwrap();
+    }
+
+    fn an_upload() -> crate::profile_pictures::Upload {
+        crate::profile_pictures::Upload {
+            blob_id: libthreema::common::BlobId([7; 16]),
+            key: [8; 32],
+            size: 4,
+            uploaded_at: crate::messages::now_ms(),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_upload_of_our_picture_holds_up_nothing_and_they_get_it_after() {
+        use crate::profile_pictures::Distribution;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, app) = app();
+                let (setup, _) = contact_without_fs_support(&app);
+                picture_to_share(&setup);
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let mut session = session(&setup, &tx).await;
+                crate::https::stall_requests();
+                tokio::time::timeout(Duration::from_secs(1), session.distribute_picture(CREATOR))
+                    .await
+                    .expect("the connection doesn't wait for the upload")
+                    .unwrap();
+                tokio::task::yield_now().await;
+                let uploads = &setup.picture_uploads;
+                assert!(uploads.running.get());
+                assert!(uploads.waiting.borrow().contains(CREATOR));
+                assert!(
+                    !uploads.start(Instant::now()),
+                    "one upload for everyone waiting"
+                );
+                assert!(matches!(
+                    setup.store.picture_distribution(CREATOR, true).unwrap(),
+                    Distribution::Set(None)
+                ));
+
+                let version = setup
+                    .store
+                    .setting(crate::store::keys::PROFILE_PICTURE_VERSION)
+                    .unwrap();
+                uploads.ended(
+                    &setup.store,
+                    version.as_deref(),
+                    Ok(an_upload()),
+                    Instant::now(),
+                );
+                // No handshake behind this session: the message gets as far as the transport, and
+                // without the server's ack it isn't noted as sent. The next try has the upload.
+                let _ = session.send_waiting_pictures().await;
+                assert!(uploads.waiting.borrow().is_empty());
+                assert!(matches!(
+                    setup.store.picture_distribution(CREATOR, true).unwrap(),
+                    Distribution::Set(Some(_))
+                ));
+            })
+            .await;
+    }
+
+    #[test]
+    fn a_failed_upload_of_our_picture_pauses_and_a_changed_picture_does_not() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let uploads = &setup.picture_uploads;
+        let now = Instant::now();
+        assert!(uploads.start(now));
+        uploads.ended(
+            &setup.store,
+            None,
+            Err(crate::media::MediaError::Status(500)),
+            now,
+        );
+        assert!(!uploads.start(now + PICTURE_UPLOAD_PAUSE - Duration::from_secs(1)));
+        assert!(uploads.start(now + PICTURE_UPLOAD_PAUSE));
+        // Set anew during the upload: that blob is of the old picture.
+        setup.store.bump_profile_picture_version().unwrap();
+        uploads.ended(&setup.store, Some("old"), Ok(an_upload()), now);
+        assert_eq!(setup.store.picture_upload().unwrap(), None);
+        assert!(uploads.start(now), "no pause: the new picture goes now");
+    }
+
+    /// The markup goes, and nothing that merely looks like it.
+    #[test]
+    fn the_servers_words_are_shown_without_their_markup() {
+        for (text, plain) in [
+            ("plain words", "plain words"),
+            ("<b>Update</b> now", "Update now"),
+            ("one<br>two<br/>three", "one\ntwo\nthree"),
+            ("<p>one</p><p>two</p>", "one\ntwo"),
+            ("<a href=\"https://threema.ch\">Threema</a>", "Threema"),
+            ("<img src=\"file:///etc/passwd\">words", "words"),
+            ("a < b and b > a", "a < b and b > a"),
+            ("3 <4", "3 <4"),
+            ("cut off <b", "cut off <b"),
+            ("Tom &amp; Jerry &lt;b&gt;", "Tom & Jerry <b>"),
+            ("&amp;lt;", "&lt;"),
+            ("Grüße <i>aus</i> Köln", "Grüße aus Köln"),
+        ] {
+            assert_eq!(plain_server_text(text), plain, "{text}");
+        }
+        assert_eq!(server_reason("<br>"), None);
+        assert_eq!(server_reason("  "), None);
+    }
+
+    #[test]
+    fn the_ui_gets_a_reason_in_words_or_by_its_code() {
+        assert_eq!(
+            OfflineReason::Server("maintenance".into()).to_json(),
+            serde_json::json!({ "kind": "server", "text": "maintenance" })
+        );
+        assert_eq!(
+            OfflineReason::ServerAlert("maintenance".into()).to_json(),
+            serde_json::json!({ "kind": "server", "text": "maintenance" })
+        );
+        assert_eq!(
+            OfflineReason::Mediator(4111).to_json(),
+            serde_json::json!({ "kind": "mediator", "code": 4111 })
+        );
+        assert_eq!(
+            OfflineReason::LoginRefused.to_json(),
+            serde_json::json!({ "kind": "loginRefused" })
+        );
+        assert_eq!(
+            OfflineReason::AnotherConnection { first: true }.to_json(),
+            serde_json::json!({ "kind": "anotherConnection", "first": true })
+        );
+    }
+
+    /// Only an end of the connection after our login counts as a no: before it the server hasn't
+    /// been asked, and a timeout says nothing.
+    #[test]
+    fn a_refused_login_is_the_connection_closing_after_the_login() {
+        let refused = |login_sent, error: TransportError| {
+            matches!(
+                handshake_read_failed(login_sent, error.into()),
+                ConnectionError::LoginRefused
+            )
+        };
+        assert!(refused(true, TransportError::Closed));
+        assert!(refused(
+            true,
+            TransportError::Io(std::io::ErrorKind::ConnectionReset.into())
+        ));
+        assert!(!refused(false, TransportError::Closed));
+        assert!(!refused(
+            true,
+            TransportError::Io(std::io::ErrorKind::TimedOut.into())
+        ));
+        assert!(!refused(true, TransportError::WriteTimeout));
+        // Through the mediator: its close code for the chat server's connection having ended.
+        let mediator_closed = |code| {
+            TransportError::WebSocket(WebSocketError::Closed {
+                code: Some(code),
+                reason: String::new(),
+            })
+        };
+        assert!(refused(true, mediator_closed(MEDIATOR_CHAT_SERVER_CLOSED)));
+        assert!(!refused(
+            false,
+            mediator_closed(MEDIATOR_CHAT_SERVER_CLOSED)
+        ));
+        // Could not be established, or the mediator's own affair.
+        assert!(!refused(true, mediator_closed(4001)));
+        assert!(!refused(true, mediator_closed(4111)));
+    }
+
+    /// A short hiccup at the server takes a few refusals in seconds: no alarm, however many.
+    /// Minutes of it, with nothing else going wrong, and it tells once.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_refused_login_is_told_only_after_minutes_of_them() {
+        let mut logins = RefusedLogins::default();
+        assert_eq!(logins.refused(), (true, false));
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert_eq!(logins.refused(), (false, false));
+        }
+        tokio::time::advance(REFUSED_LOGINS_SPAN).await;
+        assert_eq!(logins.refused(), (false, true));
+        assert_eq!(logins.refused(), (false, false));
+
+        // Long enough but too few: a device asleep in between, say.
+        let mut logins = RefusedLogins::default();
+        logins.refused();
+        tokio::time::advance(REFUSED_LOGINS_SPAN).await;
+        assert_eq!(logins.refused(), (false, false));
+        assert_eq!(logins.refused(), (false, true));
+
+        // Something else went wrong in between, or a login worked: it starts over.
+        let mut logins = RefusedLogins::default();
+        logins.refused();
+        tokio::time::advance(REFUSED_LOGINS_SPAN).await;
+        logins.refused();
+        logins.over();
+        assert_eq!(logins.refused(), (true, false));
+        assert_eq!(logins.refused(), (false, false));
+        assert_eq!(logins.refused(), (false, false));
+    }
+
+    /// A message queue that comes in one piece of news: the UI is told when it starts and when no
+    /// queue is left, also when the connection goes first.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_ui_hears_when_a_backlog_starts_and_ends() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let mut told = move || {
+            let mut said = Vec::new();
+            while let Ok(message) = from.try_recv() {
+                if let FromConnection::Backlog(open) = message {
+                    said.push(open);
+                }
+            }
+            said
+        };
+        {
+            let mut session = session(&setup, &tx).await;
+            session.set_backlog(Backlog {
+                chat_queue: true,
+                reflection_queue: false,
+            });
+            assert_eq!(told(), [true]);
+            session
+                .handle_instruction(CspProtocolInstruction {
+                    state_update: None,
+                    outgoing_frame: None,
+                    incoming_payload: Some(IncomingPayload::QueueSendComplete),
+                })
+                .await
+                .unwrap();
+            assert_eq!(told(), [false]);
+            // The mediator's, then the chat server's, overlapping: one backlog.
+            session.set_backlog(Backlog {
+                chat_queue: false,
+                reflection_queue: true,
+            });
+            session.set_backlog(Backlog {
+                chat_queue: true,
+                ..session.backlog
+            });
+            assert_eq!(told(), [true]);
+            session
+                .handle_d2m(D2mIncoming::ReflectionQueueDry)
+                .await
+                .unwrap();
+            assert_eq!(told(), Vec::<bool>::new());
+            // Gone with the queue still open.
+        }
+        assert_eq!(told(), [false]);
+    }
+
+    /// The device stays up for as long as it takes, and no longer.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_is_over_soon_after_the_answer() {
+        use tokio::io::AsyncWriteExt as _;
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let (mut session, mut server) = session_awaiting_echo(&setup, &tx).await;
+        let (to, mut to_rx) = mpsc::unbounded_channel();
+        to.send(ToConnection::Wake).unwrap();
+        let start = Instant::now();
+        let answer_after = Duration::from_secs(1);
+        let answered_and_quiet = async {
+            sleep(answer_after).await;
+            server.write_all(&[0]).await.unwrap();
+            while !matches!(from.recv().await, Some(FromConnection::WakeSettled)) {}
+        };
+        tokio::select! {
+            ended = session.payload_loop(&mut to_rx) => panic!("ended: {:?}", ended.err()),
+            () = answered_and_quiet => {}
+        }
+        assert_eq!(start.elapsed(), answer_after + WAKE_QUIET);
+    }
+
+    /// The server's own word on its queue, wherever it stands among the session's steps.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_up_after_a_login_waits_for_the_queues_end() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _from) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        setup.wake_hold.asked();
+        setup.wake_hold.logged_in(false);
+        assert_eq!(setup.wake_hold.settles_at(), None);
+        session
+            .handle_instruction(CspProtocolInstruction {
+                state_update: None,
+                outgoing_frame: None,
+                incoming_payload: Some(IncomingPayload::QueueSendComplete),
+            })
+            .await
+            .unwrap();
+        assert!(setup.wake_hold.settles_at().is_some());
+    }
+
+    /// An echo sent before the device slept has most of a minute left; the wake-up is up for less.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wake_up_finds_a_dead_connection_within_its_time() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut from) = mpsc::unbounded_channel();
+        let (mut session, _server) = session_awaiting_echo(&setup, &tx).await;
+        let (to, mut to_rx) = mpsc::unbounded_channel();
+        to.send(ToConnection::Wake).unwrap();
+        let start = Instant::now();
+        let ended = session.payload_loop(&mut to_rx).await;
+        assert!(matches!(ended, Err(ConnectionError::Timeout)));
+        assert_eq!(start.elapsed(), WAKE_ECHO_LIMIT + ECHO_LAST_LOOK);
+        assert!(
+            !std::iter::from_fn(|| from.try_recv().ok())
+                .any(|event| matches!(event, FromConnection::WakeSettled)),
+            "it stays for the new connection"
+        );
+    }
+
+    /// A message `CREATOR` sends us, as the chat server hands it over (the same each time, for the
+    /// same id); `CREATOR` is a contact.
+    fn from_creator(setup: &ConnectionSetup, id: u64, text: &str) -> MessageWithMetadataBox {
+        let key = ClientKey::from([5; 32]);
+        let mut contact = crate::contacts::test_contact(CREATOR);
+        contact.public_key = key.public_key();
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
+        setup.store.upsert_contact(&contact).unwrap();
+        encode_outgoing_contact_message(
+            CREATOR.parse().unwrap(),
+            &key,
+            Delta::Unchanged,
+            setup.identity,
+            &ClientKey::from(*setup.client_key).public_key(),
+            &OutgoingMessage {
+                id: MessageId(id),
+                overrides: MessageOverrides::default(),
+                created_at: 1,
+                body: OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                    receiver_identity: setup.identity,
+                    body: ContactMessageBody::Text(TextMessage { text: text.into() }),
+                }),
+            },
+            Nonce([u8::try_from(id).unwrap(); 24]),
+        )
+        .unwrap()
+    }
+
+    /// The events the UI has got so far.
+    fn sent_to_ui(rx: &mut mpsc::UnboundedReceiver<FromConnection>) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let FromConnection::Event(event) = message {
+                events.push(*event);
+            }
+        }
+        events
+    }
+
+    fn storage_notices(events: &[CoreEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::StorageProblem { active } => Some(*active),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A store that fails on a message ends the connection as what it is, not as a network
+    /// problem, without acknowledging: the message comes again. The user hears of it once, and
+    /// once more when a message could be stored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failing_store_is_named_and_told_once_per_streak() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = from_creator(&setup, 1, "hi");
+        let mut session = session(&setup, &tx).await;
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON messages
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+
+        let Err(ConnectionError::Storage { code, step }) = session.handle_incoming(message).await
+        else {
+            panic!("expected a storage failure");
+        };
+        assert_ne!(code, 0, "SQLite's code");
+        assert_eq!(step, StorageStep::Incoming);
+        note_storage_failure(&setup, &tx, code, step);
+        note_storage_failure(&setup, &tx, code, step);
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
+
+        setup
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        // It's stored this time: what fails now, on this socket without a handshake, is the ack.
+        let again = from_creator(&setup, 1, "hi");
+        let error = session.handle_incoming(again).await.unwrap_err();
+        assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
+        assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+    }
+
+    /// A multi-device login runs through the mediator's queue before it gets to the chat server. If
+    /// that is where the store fails, the end of that queue says nothing about it: without this the
+    /// notice would go and come back at every attempt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_what_failed_ends_a_storage_notice() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let queue_dry = D2mIncoming::ReflectionQueueDry;
+
+        note_storage_failure(&setup, &tx, 13, StorageStep::Incoming);
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
+        session.handle_d2m(queue_dry).await.unwrap();
+        session.storage_works(StorageStep::Other);
+        session.storage_works(StorageStep::Reflected);
+        assert!(storage_notices(&sent_to_ui(&mut rx)).is_empty());
+
+        // Another step failing too is the same streak, and it lasts until both work.
+        note_storage_failure(&setup, &tx, 13, StorageStep::Reflected);
+        assert!(storage_notices(&sent_to_ui(&mut rx)).is_empty());
+        session
+            .handle_d2m(D2mIncoming::ReflectionQueueDry)
+            .await
+            .unwrap();
+        assert!(storage_notices(&sent_to_ui(&mut rx)).is_empty());
+        session
+            .handle_instruction(CspProtocolInstruction {
+                state_update: None,
+                outgoing_frame: None,
+                incoming_payload: Some(IncomingPayload::QueueSendComplete),
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+
+        // On the mediator's side, the end of its queue is the sign.
+        note_storage_failure(&setup, &tx, 13, StorageStep::Reflected);
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [true]);
+        session
+            .handle_d2m(D2mIncoming::ReflectionQueueDry)
+            .await
+            .unwrap();
+        assert_eq!(storage_notices(&sent_to_ui(&mut rx)), [false]);
+    }
+
+    /// Another device read `CREATOR`'s message 1.
+    fn read_update() -> libthreema::protobuf::d2d::Envelope {
+        use libthreema::protobuf::d2d::{
+            Envelope, IncomingMessageUpdate, envelope::Content, incoming_message_update,
+        };
+        Envelope {
+            content: Some(Content::IncomingMessageUpdate(IncomingMessageUpdate {
+                updates: vec![incoming_message_update::Update {
+                    conversation: d2d_conversation(CREATOR),
+                    message_id: 1,
+                    update: Some(incoming_message_update::update::Update::Read(
+                        incoming_message_update::Read { at: 1 },
+                    )),
+                }],
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// What fails the same way every time mustn't hold up the queue for good: after a few tries the
+    /// message is acknowledged (on this socket without a handshake that attempt is a protocol
+    /// error). The state of the device is no such reason, however long it lasts.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_that_fails_every_time_is_given_up_on() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let store = &setup.store;
+        let is_storage = |error: &ConnectionError| matches!(error, ConnectionError::Storage { .. });
+
+        // A full disk, a read-only file: never.
+        let copies: Vec<_> = (0..2 * TRIES_BEFORE_DROPPING)
+            .map(|_| from_creator(&setup, 1, "hi"))
+            .collect();
+        store.conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        for copy in copies {
+            let error = session.handle_incoming(copy).await.unwrap_err();
+            assert!(is_storage(&error), "{error}");
+        }
+        store.conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+
+        // A rule of ours that the message breaks, every time.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON messages
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        for _ in 1..TRIES_BEFORE_DROPPING {
+            let copy = from_creator(&setup, 1, "hi");
+            let error = session.handle_incoming(copy).await.unwrap_err();
+            assert!(is_storage(&error), "{error}");
+        }
+        let copy = from_creator(&setup, 1, "hi");
+        let error = session.handle_incoming(copy).await.unwrap_err();
+        assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
+
+        // Another message starts over.
+        let other = from_creator(&setup, 2, "hi");
+        let error = session.handle_incoming(other).await.unwrap_err();
+        assert!(is_storage(&error), "{error}");
+    }
+
+    #[test]
+    fn what_libthreema_reports_says_whose_doing_it_is() {
+        for own in [
+            CspE2eProtocolError::InvalidState("x"),
+            CspE2eProtocolError::DesyncError("x".into()),
+        ] {
+            let error = e2e_error(own);
+            assert!(
+                matches!(error, ConnectionError::IncomingMessage(_)),
+                "{error}"
+            );
+            assert!(error.fails_every_time());
+        }
+        for network in [
+            CspE2eProtocolError::NetworkError("x".into()),
+            CspE2eProtocolError::ServerError("x".into()),
+            CspE2eProtocolError::InvalidCredentials,
+            CspE2eProtocolError::RateLimitExceeded,
+        ] {
+            assert!(!e2e_error(network).fails_every_time());
+        }
+        let full = e2e_error(CspE2eProtocolError::DesyncError("storage[13]: x".into()));
+        assert!(matches!(full, ConnectionError::Storage { code: 13, .. }));
+        assert!(!full.fails_every_time());
+        let rule = e2e_error(CspE2eProtocolError::DesyncError("storage[19]: x".into()));
+        assert!(rule.fails_every_time());
+    }
+
+    /// Our own envelope comes back from a malicious mediator: already seen, here and on a device
+    /// that joins later, which gets the used nonces along.
+    #[tokio::test(flavor = "current_thread")]
+    async fn our_own_envelopes_count_as_seen() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let sealed = session
+            .seal_envelope(&prost::Message::encode_to_vec(&read_update()))
+            .unwrap();
+        assert_eq!(setup.store.all_d2d_nonces().unwrap().len(), 1);
+        assert!(matches!(
+            crate::reflected::open(&setup.store, &key, &sealed),
+            Err(crate::reflected::ReflectedError::Replay)
+        ));
+    }
+
+    /// What the other devices are told is what the message goes out under, also used up.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_goes_out_under_the_nonce_told_to_the_other_devices() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = session(&setup, &tx).await;
+        let text = || {
+            Outgoing::Contact(ContactMessageBody::Text(
+                libthreema::model::message::TextMessage { text: "hi".into() },
+            ))
+        };
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), false);
+        let carries = |sent: &[MessageWithMetadataBox], nonce: &[u8]| {
+            sent.last()
+                .unwrap()
+                .bytes
+                .windows(24)
+                .any(|part| part == nonce)
+        };
+        let told = session.plan_nonces(7, &[CREATOR.to_owned()]).unwrap();
+        assert_eq!(told.len(), 1);
+        assert!(setup.store.has_nonce(&told[0]).unwrap());
+
+        let encoded = session
+            .encode(CREATOR, 7, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(carries(&encoded, &told[0]));
+
+        let again = session
+            .encode(CREATOR, 7, 1, text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!carries(&again, &told[0]));
+    }
+
+    /// Typing from a leading device shows, unless it is the mediator's old stock at login.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_live_typing_from_another_device_shows() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody},
+            protobuf::d2d::{Envelope, IncomingMessage, envelope::Content},
+        };
+        let (_dir, app) = app();
+        let (setup, peer) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let (message_type, body) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: setup.identity,
+                body: ContactMessageBody::TypingIndicator(TypingIndicatorMessage {
+                    is_typing: true,
+                }),
+            }));
+        let envelope = Envelope {
+            content: Some(Content::IncomingMessage(IncomingMessage {
+                sender_identity: peer.to_string(),
+                message_id: 1,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body,
+                nonce: Vec::new(),
+            })),
+            ..Default::default()
+        };
+        let mut typing_shows = async |session: &mut Session<'_>, backlog: bool| {
+            session.reflection_backlog = backlog;
+            let (_, data) = key
+                .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
+                .unwrap();
+            // Its acknowledgement fails on this socket, what is for the UI has gone by then.
+            let _ = session
+                .handle_reflected(libthreema::d2m::payload::Reflected {
+                    reflect_id: 1,
+                    flags: D2mReflectFlags(0),
+                    timestamp: 1,
+                    envelope: data,
+                })
+                .await;
+            let mut shown = false;
+            while let Ok(from) = rx.try_recv() {
+                shown |= matches!(
+                    from,
+                    FromConnection::Event(event) if matches!(*event, CoreEvent::Typing { .. })
+                );
+            }
+            shown
+        };
+        assert!(!typing_shows(&mut session, true).await);
+        assert!(typing_shows(&mut session, false).await);
+    }
+
+    /// A rest of the directory takes nothing away and holds up nothing: the message from someone
+    /// unknown is taken from the mediator (the acknowledgement is what fails on this socket), the
+    /// lookup asks for nothing and stays owed, and the next envelope gets its turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resting_directory_holds_up_no_reflection_and_loses_no_message() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody, TextMessage},
+            protobuf::d2d::{Envelope, IncomingMessage, envelope::Content},
+        };
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        setup.store.rest_directory_calls();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let (message_type, body) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: setup.identity,
+                body: ContactMessageBody::Text(TextMessage { text: "hi".into() }),
+            }));
+        let envelope = Envelope {
+            content: Some(Content::IncomingMessage(IncomingMessage {
+                sender_identity: "C0C0C0C0".into(),
+                message_id: 1,
+                created_at: 1,
+                r#type: i32::from(message_type),
+                body,
+                nonce: vec![8; 24],
+            })),
+            ..Default::default()
+        };
+        let (nonce, data) = key
+            .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
+            .unwrap();
+        let error = session
+            .handle_reflected(libthreema::d2m::payload::Reflected {
+                reflect_id: 1,
+                flags: D2mReflectFlags(0),
+                timestamp: 1,
+                envelope: data,
+            })
+            .await
+            .unwrap_err();
+        assert!(!matches!(error, ConnectionError::Timeout), "{error}");
+        assert!(setup.store.has_d2d_nonce(&nonce).unwrap());
+        assert!(setup.store.has_nonce(&[8; 24]).unwrap());
+        assert_eq!(setup.store.reflected_waiting().unwrap().len(), 1);
+
+        session
+            .resolve_members(&["C0C0C0C0".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(setup.store.reflected_waiting().unwrap().len(), 1);
+        assert_eq!(setup.store.owed_member_lookups().unwrap(), ["C0C0C0C0"]);
+        assert!(setup.store.contact("C0C0C0C0").unwrap().is_none());
+    }
+
+    /// Receipts and our picture reach the other devices like every other message: on this socket
+    /// the attempt shows as an error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn receipts_and_our_picture_are_reflected() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        for (message_id, kind) in [
+            (1, reactions::OUTBOX_DELIVERY_RECEIPT),
+            (2, reactions::OUTBOX_READ_RECEIPT),
+        ] {
+            let error = session
+                .send_outbox_entry(reactions::OutboxEntry {
+                    id: 0,
+                    conversation: CREATOR.into(),
+                    message_id,
+                    created_at: 1,
+                    kind: kind.into(),
+                    body: serde_json::json!({ "messageId": "0000000000000007" }),
+                })
+                .await;
+            assert!(error.is_err(), "{kind}");
+        }
+        assert!(session.distribute_picture(CREATOR).await.is_err());
+        // It didn't get out, so it isn't noted as sent.
+        assert!(session.pictures_awaiting_ack.is_empty());
+        assert!(matches!(
+            setup.store.picture_distribution(CREATOR, false).unwrap(),
+            crate::profile_pictures::Distribution::Delete
+        ));
+    }
+
+    /// A directory that hangs or fails is given one chance on a connection: the next sender's
+    /// lookup holds up nothing and costs no request, and what they were for stays owed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_hanging_directory_holds_up_one_lookup_per_connection() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let asked = core::cell::Cell::new(0);
+        let hanging = || async {
+            asked.set(asked.get() + 1);
+            core::future::pending::<Option<crate::app_groups::ResolvedMembers>>().await
+        };
+        let start = tokio::time::Instant::now();
+        session
+            .resolve_members_by(&["C0C0C0C0".to_owned()], hanging())
+            .await
+            .unwrap();
+        assert_eq!(start.elapsed(), MEMBER_LOOKUP_LIMIT);
+        session
+            .resolve_members_by(&["D0D0D0D0".to_owned()], hanging())
+            .await
+            .unwrap();
+        assert_eq!(start.elapsed(), MEMBER_LOOKUP_LIMIT);
+        assert_eq!(asked.get(), 1);
+        assert_eq!(
+            setup.store.owed_member_lookups().unwrap(),
+            ["C0C0C0C0", "D0D0D0D0"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_failing_directory_takes_one_request_per_connection() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let asked = core::cell::Cell::new(0);
+        let failing = || async {
+            asked.set(asked.get() + 1);
+            None
+        };
+        for identity in ["C0C0C0C0", "D0D0D0D0", "E0E0E0E0"] {
+            session
+                .resolve_members_by(&[identity.to_owned()], failing())
+                .await
+                .unwrap();
+        }
+        assert_eq!(asked.get(), 1);
+        assert_eq!(setup.store.owed_member_lookups().unwrap().len(), 3);
+    }
+
+    /// What waited notifies like any reflected message, after a moment and only if still unread,
+    /// and one change of contacts doesn't lead to another.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_waited_is_held_back_like_a_reflected_message() {
+        use libthreema::{
+            csp_e2e::message::task::outgoing::encode_message_body,
+            model::message::{OutgoingContactMessageBody, OutgoingMessageBody, TextMessage},
+            protobuf::d2d::IncomingMessage,
+        };
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let (message_type, body) =
+            encode_message_body(&OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: setup.identity,
+                body: ContactMessageBody::Text(TextMessage { text: "hi".into() }),
+            }));
+        let message = IncomingMessage {
+            sender_identity: CREATOR.into(),
+            message_id: 1,
+            created_at: 1,
+            r#type: i32::from(message_type),
+            body,
+            nonce: Vec::new(),
+        };
+        setup
+            .store
+            .keep_reflected(&crate::multidevice::WaitingReflected {
+                id: 0,
+                sender: CREATOR.into(),
+                conversation: CREATOR.into(),
+                message_id: 1,
+                created_at: 1,
+                read_at: None,
+                message: prost::Message::encode_to_vec(&message),
+            })
+            .unwrap();
+        session.apply_waiting_reflected().await.unwrap();
+        assert_eq!(session.held.len(), 1);
+        assert!(
+            setup
+                .store
+                .held_notifications
+                .borrow()
+                .contains(&session.held[0].0)
+        );
+        while rx.try_recv().is_ok() {}
+
+        session.apply_waiting_reflected().await.unwrap();
+        assert_eq!(session.held.len(), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// What can't be encoded (here: no contact to encode for) reaches no other device, where a
+    /// removal would count as done: no attempt to reflect shows on this socket. Nothing is noted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_picture_message_that_cant_go_out_is_not_reflected() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        session.distribute_picture("C0C0C0C0").await.unwrap();
+        assert!(session.planned_nonces.borrow().is_empty());
+        assert!(session.pictures_awaiting_ack.is_empty());
+        assert!(matches!(
+            setup.store.picture_distribution("C0C0C0C0", false).unwrap(),
+            crate::profile_pictures::Distribution::Delete
+        ));
+    }
+
+    /// The server has it only when it says so: until then it isn't noted as sent, and a burst of
+    /// messages doesn't send it again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn our_picture_counts_as_sent_at_the_servers_ack() {
+        use crate::profile_pictures::Distribution;
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        session
+            .pictures_awaiting_ack
+            .insert((CREATOR.to_owned(), 7), None);
+        session.distribute_picture(CREATOR).await.unwrap();
+        assert_eq!(session.pictures_awaiting_ack.len(), 1);
+        assert!(matches!(
+            setup.store.picture_distribution(CREATOR, false).unwrap(),
+            Distribution::Delete
+        ));
+        ack(&mut session, CREATOR, 7).await;
+        assert!(session.pictures_awaiting_ack.is_empty());
+        assert!(matches!(
+            setup.store.picture_distribution(CREATOR, false).unwrap(),
+            Distribution::None
+        ));
+    }
+
+    /// A reflected envelope too, or the mediator's queue never ends, and with it no promotion to
+    /// leader and nothing from the chat server. Afterwards it counts as seen.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reflection_that_fails_every_time_is_given_up_on() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        setup
+            .store
+            .insert_incoming(CREATOR, 1, "text", "x", 1)
+            .unwrap();
+        setup
+            .store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON messages
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let (nonce, data) = key
+            .encrypt_envelope(&prost::Message::encode_to_vec(&read_update()))
+            .unwrap();
+        let reflected = || libthreema::d2m::payload::Reflected {
+            reflect_id: 1,
+            flags: D2mReflectFlags(0),
+            timestamp: 1,
+            envelope: data.clone(),
+        };
+        for _ in 1..TRIES_BEFORE_DROPPING {
+            let error = session.handle_reflected(reflected()).await.unwrap_err();
+            assert!(matches!(error, ConnectionError::Storage { .. }), "{error}");
+            assert!(!setup.store.has_d2d_nonce(&nonce).unwrap());
+        }
+        // On this socket the acknowledgement fails, as an error of its own.
+        let error = session.handle_reflected(reflected()).await.unwrap_err();
+        assert!(!matches!(error, ConnectionError::Storage { .. }), "{error}");
+        assert!(setup.store.has_d2d_nonce(&nonce).unwrap());
+    }
+
+    /// The mediator hands out again only what wasn't acknowledged. On this socket the attempt to
+    /// acknowledge shows as an error of its own.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reflection_the_store_failed_on_is_not_acknowledged() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let properties = crate::multidevice::Properties::generate();
+        let key = properties.device_group_key().unwrap();
+        setup.store.set_multi_device(Some(&properties)).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let envelope = read_update();
+        let (_, data) = key
+            .encrypt_envelope(&prost::Message::encode_to_vec(&envelope))
+            .unwrap();
+        let reflected = |data: &[u8]| libthreema::d2m::payload::Reflected {
+            reflect_id: 1,
+            flags: D2mReflectFlags(0),
+            timestamp: 1,
+            envelope: data.to_vec(),
+        };
+
+        setup
+            .store
+            .conn
+            .execute_batch("PRAGMA query_only = ON")
+            .unwrap();
+        let error = session
+            .handle_reflected(reflected(&data))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConnectionError::Storage { .. }), "{error}");
+
+        setup
+            .store
+            .conn
+            .execute_batch("PRAGMA query_only = OFF")
+            .unwrap();
+        let error = session
+            .handle_reflected(reflected(&data))
+            .await
+            .unwrap_err();
+        assert!(!matches!(error, ConnectionError::Storage { .. }), "{error}");
+    }
+
+    /// The connection dies right after a message was stored, on the acknowledgement here: the UI
+    /// still hears of it and the receipt waits for the next connection. The server's next copy
+    /// is known by then, and is only acknowledged.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stored_message_reaches_the_ui_whatever_the_connection_does() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = from_creator(&setup, 1, "hi");
+        let mut session = session(&setup, &tx).await;
+
+        assert!(session.handle_incoming(message).await.is_err());
+        let added = |events: &[CoreEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+                .count()
+        };
+        assert_eq!(added(&sent_to_ui(&mut rx)), 1);
+        let queued = |store: &crate::store::Store| {
+            store
+                .outbox()
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.kind == reactions::OUTBOX_DELIVERY_RECEIPT)
+                .count()
+        };
+        assert_eq!(queued(&setup.store), 1);
+
+        let again = from_creator(&setup, 1, "hi");
+        assert!(session.handle_incoming(again).await.is_err());
+        assert_eq!(added(&sent_to_ui(&mut rx)), 0);
+        assert_eq!(queued(&setup.store), 1);
+    }
+
+    /// The task itself can end the connection after the store write too: its events are out when
+    /// the session is.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_that_ends_hands_on_its_events() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let status = || CoreEvent::FsStatus {
+            peer: CREATOR.into(),
+            status: FsStatus::Reset,
+        };
+        {
+            let session = session(&setup, &tx).await;
+            let mut queue = session.events.borrow_mut();
+            queue.push(CoreEvent::ContactsChanged);
+            queue.push(status());
+            queue.push(CoreEvent::OutboxChanged);
+            queue.push(CoreEvent::UnknownMembers(vec!["B0B0B0B0".into()]));
+        }
+        let events = sent_to_ui(&mut rx);
+        assert!(matches!(
+            events.as_slice(),
+            [CoreEvent::ContactsChanged, CoreEvent::UnknownMembers(_)]
+        ));
+        // The store holds what the outbox event is for.
+        assert_eq!(setup.carried_events.borrow().len(), 1);
+
+        // The next connection does what the last one couldn't: here, a line in the chat.
+        let mut session = session(&setup, &tx).await;
+        session.resume_carried_events().await.unwrap();
+        assert!(setup.carried_events.borrow().is_empty());
+        assert!(matches!(
+            sent_to_ui(&mut rx).as_slice(),
+            [CoreEvent::MessageAdded { message }] if message.body == "fsReset"
+        ));
+    }
+
+    /// A message the peer rejected goes out again and a Reject of ours goes to the peer, whatever
+    /// happens to the app in between: they are in the store from when the connection ends.
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_connection_left_to_do_survives_a_restart() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sent = setup
+            .store
+            .insert_outgoing(CREATOR, 7, "text", "hi")
+            .unwrap();
+        setup
+            .store
+            .raise_outgoing_state(CREATOR, &[7], OutgoingState::Sent)
+            .unwrap();
+        {
+            let session = session(&setup, &tx).await;
+            session.events.borrow_mut().push(CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageRejected {
+                    message_id: 7,
+                    group_identity: None,
+                    session_known: true,
+                },
+            });
+        }
+
+        // A new process: nothing in memory.
+        let (setup, _) = contact_without_fs_support(&app);
+        setup.fs_mask_checks.record(CREATOR, Instant::now(), true);
+        assert!(setup.carried_events.borrow().is_empty());
+        let mut session = session(&setup, &tx).await;
+        // Sending fails on this socket without a handshake; it's queued by then.
+        let _ = session.resume_carried_events().await;
+        let state = setup.store.message(sent.id).unwrap().unwrap().state;
+        assert_eq!(state, OutgoingState::Pending as i64);
+    }
+
+    /// All there is to know of a control message or a status comes back, and what isn't either
+    /// isn't stored. Only an envelope and IDs are: this is what lies in the store.
+    #[test]
+    fn carried_events_keep_what_they_say() {
+        let group = GroupIdentity {
+            creator_identity: CREATOR.parse().unwrap(),
+            group_id: 7,
+        };
+        let key = ClientKey::from([5; 32]).public_key();
+        let events = [
+            CoreEvent::FsControl {
+                peer: CREATOR.into(),
+                peer_key: Some(key),
+                envelope: vec![1, 2, 3],
+            },
+            CoreEvent::FsControl {
+                peer: CREATOR.into(),
+                peer_key: None,
+                envelope: vec![4],
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageRejected {
+                    message_id: u64::MAX,
+                    group_identity: Some(group),
+                    session_known: false,
+                },
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageRejected {
+                    message_id: 1,
+                    group_identity: None,
+                    session_known: true,
+                },
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Terminated {
+                    session_known: false,
+                },
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Established,
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Reset,
+            },
+            CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::MessageWithoutFs,
+            },
+        ];
+        for event in &events {
+            let stored = carried_to_json(event).unwrap();
+            let back = carried_from_json(&stored).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{event:?}"));
+        }
+        assert!(carried_to_json(&CoreEvent::ContactsChanged).is_none());
+        assert!(carried_from_json(&serde_json::json!({"peer": CREATOR})).is_none());
+        assert!(carried_from_json(&serde_json::json!({"status": "reset"})).is_none());
+    }
+
+    /// What is still to come when a step fails isn't lost with it. A step that fails for another
+    /// reason than the connection isn't tried again: it would end every connection.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failing_step_leaves_the_rest_for_the_next_connection() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let control = || CoreEvent::FsControl {
+            peer: CREATOR.into(),
+            peer_key: None,
+            envelope: vec![1, 2, 3],
+        };
+        {
+            let mut session = session(&setup, &tx).await;
+            session.events.borrow_mut().push(control());
+            session.events.borrow_mut().push(CoreEvent::FsStatus {
+                peer: CREATOR.into(),
+                status: FsStatus::Reset,
+            });
+            // On this socket without a handshake, that is a protocol error.
+            let error = session.after_incoming().await.unwrap_err();
+            assert!(matches!(error, ConnectionError::Protocol(_)), "{error}");
+        }
+        assert!(matches!(
+            setup.carried_events.borrow().as_slice(),
+            [CoreEvent::FsStatus { .. }]
+        ));
+        let lost = ConnectionError::Io(std::io::ErrorKind::ConnectionReset.into());
+        assert!(lost.is_connection_lost());
+        let storage = ConnectionError::Storage {
+            code: 13,
+            step: StorageStep::Other,
+        };
+        assert!(!storage.is_connection_lost());
+    }
+
+    /// With other devices, the connection can die while waiting for the mediator to confirm a
+    /// stored message. The server's next copy passes and is reflected, without being stored or
+    /// announced again. Once the task is through it counts as known.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_message_whose_reflection_failed_is_reflected_again() {
+        let (_dir, app) = app();
+        let (setup, _) = contact_without_fs_support(&app);
+        setup
+            .store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = from_creator(&setup, 1, "hi");
+        let mut first = session(&setup, &tx).await;
+        let added = |events: &[CoreEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, CoreEvent::MessageAdded { .. }))
+                .count()
+        };
+
+        // On this socket every mediator step fails.
+        let reflection_failed = |error: ConnectionError| {
+            assert!(error.to_string().contains("mediator"), "{error}");
+        };
+        reflection_failed(first.handle_incoming(message).await.unwrap_err());
+        assert!(setup.store.has_incoming(CREATOR, 1).unwrap());
+        assert!(setup.store.awaits_reflection(CREATOR, 1).unwrap());
+        drop(first);
+        assert_eq!(added(&sent_to_ui(&mut rx)), 1);
+
+        let mut second = session(&setup, &tx).await;
+        let again = from_creator(&setup, 1, "hi");
+        reflection_failed(second.handle_incoming(again).await.unwrap_err());
+        drop(second);
+        assert_eq!(added(&sent_to_ui(&mut rx)), 0);
+        assert_eq!(
+            setup
+                .store
+                .conversation_messages(CREATOR, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A message the task ends without reflecting (blocked by now) needs no more of it.
+        setup
+            .store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockedContacts": [CREATOR] }).to_string(),
+            )
+            .unwrap();
+        let mut third = session(&setup, &tx).await;
+        let again = from_creator(&setup, 1, "hi");
+        let error = third.handle_incoming(again).await.unwrap_err();
+        assert!(!error.to_string().contains("mediator"), "{error}");
+        assert!(!setup.store.awaits_reflection(CREATOR, 1).unwrap());
+    }
+
+    #[test]
+    fn only_farewells_and_sync_requests_go_to_non_members() {
+        use libthreema::model::message::{GroupLeaveMessage, GroupSyncRequestMessage};
+        let setup = |members| GroupMessageBody::Setup(GroupSetupMessage { members });
+        assert!(goes_to_non_members(&GroupMessageBody::Leave(
+            GroupLeaveMessage
+        )));
+        assert!(goes_to_non_members(&GroupMessageBody::SyncRequest(
+            GroupSyncRequestMessage
+        )));
+        assert!(goes_to_non_members(&setup(vec![])));
+        assert!(!goes_to_non_members(&setup(vec![CREATOR.parse().unwrap()])));
+        assert!(!goes_to_non_members(&GroupMessageBody::Text(TextMessage {
+            text: "hi".into()
+        })));
+    }
+
+    #[test]
+    fn a_queued_delivery_receipt_goes_out_as_a_received_receipt() {
+        let body = outbox_body(&reactions::OutboxEntry {
+            id: 1,
+            conversation: CREATOR.into(),
+            message_id: 2,
+            created_at: 3,
+            kind: reactions::OUTBOX_DELIVERY_RECEIPT.into(),
+            body: serde_json::json!({"messageId": "00000000000000ff"}),
+        });
+        let Some(ContactMessageBody::DeliveryReceipt(receipt)) = body else {
+            panic!("expected a receipt");
+        };
+        assert!(matches!(
+            receipt.receipt_type,
+            DeliveryReceiptType::Received
+        ));
+        assert_eq!(receipt.message_ids[0].0, 0xff);
+    }
+
+    #[test]
+    fn a_repeated_call_start_says_when_the_call_started() {
+        let entry = |body: serde_json::Value| reactions::OutboxEntry {
+            id: 1,
+            conversation: "g:ABCD1234:0000000000000001".into(),
+            message_id: 1,
+            created_at: 500,
+            kind: crate::groups::OUTBOX_GROUP_CALL_START.into(),
+            body,
+        };
+        assert_eq!(
+            outbox_sent_as_of(&entry(serde_json::json!({"startedAt": 100}))),
+            100
+        );
+        assert_eq!(outbox_sent_as_of(&entry(serde_json::json!({}))), 500);
+    }
+
+    /// What `send_pending` puts before `message`.
+    fn sent_before(app: &App, message: &Message) -> Vec<String> {
+        app.store
+            .outbox_until(&message.conversation, message.created_at)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect()
+    }
+
+    /// Two steps of the user: the second one's timestamp is later.
+    fn next_step() {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_group_created_while_disconnected_goes_out_before_its_first_text() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        let group = app.create_group("Crew", &[CREATOR.to_owned()]).unwrap();
+        let key = group["key"].as_str().unwrap().to_owned();
+        next_step();
+        app.send_text(&key, "first", None).unwrap();
+        let pending = app.store.pending_outgoing().unwrap();
+        let text = pending.iter().find(|m| m.kind == "text").unwrap();
+        assert_eq!(
+            sent_before(&app, text),
+            vec![
+                crate::groups::OUTBOX_GROUP_SETUP,
+                crate::groups::OUTBOX_GROUP_NAME,
+                crate::groups::OUTBOX_GROUP_DELETE_PICTURE,
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_text_written_before_leaving_goes_out_before_the_leave() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: CREATOR.parse().unwrap(),
+            group_id: 7,
+        };
+        let key = crate::groups::key(&identity);
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: key.clone(),
+                identity,
+                name: "Crew".into(),
+                members: vec![CREATOR.into()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        app.send_text(&key, "bye", None).unwrap();
+        next_step();
+        app.leave_group(&key).unwrap();
+        let pending = app.store.pending_outgoing().unwrap();
+        let text = pending.iter().find(|m| m.kind == "text").unwrap();
+        assert!(sent_before(&app, text).is_empty());
+        // The leave is still there for the rest of the round.
+        assert_eq!(
+            app.store.outbox().unwrap()[0].kind,
+            crate::groups::OUTBOX_GROUP_LEAVE
+        );
+    }
+
+    /// There is no mediator here: this shows the reflection is tried within the setup's own step,
+    /// not the order a real mediator would see on the wire.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_group_change_is_reflected_before_the_next_message_of_a_burst() {
+        let (_dir, app) = app();
+        app.store
+            .set_multi_device(Some(&crate::multidevice::Properties::generate()))
+            .unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(CREATOR))
+            .unwrap();
+        let identity = app.store.identity().unwrap().unwrap();
+        let setup = ConnectionSetup {
+            store: Rc::clone(&app.store),
+            media: Arc::clone(&app.media),
+            https: app.https.clone(),
+            config: Arc::clone(&app.config),
+            identity: identity.threema_id.parse().unwrap(),
+            client_key: Zeroizing::new(*identity.client_key),
+            server_group: ChatServerGroup::try_from(identity.server_group.as_str()).unwrap(),
+            device_cookie: DeviceCookie([1; 16]),
+            client_info: app.version.client_info(),
+            fs_mask_checks: FsMaskChecks::default(),
+            storage_failing: StorageFailing::default(),
+            failing_items: FailingItems::default(),
+            carried_events: RefCell::default(),
+            wake_hold: WakeHold::default(),
+            picture_uploads: Rc::default(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = session(&setup, &tx).await;
+        let mut conversations = StoreConversations {
+            store: Rc::clone(&setup.store),
+            events: Rc::clone(&session.events),
+            user: setup.identity,
+            from_sync: false,
+        };
+        let group = libthreema::common::GroupIdentity {
+            creator_identity: CREATOR.parse().unwrap(),
+            group_id: 7,
+        };
+        let message = |id: u64, body: GroupMessageBody| IncomingMessage {
+            sender_identity: group.creator_identity,
+            id: MessageId(id),
+            overrides: MessageOverrides::default(),
+            created_at: 1,
+            body: IncomingMessageBody::Group(IncomingGroupMessageBody {
+                group_identity: group,
+                body,
+            }),
+        };
+
+        // The setup's step doesn't end without trying, and keeps the entry for the next try.
+        conversations
+            .add_or_update_incoming_message(message(
+                1,
+                GroupMessageBody::Setup(GroupSetupMessage {
+                    members: vec![setup.identity],
+                }),
+            ))
+            .unwrap();
+        assert!(setup.store.next_sync().unwrap().is_some());
+        assert!(session.after_incoming().await.is_err());
+        assert!(setup.store.next_sync().unwrap().is_some());
+
+        // The text that follows wants nothing of the mediator: the queue was the setup's to send.
+        while let Some((id, ..)) = setup.store.next_sync().unwrap() {
+            setup.store.sync_done(id).unwrap();
+        }
+        conversations
+            .add_or_update_incoming_message(message(
+                2,
+                GroupMessageBody::Text(TextMessage { text: "hi".into() }),
+            ))
+            .unwrap();
+        assert!(session.after_incoming().await.is_ok());
+        let mut added = false;
+        while let Ok(event) = rx.try_recv() {
+            added |= matches!(
+                event,
+                FromConnection::Event(event) if matches!(*event, CoreEvent::MessageAdded { .. })
+            );
+        }
+        assert!(added);
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::*;
+
+    #[test]
+    fn a_registered_device_counts_whatever_the_commit_does() {
+        assert_eq!(
+            JoinOutcome::from_steps(true, Ok(())),
+            JoinOutcome::Joined,
+            "the commit isn't part of the verdict"
+        );
+    }
+
+    #[test]
+    fn a_failure_says_whether_the_identity_left_this_device() {
+        assert_eq!(
+            JoinOutcome::from_steps(false, Err("x".into())),
+            JoinOutcome::FailedBeforeHandover("x".into())
+        );
+        assert_eq!(
+            JoinOutcome::from_steps(true, Err("x".into())),
+            JoinOutcome::FailedAfterHandover("x".into())
+        );
+    }
+
+    #[test]
+    fn the_core_waits_longer_than_the_join_can_take() {
+        let steps = TRANSACTION_BEGIN_LIMIT
+            + JOIN_TRANSFER_LIMIT
+            + JOIN_REGISTER_LIMIT
+            + crate::rendezvous::CLOSE_TIMEOUT
+            + D2M_REPLY_LIMIT;
+        assert!(JOIN_REPLY_LIMIT > steps + MEDIATOR_CONNECT_LIMIT);
     }
 }

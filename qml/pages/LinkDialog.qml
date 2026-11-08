@@ -5,8 +5,9 @@ import "../components"
 
 // Link an e-mail address or phone number to the Threema ID (Android's identity links), so people
 // who have it in their address book find you. `kind`: "email" or "mobile". The address or number
-// itself goes to Threema, which sends a confirmation link or an SMS code. `unlinkRequested()` from
-// the pulley when something is linked.
+// itself goes to Threema, which sends a confirmation link or an SMS code. A number must have its
+// country code, and the dialog shows what will be sent: `normalized` (digits, no "+").
+// `unlinkRequested()` from the pulley when something is linked.
 Dialog {
     id: dialog
     allowedOrientations: Orientation.All
@@ -15,11 +16,27 @@ Dialog {
     property string current
     property alias value: field.text
     readonly property bool email: kind === "email"
+    // The core's reading of the number, and of which text: it answers later, the field may have
+    // moved on by then. The hint keeps the last answer so it doesn't flicker while typing.
+    property string normalized
+    property string normalizedFrom
 
     signal unlinkRequested()
 
     canAccept: email ? /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(field.text.trim())
-                     : field.text.replace(/[^0-9]/g, "").length >= 6
+                     : normalized.length > 0 && normalizedFrom === field.text
+
+    function normalize() {
+        if (email) return
+        var text = field.text
+        backend.call("normalizeMobile", { number: text }, function(ok, result) {
+            if (!ok || field.text !== text) return
+            dialog.normalized = result.number || ""
+            dialog.normalizedFrom = text
+        })
+    }
+
+    Component.onCompleted: normalize()
 
     SilicaFlickable {
         anchors.fill: parent
@@ -71,6 +88,20 @@ Dialog {
                 EnterKey.enabled: dialog.canAccept
                 EnterKey.iconSource: "image://theme/icon-m-enter-accept"
                 EnterKey.onClicked: dialog.accept()
+                onTextChanged: dialog.normalize()
+            }
+
+            Label {
+                visible: !dialog.email
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+                text: dialog.normalized.length > 0
+                      //% "The code goes to +%1."
+                      ? qsTrId("threesea-la-link-mobile-target").arg(dialog.normalized)
+                      : qsTrId("threesea-la-error-phone-invalid")
             }
         }
 

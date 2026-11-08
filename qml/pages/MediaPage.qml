@@ -8,7 +8,8 @@ import "../components/Format.js" as Fmt
 // Harbour-allowed, so the same layout with Silica). Like Android's gallery it filters by kind
 // (photos, GIFs, videos, voice messages, audio, files; pull-down "Show", a dialog accepted by
 // swipe, saved for all chats). Tap: view, play or open (downloading first if needed); long press:
-// show in chat, save to Downloads, delete (on this device, with a remorse timer).
+// show in chat, save to Downloads, share, stop a download, delete (on this device, with a remorse
+// timer). Pull-down "Select": taps select tiles, a panel at the bottom saves, shares or deletes them.
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -36,13 +37,114 @@ Page {
     // The kinds this chat has (filters for the others would show nothing).
     readonly property var presentKinds: allKinds.filter(function(k) { return counts[k] > 0 })
 
+    // The gallery comes page by page while scrolling. `load` gets what is shown so far anew, when
+    // what is in it changes; `generation` tells whose answer is still wanted.
+    readonly property int pageSize: 60
+    property string nextPage
+    property bool loading
+    property bool loadingMore
+    property int generation
+    // The row of a message by its id, and the history position of the last row.
+    property var rowOf: ({})
+    property var oldestKey
+
+    property bool selecting: false
+    property var selected: ({})
+    // Selecting everything takes all pages, as they come.
+    property bool selectingAll: false
+    readonly property int selectedCount: {
+        var n = 0
+        for (var id in selected) if (selected[id]) n++
+        return n
+    }
+    function toggleSelected(id) {
+        var map = selected
+        map[id] = !map[id]
+        selected = map
+    }
+    function selectAll() {
+        selectFrom(0)
+    }
+    // From this row on: what arrives later is selected too, what was taken out since stays out.
+    function selectFrom(row) {
+        var map = selected
+        for (var i = row; i < media.count; ++i) map[media.get(i).id] = true
+        selected = map
+        selectingAll = nextPage.length > 0
+        loadMore()
+    }
+    function endSelection() {
+        selecting = false
+        selectingAll = false
+        selected = {}
+    }
+    // What is selected and still among the rows, as they are now.
+    function selectedRows() {
+        var rows = []
+        for (var i = 0; i < media.count; ++i) {
+            var row = media.get(i)
+            if (selected[row.id]) rows.push({ id: row.id, messageId: row.messageId, outgoing: row.outgoing,
+                                              body: JSON.parse(row.body) })
+        }
+        return rows
+    }
+    function selectedIds() {
+        return selectedRows().map(function(row) { return row.id })
+    }
+    readonly property bool selectionHere: {
+        if (selectedCount === 0) return false
+        var rows = selectedRows()
+        for (var i = 0; i < rows.length; ++i) if (rows[i].body.fileState !== 2) return false
+        return rows.length > 0
+    }
+
     function load() {
-        backend.call("chatMedia", { identity: identity }, function(ok, result) {
+        var asked = ++generation
+        loading = true
+        loadingMore = false
+        backend.call("chatMedia", { identity: identity, limit: Math.max(pageSize, media.count) },
+                     function(ok, result) {
+            if (asked !== page.generation) return
+            page.loading = false
             if (!ok) return
             page.kinds = result.kinds
             page.counts = result.counts
             media.update(result.messages)
+            page.nextPage = result.next || ""
+            grid.loadMoreIfNear()
+            // A reload took the place of a page on its way.
+            if (page.selectingAll) page.loadMore()
         })
+    }
+
+    function loadMore() {
+        if (nextPage.length === 0 || loading || loadingMore) return
+        var asked = generation
+        loadingMore = true
+        backend.call("chatMedia", { identity: identity, limit: pageSize, before: nextPage },
+                     function(ok, result) {
+            if (asked !== page.generation) return
+            page.loadingMore = false
+            if (!ok) return
+            var first = media.count
+            media.add(result.messages)
+            page.nextPage = result.next || ""
+            if (page.selectingAll) page.selectFrom(first)
+        })
+    }
+
+    // One message changed: its row takes that over. Whether anything else has to be got anew: a
+    // message that went, one that belongs among the rows and isn't there yet.
+    function applyChange(message) {
+        var row = rowOf[message.id]
+        if (row === undefined) {
+            return message.kind === "deleted"
+                    || (message.kind === "file" && (nextPage.length === 0 || message.sortKey > oldestKey))
+        }
+        if (message.kind !== "file") return true
+        var body = JSON.stringify(message.body)
+        if (media.get(row).body !== body) media.setProperty(row, "body", body)
+        return false
     }
 
     function chooseKinds() {
@@ -59,14 +161,23 @@ Page {
 
     Component.onCompleted: load()
 
+    // A file arriving is several events.
+    Timer {
+        id: reload
+        interval: 200
+        onTriggered: page.load()
+    }
+
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "messageAdded" && data.message.conversation === page.identity) {
-                page.load()
+            if (name === "messageAdded") {
+                if (data.message.conversation === page.identity && data.message.kind === "file") reload.restart()
             } else if (name === "messagesChanged") {
                 for (var i = 0; i < data.messages.length; ++i) {
-                    if (data.messages[i].conversation === page.identity) return page.load()
+                    if (data.messages[i].conversation === page.identity && page.applyChange(data.messages[i])) {
+                        reload.restart()
+                    }
                 }
             }
         }
@@ -77,13 +188,19 @@ Page {
     ListModel {
         id: media
 
+        function row(message) {
+            return { id: message.id, kind: message.mediaKind, body: JSON.stringify(message.body),
+                     messageId: message.messageId, outgoing: message.outgoing }
+        }
+
         function update(messages) {
+            var rows = {}
             for (var i = 0; i < messages.length; ++i) {
-                var message = { id: messages[i].id, kind: messages[i].mediaKind,
-                                body: JSON.stringify(messages[i].body),
-                                messageId: messages[i].messageId, outgoing: messages[i].outgoing }
+                var message = row(messages[i])
+                rows[message.id] = i
                 if (i < count) {
-                    if (get(i).id !== message.id || get(i).body !== message.body || get(i).kind !== message.kind) {
+                    var shown = get(i)
+                    if (shown.id !== message.id || shown.body !== message.body || shown.kind !== message.kind) {
                         set(i, message)
                     }
                 } else {
@@ -91,21 +208,45 @@ Page {
                 }
             }
             if (count > messages.length) remove(messages.length, count - messages.length)
+            page.rowOf = rows
+            if (messages.length > 0) page.oldestKey = messages[messages.length - 1].sortKey
+        }
+
+        function add(messages) {
+            for (var i = 0; i < messages.length; ++i) {
+                page.rowOf[messages[i].id] = count
+                append(row(messages[i]))
+            }
+            if (messages.length > 0) page.oldestKey = messages[messages.length - 1].sortKey
         }
     }
 
-    function open(id, kind, body) {
+    property int voiceToHear: -1
+    function voiceHeard() {
+        if (voiceToHear >= 0) backend.call("setVoiceListened", { message: voiceToHear })
+        voiceToHear = -1
+    }
+    Connections {
+        target: voicePlayer
+        onMessageIdChanged: if (voicePlayer.messageId >= 0 && voicePlayer.messageId === voiceToHear) voiceHeard()
+    }
+
+    function open(id, kind, body, outgoing) {
         if (body.fileState !== 2) {
-            if (body.fileState !== 1) backend.call("downloadFile", { message: id })
-        } else if (kind === "image" || kind === "gif") {
-            pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), { messageId: id, animated: kind === "gif" })
+            if (body.fileState !== 1) window.messageOut.download(id)
+        } else if ((kind === "image" || kind === "gif") && Fmt.isPicture(body.mediaType)) {
+            pageStack.push(Qt.resolvedUrl("ImageViewerPage.qml"), { identity: identity, messageId: id, newestFirst: true,
+                                                                   animated: kind === "gif" })
         } else if (kind === "voice") {
             if (voicePlayer.messageId === id && voicePlayer.playing) {
                 voicePlayer.pause()
-            } else if (voicePlayer.play(id)) {
-                window.voiceFrom = ""
             } else {
-                Notices.show(qsTrId("threesea-la-cannot-play"), Notice.Long, Notice.Center)
+                voicePlayer.play(id)
+                window.voiceFrom = ""
+                // Heard is heard, wherever it was: its chat stops showing it as new. Once it could
+                // be read.
+                voiceToHear = !outgoing && body.listened !== true ? id : -1
+                if (voicePlayer.messageId === id) voiceHeard()
             }
         } else if (kind === "video" && videoPlayer.available) {
             pageStack.push(Qt.resolvedUrl("VideoPlayerPage.qml"), { messageId: id })
@@ -122,7 +263,8 @@ Page {
             } else {
                 //% "Saved to Downloads"
                 Notices.show(qsTrId("threesea-la-saved-downloads"), Notice.Short, Notice.Center)
-                if (open) Qt.openUrlExternally("file://" + result.path)
+                // Documents and media only; the core decides by the name the file has now.
+                if (open && result.openable) Qt.openUrlExternally(Fmt.fileUrl(result.path))
             }
         })
     }
@@ -134,6 +276,22 @@ Page {
             if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
             page.load()
         })
+    }
+
+    // Several: one look at what is left, after the last.
+    function removeAll(rows) {
+        var left = rows.length
+        var problem = ""
+        function answered(ok, result, kind, message) {
+            if (!ok) problem = Errors.text(kind, message)
+            if (--left > 0) return
+            if (problem.length > 0) Notices.show(problem, Notice.Long, Notice.Center)
+            page.load()
+        }
+        for (var i = 0; i < rows.length; ++i) {
+            backend.call("deleteMessage", { identity: identity, messageId: rows[i].messageId, outgoing: rows[i].outgoing,
+                                             everyone: false }, answered)
+        }
     }
 
     function showInChat(id) {
@@ -149,6 +307,8 @@ Page {
     SilicaGridView {
         id: grid
         anchors.fill: parent
+        anchors.bottomMargin: selectionPanel.visibleSize
+        clip: true
         model: media
         // Jolla Gallery's grid: as many columns as fit Theme.itemSizeHuge.
         readonly property real cellSize: Math.floor(width / Math.max(1, Math.floor(width / Theme.itemSizeHuge)))
@@ -156,13 +316,38 @@ Page {
         cellHeight: cellSize
         cacheBuffer: 1000
 
-        // Only worth it with more than one kind.
+        function loadMoreIfNear() {
+            if (originY + contentHeight - contentY - height < 2 * height) page.loadMore()
+        }
+        onContentYChanged: loadMoreIfNear()
+        onContentHeightChanged: loadMoreIfNear()
+
         PullDownMenu {
-            visible: page.presentKinds.length > 1
+            visible: grid.count > 0 || page.presentKinds.length > 0
             MenuItem {
+                // Only worth it with more than one kind, or when the saved choice (it is for all
+                // chats) leaves this chat's only kind out: the way back.
+                visible: page.presentKinds.length > 1 || (grid.count === 0 && page.presentKinds.length > 0)
                 //% "Show"
                 text: qsTrId("threesea-me-media-show")
                 onClicked: page.chooseKinds()
+            }
+            MenuItem {
+                visible: page.selecting
+                text: qsTrId("threesea-me-cancel-selection")
+                onClicked: page.endSelection()
+            }
+            MenuItem {
+                visible: page.selecting && grid.count > 0
+                //% "Select all"
+                text: qsTrId("threesea-me-select-all")
+                onClicked: page.selectAll()
+            }
+            MenuItem {
+                visible: !page.selecting && grid.count > 0
+                //% "Select"
+                text: qsTrId("threesea-me-select")
+                onClicked: page.selecting = true
             }
         }
 
@@ -176,12 +361,17 @@ Page {
             id: tile
             readonly property var body: JSON.parse(model.body)
             readonly property bool isVideo: model.kind === "video"
-            readonly property bool isPicture: model.kind === "image" || model.kind === "gif"
+            readonly property bool isPicture: (model.kind === "image" || model.kind === "gif")
+                                              && Fmt.isPicture(body.mediaType)
             readonly property bool hasThumbnail: body.thumbnailState === 2
             readonly property bool playing: voicePlayer.messageId === model.id && voicePlayer.playing
             width: grid.cellWidth
             contentHeight: grid.cellHeight
-            onClicked: page.open(model.id, model.kind, body)
+            highlighted: down || menuOpen || (page.selecting && page.selected[model.id] === true)
+            onClicked: {
+                if (page.selecting) page.toggleSelected(model.id)
+                else page.open(model.id, model.kind, body, model.outgoing)
+            }
 
             Rectangle {
                 anchors.fill: parent
@@ -211,7 +401,7 @@ Page {
                     anchors.horizontalCenter: parent.horizontalCenter
                     source: "image://theme/" + (model.kind === "voice" && tile.body.fileState === 2
                                                 ? (tile.playing ? "icon-m-pause" : "icon-m-play")
-                                                : Fmt.fileIcon(tile.body.mediaType, tile.body.fileState))
+                                                : Fmt.fileIcon(tile.body.fileType, tile.body.fileState))
                             + (tile.highlighted ? "?" + Theme.highlightColor : "")
                 }
                 Label {
@@ -266,7 +456,9 @@ Page {
                 }
             }
 
-            menu: Component {
+            menu: page.selecting ? null : tileMenu
+            Component {
+                id: tileMenu
                 ContextMenu {
                     MenuItem {
                         //% "Show in chat"
@@ -278,6 +470,16 @@ Page {
                         text: qsTrId("threesea-me-save-downloads")
                         visible: tile.body.fileState === 2
                         onClicked: page.save(model.id, false)
+                    }
+                    MenuItem {
+                        text: qsTrId("threesea-me-share")
+                        visible: tile.body.fileState === 2
+                        onClicked: window.messageOut.shareFiles([model.id])
+                    }
+                    MenuItem {
+                        text: qsTrId("threesea-me-stop-download")
+                        visible: tile.body.fileState === 1
+                        onClicked: backend.call("cancelTransfer", { message: model.id })
                     }
                     MenuItem {
                         text: qsTrId("threesea-me-delete")
@@ -305,5 +507,71 @@ Page {
         }
 
         VerticalScrollDecorator {}
+    }
+
+    RemorsePopup { id: selectionRemorse }
+
+    // Like the chat's selection panel.
+    DockedPanel {
+        id: selectionPanel
+        width: parent.width
+        height: Theme.itemSizeLarge
+        dock: Dock.Bottom
+        open: page.selecting
+
+        Label {
+            anchors {
+                left: parent.left
+                leftMargin: Theme.horizontalPageMargin
+                right: selectionButtons.left
+                rightMargin: Theme.paddingMedium
+                verticalCenter: parent.verticalCenter
+            }
+            truncationMode: TruncationMode.Fade
+            text: page.selectedCount > 0
+                  ? qsTrId("threesea-he-n-selected", page.selectedCount)
+                  //% "Tap to select"
+                  : qsTrId("threesea-la-select-media-hint")
+            color: Theme.highlightColor
+            font.pixelSize: Theme.fontSizeSmall
+        }
+        Row {
+            id: selectionButtons
+            anchors {
+                right: parent.right
+                rightMargin: Theme.horizontalPageMargin - Theme.paddingMedium
+                verticalCenter: parent.verticalCenter
+            }
+            spacing: Theme.paddingLarge
+            IconButton {
+                enabled: page.selectionHere
+                icon.source: "image://theme/icon-m-downloads"
+                onClicked: {
+                    var ids = page.selectedIds()
+                    page.endSelection()
+                    window.messageOut.saveFiles(ids)
+                }
+            }
+            IconButton {
+                enabled: page.selectionHere
+                icon.source: "image://theme/icon-m-share"
+                onClicked: {
+                    var ids = page.selectedIds()
+                    page.endSelection()
+                    window.messageOut.shareFiles(ids)
+                }
+            }
+            IconButton {
+                enabled: page.selectedCount > 0
+                icon.source: "image://theme/icon-m-delete"
+                onClicked: {
+                    var rows = page.selectedRows()
+                    page.endSelection()
+                    selectionRemorse.execute(qsTrId("threesea-la-deleting-messages", rows.length), function() {
+                        page.removeAll(rows)
+                    })
+                }
+            }
+        }
     }
 }

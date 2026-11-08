@@ -36,6 +36,9 @@ pub enum Error {
     /// Close the WebSocket with 3001 (the peer or server broke the protocol).
     #[error("protocol error: {0}")]
     Protocol(&'static str),
+    /// No authenticated browser right now: what was to be sent goes nowhere.
+    #[error("not connected")]
+    NotConnected,
 }
 
 /// What the caller has to do.
@@ -444,7 +447,13 @@ impl Responder {
                     "server message",
                 )?;
                 match message_type(&message) {
-                    Some("new-initiator") => self.start_peer(),
+                    // The old browser's connection is over, whether or not the server said
+                    // 'disconnected' first, and the new one is only authenticated later.
+                    Some("new-initiator") => {
+                        let mut events = vec![Event::PeerGone];
+                        events.extend(self.start_peer()?);
+                        Ok(events)
+                    }
                     Some("disconnected" | "send-error") => {
                         self.peer = None;
                         Ok(vec![Event::PeerGone])
@@ -612,10 +621,10 @@ impl Responder {
     }
 
     fn send_to_peer(&mut self, message: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut peer = self.peer.take().ok_or(Error::Protocol("not connected"))?;
+        let mut peer = self.peer.take().ok_or(Error::NotConnected)?;
         let result = (|| {
             if peer.phase != PeerPhase::Task {
-                return Err(Error::Protocol("not connected"));
+                return Err(Error::NotConnected);
             }
             let nonce = self.next_peer_nonce(&mut peer)?;
             let key = peer
@@ -848,6 +857,20 @@ mod tests {
             Some(&session),
         );
         assert!(responder.receive(&replay).is_err());
+
+        // A new browser without 'disconnected' first: the old connection is over before the new
+        // one's handshake goes out, and sending meanwhile is a dropped message, not an error.
+        let new_initiator = map(vec![("type", "new-initiator".into())]);
+        let events = responder
+            .receive(&frame(&server_nonce(0x05), &new_initiator, Some(&to_us)))
+            .unwrap();
+        assert_eq!(events.first(), Some(&Event::PeerGone));
+        assert_eq!(sent(&events).len(), 1, "our new 'key'");
+        assert!(!responder.connected());
+        assert_eq!(
+            responder.send_data(Value::Binary(vec![5])),
+            Err(Error::NotConnected)
+        );
     }
 
     #[test]

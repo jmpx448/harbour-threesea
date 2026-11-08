@@ -24,6 +24,24 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   on the servers, clearly marked as unofficial, no "Threema" branding without authorization, no
   circumventing the licensing.
 
+## Calls: what ends a call
+(`core/src/calls.rs`, `app_calls.rs`, `bridge/callmanager.cpp`, `core/src/call_video.rs`)
+- An offer's `created_at` is the sender's clock, so offers are not aged: the server's short-lived
+  queue and the 60 s ring time bound them, like Android (`VoipStateService`).
+- A hangup that matches no running call is a missed call only if the chat's last 4 call lines
+  don't name its call id (Android's `isMissedCall`; the id is the 5th field of `call|…`, so this
+  holds after a restart). It never touches a call in progress. Offers whose call is over are ignored
+  the same way (delivered again after a lost acknowledgement).
+- Offers during a call: rejected "busy" and recorded as missed (Android too).
+- Rejected "unknown" means the other app could not take the call, not that anyone declined.
+- Timeouts: media not up 60 s after setup (`INITIALIZATION_TIMEOUT_MS`), group calls 20 s
+  (`TIMEOUT_CONNECTED_SIGNAL_MILLIS`). Running calls: libnice 0.1.21 has no consent freshness, so
+  the bridge counts what enters `dtlssrtpdec` (ICE checks don't, media and SCTP heartbeats do): 1:1
+  calls say "interrupted" after 10 s of nothing and fail after 30 s; group calls can be quiet with
+  everyone muted and fail after 60 s. These limits are ours, not Android's.
+- Remote VP8 pictures: at most 2560 on a side and 2560x1440 in area (`vp8_filter`, ahead of the
+  decoder; the MAX profile is 1920x1080). A larger key frame stops that stream until a good one.
+
 ## Reporting spam
 - From iOS 7.5.2 (`ServerAPIConnector.m`, `SpamDetector`, `GroupSpamDetector`), newer than Android's
   `identity/report_junk` (`APIConnector.reportJunk`), which has no group variant. Both are on the
@@ -52,9 +70,17 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   such requests (2026-11-03: an invalid key got the normal "This license key is invalid or
   expired." answer).
 - Rechecked: Android whenever its main screen opens (`CheckLicenseRoutine`), we at most daily from
-  the hourly maintenance. Like Android only `success: false` counts as a refusal; any other failure
-  is ignored and retried. Refused: the state is `needsLicense` again and stays so across restarts,
+  the hourly maintenance. Like Android only `success: false` with the directory's own words counts
+  as a refusal; any other failure is ignored and retried. A 429 is not a refusal either
+  (`DirectoryError::RateLimited`, kind `rateLimited`). Refused: the state is `needsLicense` again and stays so across restarts,
   nothing connects until a key is accepted (Android opens `EnterSerialActivity`).
+- A 429 from the directory on any call starts a rest of an hour, kept across restarts
+  (`Store::rest_directory_calls`): the license recheck, contact refresh, pending Safe import,
+  e-mail link check, feature mask, group member lookups, the forward secrecy mask check and the
+  hourly address book sync stay home until then. A rest under way keeps its end. What the user asks
+  for still goes. Group members skipped or left without an answer stay in `MEMBER_LOOKUPS_OWED` and
+  are looked up again on connecting and in maintenance. Android under the same 429 runs its worker
+  about once a day; we have no scheduler to lean on.
 - `deviceId`: random UUID persisted once (`DeviceIdProvider.kt`).
 - Identity creation for Shop licenses also sends `licenseKey` + `deviceId`
   (`UserServiceImpl.createIdentityRequestDataJSON`); libthreema's `create_identity_request`
@@ -67,7 +93,8 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
 - TLS pins are **leaf** SPKI pins: on 2026-10-21 `*.threema.ch` presented
   `vGQZ8hm2h+km+q7rnJ7kF9S17BwSY0rbhwjz6nIupf0=` (first pin in upstream's set). Fixture:
   `core/tests/fixtures/threema-ch-leaf.der`.
-- Directory base: Android uses `https://apip.threema.ch/`, libthreema `https://ds-apip.threema.ch/`. The `ds-`/`ds.` hosts are dual-stack (Android's "IPv6 for messages": `DIRECTORY_SERVER_IPV6_URL`, `CHAT_SERVER_IPV6_PREFIX` `ds.g-`, `BLOB_SERVER_IPV6_URL` in `app/build.gradle.kts`); we use them by default and drop the prefix for IPv4 only (Settings → Advanced, `https::server_url`).
+- Sockets to the chat server, the mediator, rendezvous relays and Threema Web's signalling server (`core/src/dial.rs`): every address on its own, IPv6 first, 3 s per IPv6 address and 15 s per IPv4 address, like Android's `CspSocket` (`CONNECT_TIMEOUT_IPV6`, `CONNECT_TIMEOUT`). A WebSocket's whole connect keeps a limit around that (the mediator's 25 s, login included).
+- Directory base: Android uses `https://apip.threema.ch/`, libthreema `https://ds-apip.threema.ch/`. The `ds-`/`ds.` hosts are dual-stack (Android's "IPv6 for messages": `DIRECTORY_SERVER_IPV6_URL`, `CHAT_SERVER_IPV6_PREFIX` `ds.g-`, `BLOB_SERVER_IPV6_URL` in `app/build.gradle.kts`); we use them by default and drop the prefix for IPv4 only (Settings → Advanced, `https::server_url`). Hosts without that prefix (the mediator, a device group's mirror, a group call's server, Threema Safe) then use only their IPv4 addresses (`https::for_ip_version`, at connect time in `dial.rs` and in the HTTPS client's resolver); the update check to GitHub has its own client and isn't covered.
 
 ## Servers and keys
 - Production config: libthreema `common/config.rs` `Config::production()`.
@@ -75,7 +102,9 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   (prod `450b9757…c909`, prodAlt `da7c7379…6f15`) — match libthreema.
 - CSP is not TLS; server authentication is the protocol's key pinning.
 - HTTPS pins (SHA-256 SPKI): `app/src/main/res/xml/network_security_config.xml`
-  (threema.ch, threema.com, sfu.threema.ch, …). We must replicate these in our HTTPS client.
+  (threema.ch, threema.com, sfu.threema.ch, …), copied into `core/src/https.rs`;
+  `scripts/check-pins.py` (part of `scripts/check.sh`) fails when they differ from the
+  submodule's, so a new upstream tag with other pins is noticed.
 
 ## Background on Libre
 - Libre has no FCM: `forceThreemaPush = (this is Libre)`, i.e. a foreground service holding a
@@ -95,17 +124,124 @@ Things learned while porting. Sources are upstream paths at the pinned tag.
   conversations, nonces, settings. Without multi-device, the only instruction of the incoming
   task is `FetchSender` (directory lookup); contacts are written by libthreema directly.
 - One device cookie per installation (random 16 bytes, stored). Echo request after 60 s of
-  silence, reconnect if nothing comes back within another 60 s; backoff 1 s → 60 s.
+  silence, reconnect if nothing comes back within another 60 s; backoff 1 s → 60 s. A rate limit on
+  the incoming task's `FetchSender` ends the session too, and libthreema asks for at least 10 s:
+  no attempt before that, wake-ups included, and the wait grows to 5 minutes while each login
+  meets the limit again (the waiting message repeats the lookup every time). A close that says not
+  to come back by ourselves (`can_reconnect` false, mediator 41xx) means ten minutes by the clock:
+  only "Connect now" ends that early, not the timer, a network change or returning to the app.
+  Wake-ups: every five minutes (Keep running), 2 s after the networks in use change, and on
+  returning to the app. A wake-up shortens an echo already out to 15 s; the device stays up until
+  something was received and 2 s went by without more (after a new login: until
+  `queue-send-complete` and, on the mediator, `reflection-queue-dry`, like Android's
+  `BaseServerConnection`), or the attempt failed, and until transfers running have ended, for at
+  most 45 s (`wakeSettled`). How long a session lasted, for its backoff, goes by the clock:
+  tokio's stands still while the device sleeps.
 - Outgoing (no libthreema task yet, LIB-51): patch 0003 encodes; we pick a fresh nonce, record it
   in the nonce table, send, and mark the message "sent" on the server's message-ack. Delivery and
   read receipts are delivery-receipt messages handled by libthreema and surfaced through
   `add_or_update_incoming_message`.
-- Forward secrecy: see below. Not yet: groups (LIB-53), typing-indicator sending, nickname updates
-  to contacts, outgoing retries after server-side failures.
+- What a read has to tell others is queued in the outbox in the step that marks the messages read
+  (reading again finds nothing): read receipts in bundles of 875 IDs, removed on the server's ack;
+  with linked devices also a read update (`d2d.IncomingMessageUpdate`) for every chat, receipt or
+  not, removed on the mediator's ack. The outgoing receipt is reflected too, as the spec has it, the
+  delivered one as well; the update says the same to the other devices and also covers a contact
+  blocked meanwhile. So is our profile picture sent to a contact, once it has been encoded for them,
+  and it counts as sent at the server's ack: another device takes a removal as done for that contact, and a picture only if it is its own upload too. Android records any blob;
+  with uploads not shared, that would send the picture again at each switch between devices.
+- No message body over 7500 bytes goes out (`MESSAGE_BODY_MAX`): a frame holds 8192 and the
+  wrappings take up to about 600. A longer one is marked failed or, from the outbox, dropped, so it
+  isn't tried at every login. Closing a poll is refused up front when the results don't fit: the
+  poll stays open and the user gets an error. This differs from Android on purpose, which saves the
+  poll as closed before sending and only logs `MessageTooLongException`, so it ends there and nobody
+  else hears (`PollServiceImpl.close`, `PollUtil.closePoll`). Summary mode is no way out, since
+  clients must discard a poll's change of display mode (csp.struct.yml; Android's
+  `PollServiceImpl.update`).
+- Our nickname goes in the metadata of messages that distribute the profile. Three answers:
+  a name; an empty string, which makes the receiver drop the name it knows (Android's
+  `setNicknameFromRemote("")`); or nothing, which leaves it alone. An ID backup holds no nickname,
+  so an ID restored from one, a new one, or one from a Threema Safe backup without a nickname says
+  nothing until its user is asked once
+  (`NICKNAME_UNANSWERED`, `NicknameDialog.qml`) and picks a name, or later takes one away. Android's
+  wizard defaults the nickname to the ID, which also replaces the name friends knew.
+- Receiving, in this order: everything a message says goes into the store in one step, the delivery
+  receipt included (an outbox entry; sent after the next login if not now); the UI hears of it; then
+  the acknowledgement; then what takes the network. So the connection can die at any point: what is
+  stored is announced (`Session::drop`), and what the server sends again is known and only
+  acknowledged. Forward secrecy answers and statuses the store holds nowhere else wait for the next
+  connection (`FS_EVENTS_CARRIED`, saved when a connection ends; only IDs and Accept, Reject and
+  Terminate envelopes, no message content). A store failure ends the connection without an acknowledgement, so the message
+  comes again and holds up the queue behind it: the log gets SQLite's code, the user one notice per
+  streak (`storageProblem`), since the server keeps messages only for a limited time.
+- What fails the same way every time mustn't hold up everything behind it: after 3 tries in a row
+  (`TRIES_BEFORE_DROPPING`) a message is acknowledged and dropped, with an error in the log, like
+  Android, which acknowledges any failure but the network's at once. That goes for libthreema's own
+  errors and SQLite's 0, ERROR, TOOBIG, CONSTRAINT and MISMATCH (`store::fails_every_time`), never
+  for the state of the device: FULL, IOERR, READONLY, BUSY, LOCKED, NOMEM, CANTOPEN, CORRUPT, NOTADB
+  wait as long as they last, and so do network and server errors.
+- Reflected envelopes: applied and their nonce noted in one store step, then acknowledged; one the
+  store failed on stays unacknowledged, so the mediator hands it out at the next login, by the same
+  rule as above (without an end of that queue there is no promotion to leader either). Android
+  acknowledges those too (with a TODO), but nothing else brings them to a follower.
+- A reflected message from a contact deleted here raises them to direct as the leader does, unless
+  they are on the block list (ADR 0019); a reflected group-setup raises nobody, a group sync decides.
+  One from someone with no contact at all (what would make a contact, or what is said in a group we
+  have; never someone on the block list) is acknowledged and kept in `reflected_waiting`, with the
+  lookup owed like a group member's, asked for once per sender. A directory that rests holds up
+  nothing; one that fails or doesn't answer within 10 s holds up that one lookup, and isn't asked
+  again on that connection, only at the next login or the hourly try. It is applied in the connection once they have a contact
+  (a contact sync, any change of contacts, also from work beside the core loop, a login), held back from notifying like every reflected
+  message, and placed by its time among what got here meanwhile. It is dropped if the directory gives no
+  contact for the ID (revoked, or another key for a predefined contact), when its sender is blocked,
+  and by Keep messages. Android discards these. If it is read on another device meanwhile (update or read receipt), it comes
+  in read; no other update is kept for it.
+  At most 1000 wait, the oldest stay. One beyond that is acknowledged and not kept here; it is logged
+  with a count, and the count shows on the linked devices page until the user clears it there (no
+  content, no sender).
+- Typing reflected from a leading device shows, except while the mediator is still handing out its
+  backlog at login: those can be old.
+- The CSP nonces an envelope tells of (`IncomingMessage.nonce`, `OutgoingMessage.nonces`) go into
+  the nonce store in that same step, unless the message has no replay protection: without them, a
+  chat server could replay to a new leader what the last one received. Our own envelope's D2D nonce
+  is noted when it is sealed, and an outgoing message's nonces are picked before its reflection,
+  which carries them (a member a group message only reaches later on that connection isn't in it:
+  the field is optional for now).
+- A leader stores a 1:1 message before reflecting it. Until the task is through it is in
+  `awaiting_reflection`, which keeps `message_is_marked_used` from discarding the server's next copy
+  as a reused id: that copy runs the reflection again, or the other devices would never get the
+  message. A group message has no such check in its way.
+- Forward secrecy: see below. Not yet: groups (LIB-53), typing-indicator sending, outgoing retries
+  after server-side failures.
 - Live-tested 2026-10-21 with the test ID: ECHOECHO echoes text; server ack → "sent",
   ECHOECHO also sends a "read" receipt.
+- What the servers say: a `server-alert` or `close-error`, a mediator's 41xx close (by its code) and
+  logins that the chat server keeps ending (no word from it: it closes the connection before the
+  login's answer, through the mediator close code 4000; at least 3 of them over at least 5 minutes
+  with no other failure in between, as a short hiccup at the server must not raise this) reach the
+  UI as `offlineReason`, shown under the chat list's header until the next login, with a
+  notification while the window is closed. Android keeps them in `ServerMessageModel` and shows them
+  as HTML; ours are plain text with the markup taken out (`plain_server_text`). Whether a revoked
+  ID's login ends that way isn't known from the code on either side.
+  "Another connection" alone isn't reported, as on Android, where it is mostly our own old connection
+  after a change of network. Past the closes we ignore, logins are 10 minutes apart: that is reported,
+  in our words (`anotherConnection`), which Android doesn't do, since we keep trying and the header
+  would otherwise only say "Offline".
+- A `close-error` containing "Another connection" isn't shown, and as on Android (`MonitoringLayer`)
+  its `can-reconnect: false` is ignored the first 3 times, since it mostly is our own earlier
+  connection after a change of network. After that the hold applies, so two devices fighting over
+  an ID come down to a login every 10 minutes; a session over 10 minutes starts the count over,
+  where Android's lasts until the connection is started anew.
+- Alerts: like Android's `NotificationServiceImpl`, a chat's notification only alerts after 30
+  seconds without news (`NOTIFY_AGAIN_TIMEOUT`, in `alert()`); inside that it only updates. Ours on
+  top: what the servers hand out after a login, up to `queue-send-complete` or the mediator's
+  queue being dry (`backlog`), alerts once at the end. Android has no such thing, and goes by the
+  chat only.
 
 ## Threema Safe
+
+- Finding the ID for a restore (Android: `ThreemaSafeServiceImpl.searchID`): `identity/match` with
+  the hashes of a number or address, no `matchToken` (Android has none without an identity either)
+  and `includeInactive: true`. Only hashes leave the device, like address book matching.
 Not in libthreema (only the URL template); implemented in `core/src/safe/` after upstream
 `app/src/main/java/ch/threema/app/threemasafe/ThreemaSafeServiceImpl.java`. Format spec:
 `domain/libthreema/threema-protocols/src/safe-backup.schema.yml` (version 1).
@@ -119,21 +255,42 @@ Not in libthreema (only the URL template); implemented in `core/src/safe/` after
   2026-10-21: 3 MiB, 180 days); `GET|PUT|DELETE backups/<backupId hex>`; 404 = no backup.
   Custom Safe servers are not supported (third-party endpoints, §7 rule 6).
 - Upload policy (`upload_due`): unchanged JSON → refresh after half the retention; changed →
-  at most every 23 h; after an error or "Back up now" → immediately. Checked at core start and
+  at most every 23 h (a chat's new message counts as a change, as `lastUpdate` is part of the
+  JSON); after an error or "Back up now" → immediately. Checked at core start and
   hourly while running. Change detection: SHA-256 of the JSON.
+- `lastUpdate` (contacts, groups, lists; ms): the chat's newest message when writing, as Android
+  lists a restored contact's chat only if it has one (`ConversationServiceImpl`). Reading: a chat
+  with a `lastUpdate` is listed without messages from then on (`emptied_chats`, the stand-in of an
+  emptied chat), so it survives our next upload; entries not imported yet keep the backup's value.
+- Links: only confirmed ones go into a backup, or to a linked device (Android:
+  `LinkingState_LINKED`), since a restore on Android links them again, with a mail or an SMS. An
+  address waiting for its confirmation stays out, and starting a number's change drops the old
+  number at once, as the server does.
 - Restore: license first (Libre), derive, download, decrypt, parse (reject version > 1),
   `identity/fetch_priv` for the server group, keep nickname/links. Contacts, then groups and
   lists, wait in `safe_pending_import` until imported (directory lookups) **and are carried into
-  new backups** meanwhile, so an automatic upload never drops them.
+  new backups** meanwhile, so an automatic upload never drops them. What the restore keeps goes
+  into the store in one transaction (the picture's files before it): killed half way, there is no
+  ID yet and the restore can simply be repeated.
 - Groups and lists (Android `getGroups`/`restoreGroups`, `…DistributionLists`): ids are
   lowercase hex of the **little-endian** 8 bytes (the wire order; list ids likewise from our
   `d:<u64>` key). Group `members` are all participants incl. the user while a member (we store
   everyone but the user). Restore: skip the legacy `deleted` flag and groups whose creator is
   unknown; look up unknown members once (group members as _group_ acquaintances, list members
   as direct contacts), drop those that don't exist; not a member → left; member but the creator
-  isn't → left (Android: kicked). Existing groups/lists are kept. No picture (not in Safe) and
-  no sync request after a restore (Android sends none either). Until 2026-10-22 our backups
-  only carried groups/lists from an earlier restore, never our own.
+  isn't → left (Android: kicked). Existing groups/lists are kept. No picture (not in Safe). Until
+  2026-10-22 our backups only carried groups/lists from an earlier restore, never our own.
+- After a restore (Android's _Application Setup Steps_, `ApplicationSetupSteps.kt`), once the import
+  is done and the connection up; the flag is stored with the restore, so a kill doesn't lose it:
+  the feature mask goes out first, then for each group not left the state to all members if it is
+  ours, else a `group-sync-request` to its creator (not one on the block list, ADR 0019). Then the
+  _solicited contacts_ (people in those groups, and those with a chat; no revoked IDs, and no
+  blocked ones) get an FS `Init` if they support FS (not with multi-device or FS off) and a request
+  for their picture, 20 per round (connect, hourly). Deviations from Android: a creator's restore
+  sends no `delete-profile-picture`, as Android does for a picture it merely lost; a contact we
+  already have a session with gets no empty message, as that session is newer than the restore. A
+  session's "established" line only appears in a chat with something in it: Android's doesn't list
+  the chat, ours would.
 - Passwords: 8–4096 chars; "weak" = single repeated char, ≤ 15 digits, or in upstream's
   `app/assets/passwords/bad_passwords.txt` (warning only, like Android).
 
@@ -151,13 +308,45 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - Incoming: libthreema's incoming task decapsulates (`CspE2eContextInit::fs_sessions`); the peer
   ratchet is turned in `acknowledge()` (`fs-commit-fn`). Control replies (Accept/Reject/Terminate)
   are queued through the store and sent by `core::connection`.
-- Outgoing: only to contacts whose feature mask has `FORWARD_SECURITY_SUPPORT` (0x40). We publish
-  our mask (`identity/set_featuremask`, challenge–response) = 0x40.
-- A peer Reject puts the message back into the queue and it is re-sent (new session) — Android
-  asks the user first.
+  An answer carries the key of whoever wrote (`enqueue_control`): a stranger's Init comes before
+  the message that creates the contact, and a lost Accept costs a rejected first reply. Not with
+  "block unknown senders" on (`providers::control_receiver`).
+- Outgoing: only to contacts whose feature mask has `FORWARD_SECURITY_SUPPORT` (0x40), the mask
+  alone decides, like Android; an existing session doesn't. We publish our mask
+  (`identity/set_featuremask`, challenge–response) = 0x40. Encapsulated group messages name their
+  group, as the spec requires (`group_identity`), and a Reject repeats it.
+- The feature mask follows the peer: a Terminate (of a known session, or DISABLED_BY_LOCAL), a
+  Reject, a message without forward secrecy, or an Init from someone whose stored mask says no looks
+  up that one contact inside the connection (`fs_support_after`), and so does sending to someone with
+  a session whose stored mask says no. At most once a minute per contact, across reconnects; an Init
+  every 5 s, and it trusts only a lookup made for it, since the "no" from just before may be from a
+  linking that was rolled back. What the lookup finds is stored on a fresh read of the contact. If the
+  directory answers no FS, what's left of the sessions ends with a Terminate; without an answer they stay
+  (DISABLED_BY_REMOTE) and the chat gets its line, as also when the contact refresh finds it
+  (`fs_support_lost`, Android's `OnFSFeatureMaskDowngradedTask`).
+- A peer Reject puts the message back into the queue at once, so that nothing can lose it, and it is
+  re-sent after the mask lookup — Android asks the user first. With a group named: the Common Group Receive Steps, a message we
+  don't have counts as a sync request if the group is ours, and only a message of ours goes out
+  again, to the sender of the Reject. Without one (older clients, or our own messages from before
+  we named it): by ID, and only for a member of that group.
+- Forward secrecy off (multi-device, or Settings → Privacy): `fs_answering_only`. No sessions, but a
+  message in an envelope gets a Reject with DISABLED_BY_LOCAL, as the spec says, so it is sent again
+  without; other variants are discarded. Android answers with a Terminate, which loses the message.
+- A message without an envelope on a session covering its type (`minimum_incoming_applied_version`,
+  like Android's `warnIfMessageWithoutForwardSecurityReceived`) gives a status line if the contact's
+  mask, just looked up, still says FS. Every such visible message gets its line, as on Android, right
+  after it; a run of receipts or typing, which add no rows, gets one.
+- Status lines (`fs_status_line`) only for sessions that existed, and only what we know: `fsReset`,
+  `fsMessageRejected` (a message really goes out again), `fsUnavailable` (the mask says no),
+  `fsMessageWithoutFs`, `fsEstablished`. `fsTerminated` only survives in old rows.
+- A row that can't be a session counts as none and is removed; a session in an impossible state is
+  ended and replaced when sending (`encapsulate_or_replace`). Should encapsulating still fail, the
+  message counts as not sent. None of this ends the connection.
+- Deleting a contact leaves its sessions alone, like Android (`MarkContactAsDeletedBackgroundTask`
+  has no part in them; only `DeleteAllContactsBackgroundTask` deletes them, when the whole ID goes).
+  The row stays (ADR 0022), so the person's next message comes in on its session.
 - Simplifications vs Android (TODO): new sessions are stored right away (Android waits for the
-  server ack of the Init); no "message without forward secrecy" warnings; no 24 h keep-alive
-  `empty` messages; no Terminate when deleting a contact (sessions are just deleted).
+  server ack of the Init); no 24 h keep-alive `empty` messages.
 - ECHOECHO does not support FS (mask 0x9). Interop verified with the official Android app
   (2026-10-21). Android turns FS off (mask without 0x40) while multi-device is active.
 
@@ -170,6 +359,9 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   0x04 decline (👎), any skin tone mapped to the base emoji. A legacy reaction **replaces** all
   reactions of its sender on the message; there is no legacy withdraw, so the UI offers only
   👍/👎 for such contacts and doesn't withdraw.
+- In a group, reactions work if any member supports them, and each member is chosen for when sending
+  (`body_for_receiver`): without support a thumb goes as the legacy form; anything else goes as the
+  `Reaction` itself, as the spec's footnote says (Android leaves them out).
 - Receive: unknown referred messages and status lines (not reactable) are ignored; emoji > 64
   bytes, empty or non-UTF-8 are rejected by the decoder (libthreema).
 - Outgoing reactions are not messages of their own; they wait in the `outbox` table until the
@@ -183,12 +375,21 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   `EDIT_MESSAGE_SUPPORT` (0x100) / `DELETE_MESSAGE_SUPPORT` (0x200) on both sides; we announce
   both. Push, replay protected, no delivery receipts.
 - Sender side only: own messages, at most 6 hours old. The receiver accepts any age but only
-  from the original sender (we look up the message in the sender's direction only), edits only
-  text messages (captions later), never status lines.
-- A deleted message becomes a placeholder (kind `deleted`, content and reactions removed,
-  `edited_at` = deletion time). Messages nobody received yet (pending/failed) are simply changed
-  or removed without telling the peer.
+  from the original sender (we look up the message in the sender's direction only), and applies an
+  edit to a text or a file's caption, as Android does. Editing our own captions isn't offered yet.
+- A deletion applies to texts, locations and files only, as on Android; a poll stays what votes
+  and its close refer to.
+- A deleted message becomes a placeholder (kind `deleted`, content, reactions and poll entry removed,
+  `edited_at` = deletion time). It has nothing left to send: a later Reject of it changes nothing.
+  A message whose send hasn't begun, or that failed, is simply changed or removed without telling
+  the peer. Pending but with its send begun (`written_out`, on record before the first byte goes out,
+  as the ack may be lost or a group's members acknowledge one by one), someone may have it: it takes
+  an edit or deletion like a sent one, and may need the feature for that, while a resend carries the
+  new text to whoever doesn't have it yet (Android allows neither until the message is sent).
 - "Delete" on its own removes a message from this device only (any message).
+- Notes groups (a group of one, not left): every feature counts as supported, no age limit, and
+  reactions, edits, deletions and votes still go through the outbox so that linked devices hear of
+  them; the receiver list is just empty. "Delete for everyone" is offered only with linked devices.
 - Editing must not trigger typing indicators.
 
 ## Blob server
@@ -198,9 +399,54 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 - The blob server answers **403 unless the user agent contains "Threema"**. We send `Threesea/<version> (Threema compatible; Sailfish OS)`.
 - Upload `POST https://ds-blobp-upload.threema.ch/upload?persist=0`, multipart field `blob`
   (`blob.bin`, `application/octet-stream`), answer: blob id in hex. Done: `POST …/{id}/done`.
+- A group's file goes up with `persist=1`, and without multi-device nobody sends `done` for it:
+  the other members still need it. 1:1: `persist=0`, `done` by the recipient once fetched. Android's
+  rules: `shouldPersistUploadForMessage` and `shouldMarkAsDone` in `MessageServiceImpl.java`. One
+  deviation: without multi-device we send no `done` for our own 1:1 file fetched again after a
+  clean-up (Android does), as its recipient may not have it yet.
+- Time limits as on Android: 30 s to connect and 100 s without anything moving, no limit on the
+  whole transfer (`BlobUploader.kt`, `BlobLoader.kt`: connect and read timeouts only). reqwest's
+  `TCP_USER_TIMEOUT` of 30 s is raised to 120 s, or any blackout that long would end the transfer.
+- An upload's progress is seen by the body being taken piece by piece; once all of it is taken,
+  300 s for the answer. Taken means into the system's send buffer, not sent. **So uploads have a
+  floor of about 75 to 85 kbit/s:** a probe on loopback saw 943 KB read between two takes (100 s:
+  75 kbit/s) and 3.1 MB taken but unread when the last piece was (300 s: 83 kbit/s). Below that
+  an upload can fail however steadily it moves; the real figures follow the phone's buffer sizes.
+  reqwest offers no way to set `SO_SNDBUF`, so we leave it.
+- A body sent in pieces can't be sent twice: reqwest hands a 307 or 308 back instead of following
+  it, which then waits for a tap, and an HTTP/2 refused stream, which it would otherwise send again
+  by itself, fails like a network error and costs a try and a pause.
 - Libre needs no auth token (only OnPrem does).
 - Sailjail: the pickers (`Sailfish.Pickers`) need `MediaIndexing` (Tracker) besides Pictures,
   Videos, Music, Documents, Downloads; without it the picker pages stay empty.
+- Deprecated image, audio and video messages (0x02, 0x13, 0x14, group 0x43–0x45), which nobody may send
+  any more: decoded into `FileMessage` as Android's `LegacyMessageTransformer` does, so they are
+  ordinary file messages from there on. A 1:1 image has no file key: its blob is sealed with the
+  contact's and our keys and a nonce from the message (`legacyNonce` in the body, kept from the UI). The
+  rest use their key with nonces `00..01` and `00..02` (video thumbnail). The file JSON is read
+  leniently, as Android's vendored `org.json` coerces: an optional field of another type counts as
+  absent, a size may be a float or a numeric string, a media type that isn't a text means none; name
+  and caption limits apply when sending only.
+
+## Videos sent as media (not protocol)
+
+A video's MP4 or QuickTime file can hold a GPS position, the time of recording and the phone's
+model, in places that vary by vendor, and Android only loses them by re-encoding. We send media
+videos without them whatever else happens to the file (scaled or not, Lite or Full):
+`core/src/mp4.rs` runs where every outgoing file passes, in `store_outgoing_file`, also for what
+GStreamer's muxer wrote. It keeps only the boxes a player needs and only sound and picture tracks
+(Android's output has no others); the rest become zero-filled `free` boxes of the same size, so
+sample offsets hold and the streams stay byte for byte. The samples of a dropped track are zeroed
+too, the times in `mvhd`, `tkhd` and `mdhd` become 0, handler names, the vendor and encoder name in
+sample descriptions and data reference strings are blanked, and a trailer behind the last box is
+cut. Every kept track's chunks must lie in a kept `mdat`, or it isn't a video we can vouch for. A file
+that fails any of this is refused with `videoKeepsMetadata`, and goes only if the user says so (ADR
+0025). Limits: the codecs' own streams aren't looked into (an H.264 SEI could say something), nor
+what lies in an `mdat` outside any track's samples, nor sample descriptions' inner boxes.
+
+Width and height in the file message are the picture's as shown (`tkhd`, with its rotation), not
+the thumbnail's, which is a square. The name is generic ("video.mp4", "image.jpg"), as on Android
+(`MessageServiceImpl`: "to prevent privacy leaks").
 
 ## Voice messages
 
@@ -236,23 +482,114 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   at most once an hour; left → empty setup (creator) or `group-leave` in reply; sender not a
   member → empty setup or sync request) and each control message's own steps, in
   `core/src/groups.rs` (unit-tested). Members we don't know are looked up and stored with
-  acquaintance level _group_ (not shown as contacts).
-- Creator: create (setup + name + delete-picture to all), rename, change members (setup to all
-  old and new, name/picture to added), dissolve (empty setup). Members: leave (`group-leave` to
+  acquaintance level _group_ (not shown as contacts): by the connection, right after the setup and
+  before the next message, and for whatever that left open on reconnect and in maintenance
+  (`Store::unresolved_members`: members of groups we are in, receivers of what is queued). The
+  setup's nonce is used by then, so a failed lookup can't count on redelivery. Someone the directory
+  doesn't know, or a contact that is revoked when the setup comes, is not kept as a member (Android
+  neither) and nothing waits for them. A sync request's creator is looked up the same way.
+- Anyone can name any ID in a setup or a group message, so what that makes us ask the directory is
+  bounded: a setup listing over 256 (Android's `MAX_GROUP_SIZE`) is discarded, at most 512 IDs go to
+  group lookups per hour (the rest wait for the next round), and an ID the directory didn't know is
+  remembered for a day (in memory) and left out of setups and sync requests. An "added" line for
+  someone with no contact waits for their lookup, so that no made-up ID gets one.
+- A group-setup creates its sender as a _direct_ contact (csp.struct.yml, Android), a stranger's
+  too, also under _block unknown_ (ADR 0019). Its dedicated blocking steps run in libthreema before
+  anything is created: a creator on the block list, for a group the user isn't in, is discarded.
+- A group message from someone with no contact row who is a member of a group we are in isn't
+  discarded: libthreema just looked up their key to decrypt it, so it creates the contact at level
+  _group_ (or keeps the message unacknowledged if that lookup failed). Anyone else is discarded.
+- Queued while offline, a group's messages and control entries go out in the order the user made
+  them (by `created_at`): the setup before the first text, a text before our leave.
+- Deleting a group we left keeps the queued `group-leave` or empty setup until it is acknowledged:
+  it is sent by the key alone, and otherwise the members keep writing and the creator's answer to
+  the sync request brings the group back. All else queued for the group goes.
+- Whoever left or was removed after something was queued for them doesn't get it
+  (`providers::group_receivers`). Exceptions: a leave, an empty setup, and a sync request to the
+  creator.
+- Creator: create (setup + name + delete-picture to all), rename, change members (setup to those
+  in the group, an empty setup to those removed, name/picture to added), dissolve (empty setup). A running call's start is repeated, with
+  its `started_at` as `created-at`, to new members and to whoever gets the state on a sync request
+  or a Reject, after a fresh peek rather than the spec's "most recent refresh" (no event for the
+  UI: it can come while locked). Members: leave (`group-leave` to
   all). Answering sync requests: the state, or an empty setup for non-members.
+- Threema Desktop refuses to link at all over a group naming someone it has no contact for
+  (`dom/backend/join.ts`), and asserts the same on `GroupSync`. So no group data names a member
+  without a contact (`join::group_sync_members`), a group whose creator has none stays out of it
+  altogether (`join::group_syncable`), and a contact a group still names, a left group too, stays
+  as a group acquaintance when deleted.
 - Group pictures: JPEG, uploaded with `persist=1` (members fetch it without `done`), sent with
-  sync answers and to new members.
-- Not yet: group calls, per-receiver legacy reactions.
+  sync answers and to new members. A picture on the device is uploaded anew for them, as the resync
+  steps say: `group_picture_sends` notes who is waiting, in the same step as their setup, until the
+  upload has worked. So no old blob goes out, and one set on another device goes out at all, whose
+  mirror blob no member could use. A member's download that finds the blob gone (404, or it doesn't
+  decrypt) drops the descriptor; the creator's next set-picture is a new try.
+- Group sync (`GroupSync`, multi-device): `member_identities` holds neither the creator nor the
+  user, ours (above) has the creator. `groups::normalized_members` turns a synced list into ours
+  and `join::group_sync_members` ours into a synced one, which also leaves out anyone without a
+  contact, as the other devices wouldn't know them. An `Update` for a group we don't have is
+  ignored, only `Create` makes one (like Android).
+- `user_state`: `groups.kicked` tells of the groups we are out of (`left_group`) whether the creator
+  removed us. Groups from before that column stay "left"; they can't be told apart.
+- Group control reflected as an incoming message (another device leads) is discarded like on
+  Android, and nothing goes out in reply: that device answered, and tells us by `GroupSync`. The
+  status lines come from that sync: `member_state_changes` checked against the old and new
+  lists (md-d2d.proto), and the name and `user_state` when they differ. Content is stored as it
+  comes, whatever our lists say, as the leader ran the receive steps. Member changes made here
+  fill `member_state_changes` for the others.
+- While we lead, a group message that changes a group is reflected as `GroupSync`, since the
+  reflected message itself tells the others nothing (`GroupOutcome.change`, csp.struct.yml's _MD_
+  steps): a new group as `Create`, else only what changed. Unlike the spec it isn't reflected in a
+  transaction before the change is stored, as the message handling can't wait for the mediator; it
+  goes into `d2d_sync_queue` in the same store transaction as the change, so a crash keeps both or
+  neither. The spec looks new members up first; here that takes the network, so the entry lists
+  only people with a contact, and `group_member_lookups` notes the rest. Once looked up, one
+  store transaction stores their contacts and queues `ContactSync.Create` and then a
+  `GroupSync.Update` with them in the list (`ADDED` for those who came with a change, not for a new
+  group's). No group sync names anyone before their contact has gone out: every contact a lookup stores goes
+  out as `ContactSync.Create`, whatever the lookup was for, and a member found only by the retry is
+  noted so that the list with them in it follows. A failed lookup is tried
+  again on reconnect and hourly. Threema Desktop diffs the lists and uses only the map's `LEFT`
+  (`model/group.ts`), so it shows such a late member of a new group as "added"; accepted, as
+  the alternative is holding back the new group. `SyncQueued` makes the connection reflect the
+  entry before it looks at the next message: Desktop drops a reflected message for a
+  group it doesn't have. Migration 35 also marks a one-off: contacts looked up for groups
+  before this reached no other device and Desktop drops a member list naming one, so the first
+  start while in a device group queues every group-level contact as `ContactSync.Create` (Desktop
+  discards those it has). A picture is reflected as its public, persisted blob for the members, as
+  Android does and as Desktop fetches it, once it is on this device; one without such a blob is
+  uploaded first;
+  `group_picture_syncs` notes it until then, in the same step as the picture, and it is retried
+  the same way; deleting the picture clears the note and the file, and a version 0 sends nothing.
+  A picture set here takes the same way, and our own too (`OWN_PICTURE_SYNC_OWED`), by itself rather
+  than in the rest of the profile's sync: the same public, persisted upload contacts get, reused for
+  its week, with its `uploaded_at`, as the others hand it on to contacts as it is. A picture from another device: what the sync says is kept
+  in `synced_pictures` with the sync, as it won't come again, until the picture is stored, fetched
+  on reconnect and hourly with the contact pictures' backoff; a 404 or a failed decryption ends it,
+  and so does a newer word on it, a sync or the contact's or creator's message or a change here. The
+  mirror's `done` comes only after it is stored. Applying it clears the group's descriptor, also
+  for a new picture: it would be some older picture's.
+- Contacts in `ContactSync`: someone new goes as `Create`, since `Update` of someone unknown is
+  dropped (Android: `ReflectedContactSyncTask`). Each user action on a contact is reflected, a
+  deletion as acquaintance level `GROUP_OR_DELETED`. What a directory lookup or the regular
+  identity check changes (feature mask, activity state, identity type) goes as an update with just those fields, as on Android
+  (`ContactUpdateWorker`): Desktop looks up nobody itself, so an imported contact's real feature
+  mask and a revocation reach it only this way. Identity links go with the user profile after a link, an unlink or a
+  verification, and come back in the same field; one awaiting its code here stays when another
+  device lists none. A Data backup's metadata import reflects the contacts and groups it added.
 - No periodic group sync: neither the spec (`csp-e2e.proto`) nor Android (6.5.3) has one; Android's
   `synchronizedAt` group field is unused ("might be used for periodic group sync", SE-146). We
-  sync only on the spec's triggers (unknown group, sync requests), like Android.
+  sync only on the spec's triggers (unknown group, sync requests) and once after a Safe restore,
+  like Android.
 
 ## Polls
 
 - `poll-setup` (0x15 / group 0x52): poll id (u64) + JSON (`d` question, `s` state, `a` multiple,
   `t` announce votes to everyone, `u` display mode, `c` choices `{i, n, o}`; when closing also
   `p` participants and per choice `r` votes per participant or `t` totals). Closing = the same
-  poll id with `s: 1`; closed → open is ignored.
+  poll id with `s: 1`; closed → open is ignored. A close changes the results only, by choice ID (the
+  spec's "ignore any other fields"; Android also takes the names): choice texts stay what people
+  voted for.
 - `poll-vote` (0x16 / 0x53): creator id + poll id + JSON `[[choice id, 0|1], …]` with all
   choices. Sent to everyone if the poll announces votes, else only to its creator.
 - Stored as a message of kind `poll` (its state is the body), `polls` table maps
@@ -264,8 +601,48 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
 
 - A quote is a text message starting with `> quote #<quoted message id, 16 lowercase hex>\n\n`
   (Android `QuoteUtil` "quote v2"); the quoted message is looked up only within the same
-  conversation. The core strips the prefix (`text`) and reports `quoteId`; edits keep the
-  prefix (receivers replace the whole text), incoming edits without it keep the original quote.
+  conversation. The core strips the prefix (`text`) and reports `quoteId`; an edit goes out as the
+  bare new text, as on Android (which would show a prefix in it as text), and the receiver keeps the
+  original's quote. An incoming edit that does carry a prefix (older versions of this app) replaces it.
+
+## Blocking and revoked IDs
+
+- _Identity Blocked Steps_ (`providers::identity_blocked`, Android `IdentityBlockedSteps`):
+  special contacts never; the block list; with "block unknown senders" on anyone who is neither
+  a direct contact nor in a group we are still in, predefined contacts excepted.
+- Receiving: libthreema discards what isn't exempt. group-setup and the requests we would answer
+  with a group-sync-request have steps of their own (`groups::receive`, ADR 0019): someone on the
+  block list can't bring us into a group we aren't in, and we don't ask them for one we don't
+  have. A group we are in changes as usual, and "block unknown senders" plays no part here, as on
+  Android. A blocked member's group poll is exempt so that polls stay in step when we send, but it
+  is ignored here (Android's `processIncomingGroupMessage`).
+- Forward secrecy: someone on the block list gets no session, no Accept and no Reject, their
+  envelopes are acknowledged and discarded (`incoming.rs`, ours), unless we share an active group:
+  their group control messages are exempt and may be encapsulated. Unknown senders with "block
+  unknown senders" on keep a session for the same reason (their group-setup), and what isn't
+  exempt is discarded after decrypting. Status lines only appear for contacts who aren't blocked
+  either way (`providers::shows_fs_status`).
+- Sending (`providers::may_receive`, in `Connection::encode` so nothing gets past it; Android's
+  `OutgoingCspMessageHandle`): revoked IDs get nothing at all, blocked ones only what is exempt
+  (libthreema's `is_exempt_from_blocking`: group-setup, name, leave, sync request, picture, group
+  poll setup and vote, group call start). A group message queued before the block loses them as a
+  receiver, a 1:1 message fails. Writing to someone, also through a list, makes them a direct
+  contact and tells the other devices (Android's `setAcquaintanceLevelFromLocal`).
+- Revoked IDs can't be written to (`contactRevoked`): `activity_state` Invalid, from the daily
+  directory check. A list leaves revoked and blocked members out.
+- Calls to someone the signalling wouldn't reach are refused before anything is sent
+  (`contactRevoked`, `contactBlocked`, `contactUnknown`; Android's `VoipUtil` for blocked ones).
+
+## Keys we trust
+
+- Predefined contacts have the key from libthreema's `Config`; a directory or backup answer with
+  another key is refused, the right one means fully verified with the known nickname
+  (`contacts::pin_predefined`, in every directory lookup and after a Safe restore).
+- Threema Safe: a fully verified contact keeps the backup's key and level whatever the directory
+  says (`ThreemaSafeServiceImpl`). Everyone else restores unverified with the directory's key;
+  address book matching raises them again.
+- Address book match with another key than the stored one: the contact isn't changed except that
+  "server verified" drops to unverified (Android `SynchronizeAndroidContactsUseCase`).
 
 ## Profile pictures
 
@@ -277,8 +654,11 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   days; changing the picture or the sharing setting, or a request from the contact, resets
   what each contact has.
 - Received pictures: downloaded without `done`, stored encrypted (`contact:<ID>`), versioned in
-  `contact_pictures` (migration 11). The first message of a contact without a picture triggers
-  one `contact-request-profile-picture`.
+  `contact_pictures` (migration 11). Contacts a Threema Safe or data backup import added get one
+  `contact-request-profile-picture`, once there is a chat or a shared group with them (ADR 0026,
+  Android's `isRestored`); a picture or a deletion from them ends that. Nobody else is asked: a
+  request is a message like any other, it may start a forward secrecy session, and the contact
+  may see that. Revoked and blocked IDs aren't asked.
 - Who gets it (Android `PROFILEPIC_RELEASE_*`): everyone, nobody, or selected contacts (allow
   list, migration 18; contacts off the list get a removal like "nobody"). Changing the list
   resets only the changed contacts. Threema Safe carries it as `user.profilePicRelease`:
@@ -290,6 +670,23 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   stores it as both and keeps it only if it is a JPEG (Android drops undecodable ones).
 - Not yet: user-defined pictures, gateway avatars.
 
+## Keep messages and Clean up (not protocol)
+
+Both go by when a message reached this device, as Android does: an incoming `created_at` is the
+sender's clock. The phone's own clock remains a weak spot: set far ahead, it makes everything look
+old and a maintenance run deletes too much. Android has the same limit and we leave it; a last-run
+stamp written under such a clock doesn't stop later runs. Set far behind when a message came, its
+arrival time would later look old: a `created_at` over a day after the arrival, and not in the
+future, counts instead, which at worst keeps a message longer.
+
+A pinned chat or one with a draft stays listed when its last message goes. Other 1:1 chats leave the
+list; Android keeps every chat as an empty row, but a period chosen for privacy shouldn't leave a
+list of who wrote.
+
+Clean up takes private chats only while they are unlocked (it needs no PIN when the app lock is off).
+A period already set for Keep messages applies to them whether hidden or not, also a shorter one set
+while they are hidden.
+
 ## Share target (Sailfish OS, not Threema)
 
 - Sailfish.Share "app share methods": the `.desktop` file lists `X-Share-Methods=threesea` with a
@@ -297,17 +694,44 @@ byte-compatible with Android `DHSession`/`KDFRatchet`/`ForwardSecurityMessagePro
   SupportsMultipleFiles); the share UI calls `org.sailfishos.share.share(a{sv})` on
   `<OrganizationName>.<ApplicationName>` (our D-Bus name) at `/share/threesea`, which a QML
   `ShareProvider { method: "threesea"; registerName: false }` implements. Resources are file
-  paths, or `{name, data, type}` maps for text. Passes the Harbour validator.
+  paths, or `{name, data, type}` maps for text. Passes the Harbour validator. A shared file goes as
+  picture or video by its type, by its bytes where its name doesn't say (`sharedFileKind`), so that
+  it is cleaned like any other (ADR 0025); a name that says sound is believed, an .m4a being an MP4
+  inside. A path in the app's own data, cache or settings folders is refused: another app can name
+  them, and what is sent from the capture folder is deleted afterwards.
+- Links are another matter: the Browser sends `{type: "text/x-url", linkTitle, status}` with the
+  address in `status` (`sailfish-components-webview`'s `WebShareAction.qml`). `ShareProvider` keeps
+  only `name`, `data` and `filePath`, skips such a resource and answers InvalidArgs; our QML never
+  hears of it. So `threesealink` has `Capabilities=text/x-url` and a `DBusAdaptor` at
+  `/share/threesealink` (no `service`: the name is ours already, bridge/main.cpp), and the first
+  method lists its text types instead of `text/*`, or links would be offered twice. A capability can't
+  say "text but not links", so a text type not on the list (a rarer source language, say) isn't offered
+  for a file: the share sheet leaves Threesea out for it, and the chat's file picker still sends it. Nested maps reach
+  QML unpacked, tried in the SDK (a probe with the map above answered over gdbus); a real Browser
+  share is for the phone.
 - Test without Gallery: `gdbus call --session --dest org.threesea.harbour-threesea --object-path
   /share/threesea --method org.sailfishos.share.share "{'resources': <['/path']>}"`.
 
 ## Contact verification (QR)
 
-- `3mid:<ID>,<public key hex>[,<expiry>]` (Android `ContactUrlUtil`). Scanning it: the key must
-  equal the stored (or, for a new contact, the directory's) key → verification level _fully
-  verified_; a new contact is added as direct contact.
+- `3mid:<ID>,<public key hex>[,<expiry>]` (Android `ContactUrlUtil`, `ContactUrlResult`): the
+  expiry is epoch seconds, a past one is refused (`qrExpired`), one that isn't a number means
+  none. Scanning it: the key must equal the stored (or, for a new contact, the directory's) key
+  → verification level _fully verified_; a new contact is added as direct contact.
 - Generated with `qrcode`, decoded with `rqrr` (pure Rust); the camera viewfinder is grabbed
-  (`VideoOutput.grabToImage`) every 600 ms and decoded as greyscale; a picture works too.
+  (`VideoOutput.grabToImage`) every 600 ms and decoded as greyscale; a picture works too, but
+  gives only the middle level (_server verified_, never lowering a contact's): a picture may
+  have come from anywhere, and _fully verified_ means the code was scanned in person. Android
+  has no picture option (`QRScannerActivity`, camera only). We call the middle level "Partly
+  verified" and the contact page says what it can stand for. It goes to linked devices as
+  `SERVER_VERIFIED`, which Android and Threema for Desktop explain as "contained in your address
+  book".
+- Every scanned text goes through `qrKind` first (`qr_kind` in `core/src/app.rs`). The contacts
+  page's scanner takes any kind, as Android's `AddContactActivity` does. Deliberately stricter
+  here: a Threema Web code always asks what it grants before it pairs, and a link to an ID (no
+  key: it adds, never verifies) asks before it adds. A refused or declined code stays quiet while
+  the camera sees it. The question always says a browser can ask to be remembered: the code's
+  permanent bit binds nothing, `keyPersisted` is honoured whatever it said, as on Android.
 
 
 ## Address book matching (opt-in)
@@ -317,12 +741,28 @@ Port of Android's `APIConnector.matchIdentities` / `SynchronizeContactsRoutine`:
 - Hashes: HMAC-SHA256 with Android's fixed keys (`EMAIL_HMAC_KEY`, `MOBILENO_HMAC_KEY` in
   `APIConnector.java`). E-mail addresses are trimmed and lower-cased; for `gmail.com` /
   `googlemail.com` both domains are hashed. Phone numbers are normalised to E.164 without "+"
-  (`core/src/address_book.rs`: the device region's calling code for national numbers).
+  (`core/src/address_book.rs`). Numbers without a country code take the country from Settings →
+  Privacy; "Automatic" is the linked number's calling code, else the locale's (ADR 0016).
+  Without any country they aren't hashed. Extensions and tones (`;12`, `ext. 12`) go, digits of other
+  scripts count. Known gaps against libphonenumber: carrier codes in national or international
+  prefixes (Brazil's `015 11 9…`, Korea's and Israel's carrier prefixes for calling abroad).
   Nothing unhashed leaves the device.
 - Flow: `identity/match_token` (challenge response with the client key, token cached in the
   store and refreshed when the server rejects it), then `identity/match` with the hash lists.
+- New people are looked up together (`identity/fetch_bulk`, a hundred per request). If that fails or
+  the directory says too many requests, those found so far are kept and the command fails; the next
+  sync gets the rest.
 - Hits become contacts (verification level server-verified, acquired directly) named after the
-  address book entry if they have no name yet.
+  address book entry if they have no name yet. Such a name is marked `SyncState::Imported` and follows
+  the entry at later syncs, as on Android; an entry without a name changes nothing. A name the user
+  wrote or cleared is `Custom` and stays. Names from before this was kept (`Initial`) can't be told
+  from the user's, so they stay too.
+- Only one-to-one matches count, as on Android (`AndroidContactMatcher`): an ID claimed by different
+  people's entries is left alone, and so is a person whose entries match several IDs (one of them may
+  be a number shared with someone else). Entries with the same name count as one person; an entry
+  without a name is its own and says nothing against a named one.
+  Whoever the user deleted is on the exclusion list and isn't brought back; adding them by hand
+  takes them off it.
 - Sailfish side: `org.nemomobile.contacts` PeopleModel in QML (Harbour-allowed, Sailjail
   permission `Contacts`), only when the user enables it in Settings; then at most daily.
 
@@ -338,6 +778,7 @@ Port of Android's link handling (`AndroidManifest.xml` intent filters, `AppLinks
 | `threema://compose?id=&text=`, `https://go.threema.ch/compose?…`, `https://threema.id/compose?…` | write (no `id`: choose the chat) |
 | `threema://add?id=`, `https://go.threema.ch/add?id=` | add contact |
 | `threema://license?key=`, `https://go.threema.ch/license?key=` | license key (setup only) |
+| `threema://link_mobileno?code=` | the code of a pending phone link, digits only and at most 8 (`VerifyMobileNumberUseCase`); only from outside the app, never from a chat message |
 
 Parsing is `core/src/links.rs`. Sailfish side: the `.desktop` declares
 `x-scheme-handler/threema`, `x-url-handler/threema.id` and `x-url-handler/go.threema.ch`;
@@ -365,11 +806,37 @@ is muted (`never`, optionally until a time; Android offers 1/2/4/8/24/144 h, we 
 ## Locations
 
 `location` messages (libthreema `LocationMessage`: latitude, longitude, accuracy, name,
-address) are received into the store as JSON and sent with `sendLocation`. The position comes
-from QtPositioning (Sailjail permission `Location`, Harbour-allowed). No map preview and no
-reverse geocoding: both need a tile or geocoding server outside Threema (§7.6). Received
-locations open as `geo:` links in an installed maps app (e.g. Pure Maps); the bubble shows the
-name, address and coordinates.
+address) are received into the store as JSON and sent with `sendLocation`. On the wire there is
+one line after the coordinates for a place given by a single text, and decoders read it as the
+address, so a name alone goes out as the address (libthreema's encoder would drop it). The position comes
+from QtPositioning (Sailjail permission `Location`, Harbour-allowed). Received locations open as
+`geo:` links in an installed maps app (e.g. Pure Maps); the bubble shows the name, address and
+coordinates.
+
+Android's places come from Threema's own hosts, as in `app/build.gradle.kts` and
+`DefaultServerAddressProvider.kt`; `poi.threema.ch` falls under the `threema.ch` pins:
+
+- `GET https://poi.threema.ch/around/{lat}/{lon}/{radius}/` (radius 750): a JSON array of
+  `{id, name, lat, lon, dist (m), <kind>}`. `<kind>` is one of `amenity`, `shop`, `tourism`, `sport`,
+  `leisure`, `natural`, `public_transport`, `aeroway`, `aerialway`, `highway`; Android drops entries
+  with none of them. Android doesn't read `dist` here; we show it.
+- `GET https://poi.threema.ch/names/{lat}/{lon}/{query}/`: `{name, lat, lon, dist (m), …}`, from
+  3 characters on; Android drops entries without `dist`. No request for 0/0.
+- Coordinates with six decimals; the query percent-encoded as one segment of the path. Android sends
+  no authentication, only its user agent. These formats come from Android's parser
+  (`location/PoiRepository.kt`) and its test answers (`core/tests/fixtures/poi-*.json`); a live answer
+  hasn't been seen from here yet, nor `poi.threema.ch`'s own certificate: we pin the leaf, Android
+  accepts a pin anywhere in the chain, so a leaf outside the set would fail only here.
+
+Android's map style is `https://map.threema.ch/styles/threema/style.json`, drawn by MapLibre. The
+hosts of its tiles and fonts are named in that file only, not in the Android source. Checked once
+(2026-11-06): everything is on `map.threema.ch` — the source `openmaptiles` is the TileJSON
+`/data/threema` (3.0.0; `/data/threema.json` is 404) with vector tiles at
+`/data/threema/{z}/{x}/{y}` (pbf, zoom 0-14), glyphs at `/fonts/{fontstack}/{range}.pbf` (Noto
+Sans), the sprite at `/styles/threema/sprite`; attribution "© OpenMapTiles © OpenStreetMap
+contributors". No raster tiles. `map.threema.ch` falls under the `threema.ch` pins; our MapLibre
+gets them from the core (ADR 0032). Addresses of a
+point come from the platform's `android.location.Geocoder`, not from Threema.
 
 ## Distribution lists
 
@@ -393,6 +860,40 @@ the answer has `linked: true` if it is already linked to this ID, otherwise the 
 for phase 2. An empty address or number unlinks. E-mail is confirmed by a link in the mail;
 whether that happened is phase 1 again without answering the challenge (`linked`). Phone: phase 2
 returns `verificationId`; `{verificationId, code}` to `link_mobileno` confirms,
-`link_mobileno_call` has the code read out by phone. Numbers are E.164 without `+`, normalized like
-the address book's (national numbers need a known region, otherwise we ask for `+`).
+`link_mobileno_call` has the code read out by phone. Numbers are E.164 without `+`, and the user must
+enter them with their country code; the dialog shows the result first (ADR 0016).
 These are the only requests that send a plain address/number (CLAUDE.md §7.4 exception).
+
+## Linking and removing devices: what counts as done (ADR 0017)
+
+- Removing: inside a `DROP_DEVICE` transaction read the devices (`GetDevicesInfo`), drop only those
+  listed, each confirmed by its `DropDeviceAck`. If no other device remains, drop this one last; the
+  mediator may answer with close code 4113 instead of an ack, which counts as done. Nothing to
+  commit then: the connection is gone anyway. Empty id list = Android's "deactivate if alone".
+- Joining: `Registered` means the new device has all data and is registered on the mediator, so
+  the list has it from then on. Limits: 90 s to begin the transaction, 5 minutes for the transfer
+  (60 s per 1 MiB chunk), 3 minutes for `Registered`, 5 s to close the link, 30 s for the commit.
+  A commit failing after `Registered` restarts the connection, which releases the lock.
+
+## Threema Web: how the browser stays up to date (not protocol)
+
+Android hangs its updates on listeners. We compare at every refresh (after each command and event,
+if the store's change count, the subscriptions or the picture writes moved), per browser, what it
+was sent with what the store says now: receivers (`update/receiver`, more than 20 of a type at once
+as `update/receivers`), pictures (`update/avatar`, 48 px; `update/profile` has ours in 512 px),
+the profile, the chat list, and the messages it has (`update/messages` mode `removed`). A way of
+changing something that nobody thought of still reaches the browser that way, at its next refresh.
+
+The order matters: what goes away first (messages, conversations, then receivers), new receivers
+before new conversations, as the browser ignores a conversation of a receiver it doesn't know.
+`update/receivers` makes the browser forget the pictures it has loaded, `update/receiver` doesn't.
+The removals say `type: text` and `isStatus: false` whatever the message was: the browser goes by
+the ID. `update/alert` (`source: server`) carries the chat server's words; an alert is a `warning`,
+what it closes the connection with an `error`. The browser shows each as a dialog, so the same words
+go to a browser once until a connection has stayed up for 60 s. `update/receiver` only adds to what
+the browser has, so a name taken away goes as an empty one.
+
+Building all receivers takes a look at every contact, so a refresh does it only when
+`receiver_generation` moved: triggers count every change to contacts, groups, lists, the private
+chats, the blocked contacts and whether pictures are shown. Picture writes, the lock state and a new
+subscription count as well.

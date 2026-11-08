@@ -8,6 +8,6 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 docker run --rm -i -e SFOS="$SFOS" -v "$ROOT:/src:ro" "$IMAGE" sh -euc '
     T=SailfishOS-$SFOS-i486
     B=$HOME/build; mkdir -p $B/tests $B/bridge
-    cp -r /src/tests/models $B/tests/; cp /src/bridge/jsonlistmodel.* /src/bridge/contactlistmodel.* $B/bridge/
+    cp -r /src/tests/models $B/tests/; cp /src/bridge/jsonlistmodel.* /src/bridge/contactlistmodel.* /src/bridge/listfilter.* /src/bridge/coreresult.h $B/bridge/
     cd $B/tests/models && sb2 -t $T qmake >/dev/null && sb2 -t $T make -s >/dev/null 2>&1 || sb2 -t $T make
     sb2 -t $T ./models-test'

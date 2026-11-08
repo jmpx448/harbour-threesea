@@ -79,6 +79,22 @@ impl App {
             .send(CoreEvent::Call(json!({ "event": "chatsChanged" })));
     }
 
+    /// A chat opened in the browser loses its "Mark as unread". The browser hears of it with the
+    /// next refresh, our UI through the event. A private or unknown chat stays as it is.
+    fn web_chat_opened(&self, incoming: &Incoming<'_>) {
+        let Ok(key) = self.web_receiver_key(incoming.arg("id")) else {
+            return;
+        };
+        if self
+            .store
+            .marked_unread_chats()
+            .is_ok_and(|marked| marked.contains(&key))
+            && self.store.set_marked_unread(&key, false).is_ok()
+        {
+            self.web_changed_chats();
+        }
+    }
+
     /// The browser's actions; `None` if `incoming` isn't one. `Ok`: the reply (its `ack` added
     /// by the caller).
     pub(crate) async fn web_action(
@@ -102,37 +118,22 @@ impl App {
                     _ => Err("badRequest"),
                 }
             }
-            // Which chat the browser shows (Android uses it for notifications); nothing to do.
-            ("update", "activeConversation") => Ok(confirm()),
+            // The chat is open in the browser: it counts as seen, like Android.
+            ("update", "activeConversation") => {
+                self.web_chat_opened(incoming);
+                Ok(confirm())
+            }
+            // The browser hears of the removal from the next refresh, like every other.
             ("delete", "message") => match self.web_target(incoming) {
-                Ok((key, Some((message_id, outgoing)))) => {
-                    let removed = map(vec![
-                        ("id", incoming.arg("messageId").unwrap_or_default().into()),
-                        ("isOutbox", outgoing.into()),
-                        ("isStatus", false.into()),
-                        ("type", "text".into()),
-                    ]);
-                    let result = self
-                        .web_command(json!({"cmd": "deleteMessage", "identity": key,
-                            "messageId": message_id, "outgoing": outgoing, "everyone": false}))
-                        .await;
-                    match result {
-                        Ok(_) => Ok({
-                            self.web_changed_chats();
-                            arp::message(
-                                "update",
-                                "messages",
-                                Some(map(vec![
-                                    ("type", receiver_type(&key).into()),
-                                    ("id", key.as_str().into()),
-                                    ("mode", "removed".into()),
-                                ])),
-                                Some(Value::Array(vec![removed])),
-                            )
-                        }),
-                        Err(_) => Err("badRequest"),
-                    }
-                }
+                Ok((key, Some((message_id, outgoing)))) => self
+                    .web_command(json!({"cmd": "deleteMessage", "identity": key,
+                        "messageId": message_id, "outgoing": outgoing, "everyone": false}))
+                    .await
+                    .map(|_| {
+                        self.web_changed_chats();
+                        confirm()
+                    })
+                    .map_err(|_| "badRequest"),
                 Ok(_) => Err("badRequest"),
                 Err(code) => Err(code),
             },
@@ -227,10 +228,7 @@ impl App {
             })?;
         // Our UI shows it like one sent on another device.
         if let Some(Ok(Some(message))) = result["id"].as_i64().map(|id| self.store.message(id)) {
-            let _ = self.media_events.send(CoreEvent::MessageAdded {
-                message,
-                send_delivery_receipt: false,
-            });
+            let _ = self.media_events.send(CoreEvent::MessageAdded { message });
         }
         let id = result["id"]
             .as_i64()

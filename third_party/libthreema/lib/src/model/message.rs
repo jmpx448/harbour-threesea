@@ -96,6 +96,7 @@ struct GroupMessageProperties {
     push: bool,
     lifetime: MessageLifetime,
     user_profile_distribution: bool,
+    requires_direct_contact: bool,
     replay_protection: bool,
     reflect_incoming: bool,
     reflect_outgoing: bool,
@@ -107,7 +108,7 @@ impl GroupMessageProperties {
             push: self.push,
             lifetime: self.lifetime,
             user_profile_distribution: self.user_profile_distribution,
-            requires_direct_contact: false,
+            requires_direct_contact: self.requires_direct_contact,
             replay_protection: self.replay_protection,
             reflect_incoming: self.reflect_incoming,
             reflect_outgoing: self.reflect_outgoing,
@@ -190,6 +191,7 @@ impl TextMessage {
         push: true,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -236,6 +238,7 @@ impl LocationMessage {
         push: true,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -333,6 +336,7 @@ impl LegacyReactionMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -388,6 +392,10 @@ pub struct FileMetadata {
     pub animated: Option<bool>,
     /// Duration in seconds (audio, videos).
     pub duration: Option<f64>,
+    /// Only set for a [`FileMessage`] decoded from a `deprecated-image` message, and never sent: the
+    /// blob's nonce. Its data is encrypted for us with `X25519HSalsa20(sender, receiver)` and this
+    /// nonce instead of a file key, and [`FileMessage::key`] means nothing.
+    pub legacy_nonce: Option<[u8; 24]>,
 }
 
 /// A `file` message: a file (or media) uploaded to the blob server, encrypted with `key` (file
@@ -457,7 +465,8 @@ impl PollSetupMessage {
     const CONTACT_EXEMPT_FROM_BLOCKING: bool = false;
     const CONTACT_PROPERTIES: MessageProperties = TextMessage::CONTACT_PROPERTIES;
     const CONTACT_TYPE: CspE2eMessageType = CspE2eMessageType::PollSetup;
-    const GROUP_EXEMPT_FROM_BLOCKING: bool = false;
+    // Exempt from blocking in groups (the poll state must stay consistent).
+    const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
     const GROUP_PROPERTIES: GroupMessageProperties = TextMessage::GROUP_PROPERTIES;
     const GROUP_TYPE: CspE2eMessageType = CspE2eMessageType::GroupPollSetup;
 }
@@ -495,6 +504,7 @@ impl PollVoteMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -545,6 +555,7 @@ impl ReactionMessage {
         push: true,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -582,6 +593,7 @@ impl EditMessage {
         push: true,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -609,6 +621,7 @@ impl GroupCallStartMessage {
         push: true,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -643,6 +656,7 @@ impl DeleteMessage {
         push: true,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -923,7 +937,8 @@ impl ContactMessageBody {
     }
 
     /// Determine whether the 1:1 message is exempt from blocking.
-    const fn is_exempt_from_blocking(&self) -> bool {
+    #[must_use]
+    pub const fn is_exempt_from_blocking(&self) -> bool {
         match &self {
             ContactMessageBody::Text(_) => TextMessage::CONTACT_EXEMPT_FROM_BLOCKING,
             ContactMessageBody::Location(_) => LocationMessage::CONTACT_EXEMPT_FROM_BLOCKING,
@@ -1007,12 +1022,13 @@ pub struct GroupSetupMessage {
     pub members: Vec<ThreemaId>,
 }
 impl GroupSetupMessage {
-    // Dedicated blocking steps (the receiver checks whether the group exists).
+    // Dedicated blocking steps: in the incoming message task, before this can create a contact.
     const GROUP_EXEMPT_FROM_BLOCKING: bool = true;
     const GROUP_PROPERTIES: GroupMessageProperties = GroupMessageProperties {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: true,
+        requires_direct_contact: true,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -1034,6 +1050,7 @@ impl GroupNameMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -1052,6 +1069,7 @@ impl GroupLeaveMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -1070,6 +1088,7 @@ impl GroupSyncRequestMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -1110,6 +1129,7 @@ impl SetProfilePictureMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -1141,6 +1161,7 @@ impl DeleteProfilePictureMessage {
         push: false,
         lifetime: MessageLifetime::Indefinite,
         user_profile_distribution: false,
+        requires_direct_contact: false,
         replay_protection: true,
         reflect_incoming: true,
         reflect_outgoing: true,
@@ -1282,7 +1303,8 @@ impl GroupMessageBody {
 
     /// Determine whether the group message is exempt from blocking.
     #[inline]
-    fn is_exempt_from_blocking(&self) -> bool {
+    #[must_use]
+    pub fn is_exempt_from_blocking(&self) -> bool {
         match &self {
             GroupMessageBody::Text(_) => TextMessage::GROUP_EXEMPT_FROM_BLOCKING,
             GroupMessageBody::Location(_) => LocationMessage::GROUP_EXEMPT_FROM_BLOCKING,
@@ -1360,6 +1382,24 @@ impl IncomingMessageBody {
             IncomingMessageBody::Contact(body) => body.properties(),
             IncomingMessageBody::Group(body) => body.body.properties().into_message_properties(),
         }
+    }
+
+    /// Whether a message of this kind makes its sender a _direct_ contact upon reception.
+    ///
+    /// Needed by whoever applies a reflected message, as that doesn't pass the incoming message
+    /// task.
+    #[must_use]
+    pub const fn requires_direct_contact(&self) -> bool {
+        self.properties().requires_direct_contact
+    }
+
+    /// Whether a message of this kind is protected against replay by storing its nonce.
+    ///
+    /// Needed by whoever applies a reflected message, as that doesn't pass the incoming message
+    /// task.
+    #[must_use]
+    pub const fn has_replay_protection(&self) -> bool {
+        self.properties().replay_protection
     }
 
     /// Determine whether the incoming message is exempt from blocking.

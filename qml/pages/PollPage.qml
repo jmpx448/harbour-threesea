@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import "../components"
 import "../components/Errors.js" as Errors
 
 // A poll as a Silica dialog: set the choices (switches; single choice replaces, multiple toggles),
@@ -15,9 +16,13 @@ Dialog {
     // The conversation (contact id or group key), for member names.
     property string conversation
     property var poll: ({})
+    // A chat where nothing goes out: the poll can be looked at, not voted in or closed.
+    property bool readOnly: false
     // identity -> display name; members (groups) to show who hasn't voted.
     property var names: ({})
     property var members: []
+    // The chat's names of those who voted, for someone who has left the group since.
+    property var formerNames: ({})
 
     // The poll message changed by our vote or closing (the chat updates its bubble).
     signal changed(var message)
@@ -37,7 +42,7 @@ Dialog {
         for (var i = 0; i < selection.length; ++i) if (myVote.map(Number).indexOf(selection[i]) < 0) return false
         return true
     }
-    canAccept: !closed && !sameAsVote()
+    canAccept: !closed && !readOnly && !sameAsVote()
     // The chat sends it: this dialog is gone before the reply arrives.
     onAccepted: voteRequested(selection.slice())
     readonly property bool countsKnown: closed || poll.announce === true || mine
@@ -52,7 +57,7 @@ Dialog {
             //% "You"
             return qsTrId("threesea-la-you")
         }
-        return names[identity] || identity
+        return names[identity] || formerNames[identity] || identity
     }
 
     function votersOf(choice) {
@@ -124,8 +129,12 @@ Dialog {
         anchors.fill: parent
         model: page.poll.choices || []
 
+        // The DialogHeader's height arrives after the header's first layout.
+        StayAtTop { target: list }
+
+        // Silica opens a menu with nothing in it too.
         PullDownMenu {
-            visible: !page.closed
+            visible: !page.closed && !page.readOnly && (page.mine || page.selection.length > 0)
             MenuItem {
                 visible: page.mine
                 //% "Close poll"
@@ -134,11 +143,12 @@ Dialog {
                 onClicked: remorse.execute(qsTrId("threesea-la-closing-poll"), function() {
                     backend.call("closePoll", { message: page.messageId }, function(ok, result, kind, message) {
                         // The results are a message of their own now; the voting is over.
-                        if (ok && result) {
-                            page.changed(result)
+                        // No result: already closed elsewhere, and the voting is just as over.
+                        if (ok) {
+                            if (result) page.changed(result)
                             pageStack.pop()
                         }
-                        else if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                     })
                 })
             }
@@ -196,7 +206,7 @@ Dialog {
             text: modelData.name
             automaticCheck: false
             checked: page.selection.indexOf(Number(modelData.id)) >= 0
-            enabled: !page.closed
+            enabled: !page.closed && !page.readOnly
             description: page.countsKnown
                          ? [qsTrId("threesea-la-poll-votes", page.count(modelData))]
                                .concat(choiceVoters.length > 0 ? [choiceVoters.map(page.nameOf).join(", ")] : [])

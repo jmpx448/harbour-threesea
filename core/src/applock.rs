@@ -289,7 +289,6 @@ mod tests {
         // Locked: only what the generic notification needs, never the content.
         let event = CoreEvent::MessageAdded {
             message: message.clone(),
-            send_delivery_receipt: false,
         };
         let locked = event.to_json(&store, false);
         assert_eq!(locked["private"], true);
@@ -326,10 +325,7 @@ mod tests {
             .insert_status("BBBBBBBB", "call|missed|0|0")
             .unwrap()
             .unwrap();
-        let event = CoreEvent::MessageAdded {
-            message: status,
-            send_delivery_receipt: false,
-        };
+        let event = CoreEvent::MessageAdded { message: status };
         assert_eq!(
             event.to_json(&store, false)["message"]["body"],
             "call|missed|0|0"
@@ -350,6 +346,64 @@ mod app_tests {
 
     fn error(reply: &Value) -> &str {
         reply["error"]["kind"].as_str().unwrap_or("")
+    }
+
+    /// Private marks arrive without a lock (Safe restore, a linked device): no PIN opens them
+    /// until one is set, then that one does and the marks can be taken off.
+    #[tokio::test(flavor = "current_thread")]
+    async fn any_pin_opens_nothing_without_a_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "test".into(),
+                language: "en".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "test".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[1; 32],
+        )
+        .unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        app.store
+            .insert_incoming("BBBBBBBB", 1, "text", "private text", 1)
+            .unwrap();
+        app.store.set_private("BBBBBBBB", true).unwrap();
+
+        for command in [
+            json!({"cmd": "unlock", "pin": "0000", "privateChats": true}),
+            json!({"cmd": "unlock", "pin": "0000"}),
+        ] {
+            assert_eq!(error(&call(&mut app, command).await), "lockNeeded");
+        }
+        let private = json!({"cmd": "conversations", "private": true});
+        assert_eq!(error(&call(&mut app, private.clone()).await), "locked");
+        assert!(
+            !call(&mut app, json!({"cmd": "lockStatus"})).await["result"]["unlocked"]
+                .as_bool()
+                .unwrap()
+        );
+
+        let set = json!({"cmd": "setLock", "enabled": true, "pin": "2468",
+                         "keyboard": false, "appLock": false, "graceSecs": 0});
+        assert_eq!(error(&call(&mut app, set).await), "");
+        let open = json!({"cmd": "unlock", "pin": "0000", "privateChats": true});
+        assert_eq!(error(&call(&mut app, open).await), "wrongPin");
+        let open = json!({"cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, open).await["result"]["unlocked"], true);
+        let unmark = json!({"cmd": "setPrivate", "identity": "BBBBBBBB", "private": false});
+        assert_eq!(error(&call(&mut app, unmark).await), "");
+
+        // Removing the lock ends what it opened: a later mark is hidden again.
+        let remove = json!({"cmd": "setLock", "enabled": false, "currentPin": "2468"});
+        assert_eq!(call(&mut app, remove).await["result"]["unlocked"], false);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -416,6 +470,17 @@ mod app_tests {
                 "{command}"
             );
         }
+        // Tones: the hidden chat's stays hidden and can't be changed; the old settings file's
+        // are taken over all the same (and then the file holds no chat any more).
+        let tone = json!({"cmd": "setChatTone", "identity": "BBBBBBBB", "tone": "/b.ogg"});
+        assert_eq!(error(&call(&mut app, tone).await), "locked");
+        let tone = json!({"cmd": "setChatTone", "identity": "CCCCCCCC", "tone": "/c.ogg"});
+        assert!(call(&mut app, tone).await["ok"].as_bool().unwrap());
+        let import = json!({"cmd": "importChatTones", "tones": {"BBBBBBBB": "/b.ogg"}});
+        assert!(call(&mut app, import).await["ok"].as_bool().unwrap());
+        let tones = call(&mut app, json!({"cmd": "chatTones"})).await;
+        assert_eq!(tones["result"]["tones"], json!({"CCCCCCCC": "/c.ogg"}));
+
         let search = json!({"cmd": "searchMessages", "query": "secret"});
         let results = call(&mut app, search.clone()).await;
         assert_eq!(results["result"]["results"].as_array().unwrap().len(), 1);
@@ -435,6 +500,11 @@ mod app_tests {
 
         let open = json!({"cmd": "unlock", "pin": "2468", "privateChats": true});
         assert_eq!(call(&mut app, open).await["result"]["unlocked"], true);
+        let tones = call(&mut app, json!({"cmd": "chatTones"})).await;
+        assert_eq!(
+            tones["result"]["tones"],
+            json!({"BBBBBBBB": "/b.ogg", "CCCCCCCC": "/c.ogg"})
+        );
         let list = call(&mut app, private).await;
         assert_eq!(list["result"]["conversations"][0]["identity"], "BBBBBBBB");
         let results = call(&mut app, search).await;

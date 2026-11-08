@@ -6,4 +6,4 @@ QT = core gui
 CONFIG += c++14 console
 INCLUDEPATH += ../../bridge
 SOURCES += main.cpp ../../bridge/gifdecoder.cpp
-HEADERS += ../../bridge/gifdecoder.h
+HEADERS += ../../bridge/gifdecoder.h ../../bridge/peerimage.h

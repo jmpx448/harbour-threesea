@@ -9,8 +9,10 @@
 
 #include "callengine.h"
 #include "dtlscertificate.h"
+#include "vp8filter.h"
 #include "aec/echocanceller.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QImage>
 #include <QRegularExpression>
@@ -101,6 +103,7 @@ bool CallEngine::build(const QVariantMap &turn, bool relayOnly, int opusPayloadT
     m_pendingCandidates = pending;
     m_framesSent = 0;
     m_framesReceived = 0;
+    m_packetsReceived = 0;
     // Microphone → mono Opus, constant bitrate (Android's SdpPatcher asks for cbr=1). The
     // pulse role "phone" lets the audio policy route it like a call.
     const QString description = QStringLiteral(
@@ -148,6 +151,8 @@ bool CallEngine::build(const QVariantMap &turn, bool relayOnly, int opusPayloadT
     g_value_unset(&item);
     gst_iterator_free(sinkPads);
     m_micVolume = gst_bin_get_by_name(GST_BIN(m_pipeline), "mic");
+    // Muted while there was no pipeline yet (the TURN servers take a moment).
+    g_object_set(m_micVolume, "mute", m_muted ? TRUE : FALSE, nullptr);
     m_echoCanceller.reset(new EchoCanceller);
     GstElement *aec = gst_bin_get_by_name(GST_BIN(m_pipeline), "aec");
     GstPad *aecPad = gst_element_get_static_pad(aec, "src");
@@ -282,6 +287,7 @@ void CallEngine::addCandidate(const QVariantMap &candidate)
 
 void CallEngine::setMuted(bool muted)
 {
+    m_muted = muted;
     if (m_micVolume) {
         g_object_set(m_micVolume, "mute", muted ? TRUE : FALSE, nullptr);
     }
@@ -311,7 +317,9 @@ void CallEngine::stop()
     m_pendingChannel.clear();
     m_receivedChannel.clear();
     m_channelOpen = false;
-    // This call's DTLS private key (PEM) is not kept beyond it.
+    // Our copy of this call's DTLS private key (PEM). GStreamer's own copies (the elements' `pem`
+    // and the DTLS agents it keeps per PEM) are out of our reach and not cleared; the key is good
+    // for this call only.
     m_certificate.fill('\0');
     m_certificate.clear();
     if (!m_pipeline) {
@@ -345,6 +353,10 @@ void CallEngine::stop()
     m_pendingCandidates.clear();
     m_mids.clear();
     m_remoteFingerprint.clear();
+    // The pipeline's threads are gone. What they queued belongs to this call: an offer or error
+    // must not reach the next one, nor the manager after the user hung up.
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
+    m_remoteFramePending = false;
 }
 
 // --- GStreamer threads: hand everything over to this object's thread. ---
@@ -369,6 +381,10 @@ void CallEngine::descriptionCreated(GstPromise *promise, const char *field, cons
     gst_promise_unref(promise);
     if (!description) {
         QMetaObject::invokeMethod(this, "onError", Qt::QueuedConnection, Q_ARG(QString, type));
+        return;
+    }
+    if (!m_webrtc) {
+        gst_webrtc_session_description_free(description);
         return;
     }
     g_signal_emit_by_name(m_webrtc, "set-local-description", description, nullptr);
@@ -469,7 +485,7 @@ void CallEngine::onPadAdded(GstElement *, GstPad *pad, void *self)
         ? "queue ! rtpopusdepay ! opusdec plc=true use-inband-fec=true ! audioconvert ! audioresample "
           "! audio/x-raw,format=S16LE,channels=1,rate=48000 ! audiobuffersplit output-buffer-duration=1/100 "
           "! identity name=aecplayback ! pulsesink stream-properties=\"props,media.role=phone\""
-        : vp8 ? "queue ! rtpvp8depay ! vp8dec threads=2 ! videoconvert ! video/x-raw,format=BGRx "
+        : vp8 ? "queue ! rtpvp8depay name=depay ! vp8dec threads=2 ! videoconvert ! video/x-raw,format=BGRx "
                 "! appsink name=remotevideo emit-signals=true sync=false max-buffers=1 drop=true"
               : "fakesink";
     GError *error = nullptr;
@@ -483,6 +499,12 @@ void CallEngine::onPadAdded(GstElement *, GstPad *pad, void *self)
         GstElement *sink = gst_bin_get_by_name(GST_BIN(bin), "remotevideo");
         g_signal_connect(sink, "new-sample", G_CALLBACK(&CallEngine::onRemoteSample), engine);
         gst_object_unref(sink);
+        GstElement *depay = gst_bin_get_by_name(GST_BIN(bin), "depay");
+        GstPad *depaySrc = gst_element_get_static_pad(depay, "src");
+        gst_pad_add_probe(depaySrc, GST_PAD_PROBE_TYPE_BUFFER, reinterpret_cast<GstPadProbeCallback>(&CallEngine::onVp8Frame),
+                          new Vp8Filter, [](gpointer filter) { delete static_cast<Vp8Filter *>(filter); });
+        gst_object_unref(depaySrc);
+        gst_object_unref(depay);
     }
     if (opus) {
         GstElement *playback = gst_bin_get_by_name(GST_BIN(bin), "aecplayback");
@@ -522,6 +544,18 @@ int CallEngine::onCaptureBuffer(GstPad *, GstPadProbeInfo *info, void *self)
 int CallEngine::onMediaBuffer(GstPad *, GstPadProbeInfo *, void *self)
 {
     return static_cast<CallEngine *>(self)->m_verified ? GST_PAD_PROBE_OK : GST_PAD_PROBE_DROP;
+}
+
+int CallEngine::onNetworkBuffer(GstPad *, GstPadProbeInfo *, void *self)
+{
+    ++static_cast<CallEngine *>(self)->m_packetsReceived;
+    return GST_PAD_PROBE_OK;
+}
+
+int CallEngine::onVp8Frame(GstPad *, GstPadProbeInfo *info, void *filter)
+{
+    return static_cast<Vp8Filter *>(filter)->passes(gst_pad_probe_info_get_buffer(info)) ? GST_PAD_PROBE_OK
+                                                                                         : GST_PAD_PROBE_DROP;
 }
 
 // What is about to be played: the reference the echo is removed against.
@@ -570,11 +604,21 @@ QImage sampleImage(GstAppSink *sink)
 
 int CallEngine::onRemoteSample(GstElement *sink, void *self)
 {
-    const QImage image = sampleImage(GST_APP_SINK(sink));
-    if (!image.isNull()) {
-        QMetaObject::invokeMethod(static_cast<CallEngine *>(self), "remoteFrame", Qt::QueuedConnection,
-                                  Q_ARG(QImage, image));
+    auto *engine = static_cast<CallEngine *>(self);
+    if (engine->m_remoteFramePending.exchange(true)) {
+        // The GUI is behind: pictures must not pile up in its queue.
+        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+        if (sample) {
+            gst_sample_unref(sample);
+        }
+        return GST_FLOW_OK;
     }
+    const QImage image = sampleImage(GST_APP_SINK(sink));
+    if (image.isNull()) {
+        engine->m_remoteFramePending = false;
+        return GST_FLOW_OK;
+    }
+    QMetaObject::invokeMethod(engine, "onRemoteFrame", Qt::QueuedConnection, Q_ARG(QImage, image));
     return GST_FLOW_OK;
 }
 
@@ -704,6 +748,13 @@ void CallEngine::onElementAdded(GstBin *, GstBin *, GstElement *element, void *s
             && !g_object_get_data(G_OBJECT(candidate), "threesea-certificate")) {
             g_object_set(candidate, "pem", engine->m_certificate.constData(), nullptr);
             g_object_set_data(G_OBJECT(candidate), "threesea-certificate", GINT_TO_POINTER(1));
+            // All that comes in over the transport passes here.
+            GstPad *sink = gst_element_get_static_pad(candidate, "sink");
+            if (sink) {
+                gst_pad_add_probe(sink, static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST),
+                                  reinterpret_cast<GstPadProbeCallback>(&CallEngine::onNetworkBuffer), engine, nullptr);
+                gst_object_unref(sink);
+            }
         }
     };
     configure(element);
@@ -903,6 +954,12 @@ void CallEngine::flushChannel()
     for (const QByteArray &data : pending) {
         sendChannel(data);
     }
+}
+
+void CallEngine::onRemoteFrame(const QImage &image)
+{
+    m_remoteFramePending = false;
+    emit remoteFrame(image);
 }
 
 void CallEngine::onError(const QString &reason)

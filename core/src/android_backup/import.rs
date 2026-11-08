@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The history import job: streams chats out of the archive on a blocking thread, applies
-//! them on the core thread in bounded, fully synchronous transactions (no await between
-//! BEGIN and COMMIT: every task shares the store connection), and only marks media local
-//! once its bytes are written and authenticated. Cancellation stops between batches; done
-//! batches stay (the whole import is idempotent, so running it again resumes).
+//! them on the core thread in bounded, fully synchronous transactions (no await while one is
+//! open: every task shares the store connection), and only marks media local once its bytes are
+//! written and authenticated. Cancellation stops between batches; done batches stay (the whole
+//! import is idempotent, so running it again resumes). A store that refuses a write ends the job
+//! with its error: an archive's bad row is counted, a full disk isn't a bad row.
 
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
@@ -35,13 +36,16 @@ pub(crate) const MIGRATION_IMPORT_IDS: &str = "
     ) WITHOUT ROWID;";
 
 const BATCH: usize = 400;
-const MAX_TABLE_BYTES: usize = 64 << 20;
+/// How many left-out chats the summary names; a crafted archive could leave out thousands, and
+/// the counts hold them all.
+const MAX_LEFT_OUT_NAMED: usize = 100;
+/// How much of one table is held in memory (tests stay at what they can write quickly).
+const MAX_TABLE_BYTES: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
-/// A file message whose bytes (and keys) are applied after its row is committed.
+/// A file message whose bytes are applied after its row is committed.
 struct MediaJob {
     row: i64,
     uid: String,
-    keys: Option<convert::FileImport>,
     outgoing: bool,
 }
 
@@ -95,11 +99,32 @@ impl Family {
     }
 }
 
+/// What the archive holds beside its chats, looked up while they are imported.
+#[derive(Default)]
+struct ArchiveIndex {
+    /// Media and thumbnail entries, by family and uid.
+    media: std::collections::HashMap<(&'static str, String), String>,
+    thumbnails: std::collections::HashMap<(&'static str, String), String>,
+    /// People whose key in the archive differs from the one stored here. The archive may be old
+    /// or wrong about them, so nothing it says in their name goes into their chat, groups or
+    /// messages here.
+    other_key: std::collections::HashSet<String>,
+}
+
 /// One chat file of the archive, resolved to a local conversation.
 struct ChatPlan {
     entry: String,
     conversation: String,
     family: Family,
+}
+
+/// A chat the import left out, for the result page. Why: `notHere`, `tooLarge`, `damaged`,
+/// `otherKey`.
+#[derive(serde::Serialize)]
+pub struct LeftOutChat {
+    pub conversation: String,
+    pub name: String,
+    pub reason: &'static str,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -108,6 +133,17 @@ pub struct Summary {
     pub chats: usize,
     /// Chat files whose conversation is not on this device (metadata import pending).
     pub skipped_chats: usize,
+    /// Chat files beyond what is read into memory: left out, the rest of the archive goes on.
+    pub too_large_chats: usize,
+    /// Chat files that fail authentication or aren't text: left out as a whole, the rest goes on.
+    pub damaged_chats: usize,
+    /// Which chats those are, as far as they have a name. A private chat is never named here: the
+    /// page shows while the private chats may be hidden, and only the core knows them.
+    pub left_out_chats: Vec<LeftOutChat>,
+    /// Chats of contacts whose key in the archive differs from the one stored here: left out.
+    pub key_conflict_chats: usize,
+    /// Group messages and reactions in the name of such a contact: left out.
+    pub key_conflict_rows: usize,
     pub imported: usize,
     pub existing: usize,
     /// Same message id from a different group sender: reported, neither record touched.
@@ -125,9 +161,83 @@ pub struct Summary {
     pub media_failed: usize,
     pub reactions: usize,
     pub reactions_unmatched: usize,
+    /// Reaction files over the memory bound or damaged: unread, the import is done without them.
+    pub reaction_files_left_out: usize,
     /// Poll messages imported with their poll (also counted in `imported`).
     pub polls: usize,
+    /// Rows whose `uid` another chat of the same kind in this archive already holds. Android's
+    /// uids are unique, so something copied a chat file: a hint, see [`CrossChecks`].
+    pub uid_conflicts: usize,
+    /// Group chats whose incoming rows mostly come from people outside the group: a hint too.
+    pub foreign_group_chats: usize,
     pub cancelled: bool,
+}
+
+/// Fewest incoming rows for a verdict on who wrote a group chat: a short chat may simply be
+/// the words of someone who left.
+const MIN_ROWS_FOR_SENDER_CHECK: usize = 10;
+
+/// Hints that an archive's files were moved around. Neither the entry names nor the set of
+/// entries are authenticated (docs/android-backup-design.md), and these only notice the crude
+/// cases: no hint means nothing, and a hint doesn't stop the import. Uids are kept as hashes, so
+/// the memory stays small however many rows pass by.
+#[derive(Default)]
+struct CrossChecks {
+    hasher: std::hash::RandomState,
+    owners: std::collections::HashMap<u64, usize>,
+}
+
+impl CrossChecks {
+    /// How many of a chat's rows carry a uid another chat of the family already holds.
+    fn claimed_elsewhere(
+        &mut self,
+        chat: usize,
+        family: Family,
+        messages: &[records::Message],
+    ) -> usize {
+        use std::hash::BuildHasher as _;
+        messages
+            .iter()
+            .filter(|message| {
+                let uid = self.hasher.hash_one((family.name(), &message.uid));
+                *self.owners.entry(uid).or_insert(chat) != chat
+            })
+            .count()
+    }
+}
+
+/// Whether most incoming rows come from people outside the group as it stands. People who left
+/// count as outside, which is why only a majority is worth a hint. The user's own rows are not
+/// incoming, even where Android writes the user's ID into them (polls), and the member list
+/// doesn't hold the user. A set, because the core thread runs this and a file decides both sizes.
+fn mostly_from_non_members(
+    members: &[String],
+    creator: &str,
+    messages: &[records::Message],
+) -> bool {
+    let members: std::collections::HashSet<&str> = members.iter().map(String::as_str).collect();
+    let (mut incoming, mut foreign) = (0, 0);
+    for sender in messages
+        .iter()
+        .filter(|message| !message.outgoing)
+        .filter_map(|message| message.sender.as_deref())
+    {
+        incoming += 1;
+        if sender != creator && !members.contains(sender) {
+            foreign += 1;
+        }
+    }
+    incoming >= MIN_ROWS_FOR_SENDER_CHECK && foreign * 2 > incoming
+}
+
+/// What the blocking thread brings back from opening the archive.
+struct OpenedArchive {
+    archive: Archive,
+    source: String,
+    contacts: Vec<records::Contact>,
+    groups: Vec<records::Group>,
+    polls: ArchivePolls,
+    invalid_polls: usize,
 }
 
 /// Everything the job owns (nothing borrows the [`crate::app::App`]).
@@ -153,12 +263,22 @@ impl HistoryImport {
             Ok(summary) => {
                 tracing::info!(
                     chats = summary.chats,
+                    skipped = summary.skipped_chats,
+                    too_large = summary.too_large_chats,
+                    damaged = summary.damaged_chats,
+                    key_conflicts = summary.key_conflict_chats + summary.key_conflict_rows,
+                    invalid_rows = summary.invalid_rows,
                     imported = summary.imported,
                     existing = summary.existing,
                     media = summary.media_files,
                     cancelled = summary.cancelled,
                     "Android history import finished"
                 );
+                if !summary.cancelled {
+                    let _ = self
+                        .store
+                        .delete_setting(crate::store::keys::DATA_IMPORT_UNFINISHED);
+                }
                 // The lists rebuild from scratch: an import is a bulk change, not a stream of
                 // messageAdded events.
                 self.emit(json!({ "event": "chatsChanged" }));
@@ -187,34 +307,58 @@ impl HistoryImport {
         let password = self.password.clone();
         let own_id = self.me.clone();
         let own_key = self.own_public_key.clone();
-        // Open, gate and fingerprint on the blocking thread; the archive moves back and
-        // forth between the threads from here on.
-        let (mut archive, source) =
-            tokio::task::spawn_blocking(move || -> Result<(Archive, String), ApiError> {
-                let mut archive = Archive::open(&path, &password)?;
-                let _version = super::read_version(&mut archive)?;
-                let encrypted = super::read_identity_backup(&mut archive)?;
-                let (_, identity) =
-                    libthreema::id_backup::decrypt_identity_backup(&password, &encrypted)
-                        .map_err(|_| ApiError::BackupDecrypt)?;
-                if identity.threema_id.to_string() != own_id
-                    || identity.client_key.public_key().to_string() != own_key
-                {
-                    return Err(ApiError::BackupOtherIdentity);
-                }
-                let fingerprint = fingerprint_file(&path)?;
-                Ok((archive, fingerprint))
+        // Open, gate, fingerprint and read the small tables on the blocking thread; the archive
+        // moves back and forth between the threads from here on. Tables are read and parsed
+        // there too: the core thread keeps serving commands and the connection.
+        let opened = tokio::task::spawn_blocking(move || -> Result<OpenedArchive, ApiError> {
+            let mut archive = Archive::open(&path, &password)?;
+            let _version = super::read_version(&mut archive)?;
+            let encrypted = super::read_identity_backup(&mut archive)?;
+            let (_, identity) =
+                libthreema::id_backup::decrypt_identity_backup(&password, &encrypted)
+                    .map_err(|_| ApiError::BackupDecrypt)?;
+            if identity.threema_id.to_string() != own_id
+                || identity.client_key.public_key().to_string() != own_key
+            {
+                return Err(ApiError::BackupOtherIdentity);
+            }
+            let source = fingerprint_file(&path)?;
+            let contacts = optional_table(&mut archive, "contacts.csv")?
+                .map(|table| records::contacts(&table).0)
+                .unwrap_or_default();
+            let groups = optional_table(&mut archive, "groups.csv")?
+                .map(|table| records::groups(&table).0)
+                .unwrap_or_default();
+            let (polls, invalid_polls) = read_polls(&mut archive)?;
+            Ok(OpenedArchive {
+                archive,
+                source,
+                contacts,
+                groups,
+                polls,
+                invalid_polls,
             })
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))??;
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))??;
+        let OpenedArchive {
+            mut archive,
+            source,
+            contacts,
+            groups,
+            polls,
+            invalid_polls,
+        } = opened;
 
-        let mut summary = Summary::default();
+        let mut summary = Summary {
+            invalid_rows: invalid_polls,
+            ..Summary::default()
+        };
 
         // Resolve every chat file to a local conversation; media/thumbnail presence by uid.
-        let (plans, media_entries, thumbnail_entries) =
-            self.plan_chats(&mut archive, &mut summary)?;
-        let polls = read_polls(&mut archive, &mut summary)?;
+        let (plans, index) = self.plan_chats(&archive, contacts, &groups, &mut summary)?;
         let total = plans.len();
+        let mut checks = CrossChecks::default();
 
         for (done, plan) in plans.into_iter().enumerate() {
             if self.cancel.get() {
@@ -229,21 +373,52 @@ impl HistoryImport {
                 "imported": summary.imported,
             }));
             let entry = plan.entry.clone();
-            let (returned, text) = tokio::task::spawn_blocking(
-                move || -> Result<(Archive, Zeroizing<String>), ArchiveError> {
-                    let text = archive.read_text(&entry, MAX_TABLE_BYTES)?;
-                    Ok((archive, text))
-                },
-            )
+            let (returned, parsed) = tokio::task::spawn_blocking(move || {
+                let parsed = archive.read_table(&entry, MAX_TABLE_BYTES).map(|table| {
+                    let (mut messages, invalid) = records::messages(&table);
+                    // Oldest first, deterministic ties: placement needs ascending times.
+                    messages.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.uid.cmp(&b.uid)));
+                    (messages, invalid)
+                });
+                (archive, parsed)
+            })
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))??;
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
             archive = returned;
-            let table = super::csv::Table::parse(&text);
-            let (mut messages, invalid) = records::messages(&table);
-            drop(text);
+            let (messages, invalid) = match parsed {
+                Ok(parsed) => parsed,
+                // Every run would stop at this chat, with the later ones and all reactions behind
+                // it: it is left out and reported, the memory bound stays.
+                Err(ArchiveError::TooLarge) => {
+                    summary.too_large_chats += 1;
+                    self.name_left_out(&plan.conversation, None, "tooLarge", &mut summary);
+                    continue;
+                }
+                // The entry is read to its end first, so none of it went in. The same place
+                // would end every run: an altered or damaged file costs this chat, and says so.
+                Err(
+                    ArchiveError::Corrupt(_)
+                    | ArchiveError::Invalid(_)
+                    | ArchiveError::WrongPassword,
+                ) => {
+                    summary.damaged_chats += 1;
+                    self.name_left_out(&plan.conversation, None, "damaged", &mut summary);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             summary.invalid_rows += invalid;
-            // Oldest first, deterministic ties: placement needs ascending times.
-            messages.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.uid.cmp(&b.uid)));
+            summary.uid_conflicts += checks.claimed_elsewhere(done, plan.family, &messages);
+            if plan.family == Family::Group
+                && let Ok(Some(group)) = self.store.group(&plan.conversation)
+                && mostly_from_non_members(
+                    &group.members,
+                    &group.identity.creator_identity.to_string(),
+                    &messages,
+                )
+            {
+                summary.foreign_group_chats += 1;
+            }
 
             archive = self
                 .import_chat(
@@ -251,8 +426,7 @@ impl HistoryImport {
                     &plan,
                     &source,
                     messages,
-                    &media_entries,
-                    &thumbnail_entries,
+                    &index,
                     &polls,
                     &mut summary,
                 )
@@ -260,65 +434,119 @@ impl HistoryImport {
             summary.chats += 1;
         }
 
-        if !summary.cancelled {
-            archive = self.import_reactions(archive, &mut summary).await?;
+        // Once per archive: reactions removed or changed here since stay so when it's imported
+        // again (the rows themselves never come twice either).
+        let reactions_done = format!("android_import_reactions_done:{source}");
+        if !summary.cancelled && self.store.setting(&reactions_done)?.is_none() {
+            archive = self.import_reactions(archive, &index, &mut summary).await?;
+            if !summary.cancelled {
+                self.store.set_setting(&reactions_done, "1")?;
+            }
         }
         drop(archive);
         // Partially written media without a committed row are removed like other orphans.
-        let store = Rc::clone(&self.store);
-        self.media
-            .remove_orphans(move |id| store.message_exists(id).unwrap_or(true));
+        MediaStore::remove_orphans_in_steps(&self.media, |id| {
+            self.store.message_exists(id).unwrap_or(true)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
         Ok(summary)
     }
 
+    /// Note which chat was left out: by its name here, else the one the archive gives it.
+    fn name_left_out(
+        &self,
+        conversation: &str,
+        archive_name: Option<&str>,
+        reason: &'static str,
+        summary: &mut Summary,
+    ) {
+        if summary.left_out_chats.len() >= MAX_LEFT_OUT_NAMED
+            || self.store.is_private(conversation).unwrap_or(true)
+        {
+            return;
+        }
+        let stored = if crate::groups::parse_key(conversation).is_some() {
+            self.store
+                .group(conversation)
+                .ok()
+                .flatten()
+                .map(|group| group.name)
+        } else if conversation.starts_with("d:") {
+            self.store
+                .distribution_list(conversation)
+                .ok()
+                .flatten()
+                .map(|list| list.name)
+        } else {
+            let contact = self.store.contact(conversation).ok().flatten();
+            Some(contact.map_or_else(
+                || conversation.to_owned(),
+                |contact| crate::contacts::display_name(&contact),
+            ))
+        };
+        let name = stored.or_else(|| archive_name.map(str::to_owned));
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            summary.left_out_chats.push(LeftOutChat {
+                conversation: conversation.to_owned(),
+                name,
+                reason,
+            });
+        }
+    }
+
     /// Chat files resolved to local conversations, plus which uids have media/thumbnails.
-    #[allow(clippy::type_complexity)]
     fn plan_chats(
         &self,
-        archive: &mut Archive,
+        archive: &Archive,
+        contacts: Vec<records::Contact>,
+        groups: &[records::Group],
         summary: &mut Summary,
-    ) -> Result<
-        (
-            Vec<ChatPlan>,
-            std::collections::HashMap<(&'static str, String), String>,
-            std::collections::HashMap<(&'static str, String), String>,
-        ),
-        crate::app::ApiError,
-    > {
+    ) -> Result<(Vec<ChatPlan>, ArchiveIndex), StoreError> {
+        let stored_keys: std::collections::HashMap<String, Vec<u8>> = self
+            .store
+            .contacts()?
+            .iter()
+            .map(|contact| {
+                (
+                    contact.identity.to_string(),
+                    crate::contacts::hex_bytes(&contact.public_key.to_string()),
+                )
+            })
+            .collect();
+        let mut index = ArchiveIndex::default();
         // Alias maps from the metadata CSVs (the metadata import must have run: chats whose
         // conversation is missing are counted and skipped, nothing is created here).
         let mut contact_alias = std::collections::HashMap::new();
-        if archive.has_entry("contacts.csv") {
-            let text = archive.read_text("contacts.csv", MAX_TABLE_BYTES)?;
-            let (contacts, _) = records::contacts(&super::csv::Table::parse(&text));
-            for contact in contacts {
-                let alias = contact
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| contact.identity.clone());
-                contact_alias.insert(alias, contact.identity.clone());
-                contact_alias.insert(contact.identity.clone(), contact.identity);
+        for contact in contacts {
+            if stored_keys
+                .get(&contact.identity)
+                .is_some_and(|key| key.as_slice() != contact.public_key)
+            {
+                index.other_key.insert(contact.identity.clone());
             }
+            let alias = contact
+                .alias
+                .clone()
+                .unwrap_or_else(|| contact.identity.clone());
+            contact_alias.insert(alias, contact.identity.clone());
+            contact_alias.insert(contact.identity.clone(), contact.identity);
         }
         let mut group_alias = std::collections::HashMap::new();
-        if archive.has_entry("groups.csv") {
-            let text = archive.read_text("groups.csv", MAX_TABLE_BYTES)?;
-            let (groups, _) = records::groups(&super::csv::Table::parse(&text));
-            for group in &groups {
-                if let Ok(creator) = group.creator.parse() {
-                    let key = crate::groups::key(&libthreema::common::GroupIdentity {
-                        creator_identity: creator,
-                        group_id: group.group_id,
-                    });
-                    for alias in group.aliases() {
-                        group_alias.insert(alias, key.clone());
-                    }
+        let mut group_names = std::collections::HashMap::new();
+        for group in groups {
+            if let Ok(creator) = group.creator.parse() {
+                let key = crate::groups::key(&libthreema::common::GroupIdentity {
+                    creator_identity: creator,
+                    group_id: group.group_id,
+                });
+                group_names.insert(key.clone(), group.name.as_str());
+                for alias in group.aliases() {
+                    group_alias.insert(alias, key.clone());
                 }
             }
         }
         let mut plans = Vec::new();
-        let mut media = std::collections::HashMap::new();
-        let mut thumbnails = std::collections::HashMap::new();
         for entry in archive.entries() {
             let (family, conversation) = match &entry.kind {
                 EntryKind::ContactMessages(alias) => {
@@ -333,27 +561,39 @@ impl HistoryImport {
                         .map(|id| format!("d:{:016x}", id.cast_unsigned())),
                 ),
                 EntryKind::ContactMedia(uid) => {
-                    media.insert(("contact", uid.clone()), entry.name.clone());
+                    index
+                        .media
+                        .insert(("contact", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::GroupMedia(uid) => {
-                    media.insert(("group", uid.clone()), entry.name.clone());
+                    index
+                        .media
+                        .insert(("group", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::ListMedia(uid) => {
-                    media.insert(("list", uid.clone()), entry.name.clone());
+                    index
+                        .media
+                        .insert(("list", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::ContactThumbnail(uid) => {
-                    thumbnails.insert(("contact", uid.clone()), entry.name.clone());
+                    index
+                        .thumbnails
+                        .insert(("contact", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::GroupThumbnail(uid) => {
-                    thumbnails.insert(("group", uid.clone()), entry.name.clone());
+                    index
+                        .thumbnails
+                        .insert(("group", uid.clone()), entry.name.clone());
                     continue;
                 }
                 EntryKind::ListThumbnail(uid) => {
-                    thumbnails.insert(("list", uid.clone()), entry.name.clone());
+                    index
+                        .thumbnails
+                        .insert(("list", uid.clone()), entry.name.clone());
                     continue;
                 }
                 _ => continue,
@@ -364,15 +604,25 @@ impl HistoryImport {
                 Family::List => self.store.distribution_list(key).ok().flatten().is_some(),
             };
             match conversation {
+                Some(key) if family == Family::Contact && index.other_key.contains(&key) => {
+                    summary.key_conflict_chats += 1;
+                    self.name_left_out(&key, None, "otherKey", summary);
+                }
                 Some(key) if exists(&key) => plans.push(ChatPlan {
                     entry: entry.name.clone(),
                     conversation: key,
                     family,
                 }),
-                _ => summary.skipped_chats += 1,
+                conversation => {
+                    summary.skipped_chats += 1;
+                    if let Some(key) = conversation {
+                        let name = group_names.get(&key).copied();
+                        self.name_left_out(&key, name, "notHere", summary);
+                    }
+                }
             }
         }
-        Ok((plans, media, thumbnails))
+        Ok((plans, index))
     }
 
     /// Insert one chat's rows in bounded transactions, then its media.
@@ -383,8 +633,7 @@ impl HistoryImport {
         plan: &ChatPlan,
         source: &str,
         messages: Vec<records::Message>,
-        media_entries: &std::collections::HashMap<(&'static str, String), String>,
-        thumbnail_entries: &std::collections::HashMap<(&'static str, String), String>,
+        index: &ArchiveIndex,
         polls: &ArchivePolls,
         summary: &mut Summary,
     ) -> Result<Archive, crate::app::ApiError> {
@@ -397,29 +646,22 @@ impl HistoryImport {
                 summary.cancelled = true;
                 break;
             }
-            // Fully synchronous from BEGIN to COMMIT: the connection is shared with live
-            // work, so no await may interleave while a transaction is open.
-            self.store
-                .conn
-                .execute_batch("BEGIN IMMEDIATE")
-                .map_err(StoreError::from)?;
+            // Fully synchronous within the step: the connection is shared with live work, so no
+            // await may interleave while a transaction is open. An error undoes the batch.
+            let step = self.store.step()?;
             for message in chunk {
                 self.import_message(
                     plan,
                     source,
                     message,
                     &mut placer,
-                    media_entries,
-                    thumbnail_entries,
+                    index,
                     polls,
                     &mut media_jobs,
                     summary,
-                );
+                )?;
             }
-            self.store
-                .conn
-                .execute_batch("COMMIT")
-                .map_err(StoreError::from)?;
+            step.commit()?;
             tokio::task::yield_now().await;
         }
 
@@ -440,26 +682,11 @@ impl HistoryImport {
                     "mediaFiles": summary.media_files,
                 }));
             }
-            if let Some(keys) = &job.keys
-                && let Some(key_bytes) = keys.key
-            {
-                let _ = self.store.set_file_keys(
-                    job.row,
-                    &crate::media::FileKeys {
-                        key: Zeroizing::new(key_bytes),
-                        blob_id: keys.blob_id.map(libthreema::common::BlobId),
-                        thumbnail_blob_id: None,
-                    },
-                );
-            }
             for (part, entries) in [
-                (MediaPart::File, media_entries),
-                (MediaPart::Thumbnail, thumbnail_entries),
+                (MediaPart::File, &index.media),
+                (MediaPart::Thumbnail, &index.thumbnails),
             ] {
                 let Some(entry) = entries.get(&(plan.family.name(), job.uid.clone())) else {
-                    if part == MediaPart::File {
-                        summary.media_missing += 1;
-                    }
                     continue;
                 };
                 let name = entry.clone();
@@ -479,15 +706,11 @@ impl HistoryImport {
                 archive = returned;
                 match written {
                     Ok(()) => {
-                        let _ = self.store.set_media_state(
-                            job.row,
-                            part,
-                            crate::app_media::STATE_LOCAL,
-                        );
+                        self.store
+                            .set_media_state(job.row, part, crate::app_media::STATE_LOCAL)?;
                         if job.outgoing {
-                            let _ = self
-                                .store
-                                .set_upload_state(job.row, crate::app_media::STATE_LOCAL);
+                            self.store
+                                .set_upload_state(job.row, crate::app_media::STATE_LOCAL)?;
                         }
                         if part == MediaPart::File {
                             summary.media_files += 1;
@@ -514,12 +737,11 @@ impl HistoryImport {
         source: &str,
         message: &records::Message,
         placer: &mut Placer,
-        media_entries: &std::collections::HashMap<(&'static str, String), String>,
-        thumbnail_entries: &std::collections::HashMap<(&'static str, String), String>,
+        index: &ArchiveIndex,
         polls: &ArchivePolls,
         media_jobs: &mut Vec<MediaJob>,
         summary: &mut Summary,
-    ) {
+    ) -> Result<(), StoreError> {
         let key = &plan.conversation;
         let mut converted = convert::convert(message);
         // Polls: the message row only points at `ballot.csv`; the state comes from there.
@@ -545,7 +767,7 @@ impl HistoryImport {
             } => (kind, body, file, compat),
             convert::Converted::Unsupported(category) => {
                 *summary.unsupported.entry(category).or_default() += 1;
-                return;
+                return Ok(());
             }
         };
         if let Some(compat) = compat {
@@ -553,34 +775,26 @@ impl HistoryImport {
         }
         let message_id = match message.api_id {
             Some(id) => id,
-            None => match self.store.android_import_message_id(
+            None => self.store.android_import_message_id(
                 source,
                 plan.family.name(),
                 key,
                 &message.uid,
-            ) {
-                Ok(id) => id,
-                Err(_) => {
-                    summary.invalid_rows += 1;
-                    return;
-                }
-            },
+            )?,
         };
         // Availability of file content reflects the archive, not Android's stale flag.
-        let has_media = media_entries.contains_key(&(plan.family.name(), message.uid.clone()));
-        let has_thumbnail =
-            thumbnail_entries.contains_key(&(plan.family.name(), message.uid.clone()));
+        let has_media = index
+            .media
+            .contains_key(&(plan.family.name(), message.uid.clone()));
+        let has_thumbnail = index
+            .thumbnails
+            .contains_key(&(plan.family.name(), message.uid.clone()));
         if kind == "file" {
             let mut value: Value = serde_json::from_str(&body).unwrap_or_default();
-            let keys_present = file
-                .as_ref()
-                .is_some_and(|f| f.key.is_some() && f.blob_id.is_some());
-            let remote_or_failed = if keys_present {
-                crate::app_media::STATE_REMOTE
-            } else {
-                crate::app_media::STATE_FAILED
-            };
-            value["fileState"] = remote_or_failed.into();
+            // Failed until the media job has written the bytes; not "on the server", which would
+            // send every old file of a backup without media to the blob server by itself. A tap
+            // still tries, with the blob key kept from the backup.
+            value["fileState"] = crate::app_media::STATE_FAILED.into();
             value["thumbnail"] = has_thumbnail.into();
             value["thumbnailState"] = crate::app_media::STATE_FAILED.into();
             if message.outgoing {
@@ -590,10 +804,14 @@ impl HistoryImport {
         }
         let sender = match plan.family {
             Family::Group if !message.outgoing => match &message.sender {
+                Some(sender) if index.other_key.contains(sender) => {
+                    summary.key_conflict_rows += 1;
+                    return Ok(());
+                }
                 Some(sender) => Some(sender.clone()),
                 None => {
                     summary.invalid_rows += 1;
-                    return;
+                    return Ok(());
                 }
             },
             _ => None,
@@ -613,7 +831,10 @@ impl HistoryImport {
                             OutgoingState::Delivered as i64
                         }
                     }
-                    _ => OutgoingState::Read as i64,
+                    "READ" | "CONSUMED" => OutgoingState::Read as i64,
+                    // Empty on Android's status rows, or a name this format didn't know yet:
+                    // nothing says the recipient got it, only that it left.
+                    _ => OutgoingState::Sent as i64,
                 }
             }
         } else if message.read {
@@ -640,48 +861,52 @@ impl HistoryImport {
             read_at: message.read_at,
             received_at: None,
             sort_key,
-        });
+        })?;
         let row = match inserted {
-            Ok(Some(row)) => row,
-            Ok(None) => {
+            Some(row) => row,
+            None => {
                 // Already here: a live row or an earlier run. The existing row wins; a group
                 // row from a different sender is a real collision and reported.
-                match self.store.message_by_id(key, message.outgoing, message_id) {
-                    Ok(Some(existing)) => {
+                match self
+                    .store
+                    .message_by_id(key, message.outgoing, message_id)?
+                {
+                    Some(existing) => {
                         if sender.is_some() && existing.sender != sender {
                             summary.collisions += 1;
                         } else {
                             summary.existing += 1;
-                            // Repair pass: an interrupted earlier run may have the row
-                            // without its media. Bytes already stored stay untouched (and
-                            // uncounted), so importing again moves no media.
-                            if kind == "file" && (has_media || has_thumbnail) {
+                            // Repair pass: an earlier run may have left the row without what
+                            // came after it. Keys and bytes already stored stay untouched (and
+                            // uncounted), so importing again moves no media. A row that isn't a
+                            // file (any more) gets nothing: a deleted message stays deleted.
+                            if kind == "file" && existing.kind == "file" {
+                                if self.store.file_keys(existing.id)?.is_none() {
+                                    self.keep_file_keys(existing.id, file.as_ref())?;
+                                }
                                 let stored: Value =
                                     serde_json::from_str(&existing.body).unwrap_or_default();
                                 let local = |part: &str| {
                                     stored[part].as_i64() == Some(crate::app_media::STATE_LOCAL)
                                 };
+                                summary.media_missing +=
+                                    usize::from(!has_media && !local("fileState"));
                                 if (has_media && !local("fileState"))
                                     || (has_thumbnail && !local("thumbnailState"))
                                 {
                                     media_jobs.push(MediaJob {
                                         row: existing.id,
                                         uid: message.uid.clone(),
-                                        keys: file,
                                         outgoing: message.outgoing,
                                     });
                                 }
-                                return;
                             }
                         }
                     }
-                    _ => summary.existing += 1,
+                    // Not added, and not here: nothing the store can name, but it isn't imported.
+                    None => summary.invalid_rows += 1,
                 }
-                return;
-            }
-            Err(_) => {
-                summary.invalid_rows += 1;
-                return;
+                return Ok(());
             }
         };
         summary.imported += 1;
@@ -689,25 +914,60 @@ impl HistoryImport {
             summary.polls += 1;
             // Only the poll itself is the target of later votes and its closing.
             if kind == "poll" {
-                let _ = self.store.register_poll(key, creator, *poll_id, row);
+                self.store.register_poll(key, creator, *poll_id, row)?;
             }
         }
-        if kind == "file" && (has_media || has_thumbnail || file.is_some()) {
-            media_jobs.push(MediaJob {
-                row,
-                uid: message.uid.clone(),
-                keys: file,
-                outgoing: message.outgoing,
-            });
+        if kind == "file" {
+            // With the row, in its transaction: a stop or a kill before the media come must not
+            // leave a file nothing can fetch any more.
+            self.keep_file_keys(row, file.as_ref())?;
+            summary.media_missing += usize::from(!has_media);
+            if has_media || has_thumbnail {
+                media_jobs.push(MediaJob {
+                    row,
+                    uid: message.uid.clone(),
+                    outgoing: message.outgoing,
+                });
+            }
         }
         if kind != "deleted" {
-            self.apply_thumbs(key, row, message);
+            self.apply_thumbs(key, row, message, index, summary)?;
         }
+        Ok(())
+    }
+
+    /// The blob key a backup row brings, if it brings one.
+    fn keep_file_keys(
+        &self,
+        row: i64,
+        file: Option<&convert::FileImport>,
+    ) -> Result<(), StoreError> {
+        let Some(file) = file else {
+            return Ok(());
+        };
+        let Some(key) = &file.key else {
+            return Ok(());
+        };
+        self.store.set_file_keys(
+            row,
+            &crate::media::FileKeys {
+                key: key.clone(),
+                blob_id: file.blob_id.map(libthreema::common::BlobId),
+                thumbnail_blob_id: None,
+            },
+        )
     }
 
     /// Android's thumbs: 1:1 USERACK/USERDEC and the per-member `g_msg_states`, as reactions
     /// (`RestoreService.createReactionForStateName`).
-    fn apply_thumbs(&self, _key: &str, row: i64, message: &records::Message) {
+    fn apply_thumbs(
+        &self,
+        _key: &str,
+        row: i64,
+        message: &records::Message,
+        index: &ArchiveIndex,
+        summary: &mut Summary,
+    ) -> Result<(), StoreError> {
         let at = message.modified_at.unwrap_or(message.at);
         let emoji_for = |state: &str| match state {
             "USERACK" => Some("\u{1F44D}"),
@@ -722,25 +982,31 @@ impl HistoryImport {
                 String::new()
             };
             if crate::groups::parse_key(_key).is_none() {
-                let _ = self.store.set_reaction(row, &sender, emoji, true, at);
+                self.store.add_imported_reaction(row, &sender, emoji, at)?;
             }
         }
         for (member, state) in &message.group_states {
             if let Some(emoji) = emoji_for(state) {
+                if index.other_key.contains(member) {
+                    summary.key_conflict_rows += 1;
+                    continue;
+                }
                 let sender = if *member == self.me {
                     ""
                 } else {
                     member.as_str()
                 };
-                let _ = self.store.set_reaction(row, sender, emoji, true, at);
+                self.store.add_imported_reaction(row, sender, emoji, at)?;
             }
         }
+        Ok(())
     }
 
     /// `contact_reactions.csv` and `group_reactions.csv` (format 26+).
     async fn import_reactions(
         &self,
         mut archive: Archive,
+        index: &ArchiveIndex,
         summary: &mut Summary,
     ) -> Result<Archive, crate::app::ApiError> {
         for (entry, group) in [
@@ -751,16 +1017,29 @@ impl HistoryImport {
                 continue;
             }
             let name = entry.to_owned();
-            let (returned, text) = tokio::task::spawn_blocking(
-                move || -> Result<(Archive, Zeroizing<String>), ArchiveError> {
-                    let text = archive.read_text(&name, MAX_TABLE_BYTES)?;
-                    Ok((archive, text))
-                },
-            )
+            let (returned, parsed) = tokio::task::spawn_blocking(move || {
+                let parsed = archive
+                    .read_table(&name, MAX_TABLE_BYTES)
+                    .map(|table| records::reactions(&table, group));
+                (archive, parsed)
+            })
             .await
-            .map_err(|e| crate::app::ApiError::Internal(e.to_string()))??;
+            .map_err(|e| crate::app::ApiError::Internal(e.to_string()))?;
             archive = returned;
-            let (reactions, invalid) = records::reactions(&super::csv::Table::parse(&text), group);
+            let (reactions, invalid) = match parsed {
+                Ok(parsed) => parsed,
+                // After all the chats: it must not cost the summary of what arrived.
+                Err(
+                    ArchiveError::TooLarge
+                    | ArchiveError::Corrupt(_)
+                    | ArchiveError::Invalid(_)
+                    | ArchiveError::WrongPassword,
+                ) => {
+                    summary.reaction_files_left_out += 1;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             summary.invalid_rows += invalid;
             for chunk in reactions.chunks(BATCH) {
                 if self.cancel.get() {
@@ -768,6 +1047,15 @@ impl HistoryImport {
                     return Ok(archive);
                 }
                 for reaction in chunk {
+                    if index.other_key.contains(&reaction.sender)
+                        || reaction
+                            .contact
+                            .as_ref()
+                            .is_some_and(|contact| index.other_key.contains(contact))
+                    {
+                        summary.key_conflict_rows += 1;
+                        continue;
+                    }
                     let conversation = match (&reaction.contact, &reaction.group) {
                         (Some(contact), _) => contact.clone(),
                         (_, Some((creator, id))) => match creator.parse() {
@@ -786,11 +1074,11 @@ impl HistoryImport {
                     };
                     let mut row = None;
                     for outgoing in [false, true] {
-                        if let Ok(Some(message)) = self.store.message_by_id(
+                        if let Some(message) = self.store.message_by_id(
                             &conversation,
                             outgoing,
                             reaction.api_message_id,
-                        ) {
+                        )? {
                             if message.kind != "deleted" {
                                 row = Some(message.id);
                             }
@@ -804,17 +1092,14 @@ impl HistoryImport {
                             } else {
                                 reaction.sender.as_str()
                             };
-                            if self
-                                .store
-                                .set_reaction(
-                                    row,
-                                    sender,
-                                    &reaction.emoji,
-                                    true,
-                                    reaction.reacted_at,
-                                )
-                                .is_ok()
-                            {
+                            if !crate::reactions::is_emoji(&reaction.emoji) {
+                                summary.reactions_unmatched += 1;
+                            } else if self.store.add_imported_reaction(
+                                row,
+                                sender,
+                                &reaction.emoji,
+                                reaction.reacted_at,
+                            )? {
                                 summary.reactions += 1;
                             }
                         }
@@ -828,27 +1113,29 @@ impl HistoryImport {
     }
 }
 
-/// `ballot*.csv`, if present (small: read on the core thread like the metadata tables).
-fn read_polls(
+/// A table the format allows to be absent.
+fn optional_table(
     archive: &mut Archive,
-    summary: &mut Summary,
-) -> Result<ArchivePolls, crate::app::ApiError> {
-    if !archive.has_entry("ballot.csv") {
-        return Ok(ArchivePolls::default());
+    name: &str,
+) -> Result<Option<super::csv::Table>, ArchiveError> {
+    if !archive.has_entry(name) {
+        return Ok(None);
     }
-    let mut table = |name: &str| -> Result<Option<super::csv::Table>, ArchiveError> {
-        if !archive.has_entry(name) {
-            return Ok(None);
-        }
-        let text = archive.read_text(name, MAX_TABLE_BYTES)?;
-        Ok(Some(super::csv::Table::parse(&text)))
+    archive.read_table(name, MAX_TABLE_BYTES).map(Some)
+}
+
+/// `ballot*.csv`, if present, and how many of their rows were unreadable.
+fn read_polls(archive: &mut Archive) -> Result<(ArchivePolls, usize), ArchiveError> {
+    let Some(ballots) = optional_table(archive, "ballot.csv")? else {
+        return Ok((ArchivePolls::default(), 0));
     };
-    let ballots = table("ballot.csv")?.unwrap_or_else(|| super::csv::Table::parse(""));
-    let choices = table("ballot_choice.csv")?;
-    let votes = table("ballot_vote.csv")?;
-    let (polls, invalid) = ArchivePolls::read(&ballots, choices.as_ref(), votes.as_ref());
-    summary.invalid_rows += invalid;
-    Ok(polls)
+    let choices = optional_table(archive, "ballot_choice.csv")?;
+    let votes = optional_table(archive, "ballot_vote.csv")?;
+    Ok(ArchivePolls::read(
+        &ballots,
+        choices.as_ref(),
+        votes.as_ref(),
+    ))
 }
 
 /// SHA-256 of the archive file, streamed: the stable fingerprint synthetic ids are keyed by.
@@ -858,4 +1145,32 @@ fn fingerprint_file(path: &std::path::Path) -> Result<String, ArchiveError> {
     let mut hasher = sha2::Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
     Ok(data_encoding::HEXLOWER.encode(&hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mostly_from_non_members, records};
+    use crate::android_backup::csv::{Table, write_row};
+
+    #[test]
+    fn the_sender_check_stays_linear() {
+        // As many members as rows, nobody matching: comparing each pair took many minutes.
+        const SIZE: usize = 300_000;
+        let members: Vec<String> = (0..SIZE).map(|i| format!("M{i:07}")).collect();
+        let mut text = write_row(&["uid", "identity", "isoutbox", "type", "body", "posted_at"]);
+        for i in 0..SIZE {
+            let uid = i.to_string();
+            let sender = format!("S{i:07}");
+            text.push_str(&write_row(&[&uid, &sender, "0", "TEXT", "", "1"]));
+        }
+        let (messages, invalid) = records::messages(&Table::parse(&text).unwrap());
+        assert_eq!((messages.len(), invalid), (SIZE, 0));
+        let start = std::time::Instant::now();
+        assert!(mostly_from_non_members(&members, "ABCD1234", &messages));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            start.elapsed()
+        );
+    }
 }

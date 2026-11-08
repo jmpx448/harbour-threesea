@@ -29,7 +29,16 @@ The QR code of a self-hosted Threema Web can name any signalling server.
   certificate pins; a mismatch fails, and there is no way to override it. Any other host (a
   self-hosted Threema Web) is shown to the user once; if allowed, it is added to an allowlist and
   its certificate is pinned on first use. A later connection with a different certificate asks
-  again: accept the new certificate (and pin it) or abort.
+  again: accept the new certificate (and pin it) or abort. A session the browser never stored is
+  gone by then, so accepting pins the certificate and asks for the code again.
+  The sessions page lists the allowed servers; removing one takes its permission, its pin and its
+  sessions, and the next code naming it asks again.
+- **Control**, as on Android: a switch stored in the core that pairing, connecting and wake-ups
+  obey (off disconnects what is running and keeps the pairings the browser stored), and a silent
+  notification for as long as a browser is connected, with one banner per new connection, leading
+  to the sessions page. Dismissed, it comes straight back: Nemo's type can't make it undismissable,
+  and it is the only sign. A browser disconnected by tap can come back with a push, as on Android;
+  removing it or the switch keeps it out, and the page says so. Both flavours.
 - New dependency: `rmpv` (msgpack values), pinned; SaltyRTC and its crypto are our own code on
   libthreema's X25519/HSalsa20 and the `crypto_secretbox` crate already used.
 
@@ -38,5 +47,6 @@ The QR code of a self-hosted Threema Web can name any signalling server.
 - Everything, files included, goes through Threema's relay instead of peer to peer (as on iOS);
   still end-to-end encrypted by SaltyRTC.
 - Sessions (our permanent key, the browser's key, the server) are stored in the encrypted
-  store; hidden private chats (ADR 0009) stay hidden from the browser.
+  store; hidden private chats (ADR 0009) stay hidden from the browser; private groups and lists aren't in its receiver lists at all,
+  and marking one takes it out of a connected browser.
 - ADR 0012's step "Threema Web on webrtcbin" is dropped.

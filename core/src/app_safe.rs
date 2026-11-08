@@ -9,13 +9,13 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     safe::{
         self, MasterKey, PasswordCheck, SafeError,
         backup::{self, Backup},
         server::{self, ServerError},
     },
-    store::keys,
+    store::{StoreError, keys},
 };
 
 impl From<ServerError> for ApiError {
@@ -24,7 +24,9 @@ impl From<ServerError> for ApiError {
             ServerError::Network(e) => Self::Network(e.to_string()),
             ServerError::NotFound => Self::SafeNotFound,
             ServerError::TooLarge { .. } => Self::SafeTooLarge(error.to_string()),
-            other => Self::Server(other.to_string()),
+            other @ (ServerError::Status(_) | ServerError::InvalidResponse(_)) => {
+                Self::ServerTrouble(other.to_string())
+            }
         }
     }
 }
@@ -32,8 +34,11 @@ impl From<ServerError> for ApiError {
 impl From<SafeError> for ApiError {
     fn from(error: SafeError) -> Self {
         match error {
-            SafeError::Decrypt => Self::BackupDecrypt,
-            other => Self::Internal(other.to_string()),
+            // The backup's address comes from the key, so a wrong password finds none at all
+            // (`SafeNotFound`): one that is there but won't decrypt is damaged.
+            SafeError::Decrypt | SafeError::Format(_) => Self::SafeDamaged(error.to_string()),
+            SafeError::UnsupportedVersion(version) => Self::BackupVersion(i64::from(version)),
+            other @ (SafeError::Encrypt | SafeError::Kdf) => Self::Internal(other.to_string()),
         }
     }
 }
@@ -44,8 +49,18 @@ fn now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// How many missing contact pictures one recovery round (connect, maintenance) may request.
+/// How long a queued group message waits for someone whose lookup keeps failing, with the
+/// directory otherwise answering (it would say who doesn't exist). Then it goes without them.
+const UNRESOLVED_OUTBOX_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// How many restored contacts one round (connect, maintenance) may ask for their picture.
 const PICTURE_REQUEST_BATCH: usize = 20;
+
+/// How many contacts one round of a restore's setup steps writes to.
+const RESTORE_SETUP_BATCH: usize = 20;
+
+/// [`keys::SAFE_RESTORE_SETUP`] before the groups have been dealt with.
+const RESTORE_SETUP_START: &str = "start";
 
 /// Threema IDs: 8 characters, `*` allowed first (gateway IDs). Normalized to upper case.
 pub fn normalize_identity(input: &str) -> Option<String> {
@@ -71,6 +86,17 @@ pub(crate) fn parse_safe_id(hex: &str) -> Option<u64> {
         .try_into()
         .ok()?;
     Some(u64::from_le_bytes(bytes))
+}
+
+/// When each chat last changed, for the backup's `lastUpdate` (ms; Android lists a restored
+/// contact's chat only if it has one).
+type LastUpdates = std::collections::HashMap<String, u64>;
+
+fn last_update(updates: &LastUpdates, chat: &str) -> Option<i64> {
+    updates
+        .get(chat)
+        .and_then(|at| i64::try_from(*at).ok())
+        .filter(|at| *at > 0)
 }
 
 /// A group as Android writes it: `members` are all participants, the user included while a member.
@@ -196,6 +222,27 @@ async fn derive(identity: String, password: Zeroizing<String>) -> Result<MasterK
         .map_err(ApiError::from)
 }
 
+/// How long a failing Threema Safe stays quiet: a short outage isn't news (Android's 7 days).
+const SAFE_WARNING_AFTER: i64 = 7 * 24 * 60 * 60;
+
+/// Backups have kept failing for a week: the days since the last one that worked (since the first
+/// failure if none ever did, where Android says nothing though nothing is protected at all).
+fn safe_warning_days(
+    first_failure: Option<i64>,
+    last_upload: Option<i64>,
+    now: i64,
+) -> Option<i64> {
+    let first_failure = first_failure?;
+    if now - first_failure < SAFE_WARNING_AFTER {
+        return None;
+    }
+    Some((now - last_upload.unwrap_or(first_failure)) / (24 * 60 * 60)).filter(|days| *days > 0)
+}
+
+/// A new ID without any backup: the first reminder after a month, then every three months.
+const BACKUP_REMINDER_FIRST: i64 = 30 * 24 * 60 * 60;
+const BACKUP_REMINDER_AGAIN: i64 = 90 * 24 * 60 * 60;
+
 impl App {
     pub(crate) fn safe_check_password(password: &str) -> Value {
         let result = match safe::check_password(password) {
@@ -206,7 +253,9 @@ impl App {
         };
         json!({ "result": result })
     }
+}
 
+impl Shared {
     fn safe_key(&self) -> Result<Option<MasterKey>, ApiError> {
         let Some(hex) = self.store.setting(keys::SAFE_MASTER_KEY)? else {
             return Ok(None);
@@ -227,6 +276,61 @@ impl App {
         Ok(self.store.setting(key)?.and_then(|v| v.parse().ok()))
     }
 
+    /// An ID was just created: it is on this phone only. Asks once about Threema Safe (the
+    /// chat list, `askSetup` in the status), and reminds until some backup exists.
+    pub(crate) fn note_new_identity(&self) -> Result<(), ApiError> {
+        self.store.set_setting(keys::SAFE_SETUP_UNANSWERED, "ask")?;
+        self.store.set_setting(
+            keys::BACKUP_REMINDER_AT,
+            &(now() + BACKUP_REMINDER_FIRST).to_string(),
+        )?;
+        Ok(())
+    }
+
+    /// `safeDeclineSetup`: the user chose to go on without a backup, so no more reminders either.
+    pub(crate) fn safe_decline_setup(&self) -> Result<Value, ApiError> {
+        self.store.delete_setting(keys::SAFE_SETUP_UNANSWERED)?;
+        self.end_backup_reminder()?;
+        self.safe_status()
+    }
+
+    /// A backup of the ID exists, or the user wants none: nothing to remind of any more, and a
+    /// notification still on the screen goes (the window reads `backupReminder` in the status).
+    /// A Data backup's job ends it by itself; its `androidExportDone` tells the window.
+    pub(crate) fn end_backup_reminder(&self) -> Result<(), ApiError> {
+        if self.store.setting(keys::BACKUP_REMINDER_AT)?.is_some() {
+            self.store.delete_setting(keys::BACKUP_REMINDER_AT)?;
+            self.note_ui_events(&["safeChanged"]);
+        }
+        Ok(())
+    }
+
+    /// Is a reminder due at `now`? Then the next one is set.
+    fn backup_reminder_due(&self, now: i64) -> Result<bool, ApiError> {
+        let due = self
+            .setting_i64(keys::BACKUP_REMINDER_AT)?
+            .is_some_and(|at| at <= now);
+        if due {
+            self.store.set_setting(
+                keys::BACKUP_REMINDER_AT,
+                &(now + BACKUP_REMINDER_AGAIN).to_string(),
+            )?;
+        }
+        Ok(due)
+    }
+
+    /// See [`safe_warning_days`]; `None` too with Safe off.
+    fn safe_warning(&self) -> Result<Option<i64>, ApiError> {
+        if self.store.setting(keys::SAFE_MASTER_KEY)?.is_none() {
+            return Ok(None);
+        }
+        Ok(safe_warning_days(
+            self.setting_i64(keys::SAFE_FIRST_FAILURE)?,
+            self.setting_i64(keys::SAFE_LAST_UPLOAD)?,
+            now(),
+        ))
+    }
+
     pub(crate) fn safe_status(&self) -> Result<Value, ApiError> {
         let key = self.safe_key()?;
         let (pending_contacts, pending_groups, pending_lists) = self.pending_import_counts()?;
@@ -237,9 +341,13 @@ impl App {
             .unwrap_or(Value::Null);
         Ok(json!({
             "enabled": key.is_some(),
+            "askSetup": key.is_none()
+                && self.store.setting(keys::SAFE_SETUP_UNANSWERED)?.is_some(),
             "server": key.as_ref().map(server::base_url),
             "lastBackup": self.setting_i64(keys::SAFE_LAST_UPLOAD)?,
             "lastError": self.store.setting(keys::SAFE_LAST_ERROR)?,
+            "warningDays": self.safe_warning()?,
+            "backupReminder": self.store.setting(keys::BACKUP_REMINDER_AT)?.is_some(),
             "size": self.setting_i64(keys::SAFE_SIZE)?,
             "maxBytes": self.setting_i64(keys::SAFE_MAX_BYTES)?,
             "retentionDays": self.setting_i64(keys::SAFE_RETENTION_DAYS)?,
@@ -254,10 +362,7 @@ impl App {
         }))
     }
 
-    pub(crate) async fn safe_enable(
-        &mut self,
-        password: Zeroizing<String>,
-    ) -> Result<Value, ApiError> {
+    pub(crate) async fn safe_enable(&self, password: Zeroizing<String>) -> Result<Value, ApiError> {
         match safe::check_password(&password) {
             PasswordCheck::TooShort => return Err(ApiError::PasswordTooShort),
             PasswordCheck::TooLong => return Err(ApiError::PasswordTooLong),
@@ -280,42 +385,79 @@ impl App {
             keys::SAFE_LAST_UPLOAD,
             keys::SAFE_HASH,
             keys::SAFE_LAST_ERROR,
+            keys::SAFE_FIRST_FAILURE,
             keys::SAFE_SIZE,
+            keys::SAFE_SETUP_UNANSWERED,
         ] {
             self.store.delete_setting(k)?;
         }
-        self.safe_upload(true).await?;
+        self.end_backup_reminder()?;
+        self.safe_upload_and_tell().await?;
         self.safe_status()
     }
 
-    pub(crate) async fn safe_backup_now(&mut self) -> Result<Value, ApiError> {
+    pub(crate) async fn safe_backup_now(&self) -> Result<Value, ApiError> {
         if self.safe_key()?.is_none() {
             return Err(ApiError::Internal("Threema Safe is disabled".into()));
         }
-        self.safe_upload(true).await?;
+        self.safe_upload_and_tell().await?;
         self.safe_status()
     }
 
-    pub(crate) fn safe_disable(&mut self) -> Result<Value, ApiError> {
+    /// An upload on request: the window's warning hears how it went, whichever way, also with the
+    /// page closed by then. Only afterwards: another command ending meanwhile would send the event
+    /// early, the window would read the old status, and nothing would follow.
+    async fn safe_upload_and_tell(&self) -> Result<bool, ApiError> {
+        let result = self.safe_upload(true).await;
+        self.note_ui_events(&["safeChanged"]);
+        result
+    }
+
+    /// Turn Safe off: first the backup goes from the server, as the key to it goes with the
+    /// settings (Android's `disableSafe`). Off whatever the server says; the reply tells.
+    pub(crate) async fn safe_disable(&self) -> Result<Value, ApiError> {
+        let deleted = match self.safe_key() {
+            Ok(Some(key)) => server::delete(&self.https, &key)
+                .await
+                .map_err(ApiError::from),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        self.forget_safe(deleted)
+    }
+
+    /// The local half of [`Self::safe_disable`]: `deleted` is how the server copy fared.
+    fn forget_safe(&self, deleted: Result<(), ApiError>) -> Result<Value, ApiError> {
+        if let Err(error) = &deleted {
+            tracing::warn!(kind = error.kind(), "Threema Safe backup not deleted");
+            // The wait can outlast the page, and with the key gone nobody can delete it later.
+            self.note_ui_events(&["safeServerCopyLeft"]);
+        }
         for k in [
             keys::SAFE_MASTER_KEY,
             keys::SAFE_LAST_UPLOAD,
             keys::SAFE_HASH,
             keys::SAFE_LAST_ERROR,
+            keys::SAFE_FIRST_FAILURE,
             keys::SAFE_SIZE,
             keys::SAFE_MAX_BYTES,
             keys::SAFE_RETENTION_DAYS,
         ] {
             self.store.delete_setting(k)?;
         }
-        self.safe_status()
+        // The window's warning goes with it.
+        self.note_ui_events(&["safeChanged"]);
+        let mut status = self.safe_status()?;
+        status["serverCopyDeleted"] = json!(deleted.is_ok());
+        Ok(status)
     }
 
     pub(crate) async fn safe_restore(
-        &mut self,
+        &self,
         identity: &str,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
         let identity = normalize_identity(identity).ok_or(ApiError::IdentityFormat)?;
         // Libre: a valid license comes first, as in the Android wizard.
         let _ = self.license()?;
@@ -327,52 +469,25 @@ impl App {
         let client_key = Zeroizing::new(
             BASE64
                 .decode(backup.user.privatekey.as_bytes())
-                .map_err(|_| ApiError::Internal("backup private key invalid".into()))?,
+                .map_err(|_| ApiError::SafeDamaged("backup private key invalid".into()))?,
         );
         let client_key: [u8; 32] = client_key
             .as_slice()
             .try_into()
-            .map_err(|_| ApiError::Internal("backup private key invalid".into()))?;
+            .map_err(|_| ApiError::SafeDamaged("backup private key invalid".into()))?;
         let client_key = ClientKey::from(client_key);
-        self.adopt_identity(&identity, &client_key).await?;
-
-        match backup.user.nickname.as_deref().filter(|n| !n.is_empty()) {
-            Some(nickname) => self.store.set_setting(keys::NICKNAME, nickname)?,
-            None => self.store.delete_setting(keys::NICKNAME)?,
-        }
-        self.restore_profile_picture(&backup.user)?;
-        if let Some(release) = &backup.user.profile_pic_release {
-            let (share, recipients) = crate::profile_pictures::from_safe_release(release);
-            self.store.set_picture_share(share)?;
-            self.store.set_picture_recipients(&recipients)?;
-        }
-        self.save_app_settings(&backup.settings)?;
-        // Contacts, then groups and lists, are imported below (lookups needed); until then they
-        // wait here and are carried into our own backups.
-        let pending = json!({
-            "contacts": backup.contacts,
-            "groups": backup.groups,
-            "distributionlists": backup.distributionlists,
-        });
-        self.store
-            .set_setting(keys::SAFE_PENDING_IMPORT, &pending.to_string())?;
-
-        // Keep Safe on with the same key; the server copy is current, so no immediate upload.
-        self.store
-            .set_setting(keys::SAFE_MASTER_KEY, &HEXLOWER.encode(key.as_bytes()))?;
-        self.store
-            .set_setting(keys::SAFE_LAST_UPLOAD, &now().to_string())?;
-        self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+        let private =
+            crate::directory::fetch_identity_private(&self.https, &identity, &client_key).await?;
+        let picture = self.restore_profile_picture(&backup.user);
+        self.store_restored(&identity, &client_key, private, &backup, &key, picture)?;
         if let Ok(config) = server::config(&self.https, &key).await {
             self.store_safe_limits(config)?;
         }
-        // A fresh restore starts a fresh import record.
-        self.store.delete_setting(keys::SAFE_IMPORT_SUMMARY)?;
-        self.store.delete_setting(keys::SAFE_IMPORT_ERROR)?;
         // Best effort now; failures are recorded and retried on reconnect, by maintenance and
         // on request.
         let events = self.try_pending_import().await;
         self.note_ui_events(&events);
+        // log-ok: counts
         tracing::info!(
             contacts = backup.contacts.as_ref().map_or(0, Vec::len),
             groups = backup.groups.as_ref().map_or(0, Vec::len),
@@ -385,6 +500,31 @@ impl App {
         }))
     }
 
+    /// `safeSearchId {phone, email}`: which IDs are linked to a number or address, for someone who
+    /// knows the Safe password but not the ID (Android's "forgot ID"). Before there is an ID: the
+    /// only moment it is for. Both are hashed here and never stored or logged.
+    pub(crate) async fn safe_search_id(&self, phone: &str, email: &str) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
+        // Libre: a valid license comes first, as for the restore itself.
+        let _ = self.license()?;
+        let (email_hashes, phone_hashes) =
+            crate::address_book::search_hashes(phone, email, self.address_book_region()?);
+        if email_hashes.is_empty() && phone_hashes.is_empty() {
+            return Err(ApiError::IdSearchInput);
+        }
+        let found =
+            crate::directory::search_identities(&self.https, &email_hashes, &phone_hashes).await?;
+        let mut identities: Vec<String> = found
+            .into_iter()
+            .filter_map(|found| normalize_identity(&found.identity))
+            .collect();
+        identities.sort();
+        identities.dedup();
+        // log-ok: a count
+        tracing::info!(found = identities.len(), "ID search answered");
+        Ok(json!({ "identities": identities }))
+    }
+
     fn store_safe_limits(&self, config: server::ServerConfig) -> Result<(), ApiError> {
         self.store
             .set_setting(keys::SAFE_MAX_BYTES, &config.max_backup_bytes.to_string())?;
@@ -395,9 +535,9 @@ impl App {
         Ok(())
     }
 
-    /// Stored contacts plus restored ones that are not imported yet (never drop any). The own ID
-    /// is excluded, like on Android.
-    fn backup_contacts(&self) -> Result<Vec<backup::Contact>, ApiError> {
+    /// Stored contacts plus restored ones that are not imported yet (never drop any; those keep
+    /// the backup's own `lastUpdate`). The own ID is excluded, like on Android.
+    fn backup_contacts(&self, updates: &LastUpdates) -> Result<Vec<backup::Contact>, ApiError> {
         let mut list: Vec<backup::Contact> = self
             .store
             .contacts()?
@@ -405,6 +545,7 @@ impl App {
             .map(|contact| {
                 let mut entry = crate::contacts::to_backup(contact);
                 entry.is_private |= self.store.is_private(&entry.identity).unwrap_or(false);
+                entry.last_update = last_update(updates, &entry.identity);
                 entry
             })
             .collect();
@@ -432,31 +573,93 @@ impl App {
             .map(|jpeg| BASE64.encode(&jpeg))
     }
 
-    /// Our picture from a backup (Android `restoreUser`): stored as the picture and its Safe copy;
-    /// if it can't be decoded, forget about it.
-    fn restore_profile_picture(&self, user: &backup::User) -> Result<(), ApiError> {
-        if let Some(jpeg) = user
-            .profile_pic
+    /// Our picture from a backup (Android `restoreUser`), as the picture and its Safe copy: whether
+    /// that worked. If it can't be decoded, forget about it. Without a stored version the files
+    /// mean nothing, so a kill right after this leaves no picture behind.
+    fn restore_profile_picture(&self, user: &backup::User) -> bool {
+        user.profile_pic
             .as_deref()
             .and_then(|b64| BASE64.decode(b64.as_bytes()).ok())
             .filter(|jpeg| jpeg.starts_with(&[0xff, 0xd8]))
-        {
-            let stored = [
-                crate::profile_pictures::OWN_PICTURE,
-                crate::profile_pictures::OWN_PICTURE_SAFE,
-            ]
-            .iter()
-            .all(|name| self.media.write_picture(name, &jpeg).is_ok());
-            if stored {
-                self.store.bump_profile_picture_version()?;
+            .is_some_and(|jpeg| {
+                [
+                    crate::profile_pictures::OWN_PICTURE,
+                    crate::profile_pictures::OWN_PICTURE_SAFE,
+                ]
+                .iter()
+                .all(|name| self.media.write_picture(name, &jpeg).is_ok())
+            })
+    }
+
+    /// Everything a restore keeps, all or nothing. A kill or a full disk half way would leave an
+    /// ID without its contacts and with Safe off: nothing would say so, the restore page is gone
+    /// once there is an ID, and turning Safe on again would overwrite the good copy on the server.
+    fn store_restored(
+        &self,
+        identity: &str,
+        client_key: &ClientKey,
+        private: crate::directory::PrivateIdentityData,
+        backup: &Backup,
+        key: &MasterKey,
+        picture_stored: bool,
+    ) -> Result<(), ApiError> {
+        let transaction = self
+            .store
+            .conn
+            .unchecked_transaction()
+            .map_err(StoreError::from)?;
+        self.store_adopted_identity(identity, client_key, private)?;
+        match backup.user.nickname.as_deref().filter(|n| !n.is_empty()) {
+            Some(nickname) => self.store.set_setting(keys::NICKNAME, nickname)?,
+            // None in the backup: the same question as for an ID backup, which never holds one.
+            None => {
+                self.store.delete_setting(keys::NICKNAME)?;
+                self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
             }
         }
+        if picture_stored {
+            self.store.bump_profile_picture_version()?;
+        }
+        if let Some(release) = &backup.user.profile_pic_release {
+            let (share, recipients) = crate::profile_pictures::from_safe_release(release);
+            self.store.set_picture_share(share)?;
+            self.store.set_picture_recipients(&recipients)?;
+        }
+        self.save_app_settings(&backup.settings)?;
+        self.seed_recent_emoji(&backup.settings.recent_emojis)?;
+        // Contacts, then groups and lists, are imported afterwards (lookups needed); until then
+        // they wait here and are carried into our own backups.
+        let pending = json!({
+            "contacts": backup.contacts,
+            "groups": backup.groups,
+            "distributionlists": backup.distributionlists,
+        });
+        self.store
+            .set_setting(keys::SAFE_PENDING_IMPORT, &pending.to_string())?;
+        // Keep Safe on with the same key; the server copy is current, so no immediate upload.
+        self.store
+            .set_setting(keys::SAFE_MASTER_KEY, &HEXLOWER.encode(key.as_bytes()))?;
+        self.store
+            .set_setting(keys::SAFE_LAST_UPLOAD, &now().to_string())?;
+        self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+        self.store.delete_setting(keys::SAFE_FIRST_FAILURE)?;
+        // A fresh restore starts a fresh import record.
+        self.store.delete_setting(keys::SAFE_IMPORT_SUMMARY)?;
+        self.store.delete_setting(keys::SAFE_IMPORT_ERROR)?;
+        self.store
+            .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)?;
+        transaction.commit().map_err(StoreError::from)?;
         Ok(())
     }
 
     /// Our groups, and those of a restored backup not imported yet (so a failed import loses
     /// nothing).
-    fn backup_groups(&self, me: &str, pending: &Value) -> Result<Vec<backup::Group>, ApiError> {
+    fn backup_groups(
+        &self,
+        me: &str,
+        pending: &Value,
+        updates: &LastUpdates,
+    ) -> Result<Vec<backup::Group>, ApiError> {
         let mut list: Vec<backup::Group> = self
             .store
             .groups()?
@@ -464,6 +667,7 @@ impl App {
             .map(|group| {
                 let mut entry = group_to_backup(group, me);
                 entry.is_private = self.store.is_private(&group.key).unwrap_or(false);
+                entry.last_update = last_update(updates, &group.key);
                 entry
             })
             .collect();
@@ -478,7 +682,11 @@ impl App {
         Ok(list)
     }
 
-    fn backup_lists(&self, pending: &Value) -> Result<Vec<backup::DistributionList>, ApiError> {
+    fn backup_lists(
+        &self,
+        pending: &Value,
+        updates: &LastUpdates,
+    ) -> Result<Vec<backup::DistributionList>, ApiError> {
         let mut list: Vec<backup::DistributionList> = self
             .store
             .distribution_lists()?
@@ -486,6 +694,7 @@ impl App {
             .map(|list| {
                 let mut entry = list_to_backup(list);
                 entry.is_private = self.store.is_private(&list.key).unwrap_or(false);
+                entry.last_update = last_update(updates, &list.key);
                 entry
             })
             .collect();
@@ -505,7 +714,7 @@ impl App {
     /// like Android); IDs that don't exist any more are dropped. Groups and lists that exist
     /// already are left alone. On network errors everything stays pending for the next
     /// maintenance. Returns whether anything was imported.
-    pub(crate) async fn import_pending_groups(&mut self) -> Result<bool, ApiError> {
+    pub(crate) async fn import_pending_groups(&self) -> Result<bool, ApiError> {
         let mut pending: Value = self
             .store
             .setting(keys::SAFE_PENDING_IMPORT)?
@@ -560,7 +769,7 @@ impl App {
         }
         if !unknown.is_empty() {
             let ids: Vec<String> = unknown.iter().map(|(id, _)| id.clone()).collect();
-            for (id, result) in crate::contacts::lookup(&self.https, &ids).await? {
+            for (id, result) in crate::contacts::lookup(&self.https, &self.config, &ids).await? {
                 let crate::contacts::Lookup::Found(contact) = result else {
                     continue;
                 };
@@ -572,8 +781,10 @@ impl App {
                     contact.acquaintance_level =
                         libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
                 }
-                if self.store.contact(&contact.identity.to_string())?.is_none() {
+                let id = contact.identity.to_string();
+                if self.store.contact(&id)?.is_none() {
                     self.store.upsert_contact(&contact)?;
+                    self.store.mark_picture_restored(&id)?;
                 }
             }
         }
@@ -592,8 +803,10 @@ impl App {
             if self.store.group(&group.key)?.is_none() {
                 self.store.upsert_group(&group)?;
                 if entry.is_private {
-                    self.store.set_private(&group.key, true)?;
+                    self.mark_private(&group.key, true)?;
                 }
+                self.store
+                    .note_restored_chat(&group.key, entry.last_update)?;
                 imported_groups += 1;
             }
         }
@@ -602,8 +815,10 @@ impl App {
             if self.store.distribution_list(&list.key)?.is_none() {
                 self.store.upsert_distribution_list(&list)?;
                 if entry.is_private {
-                    self.store.set_private(&list.key, true)?;
+                    self.mark_private(&list.key, true)?;
                 }
+                self.store
+                    .note_restored_chat(&list.key, entry.last_update)?;
                 imported_lists += 1;
             }
         }
@@ -666,7 +881,7 @@ impl App {
     /// `SAFE_IMPORT_ERROR` for the status page and cleared by the next successful attempt; the
     /// import is retried when the connection comes back, by `maintenance`, and on request
     /// (`safeRetryImport`). Returns the UI events the attempt caused.
-    pub(crate) async fn try_pending_import(&mut self) -> Vec<&'static str> {
+    pub(crate) async fn try_pending_import(&self) -> Vec<&'static str> {
         let mut events = Vec::new();
         let result = async {
             let contacts = self.import_pending_contacts().await?;
@@ -697,6 +912,9 @@ impl App {
                 }
             }
             Err(error) => {
+                if matches!(error, ApiError::RateLimited) {
+                    self.store.rest_directory_calls();
+                }
                 tracing::warn!(kind = error.kind(), "pending Safe import failed");
                 if self
                     .store
@@ -712,32 +930,162 @@ impl App {
         events
     }
 
-    /// The connection is up: try a pending Safe import right away — `maintenance` alone would
-    /// leave restored groups waiting up to an hour after a network failure — and pick up
-    /// picture recovery (kept downloads, missing-picture requests in a bounded batch).
-    /// Rate-limited so flapping connections don't hammer the servers. Returns the UI events to
-    /// emit.
-    pub async fn on_connected(&mut self) -> Vec<&'static str> {
-        let now = tokio::time::Instant::now();
-        if self
-            .last_import_attempt
-            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60))
-        {
-            return Vec::new();
-        }
-        self.last_import_attempt = Some(now);
+    /// The network's part of [`App::on_connected`].
+    pub(crate) async fn on_connected_away(&self) -> Vec<&'static str> {
         let mut events = Vec::new();
         let pending = self
             .pending_import_counts()
             .map(|(contacts, groups, lists)| contacts + groups + lists)
             .unwrap_or(0);
-        if pending > 0 {
+        if pending > 0 && !self.store.directory_resting() {
             events = self.try_pending_import().await;
         }
+        self.run_restore_setup().await;
         self.resume_picture_downloads();
-        self.request_missing_pictures(PICTURE_REQUEST_BATCH);
-        self.retry_failed_uploads();
+        self.request_restored_pictures(PICTURE_REQUEST_BATCH);
         events
+    }
+
+    /// A restored device's _Application Setup Steps_ (Android `ApplicationSetupSteps.kt`), once
+    /// the import is done and the connection is up: its groups and sessions are as old as the
+    /// backup. Upstream's first step comes first here too: nothing is said about forward secrecy
+    /// before the directory knows our feature mask; if that fails, the next round tries again.
+    async fn run_restore_setup(&self) {
+        let waiting = self.store.setting(keys::SAFE_RESTORE_SETUP);
+        let imported = self
+            .pending_import_counts()
+            .is_ok_and(|counts| counts == (0, 0, 0));
+        // The feature mask goes first, and during a rest it stays home without saying so.
+        if !matches!(waiting, Ok(Some(_)))
+            || !imported
+            || self.connection_state.get() != "connected"
+            || self.store.directory_resting()
+        {
+            return;
+        }
+        if let Err(error) = self.publish_feature_mask().await {
+            tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
+            return;
+        }
+        if let Err(error) = self.restore_setup_step() {
+            tracing::warn!(kind = error.kind(), "restore setup step failed");
+        }
+    }
+
+    /// One round of the setup steps. The first queues what the groups need, in the outbox, and
+    /// picks the contacts; each then starts forward secrecy with a bounded number of them and asks
+    /// them for their picture (their next message would do too, so nobody has to hurry, and the
+    /// servers don't get a burst). What is left waits in the setting for the next round.
+    fn restore_setup_step(&self) -> Result<(), ApiError> {
+        let Some(state) = self.store.setting(keys::SAFE_RESTORE_SETUP)? else {
+            return Ok(());
+        };
+        let identity = self.store.identity()?.ok_or(ApiError::NoIdentity)?;
+        let mut contacts: Vec<String> = if state == RESTORE_SETUP_START {
+            let transaction = self
+                .store
+                .conn
+                .unchecked_transaction()
+                .map_err(StoreError::from)?;
+            let mut queued = 0_usize;
+            for group in self.store.groups()? {
+                if crate::groups::resync_restored(&self.store, &group, &identity.threema_id)? {
+                    queued += 1;
+                }
+            }
+            let contacts = self.solicited_contacts(&identity.threema_id)?;
+            self.store.set_setting(
+                keys::SAFE_RESTORE_SETUP,
+                &serde_json::to_string(&contacts).map_err(|e| ApiError::Internal(e.to_string()))?,
+            )?;
+            transaction.commit().map_err(StoreError::from)?;
+            tracing::info!(
+                groups = queued,
+                total = contacts.len(),
+                "restore setup started"
+            );
+            contacts
+        } else {
+            serde_json::from_str(&state).unwrap_or_default()
+        };
+        let rest = contacts.split_off(contacts.len().min(RESTORE_SETUP_BATCH));
+        // As upstream: no sessions with multi-device (or forward secrecy off, the same thing here).
+        let fs_on =
+            self.store.multi_device()?.is_none() && !self.store.forward_security_disabled()?;
+        let own: libthreema::common::ThreemaId = identity
+            .threema_id
+            .parse()
+            .map_err(|_| ApiError::Internal("stored identity invalid".into()))?;
+        let client_key = ClientKey::from(*identity.client_key);
+        for id in contacts {
+            let Some(contact) = self.store.contact(&id)? else {
+                continue;
+            };
+            if self.store.is_explicitly_blocked(&id)? {
+                continue;
+            }
+            if fs_on && crate::contacts::has_fs_support(&contact) {
+                match crate::fs_store::start_session(
+                    &self.store,
+                    own,
+                    &client_key,
+                    contact.identity,
+                    &contact.public_key,
+                    u64::try_from(crate::messages::now_ms()).unwrap_or(0),
+                ) {
+                    Ok(inits) => {
+                        for envelope in inits {
+                            self.tell_connection(crate::connection::ToConnection::FsControl {
+                                peer: id.clone(),
+                                peer_key: Some(contact.public_key),
+                                envelope,
+                            });
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "cannot start a forward secrecy session"),
+                }
+            }
+            self.store.request_restored_picture(&id)?;
+        }
+        if rest.is_empty() {
+            self.store.delete_setting(keys::SAFE_RESTORE_SETUP)?;
+            tracing::info!("restore setup done");
+        } else {
+            self.store.set_setting(
+                keys::SAFE_RESTORE_SETUP,
+                &serde_json::to_string(&rest).map_err(|e| ApiError::Internal(e.to_string()))?,
+            )?;
+        }
+        self.tell_connection(crate::connection::ToConnection::SendPending);
+        Ok(())
+    }
+}
+
+impl Shared {
+    /// Upstream's _solicited contacts_: the people in groups we are in and those we have a chat
+    /// with, without revoked IDs. Blocked contacts aren't written to either.
+    pub(crate) fn solicited_contacts(&self, me: &str) -> Result<Vec<String>, ApiError> {
+        let mut candidates = std::collections::BTreeSet::new();
+        for group in self.store.groups()?.into_iter().filter(|group| !group.left) {
+            candidates.insert(group.identity.creator_identity.to_string());
+            candidates.extend(group.members);
+        }
+        for (last, _) in self.store.conversations()? {
+            if normalize_identity(&last.conversation).is_some() {
+                candidates.insert(last.conversation);
+            }
+        }
+        let mut contacts = Vec::new();
+        for id in candidates {
+            let valid = self.store.contact(&id)?.is_some_and(|contact| {
+                contact.activity_state
+                    != libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid
+            });
+            if valid && id != me && !self.store.is_explicitly_blocked(&id)? {
+                contacts.push(id);
+            }
+        }
+        Ok(contacts)
     }
 
     /// The backup as it would be uploaded now.
@@ -748,15 +1096,17 @@ impl App {
             .setting(keys::SAFE_PENDING_IMPORT)?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(Value::Null);
+        let updates = crate::join::last_updates(&self.store)?;
+        let (email, mobile) = self.store.confirmed_links()?;
         let mut links = Vec::new();
-        if let Some(mobile) = self.store.setting(keys::LINKED_MOBILE)? {
+        if let Some(mobile) = mobile {
             links.push(backup::Link {
                 kind: "mobile".into(),
                 value: mobile.trim_start_matches('+').to_owned(),
                 name: None,
             });
         }
-        if let Some(email) = self.store.setting(keys::LINKED_EMAIL)? {
+        if let Some(email) = email {
             links.push(backup::Link {
                 kind: "email".into(),
                 value: email,
@@ -784,32 +1134,55 @@ impl App {
                 )),
                 links,
             },
-            contacts: Some(self.backup_contacts()?),
-            groups: Some(self.backup_groups(&identity.threema_id, &pending)?),
-            distributionlists: Some(self.backup_lists(&pending)?),
-            settings: self.app_settings()?,
+            contacts: Some(self.backup_contacts(&updates)?),
+            groups: Some(self.backup_groups(&identity.threema_id, &pending, &updates)?),
+            distributionlists: Some(self.backup_lists(&pending, &updates)?),
+            settings: self.backup_settings()?,
         })
     }
 
+    /// The settings with the emoji the picker has now; the restored list only until there are
+    /// any here (the restore seeds the picker, an older restore didn't).
+    fn backup_settings(&self) -> Result<backup::Settings, ApiError> {
+        let mut settings = self.app_settings()?;
+        let recent = self.recent_emoji()?;
+        if !recent.is_empty() {
+            settings.recent_emojis = recent;
+        }
+        Ok(settings)
+    }
+}
+
+impl Shared {
     /// Upload if the policy says so (or `force`). Returns whether an upload happened. Failures
     /// are recorded in `SAFE_LAST_ERROR` and returned.
-    async fn safe_upload(&mut self, force: bool) -> Result<bool, ApiError> {
+    async fn safe_upload(&self, force: bool) -> Result<bool, ApiError> {
         let Some(key) = self.safe_key()? else {
             return Ok(false);
         };
         let result = self.safe_upload_with(&key, force).await;
-        match &result {
-            Ok(_) => self.store.delete_setting(keys::SAFE_LAST_ERROR)?,
-            Err(error) => {
-                tracing::warn!(kind = error.kind(), "Threema Safe backup failed");
-                self.store
-                    .set_setting(keys::SAFE_LAST_ERROR, error.kind())?;
-            }
-        }
+        self.note_safe_upload(result.as_ref().err())?;
         result
     }
 
-    async fn safe_upload_with(&mut self, key: &MasterKey, force: bool) -> Result<bool, ApiError> {
+    /// How an upload attempt went: the last error, and since when they have kept failing.
+    fn note_safe_upload(&self, error: Option<&ApiError>) -> Result<(), ApiError> {
+        let Some(error) = error else {
+            self.store.delete_setting(keys::SAFE_LAST_ERROR)?;
+            self.store.delete_setting(keys::SAFE_FIRST_FAILURE)?;
+            return Ok(());
+        };
+        tracing::warn!(kind = error.kind(), "Threema Safe backup failed");
+        self.store
+            .set_setting(keys::SAFE_LAST_ERROR, error.kind())?;
+        if self.store.setting(keys::SAFE_FIRST_FAILURE)?.is_none() {
+            self.store
+                .set_setting(keys::SAFE_FIRST_FAILURE, &now().to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn safe_upload_with(&self, key: &MasterKey, force: bool) -> Result<bool, ApiError> {
         let json = Zeroizing::new(
             serde_json::to_vec(&self.build_backup()?)
                 .map_err(|e| ApiError::Internal(e.to_string()))?,
@@ -846,50 +1219,133 @@ impl App {
         tracing::info!(size, "Threema Safe backup uploaded");
         Ok(true)
     }
+}
 
-    /// Periodic work on the core thread (called at start and then hourly): pending Safe contact
-    /// import and the automatic Safe backup. Returns the events to emit to the UI.
-    pub async fn maintenance(&mut self) -> Vec<&'static str> {
-        let mut events = Vec::new();
+impl Shared {
+    /// The part of periodic work that waits for the network, beside the core loop:
+    /// [`App::finish_maintenance`] does the rest.
+    pub(crate) async fn maintenance_away(&self) -> MaintenanceRound {
+        let mut round = MaintenanceRound::default();
         match self.store.identity() {
             Ok(Some(_)) => {}
-            _ => return events,
+            _ => return round,
         }
         // Refused, and nothing goes to Threema's servers until a key is accepted again.
         if !self.license_valid().unwrap_or(false) {
-            return events;
+            return round;
         }
-        match self.recheck_license().await {
+        match self.ask_about_license().await {
             Ok(false) => {}
             Ok(true) => {
-                events.push("licenseChanged");
-                return events;
+                round.refused = true;
+                return round;
             }
             Err(error) => tracing::warn!(kind = error.kind(), "license check failed"),
         }
-        events.extend(self.try_pending_import().await);
+        if !self.store.directory_resting() {
+            round.events.extend(self.try_pending_import().await);
+        }
+        self.run_restore_setup().await;
         self.resume_picture_downloads();
-        self.request_missing_pictures(PICTURE_REQUEST_BATCH);
+        self.request_restored_pictures(PICTURE_REQUEST_BATCH);
+        match self
+            .store
+            .expire_unresolved_outbox(crate::messages::now_ms() - UNRESOLVED_OUTBOX_MAX_AGE_MS)
+        {
+            Ok(0) => {}
+            Ok(receivers) => {
+                tracing::warn!(receivers, "gave up on group receivers with no contact")
+            }
+            Err(error) => tracing::warn!(%error, "expiring the group outbox failed"),
+        }
         if self.check_email_link().await.unwrap_or(false) {
-            events.push("profileChanged");
+            round.events.push("profileChanged");
         }
         if self.refresh_contacts(false).await.unwrap_or(false) {
-            events.push("contactsChanged");
+            round.events.push("contactsChanged");
         }
+        self.check_device_group();
         if let Err(error) = self.publish_feature_mask().await {
             tracing::warn!(kind = error.kind(), "publishing the feature mask failed");
-        }
-        self.android_export_scheduled();
-        if self.auto_delete_scheduled() {
-            events.push("chatsChanged");
         }
         let before = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();
         let uploaded = self.safe_upload(false).await.unwrap_or(false);
         let after = self.store.setting(keys::SAFE_LAST_ERROR).ok().flatten();
-        if uploaded || before != after {
-            events.push("safeChanged");
+        // Also while the warning stands: its days go up, and it may have just come due.
+        if uploaded || before != after || self.safe_warning().ok().flatten().is_some() {
+            round.events.push("safeChanged");
         }
-        events
+        if self.backup_reminder_due(now()).unwrap_or(false) {
+            round.events.push("backupReminder");
+        }
+        round.licensed = true;
+        round
+    }
+}
+
+/// How far a round of maintenance got beside the core loop.
+#[derive(Default)]
+pub(crate) struct MaintenanceRound {
+    events: Vec<&'static str>,
+    /// There is an ID with a license, and it wasn't refused during the round.
+    licensed: bool,
+    /// The directory refused the license just now.
+    refused: bool,
+}
+
+impl App {
+    /// The connection is up: try a pending Safe import right away — `maintenance` alone would
+    /// leave restored groups waiting up to an hour after a network failure — and pick up
+    /// picture recovery (kept downloads, restored contacts' requests in a bounded batch).
+    /// Rate-limited so flapping connections don't hammer the servers. Whether the part that can
+    /// wait for the network ([`Shared::on_connected_away`]) is to run now.
+    pub(crate) fn on_connected_here(&mut self) -> bool {
+        self.check_device_group();
+        self.retry_failed_transfers();
+        let now = tokio::time::Instant::now();
+        if self
+            .last_import_attempt
+            .get()
+            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(60))
+        {
+            return false;
+        }
+        self.last_import_attempt.set(Some(now));
+        true
+    }
+
+    /// All of what follows connecting, in place. Returns the UI events to emit.
+    #[cfg(test)]
+    pub async fn on_connected(&mut self) -> Vec<&'static str> {
+        if self.on_connected_here() {
+            self.shared.on_connected_away().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The end of a round of maintenance, on the core loop. Returns the events to emit to the UI.
+    pub(crate) fn finish_maintenance(&mut self, mut round: MaintenanceRound) -> Vec<&'static str> {
+        crate::app_media::sweep_shared_files();
+        if round.refused {
+            self.license_refused();
+            round.events.push("licenseChanged");
+        }
+        if round.licensed {
+            self.android_export_scheduled();
+            if self.expire_messages() {
+                round.events.push("chatsChanged");
+            }
+        }
+        round.events
+    }
+
+    /// Periodic work (a while after the start, then hourly): pending Safe contact import and the
+    /// automatic Safe backup, all in place. Returns the events to emit to the UI.
+    #[cfg(test)]
+    pub async fn maintenance(&mut self) -> Vec<&'static str> {
+        let round = self.shared.maintenance_away().await;
+        self.finish_maintenance(round)
     }
 }
 
@@ -897,6 +1353,53 @@ impl App {
 mod tests {
     use super::*;
     use crate::{app::StartConfig, store::StoredIdentity};
+
+    fn app_without_identity(dir: &std::path::Path) -> App {
+        App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[7; 32],
+        )
+        .unwrap()
+    }
+
+    /// An app with the ID `AAAAAAAA`.
+    fn app_with_identity(dir: &std::path::Path) -> App {
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.to_owned(),
+                app_version: "0.1.0".into(),
+                language: "de".into(),
+                country: "CH".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "AAAAAAAA".into(),
+                client_key: Zeroizing::new([5; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        app
+    }
 
     #[test]
     fn identity_format() {
@@ -969,6 +1472,749 @@ mod tests {
             .unwrap();
         let parsed = safe::parse_backup(&key.decrypt(&blob).unwrap()).unwrap();
         assert_eq!(parsed.contacts.unwrap().len(), 1);
+    }
+
+    /// The picker and the backup's list are one: what a restore brings shows in the picker, and
+    /// what is used here goes into the next backup.
+    #[test]
+    fn recent_emoji_go_from_a_backup_to_the_picker_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+
+        // A restored list, before the picker has one: kept for the next backup.
+        let mut settings = app.app_settings().unwrap();
+        settings.recent_emojis = vec!["\u{1F600}".into()];
+        app.save_app_settings(&settings).unwrap();
+        assert_eq!(
+            app.build_backup().unwrap().settings.recent_emojis,
+            ["\u{1F600}"]
+        );
+
+        // Seeded under the picker's limits, the order kept.
+        let mut restored = vec![String::new(), "x".repeat(65), "\u{1F44D}".into()];
+        restored.extend((0..40).map(|n| format!("e{n}")));
+        restored.push("\u{1F44D}".into());
+        app.seed_recent_emoji(&restored).unwrap();
+        let seeded = app.recent_emoji().unwrap();
+        assert_eq!(seeded.len(), 32);
+        assert_eq!(seeded[0], "\u{1F44D}");
+        assert_eq!(seeded[1], "e0");
+        assert_eq!(seeded.iter().filter(|e| *e == "\u{1F44D}").count(), 1);
+
+        // Nothing usable in a backup leaves the list as it is.
+        app.seed_recent_emoji(&[String::new()]).unwrap();
+        assert_eq!(app.recent_emoji().unwrap(), seeded);
+
+        // Used here: the next backup says so.
+        app.use_emoji("\u{1F389}").unwrap();
+        let backup = app.build_backup().unwrap();
+        assert_eq!(backup.settings.recent_emojis[0], "\u{1F389}");
+        assert_eq!(backup.settings.recent_emojis.len(), 32);
+    }
+
+    #[test]
+    fn server_and_backup_failures_have_kinds_of_their_own() {
+        let kind = |error: ServerError| ApiError::from(error).kind();
+        assert_eq!(kind(ServerError::Status(503)), "serverTrouble");
+        assert_eq!(
+            kind(ServerError::InvalidResponse("line 1".into())),
+            "serverTrouble"
+        );
+        assert_eq!(kind(ServerError::NotFound), "safeNotFound");
+        let kind = |error: crate::directory::DirectoryError| ApiError::from(error).kind();
+        assert_eq!(
+            kind(crate::directory::DirectoryError::Status(503)),
+            "serverTrouble"
+        );
+        assert_eq!(
+            kind(crate::directory::DirectoryError::InvalidResponse(
+                "line 1".into()
+            )),
+            "serverTrouble"
+        );
+        assert_eq!(
+            kind(crate::directory::DirectoryError::Server("Nein".into())),
+            "server"
+        );
+        // A backup from a newer version, and one that isn't JSON.
+        let error = safe::parse_backup(br#"{"info":{"version":2}}"#).unwrap_err();
+        assert_eq!(ApiError::from(error).kind(), "backupVersion");
+        let error = safe::parse_backup(b"not json").unwrap_err();
+        assert_eq!(ApiError::from(error).kind(), "safeDamaged");
+        // Found by the key, but it won't decrypt.
+        let key = MasterKey::from_bytes([1; 64]);
+        let mut damaged = key.encrypt(b"{}").unwrap();
+        damaged[30] ^= 1;
+        let error = key.decrypt(&damaged).unwrap_err();
+        assert_eq!(ApiError::from(error).kind(), "safeDamaged");
+    }
+
+    #[test]
+    fn only_confirmed_links_leave_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let links = |app: &App| -> Vec<String> {
+            let backup = app.build_backup().unwrap();
+            let synced = crate::join::profile_sync(&app.store)
+                .unwrap()
+                .identity_links
+                .unwrap()
+                .links;
+            assert_eq!(synced.len(), backup.user.links.len(), "the same for both");
+            backup.user.links.into_iter().map(|l| l.value).collect()
+        };
+        app.store
+            .set_setting(keys::LINKED_EMAIL, "ab@example.org")
+            .unwrap();
+        app.store
+            .set_setting(keys::LINKED_MOBILE, "41791234567")
+            .unwrap();
+        assert_eq!(links(&app), ["41791234567", "ab@example.org"]);
+        // Both waiting for their confirmation: neither may go anywhere.
+        app.store
+            .set_setting(keys::LINKED_EMAIL_PENDING, "1")
+            .unwrap();
+        app.store
+            .set_setting(keys::LINKED_MOBILE_PENDING, "41790000000 v1")
+            .unwrap();
+        assert!(links(&app).is_empty());
+        app.store
+            .delete_setting(keys::LINKED_EMAIL_PENDING)
+            .unwrap();
+        assert_eq!(links(&app), ["ab@example.org"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restore_setup_waits_for_a_directory_rest_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        app.store
+            .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)
+            .unwrap();
+        app.connection_state.set("connected");
+        app.store.rest_directory_calls();
+        app.run_restore_setup().await;
+        assert_eq!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .as_deref(),
+            Some(RESTORE_SETUP_START),
+            "no step before the feature mask is out"
+        );
+    }
+
+    /// An app without an ID, and what it restores.
+    fn restore_material(dir: &std::path::Path) -> (App, Backup, MasterKey) {
+        let app = app_with_identity(dir);
+        let mut backup = app.build_backup().unwrap();
+        backup.user.nickname = Some("julia".into());
+        backup.contacts = Some(vec![crate::contacts::to_backup(
+            &crate::contacts::test_contact("BBBBBBBB"),
+        )]);
+        app.store.wipe().unwrap();
+        (app, backup, MasterKey::from_bytes([1; 64]))
+    }
+
+    fn private_data() -> crate::directory::PrivateIdentityData {
+        crate::directory::PrivateIdentityData {
+            server_group: "a1".into(),
+            email: None,
+            mobile_no: None,
+        }
+    }
+
+    #[test]
+    fn a_restore_is_stored_all_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, mut backup, key) = restore_material(dir.path());
+        backup.settings.recent_emojis = vec!["\u{1F44D}".into()];
+        let client_key = ClientKey::from([5; 32]);
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap();
+        assert!(app.store.identity().unwrap().is_some());
+        assert_eq!(app.recent_emoji().unwrap(), ["\u{1F44D}"]);
+        let status = app.safe_status().unwrap();
+        assert_eq!(status["enabled"], true);
+        assert_eq!(status["restore"]["pendingContacts"], 1);
+        assert!(status["lastBackup"].is_number());
+        assert!(
+            app.store
+                .setting(keys::PROFILE_PICTURE_VERSION)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            app.store.setting(keys::NICKNAME).unwrap().as_deref(),
+            Some("julia")
+        );
+    }
+
+    #[test]
+    fn a_restore_without_a_nickname_asks_instead_of_removing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, mut backup, key) = restore_material(dir.path());
+        backup.user.nickname = None;
+        let client_key = ClientKey::from([5; 32]);
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap();
+        assert_eq!(app.store.setting(keys::NICKNAME).unwrap(), None);
+        assert_eq!(app.profile_json().unwrap()["askNickname"], true);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (app, backup, key) = restore_material(dir.path());
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap();
+        assert_eq!(app.store.setting(keys::NICKNAME_UNANSWERED).unwrap(), None);
+        assert_eq!(app.profile_json().unwrap()["askNickname"], false);
+    }
+
+    #[test]
+    fn a_restore_that_cant_finish_leaves_no_id_so_it_can_be_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, backup, key) = restore_material(dir.path());
+        // The last write fails, as with a full disk.
+        app.store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER no_more BEFORE INSERT ON settings WHEN NEW.key = 'safe_last_upload'
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let client_key = ClientKey::from([5; 32]);
+        app.store_restored("AAAAAAAA", &client_key, private_data(), &backup, &key, true)
+            .unwrap_err();
+        assert!(app.store.conn.is_autocommit(), "no transaction left open");
+        assert!(app.store.identity().unwrap().is_none());
+        for name in [
+            keys::NICKNAME,
+            keys::SAFE_PENDING_IMPORT,
+            keys::SAFE_MASTER_KEY,
+            keys::PROFILE_PICTURE_VERSION,
+        ] {
+            assert!(app.store.setting(name).unwrap().is_none(), "{name}");
+        }
+        // Once it works, the same restore goes through.
+        app.store
+            .conn
+            .execute_batch("DROP TRIGGER no_more;")
+            .unwrap();
+        app.store_restored(
+            "AAAAAAAA",
+            &client_key,
+            private_data(),
+            &backup,
+            &key,
+            false,
+        )
+        .unwrap();
+        assert!(app.store.identity().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_backup_says_when_each_chat_last_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        for id in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        app.store
+            .insert_incoming("BBBBBBBB", 1, "text", "hi", 5000)
+            .unwrap();
+        // A restored chat without messages, and a contact who never had a chat.
+        app.store
+            .note_restored_chat("CCCCCCCC", Some(3000))
+            .unwrap();
+        // Waiting to be imported: the backup's own value stays.
+        app.store
+            .set_setting(
+                keys::SAFE_PENDING_IMPORT,
+                r#"{"contacts":[{"identity":"EEEEEEEE","verification":0,"lastUpdate":7000}]}"#,
+            )
+            .unwrap();
+        let contacts = app.build_backup().unwrap().contacts.unwrap();
+        let of = |id: &str| {
+            contacts
+                .iter()
+                .find(|c| c.identity == id)
+                .unwrap()
+                .last_update
+        };
+        // When it arrived here, not the sender's clock (5000).
+        let arrived = |id: &str| {
+            let newest = app.store.conversation_messages(id, 1).unwrap();
+            Some(newest[0].arrived_at())
+        };
+        assert_eq!(of("BBBBBBBB"), arrived("BBBBBBBB"));
+        assert_ne!(of("BBBBBBBB"), Some(5000));
+        assert_eq!(of("CCCCCCCC"), Some(3000));
+        assert_eq!(of("DDDDDDDD"), None);
+        assert_eq!(of("EEEEEEEE"), Some(7000));
+
+        // A later message wins over the restored time, and deleting the chat ends it.
+        app.store
+            .insert_incoming("CCCCCCCC", 2, "text", "hi", 9000)
+            .unwrap();
+        app.store.delete_conversation("BBBBBBBB").unwrap();
+        let contacts = app.build_backup().unwrap().contacts.unwrap();
+        let of = |id: &str| {
+            contacts
+                .iter()
+                .find(|c| c.identity == id)
+                .unwrap()
+                .last_update
+        };
+        assert_eq!(of("BBBBBBBB"), None);
+        assert_eq!(of("CCCCCCCC"), arrived("CCCCCCCC"));
+        // Android's old negative values are no time at all.
+        app.store.note_restored_chat("DDDDDDDD", Some(-5)).unwrap();
+        assert_eq!(
+            last_update(&crate::join::last_updates(&app.store).unwrap(), "DDDDDDDD"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_restored_private_chat_without_messages_stays_out_of_the_chat_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        for id in ["BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+            app.store.note_restored_chat(id, Some(3000)).unwrap();
+        }
+        app.mark_private("CCCCCCCC", true).unwrap();
+        let list = app.conversations_json(false, false).unwrap();
+        let listed: Vec<&str> = list["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| chat["identity"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, ["BBBBBBBB"]);
+    }
+
+    /// A restored app, connected: a group of ours, one of someone else's, one left; `DDDDDDDD`
+    /// is only in the left group and `FFFFFFFF` is blocked.
+    fn restored_app() -> (
+        tempfile::TempDir,
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<crate::connection::ToConnection>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.connection.replace(Some(tx));
+        app.connection_state.set("connected");
+        for id in ["BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE", "FFFFFFFF"] {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.feature_mask = libthreema::common::FeatureMask(
+                libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+            );
+            app.store.upsert_contact(&contact).unwrap();
+        }
+        let group = |creator: &str, id: u64, members: &[&str], left: bool| {
+            let identity = libthreema::common::GroupIdentity {
+                creator_identity: libthreema::common::ThreemaId::try_from(creator).unwrap(),
+                group_id: id,
+            };
+            crate::groups::Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: format!("Group {id}"),
+                members: members.iter().map(|m| (*m).to_owned()).collect(),
+                left,
+                created_at: 1000,
+                picture: None,
+                picture_version: 0,
+            }
+        };
+        for g in [
+            group("AAAAAAAA", 1, &["BBBBBBBB"], false),
+            group("CCCCCCCC", 2, &["CCCCCCCC"], false),
+            group("DDDDDDDD", 3, &["DDDDDDDD"], true),
+        ] {
+            app.store.upsert_group(&g).unwrap();
+        }
+        app.store
+            .note_restored_chat("EEEEEEEE", Some(3000))
+            .unwrap();
+        app.store
+            .note_restored_chat("FFFFFFFF", Some(3000))
+            .unwrap();
+        app.store
+            .set_setting(keys::APP_SETTINGS, r#"{"blockedContacts":["FFFFFFFF"]}"#)
+            .unwrap();
+        app.store
+            .set_setting(keys::SAFE_RESTORE_SETUP, RESTORE_SETUP_START)
+            .unwrap();
+        (dir, app, rx)
+    }
+
+    fn inits_to(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::connection::ToConnection>,
+    ) -> Vec<String> {
+        let mut peers = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let crate::connection::ToConnection::FsControl { peer, .. } = message {
+                peers.push(peer);
+            }
+        }
+        peers
+    }
+
+    #[test]
+    fn a_restore_brings_groups_and_sessions_up_to_date_once() {
+        let (_dir, app, mut rx) = restored_app();
+        let queued = |key: &str| -> Vec<String> {
+            let mut statement = app
+                .store
+                .conn
+                .prepare("SELECT kind FROM outbox WHERE conversation = ?1 ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([key], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        app.restore_setup_step().unwrap();
+        // Our group: its state, without saying anything about a picture we don't have.
+        let ours = app.store.groups().unwrap();
+        let key_of = |creator: &str| {
+            ours.iter()
+                .find(|g| g.identity.creator_identity.as_str() == creator)
+                .unwrap()
+                .key
+                .clone()
+        };
+        assert_eq!(
+            queued(&key_of("AAAAAAAA")),
+            [
+                crate::groups::OUTBOX_GROUP_SETUP,
+                crate::groups::OUTBOX_GROUP_NAME
+            ]
+        );
+        // Someone else's: a request. One we left: nothing.
+        assert_eq!(
+            queued(&key_of("CCCCCCCC")),
+            [crate::groups::OUTBOX_GROUP_SYNC_REQUEST]
+        );
+        assert!(queued(&key_of("DDDDDDDD")).is_empty());
+        // Sessions: group people and those with a chat; not the blocked, not a left group's.
+        assert_eq!(inits_to(&mut rx), ["BBBBBBBB", "CCCCCCCC", "EEEEEEEE"]);
+        assert!(app.store.fs_peers().unwrap().len() == 3);
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_none(),
+            "done, and not again"
+        );
+        app.restore_setup_step().unwrap();
+        assert!(inits_to(&mut rx).is_empty());
+        assert_eq!(queued(&key_of("CCCCCCCC")).len(), 1);
+    }
+
+    #[test]
+    fn a_restores_contacts_go_in_batches() {
+        let (_dir, app, mut rx) = restored_app();
+        let many: Vec<String> = (0..RESTORE_SETUP_BATCH + 5)
+            .map(|n| format!("ZZZZ{n:04}"))
+            .collect();
+        for id in &many {
+            let mut contact = crate::contacts::test_contact(id);
+            contact.feature_mask = libthreema::common::FeatureMask(
+                libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT,
+            );
+            app.store.upsert_contact(&contact).unwrap();
+        }
+        app.store
+            .set_setting(
+                keys::SAFE_RESTORE_SETUP,
+                &serde_json::to_string(&many).unwrap(),
+            )
+            .unwrap();
+        app.restore_setup_step().unwrap();
+        assert_eq!(inits_to(&mut rx).len(), RESTORE_SETUP_BATCH);
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_some()
+        );
+        app.restore_setup_step().unwrap();
+        assert_eq!(inits_to(&mut rx).len(), 5);
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn with_forward_secrecy_off_a_restore_starts_no_sessions() {
+        let (_dir, app, mut rx) = restored_app();
+        app.store.set_setting(keys::FORWARD_SECURITY, "0").unwrap();
+        app.restore_setup_step().unwrap();
+        assert!(inits_to(&mut rx).is_empty());
+        assert!(app.store.fs_peers().unwrap().is_empty());
+        assert!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_setup_steps_wait_for_the_import_and_the_connection() {
+        let (_dir, app, mut rx) = restored_app();
+        app.store
+            .set_setting(
+                keys::SAFE_PENDING_IMPORT,
+                r#"{"contacts":[{"identity":"ABCD1234","verification":0}]}"#,
+            )
+            .unwrap();
+        app.run_restore_setup().await;
+        assert!(inits_to(&mut rx).is_empty(), "the import comes first");
+        assert_eq!(
+            app.store
+                .setting(keys::SAFE_RESTORE_SETUP)
+                .unwrap()
+                .as_deref(),
+            Some(RESTORE_SETUP_START)
+        );
+        app.store.delete_setting(keys::SAFE_PENDING_IMPORT).unwrap();
+        app.connection_state.set("connecting");
+        app.run_restore_setup().await;
+        assert!(inits_to(&mut rx).is_empty(), "the connection too");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_id_search_is_for_a_device_without_an_id_and_needs_something_to_look_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        assert!(matches!(
+            app.safe_search_id("+41791234567", "").await,
+            Err(ApiError::IdentityExists)
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_without_identity(dir.path());
+        assert!(matches!(
+            app.safe_search_id("+41791234567", "").await,
+            Err(ApiError::NoLicense)
+        ));
+        app.store
+            .set_setting(keys::LICENSE_KEY, "XXXXX-XXXXX")
+            .unwrap();
+        for (phone, email) in [("", ""), ("12", "not an address")] {
+            assert!(matches!(
+                app.safe_search_id(phone, email).await,
+                Err(ApiError::IdSearchInput)
+            ));
+        }
+    }
+
+    #[test]
+    fn an_id_search_sends_hashes_only() {
+        let (emails, phones) =
+            crate::address_book::search_hashes("+41 79 123 45 67", " Someone@Example.org ", "");
+        assert_eq!(
+            emails,
+            crate::address_book::email_hashes("someone@example.org")
+        );
+        assert_eq!(phones, [crate::address_book::phone_hash("41791234567")]);
+        for hash in emails.iter().chain(&phones) {
+            assert!(
+                !hash.contains("example") && !hash.contains("4179"),
+                "{hash}"
+            );
+        }
+        // A number of its own country without one: by the region's rules.
+        let (_, phones) = crate::address_book::search_hashes("079 123 45 67", "", "CH");
+        assert_eq!(phones, [crate::address_book::phone_hash("41791234567")]);
+        assert!(
+            crate::address_book::search_hashes("079 123 45 67", "", "")
+                .1
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_new_id_is_asked_about_safe_until_it_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let asked = |app: &App| app.safe_status().unwrap()["askSetup"].clone();
+        // Restored or older IDs aren't asked.
+        assert_eq!(asked(&app), false);
+        app.note_new_identity().unwrap();
+        assert_eq!(asked(&app), true);
+        app.safe_decline_setup().unwrap();
+        assert_eq!(asked(&app), false);
+
+        // Turned on some other way: no more question either.
+        app.note_new_identity().unwrap();
+        app.store
+            .set_setting(keys::SAFE_MASTER_KEY, &"00".repeat(64))
+            .unwrap();
+        assert_eq!(asked(&app), false);
+    }
+
+    #[test]
+    fn a_new_id_without_a_backup_is_reminded_now_and_then() {
+        const DAY: i64 = 24 * 60 * 60;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        // Restored or older IDs: never.
+        assert!(!app.backup_reminder_due(now() + 1000 * DAY).unwrap());
+
+        app.note_new_identity().unwrap();
+        assert!(!app.backup_reminder_due(now() + 29 * DAY).unwrap());
+        let first = now() + 31 * DAY;
+        assert!(app.backup_reminder_due(first).unwrap());
+        assert!(!app.backup_reminder_due(first + 89 * DAY).unwrap());
+        assert!(app.backup_reminder_due(first + 90 * DAY).unwrap());
+
+        // Choosing to go on without a backup ends it, and the window hears.
+        app.take_ui_events();
+        assert_eq!(app.safe_status().unwrap()["backupReminder"], true);
+        app.safe_decline_setup().unwrap();
+        assert_eq!(app.safe_status().unwrap()["backupReminder"], false);
+        assert_eq!(app.take_ui_events(), ["safeChanged"]);
+        assert!(!app.backup_reminder_due(first + 1000 * DAY).unwrap());
+
+        // Nothing left to end: nothing to hear.
+        app.end_backup_reminder().unwrap();
+        assert!(app.take_ui_events().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_exported_id_backup_ends_the_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        app.note_new_identity().unwrap();
+        // Refused: nothing was made.
+        assert!(
+            app.export_identity_backup(Zeroizing::new("short".into()))
+                .await
+                .is_err()
+        );
+        assert!(
+            app.store
+                .setting(keys::BACKUP_REMINDER_AT)
+                .unwrap()
+                .is_some()
+        );
+        let exported = app
+            .export_identity_backup(Zeroizing::new("long enough here".into()))
+            .await
+            .unwrap();
+        // What we make, the scanner on restore takes for what it is, and its code holds it.
+        let backup = exported["backup"].as_str().unwrap();
+        assert_eq!(crate::app::qr_kind(backup, 0)["kind"], "idBackup");
+        let (size, bits) = crate::qr::modules(backup).unwrap();
+        assert_eq!(exported["qr"]["size"], size);
+        assert_eq!(exported["qr"]["bits"], bits);
+        assert_eq!(app.store.setting(keys::BACKUP_REMINDER_AT).unwrap(), None);
+        assert_eq!(app.take_ui_events(), ["safeChanged"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_window_hears_of_an_upload_only_when_it_has_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        app.store
+            .set_setting(keys::SAFE_MASTER_KEY, &"00".repeat(64))
+            .unwrap();
+        crate::https::stall_requests();
+        let waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(50), app.safe_backup_now()).await;
+        assert!(waiting.is_err(), "the upload is on its way");
+        assert!(app.take_ui_events().is_empty());
+    }
+
+    #[test]
+    fn a_failing_safe_warns_after_a_week_with_the_days_since_the_last_backup() {
+        const DAY: i64 = 24 * 60 * 60;
+        let now = 100 * DAY;
+        assert_eq!(safe_warning_days(None, Some(now - 50 * DAY), now), None);
+        // Not before the week is over, however old the last backup is.
+        assert_eq!(
+            safe_warning_days(Some(now - 7 * DAY + 1), Some(now - 50 * DAY), now),
+            None
+        );
+        assert_eq!(
+            safe_warning_days(Some(now - 7 * DAY), Some(now - 50 * DAY), now),
+            Some(50)
+        );
+        // No backup ever: since the first failure.
+        assert_eq!(safe_warning_days(Some(now - 9 * DAY), None, now), Some(9));
+    }
+
+    #[test]
+    fn only_the_first_failure_starts_the_week_and_success_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        let first = |app: &App| app.store.setting(keys::SAFE_FIRST_FAILURE).unwrap();
+        let failure = ApiError::Network("no route".into());
+        app.note_safe_upload(Some(&failure)).unwrap();
+        assert!(first(&app).is_some());
+        app.store
+            .set_setting(keys::SAFE_FIRST_FAILURE, "1000")
+            .unwrap();
+        app.note_safe_upload(Some(&failure)).unwrap();
+        assert_eq!(first(&app).as_deref(), Some("1000"));
+        assert_eq!(
+            app.store.setting(keys::SAFE_LAST_ERROR).unwrap().as_deref(),
+            Some("network")
+        );
+
+        // Safe off: nothing to warn of, whatever was noted.
+        assert_eq!(app.safe_status().unwrap()["warningDays"], json!(null));
+        app.store
+            .set_setting(keys::SAFE_MASTER_KEY, &"00".repeat(64))
+            .unwrap();
+        assert!(app.safe_status().unwrap()["warningDays"].as_i64().unwrap() > 7);
+
+        app.note_safe_upload(None).unwrap();
+        assert_eq!(first(&app), None);
+        assert_eq!(app.store.setting(keys::SAFE_LAST_ERROR).unwrap(), None);
+        assert_eq!(app.safe_status().unwrap()["warningDays"], json!(null));
+    }
+
+    #[test]
+    fn turning_safe_off_says_whether_the_server_copy_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_identity(dir.path());
+        let enable = |app: &App| {
+            app.store
+                .set_setting(keys::SAFE_MASTER_KEY, &HEXLOWER.encode(&[1; 64]))
+                .unwrap();
+            app.store.set_setting(keys::SAFE_LAST_UPLOAD, "1").unwrap();
+        };
+        enable(&app);
+        assert_eq!(app.safe_status().unwrap()["enabled"], true);
+        let status = app.forget_safe(Ok(())).unwrap();
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["serverCopyDeleted"], true);
+        assert_eq!(app.take_ui_events(), ["safeChanged"]);
+
+        // A failed deletion turns it off all the same, and both the reply and an event say so.
+        enable(&app);
+        let status = app
+            .forget_safe(Err(ApiError::Network("no route".into())))
+            .unwrap();
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["serverCopyDeleted"], false);
+        assert_eq!(app.take_ui_events(), ["safeServerCopyLeft", "safeChanged"]);
+        assert!(app.store.setting(keys::SAFE_MASTER_KEY).unwrap().is_none());
+        assert_eq!(app.safe_status().unwrap().get("serverCopyDeleted"), None);
     }
 
     #[test]
@@ -1162,7 +2408,20 @@ mod tests {
         assert_eq!(status["restore"]["pendingGroups"], 4);
         assert_eq!(status["restore"]["pendingLists"], 1);
         assert_eq!(new.build_backup().unwrap().groups.unwrap().len(), 4);
+        let mut events = new.take_media_events().unwrap();
         assert!(new.import_pending_groups().await.unwrap());
+        // The restored private marks reach the media gate, notifications and browsers too.
+        let mut marked = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let crate::providers::CoreEvent::PrivateChanged {
+                conversation,
+                private: true,
+            } = event
+            {
+                marked.push(conversation);
+            }
+        }
+        assert_eq!(marked, [groups[1].key.clone(), list.key.clone()]);
         // The status now reports the counts and that nothing waits any more.
         let status = new.safe_status().unwrap();
         assert_eq!(status["restore"]["pendingGroups"], 0);
@@ -1190,7 +2449,7 @@ mod tests {
         assert!(!new.import_pending_groups().await.unwrap(), "nothing left");
 
         assert_eq!(backup.user.profile_pic, Some(BASE64.encode(&jpeg)));
-        new.restore_profile_picture(&backup.user).unwrap();
+        assert!(new.restore_profile_picture(&backup.user));
         assert_eq!(
             new.media
                 .read_picture(crate::profile_pictures::OWN_PICTURE)
@@ -1199,26 +2458,48 @@ mod tests {
                 .map(Vec::as_slice),
             Some(&jpeg[..])
         );
-        assert!(
-            new.store
-                .setting(keys::PROFILE_PICTURE_VERSION)
-                .unwrap()
-                .is_some()
-        );
         // Not a JPEG: ignored.
-        let other_dir = tempfile::tempdir().unwrap();
-        let other = new_app(other_dir.path());
         let mut user = backup.user.clone();
         user.profile_pic = Some(BASE64.encode(b"GIF89a"));
-        other.restore_profile_picture(&user).unwrap();
-        assert!(
-            other
-                .store
-                .setting(keys::PROFILE_PICTURE_VERSION)
-                .unwrap()
-                .is_none()
-        );
+        assert!(!new.restore_profile_picture(&user));
         assert_eq!(new.build_backup().unwrap().groups.unwrap().len(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_groups_last_update_survives_a_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_identity(dir.path());
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("BBBBBBBB"))
+            .unwrap();
+        let entry = backup::Group {
+            id: "0807060504030201".into(),
+            creator: "BBBBBBBB".into(),
+            groupname: Some("Team".into()),
+            created_at: Some(1000),
+            members: vec!["AAAAAAAA".into(), "BBBBBBBB".into()],
+            deleted: false,
+            last_update: Some(4000),
+            is_private: false,
+        };
+        let list = backup::DistributionList {
+            id: Some("ff00000000000000".into()),
+            name: "List".into(),
+            created_at: Some(1000),
+            members: vec!["BBBBBBBB".into()],
+            last_update: Some(5000),
+            is_private: false,
+        };
+        app.store
+            .set_setting(
+                keys::SAFE_PENDING_IMPORT,
+                &json!({ "groups": [entry], "distributionlists": [list] }).to_string(),
+            )
+            .unwrap();
+        assert!(app.import_pending_groups().await.unwrap());
+        let backup = app.build_backup().unwrap();
+        assert_eq!(backup.groups.unwrap()[0].last_update, Some(4000));
+        assert_eq!(backup.distributionlists.unwrap()[0].last_update, Some(5000));
     }
 
     /// The backup on the server of the test ID (`THREESEA_TEST_SAFE_ID`,

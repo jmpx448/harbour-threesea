@@ -1,34 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "mediaimageprovider.h"
 
-#include <QBuffer>
 #include <QDebug>
-#include <QImageReader>
 
+#include "peerimage.h"
 #include "threesebackend.h"
-
-namespace {
-
-// Largest picture decoded at all, and in formats that can't decode scaled down (megapixels).
-const qint64 MAX_PIXELS = 100 * 1000 * 1000;
-const qint64 MAX_PIXELS_UNSCALED = 30 * 1000 * 1000;
-
-// The size to decode `full` at for a QML `sourceSize`: a 0 (or missing) dimension means
-// "unconstrained" (QML sets only sourceSize.width), never upscale.
-QSize targetSize(const QSize &full, const QSize &requested)
-{
-    if (!full.isValid() || full.isEmpty()) {
-        return full;
-    }
-    const int width = requested.width() > 0 ? requested.width() : full.width();
-    const int height = requested.height() > 0 ? requested.height() : full.height();
-    if (full.width() <= width && full.height() <= height) {
-        return full;
-    }
-    return full.scaled(QSize(width, height), Qt::KeepAspectRatio);
-}
-
-}
 
 MediaImageProvider::MediaImageProvider(const ThreeseBackend *backend)
     // Without ForceAsynchronousImageLoading Qt calls a provider on the GUI thread, even for an
@@ -72,31 +48,11 @@ QImage MediaImageProvider::requestImage(const QString &id, QSize *size, const QS
     if (data.isEmpty()) {
         return QImage();
     }
-    QBuffer buffer(&data);
-    buffer.open(QIODevice::ReadOnly);
-    QImageReader reader(&buffer);
-    reader.setAutoTransform(true);
-    const QSize full = reader.size();
-    // Not decoded at all beyond what a phone can hold (a picture's header can claim any size;
-    // security audit 2026-10-27, S06): JPEG decodes scaled down, other formats in full.
-    const qint64 pixels = static_cast<qint64>(full.width()) * full.height();
-    if (!full.isValid() || pixels > MAX_PIXELS
-        || (pixels > MAX_PIXELS_UNSCALED && reader.format() != QByteArrayLiteral("jpeg"))) {
-        qWarning() << "media image" << message << "too large:" << full;
-        data.fill('\0');
-        return QImage();
-    }
-    const QSize target = targetSize(full, requestedSize);
-    // Decoders that can (JPEG) scale while decoding: camera photos are large.
-    if (target != full) {
-        reader.setScaledSize(target);
-    }
-    QImage image = reader.read();
-    if (!image.isNull() && target.isValid() && image.size() != target) {
-        image = image.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    }
-    if (image.isNull()) {
-        qWarning() << "media image" << message << "not decodable:" << reader.errorString();
+    QString problem;
+    const QImage image = PeerImage::decode(data, requestedSize, &problem);
+    if (!problem.isEmpty()) {
+        // log-ok: our own fixed texts and the image decoder's message, no content
+        qWarning() << "media image" << message << problem;
     }
     data.fill('\0');
     if (size) {

@@ -3,8 +3,11 @@
 //! §7.6). Only in builds made for GitHub (not a store build), only once the user agreed, at most
 //! once a day: one request for the repository's latest release to `api.github.com`, nothing
 //! about the user in it but the app version (User-Agent). GitHub sees the device's IP address.
-//! Nothing is downloaded or installed; the UI links to the release page.
+//! Nothing is downloaded or installed; the UI links to the release page. A store's build (Cargo
+//! feature `store`, set by scripts/build-core.sh for `STORE=1`) has no request at all: not even
+//! the host's name is in its binary.
 
+#[cfg(not(feature = "store"))]
 use std::{sync::Arc, time::Duration};
 
 use serde_json::Value;
@@ -12,8 +15,10 @@ use serde_json::Value;
 /// The repository whose releases are checked.
 pub const REPOSITORY: &str = "penttimus/harbour-threesea";
 /// The only host the check contacts.
+#[cfg(not(feature = "store"))]
 const HOST: &str = "api.github.com";
 /// A release's JSON is a few KiB; more is not read.
+#[cfg(not(feature = "store"))]
 const MAX_RESPONSE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +68,7 @@ pub fn parse_release(json: &Value) -> Option<Release> {
 
 /// A client for `api.github.com` only: ordinary WebPKI certificate checks (GitHub's keys are
 /// not pinned, unlike Threema's), HTTPS only, no redirects.
+#[cfg(not(feature = "store"))]
 fn client() -> Result<reqwest::Client, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let roots = rustls::RootCertStore {
@@ -87,6 +93,7 @@ fn client() -> Result<reqwest::Client, String> {
 ///
 /// # Errors
 /// Network or server errors, as text for the log (no user data in it).
+#[cfg(not(feature = "store"))]
 pub async fn latest() -> Result<Option<Release>, String> {
     let url = format!("https://{HOST}/repos/{REPOSITORY}/releases/latest");
     let mut response = client()?
@@ -113,6 +120,16 @@ pub async fn latest() -> Result<Option<Release>, String> {
     }
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(parse_release(&json))
+}
+
+/// A store's build never asks (the core doesn't start a check there either).
+///
+/// # Errors
+/// Always.
+#[cfg(feature = "store")]
+#[allow(clippy::unused_async)]
+pub async fn latest() -> Result<Option<Release>, String> {
+    Err("not in a store's build".into())
 }
 
 #[cfg(test)]

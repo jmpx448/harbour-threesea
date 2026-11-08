@@ -23,11 +23,14 @@ class GroupCallManager : public QObject
     // idle | joining | connecting | connected | ended
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     Q_PROPERTY(QString conversation READ conversation NOTIFY stateChanged)
+    // When we got into the call (ms since epoch), for the duration display.
+    Q_PROPERTY(double activeSince READ activeSince NOTIFY stateChanged)
     // The other participants: `[{id, identity, nickname, authenticated}]` (identity and nickname
     // once the handshake with them is done).
     Q_PROPERTY(QVariantList participants READ participants NOTIFY participantsChanged)
-    // Why the last join failed (error kind), for the UI.
+    // Why the last call ended on its own (error kind, for Errors.js, and the core's message).
     Q_PROPERTY(QString error READ error NOTIFY stateChanged)
+    Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
     // Our camera (its picture: CallVideo { manager: groupCalls; remote: false }).
     Q_PROPERTY(bool camera READ camera WRITE setCamera NOTIFY cameraChanged)
@@ -38,8 +41,10 @@ public:
     bool supported() const { return m_engine != nullptr; }
     QString state() const { return m_state; }
     QString conversation() const { return m_conversation; }
+    double activeSince() const { return m_activeSince; }
     QVariantList participants() const { return m_participants; }
     QString error() const { return m_error; }
+    QString errorMessage() const { return m_errorMessage; }
     bool muted() const { return m_muted; }
     void setMuted(bool muted);
     bool camera() const { return m_camera; }
@@ -57,9 +62,13 @@ public:
     // `create`: start a call if none runs.
     Q_INVOKABLE void join(const QString &conversation, bool create = false);
     Q_INVOKABLE void leave();
+    // The ID was removed: no call of it stays, nor what its groups' running calls were.
+    void forget();
 
 signals:
     void stateChanged();
+    // About to take the microphone: the other kind of call has to let go of it first.
+    void aboutToTakeMicrophone();
     void participantsChanged();
     void mutedChanged();
     void cameraChanged();
@@ -77,18 +86,29 @@ private slots:
 
 private:
     void setState(const QString &state);
+    // After a call: unmuted and without camera for the next one.
+    void resetDevices();
+    void checkMedia();
 
     ThreeseBackend *m_backend;
     GroupCallEngine *m_engine = nullptr;
     QHash<QString, QVariantMap> m_calls;
     QString m_state = QStringLiteral("idle");
+    // Which join a reply belongs to: one left behind can answer during the next.
+    unsigned m_joinSerial = 0;
     QString m_conversation;
     QString m_error;
+    QString m_errorMessage;
     QVariantList m_participants;
     bool m_muted = false;
     bool m_camera = false;
     bool m_frontCamera = true;
+    double m_activeSince = 0;
     QTimer m_tick;
+    // No connection in time (Android: 20 s), or nothing coming in any more.
+    QTimer m_connectTimer;
+    unsigned m_lastPackets = 0;
+    int m_silentSeconds = 0;
 };
 
 #endif // GROUPCALLMANAGER_H

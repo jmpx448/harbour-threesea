@@ -18,11 +18,12 @@
 %endif
 Name:       harbour-threesea
 Summary:    Unofficial Threema client for Sailfish OS
-Version:    0.2.0
+Version:    0.3.0
 Release:    1
 License:    AGPLv3
-URL:        https://github.com/threema-ch/threema-android
+URL:        https://github.com/penttimus/harbour-threesea
 Source0:    %{name}-%{version}.tar.bz2
+Source1:    %{name}-rpmlintrc
 Requires:   sailfishsilica-qt5 >= 0.10.9
 # The database key lives in Sailfish Secrets; not every image ships the daemon (the 5.1 emulator
 # does not).
@@ -36,6 +37,7 @@ BuildRequires:  pkgconfig(Qt5Quick)
 BuildRequires:  pkgconfig(Qt5DBus)
 BuildRequires:  pkgconfig(Qt5Multimedia)
 BuildRequires:  pkgconfig(sailfishsecrets)
+BuildRequires:  pkgconfig(nemonotifications-qt5)
 BuildRequires:  pkgconfig(openssl)
 BuildRequires:  desktop-file-utils
 %if %{with full}
@@ -57,8 +59,10 @@ Requires:   gstreamer1.0-plugins-bad
 Requires:   libnice
 %endif
 
-# Harbour: no shared libs of our own, so nothing to provide/require automatically.
+# Harbour: the only shared libraries of our own are the map renderer's, private under
+# /usr/share/harbour-threesea/lib: nothing to provide, and nothing to require from elsewhere for them.
 %define __provides_exclude_from ^%{_datadir}/.*$
+%define __requires_exclude ^libQMapLibre.*$
 
 %description
 Native Sailfish OS client for the Threema messenger, built on
@@ -81,6 +85,11 @@ Threema Shop. Not affiliated with or supported by Threema AG.
 %define rust_triple i686-unknown-linux-gnu
 %endif
 %if %{with full}
+# On top of what rpm has exported (%%{optflags}: the optimisation and the target's CPU, which also
+# selects SSE on i486 and NEON on armv7hl), for this command alone: %%qmake5 below takes $CXXFLAGS
+# for the bridge.
+CFLAGS="$CFLAGS -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
+CXXFLAGS="$CXXFLAGS -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
 meson setup target/wap-build third_party/webrtc-audio-processing --prefix=$PWD/target/wap \
     --libdir=lib --default-library=static --buildtype=release
 meson install -C target/wap-build
@@ -93,6 +102,22 @@ meson install -C target/wap-build
 %install
 %qmake5_install
 strip %{buildroot}%{_bindir}/%{name}
+# The map renderer (scripts/maplibre/build.sh; MapLibre Native Qt, BSD-2-Clause, and the QML
+# module MapboxMap, LGPL-3.0), private like Pure Maps' Jolla Store build: the QML module finds the
+# library beside it through its RUNPATH. QtPositioning 5.3 is not a Harbour-allowed import; 5.4 is
+# the same module on the device.
+mkdir -p %{buildroot}%{_datadir}/%{name}/lib/qml
+cp -a target/maplibre/libQMapLibre.so.3* %{buildroot}%{_datadir}/%{name}/lib/
+cp -a target/maplibre/MapboxMap %{buildroot}%{_datadir}/%{name}/lib/qml/
+sed -i 's/^import QtPositioning 5.3$/import QtPositioning 5.4/' \
+    %{buildroot}%{_datadir}/%{name}/lib/qml/MapboxMap/MapboxMapGestureArea.qml
+strip --strip-unneeded %{buildroot}%{_datadir}/%{name}/lib/libQMapLibre.so.3.* \
+    %{buildroot}%{_datadir}/%{name}/lib/qml/MapboxMap/*.so
+chmod 0644 %{buildroot}%{_datadir}/%{name}/lib/*.so* %{buildroot}%{_datadir}/%{name}/lib/qml/MapboxMap/*.so
+%if %{with store}
+# Asked once in builds for GitHub only; nothing opens it here (the core offers no update check).
+rm %{buildroot}%{_datadir}/%{name}/qml/pages/UpdateCheckDialog.qml
+%endif
 desktop-file-install --delete-original --dir %{buildroot}%{_datadir}/applications \
     %{buildroot}%{_datadir}/applications/*.desktop
 %if %{with full}
@@ -108,6 +133,7 @@ ln -s ../harbour-threesea.service \
 %endif
 
 %if %{with full}
+# Lite has no scripts (Harbour restricts them): the app notices itself (bridge/applifecycle.h).
 # Full keeps running in the background, so an update used to leave the old version running
 # until the user turned that off, closed the app and reopened it. Stop the running instance
 # (SIGTERM quits it cleanly) and start the new one in the background for each user who had
@@ -167,5 +193,6 @@ exit 0
 %{_datadir}/icons/hicolor/*/apps/%{name}.png
 %if %{with full}
 /usr/lib/systemd/user/harbour-threesea.service
+/usr/share/lipstick/notificationcategories/x-threesea.call.conf
 /usr/lib/systemd/user/post-user-session.target.wants/harbour-threesea.service
 %endif

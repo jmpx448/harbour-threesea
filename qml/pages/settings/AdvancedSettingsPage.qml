@@ -16,9 +16,15 @@ Page {
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "updateChecked") backend.call("updateSettings", {}, function(ok, result) {
+            if (name !== "updateChecked") return
+            backend.call("updateSettings", {}, function(ok, result) {
                 if (ok) page.updates = result
             })
+            // The pulley's own check, not the daily one; nothing on the page changes on a failure.
+            if (data.manual && !data.ok) {
+                //% "Could not check for updates. Try again later."
+                Notices.show(qsTrId("threesea-la-update-check-failed"), Notice.Long, Notice.Center)
+            }
         }
     }
 
@@ -63,9 +69,9 @@ Page {
                 //% "Keep running in the background"
                 text: qsTrId("threesea-la-keep-running")
                 description: backend.full
-                             //% "Threesea starts when you turn on the phone and stays connected after you close it, so new messages arrive right away. Uses a little more battery."
+                             //% "Threesea starts when you turn on the phone and stays connected after you close it, so new messages arrive right away. Uses more battery."
                              ? qsTrId("threesea-la-keep-running-description-full")
-                             //% "Threesea stays connected after you close it, so new messages arrive right away. Uses a little more battery."
+                             //% "Threesea stays connected after you close it, so new messages arrive right away. After you turn on the phone, it connects once you open it. Uses more battery."
                              : qsTrId("threesea-la-keep-running-description")
                 onClicked: backend.keepRunning = !checked
             }
@@ -134,13 +140,14 @@ Page {
                 text: qsTrId("threesea-se-network")
             }
 
-            // Android's "IPv6 for messages"; changing it connects again at once.
+            // Android's "IPv6 for messages", which here covers calls as well; changing it connects
+            // again at once.
             TextSwitch {
                 automaticCheck: false
                 checked: page.network.ipv6 !== false
-                //% "IPv6 for messages"
+                //% "IPv6"
                 text: qsTrId("threesea-la-ipv6")
-                //% "Connect to Threema over IPv6 where the network has it. Off: IPv4 only."
+                //% "Messages, files and calls use IPv6 where the network has it. Off: Threesea uses IPv4 for them."
                 description: qsTrId("threesea-la-ipv6-description")
                 onClicked: backend.call("setNetworkSettings", { ipv6: !checked }, function(ok, result) {
                     if (ok) page.network = result
@@ -152,7 +159,7 @@ Page {
                 text: qsTrId("threesea-se-troubleshooting")
             }
 
-            // Into the system log (journalctl). What is logged follows CLAUDE.md §7.3 at any level.
+            // Into the system log (journalctl) and the in-app log below. What is logged follows CLAUDE.md §7.3 at any level.
             ChoiceBox {
                 //% "Log"
                 label: qsTrId("threesea-la-log-level")
@@ -163,7 +170,7 @@ Page {
                           //% "Detailed"
                           qsTrId("threesea-la-log-level-debug")]
                 choice: Math.max(0, ["warn", "info", "debug"].indexOf(backend.logLevel))
-                //% "How much Threesea writes to the system log, to help find the cause of a problem."
+                //% "How much Threesea logs, to help find the cause of a problem."
                 description: qsTrId("threesea-la-log-level-description")
                 onChosen: backend.logLevel = ["warn", "info", "debug"][index]
             }

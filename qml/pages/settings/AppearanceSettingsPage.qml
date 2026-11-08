@@ -27,9 +27,10 @@ Page {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
 
+        // On the menu, not its item: Silica opens a menu with nothing in it too.
         PullDownMenu {
+            visible: backend.wallpaper !== ""
             MenuItem {
-                visible: backend.wallpaper !== ""
                 //% "Use the Ambience's background"
                 text: qsTrId("threesea-me-wallpaper-clear")
                 onClicked: backend.wallpaper = ""
@@ -51,8 +52,8 @@ Page {
 
             ChoiceBox {
                 options: [
-                    //% "Threema"
-                    qsTrId("threesea-me-emoji-threema"),
+                    //% "Twemoji"
+                    qsTrId("threesea-me-emoji-twemoji"),
                     //% "System"
                     qsTrId("threesea-me-emoji-system")
                 ]
@@ -105,12 +106,12 @@ Page {
 
             TextSwitch {
                 automaticCheck: false
-                checked: window.appSettings.receiveProfilePictures !== false
-                //% "Accept profile pictures"
+                checked: window.appSettings.showProfilePictures !== false
+                //% "Show profile pictures"
                 text: qsTrId("threesea-la-receive-pictures")
-                //% "Contacts who share their profile picture are shown with it."
+                //% "Contacts who share their profile picture are shown with it. Pictures they send keep arriving while this is off, and appear when it is turned on again."
                 description: qsTrId("threesea-la-receive-pictures-description")
-                onClicked: backend.call("setSetting", { name: "receiveProfilePictures", value: !checked },
+                onClicked: backend.call("setSetting", { name: "showProfilePictures", value: !checked },
                                         function(ok, result) { if (ok) window.appSettings = result })
             }
 

@@ -3,16 +3,20 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
 import "../components/Errors.js" as Errors
+import "../components/Format.js" as Fmt
 
 // App lock settings (ADR 0009), reached through the PIN like the device lock settings:
-// `currentPin` is what was entered to get here (empty while there is no lock). Choices go
+// `pin` is what was entered to get here (empty while there is no lock). Choices go
 // through selection dialogs confirmed by swipe. (Encrypting the stored data has its own
 // passphrase: Settings → Security.)
 Page {
     id: page
+    // The app locking closes this page and takes its PIN (window.closePinPage): with it, the
+    // next person could set a PIN of their own.
+    objectName: "holdsPin"
     allowedOrientations: Orientation.All
 
-    property string currentPin
+    property string pin
     property var status: ({})
     readonly property var lock: status.lock || null
 
@@ -54,12 +58,12 @@ Page {
             args.pin = options.pin
             args.keyboard = options.keyboard === true
         }
-        if (currentPin.length > 0) args.currentPin = currentPin
+        if (page.pin.length > 0) args.currentPin = page.pin
         backend.call("setLock", args, function(ok, result, kind, message) {
             if (ok) {
                 page.status = result
-                if (options.pin) page.currentPin = options.pin
-                if (!result.lock) page.currentPin = ""
+                if (options.pin) page.pin = options.pin
+                if (!result.lock) page.pin = ""
                 window.lockChanged(result)
                 if (done) done()
             } else {
@@ -113,11 +117,7 @@ Page {
                 //% "App lock"
                 label: qsTrId("threesea-he-app-lock")
                 choice: page.lock ? 1 : 0
-                valueText: !page.lock ? "" : page.lock.keyboard
-                           //% "Passphrase"
-                           ? qsTrId("threesea-la-lock-passphrase")
-                           //% "PIN"
-                           : qsTrId("threesea-la-lock-pin")
+                valueText: Fmt.lockValue(page.lock)
                 onChosen: {
                     if (index === 1 && !page.lock) {
                         // Switching it on continues to choosing the PIN.
@@ -145,7 +145,7 @@ Page {
                 checked: page.lock !== null && page.lock.appLock
                 //% "Lock the app"
                 text: qsTrId("threesea-la-lock-app")
-                //% "Ask whenever Threesea is opened. Private chats always ask."
+                //% "Ask when Threesea starts, and when you come back to it after the time you choose. Private chats always ask."
                 description: qsTrId("threesea-la-lock-app-description")
                 onClicked: {
                     var options = page.current()
@@ -170,8 +170,8 @@ Page {
             Item { width: 1; height: Theme.paddingLarge }
 
             InfoLabel {
-                //% "With a lock you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the PIN or passphrase, you can only get back in by removing your ID from this device and restoring it from a backup."
-                text: qsTrId("threesea-la-app-lock-info")
+                //% "With a lock you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the app lock's PIN or passphrase, the way back in is to delete Threesea's data folder .local/share/org.threesea/harbour-threesea with the chats and media in it, restart the phone and restore from a backup. A passphrase for the stored data stays set: Threesea asks for it first."
+                text: qsTrId("threesea-la-app-lock-about")
                 font.pixelSize: Theme.fontSizeSmall
             }
         }

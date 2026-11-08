@@ -64,18 +64,47 @@ pub(crate) const MIGRATION_RECOVERY: &str = "
         next_at     INTEGER NOT NULL
     ) WITHOUT ROWID;";
 
+/// Whom a restore left without a picture (store migration 38; Android's `isRestored`): asked once.
+/// It replaces `picture_requests`, whose backoff kept asking everyone without a picture for good.
+pub(crate) const MIGRATION_RESTORED: &str = "
+    DROP TABLE IF EXISTS picture_requests;
+    CREATE TABLE IF NOT EXISTS picture_restored (
+        identity  TEXT PRIMARY KEY NOT NULL
+    ) WITHOUT ROWID;";
+
+/// Pictures other devices of the group synced (store migration 39): kept from the moment the sync
+/// is applied until the picture is stored here, as the sync won't come again. `target`: `me`,
+/// `contact:<ID>` or a group key; no `blob`: removed.
+pub(crate) const MIGRATION_SYNCED_PICTURES: &str = "
+    CREATE TABLE synced_pictures (
+        target      TEXT PRIMARY KEY NOT NULL,
+        blob        BLOB,
+        key         BLOB,
+        nonce       BLOB,
+        generation  INTEGER NOT NULL,
+        attempts    INTEGER NOT NULL,
+        next_at     INTEGER NOT NULL
+    ) WITHOUT ROWID;";
+
 /// Settings keys.
 pub const SETTING_UPLOAD: &str = "profilePictureUpload";
 pub const SETTING_SHARE: &str = "profilePictureShare";
-/// Android's "Receive profile pictures" ("0" off; default on): with it off, contacts' pictures
-/// are neither asked for nor downloaded, and contacts show the usual stand-in.
-pub const SETTING_RECEIVE: &str = "profilePictureReceive";
+/// "Show profile pictures" ("0" off; default on), Android's `getProfilePicReceive`: pictures
+/// contacts send, or other devices sync, are downloaded and stored all the same, and everything
+/// that shows one comes by [`Store::shown_contact_picture_version`] and
+/// [`crate::media::MediaStore::read_picture_for_ui`]; with it off contacts show the usual stand-in.
+/// As on Android, who was restored is asked for their picture once; with this off that waits
+/// ([`Store::request_restored_picture`]). (The key is from when it was called "Accept".)
+pub const SETTING_SHOW: &str = "profilePictureReceive";
 /// Media store names.
 pub const OWN_PICTURE: &str = "me";
 /// Our picture in Threema Safe's format (400 px, q=60), made by the bridge with `me`.
 pub const OWN_PICTURE_SAFE: &str = "me-safe";
 pub fn contact_picture_name(identity: &str) -> String {
     format!("contact:{identity}")
+}
+pub fn is_contact_picture(name: &str) -> bool {
+    name.starts_with("contact:")
 }
 
 /// Outbox kind: ask a contact for their picture (`body`: `{}`).
@@ -84,19 +113,6 @@ pub const OUTBOX_REQUEST_PICTURE: &str = "requestProfilePicture";
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const WEEK_MS: i64 = 7 * DAY_MS;
-
-/// How long each picture request holds off the next one (bounded backoff; the last pause
-/// repeats). Requests are real protocol messages, and no answer may simply mean the contact
-/// has no picture or keeps it from us — that is not an error, so asking often is useless.
-const REQUEST_PAUSES_MS: [i64; 4] = [6 * HOUR_MS, 3 * DAY_MS, 10 * DAY_MS, 30 * DAY_MS];
-
-/// After they deleted their picture: nothing to fetch until they set a new one, which they
-/// distribute by themselves.
-pub const REQUEST_PAUSE_DELETED_MS: i64 = 30 * DAY_MS;
-
-/// After a download found the blob expired (or undecryptable): only a freshly requested
-/// picture helps; one request is allowed again after this.
-pub const REQUEST_PAUSE_EXPIRED_MS: i64 = HOUR_MS;
 
 /// Pauses between download retries of a kept descriptor (transient failures; the last one
 /// repeats until the attempts are used up).
@@ -209,10 +225,6 @@ impl Store {
                     "INSERT OR REPLACE INTO contact_pictures (identity, version) VALUES (?1, ?2)",
                     params![identity, version],
                 )?;
-                self.conn.execute(
-                    "DELETE FROM picture_requests WHERE identity = ?1",
-                    [identity],
-                )?;
             }
             None => {
                 self.conn.execute(
@@ -221,7 +233,7 @@ impl Store {
                 )?;
             }
         };
-        Ok(())
+        self.forget_restored_picture(identity)
     }
 
     /// A new version for our own picture (`PROFILE_PICTURE_VERSION`), monotonic like the
@@ -319,6 +331,13 @@ impl Store {
         })())
     }
 
+    /// The upload, as long as it may still be handed on (a week).
+    pub(crate) fn fresh_picture_upload(&self) -> Result<Option<Upload>, StoreError> {
+        Ok(self
+            .picture_upload()?
+            .filter(|upload| now_ms() - upload.uploaded_at <= WEEK_MS))
+    }
+
     pub fn set_picture_upload(&self, upload: Option<&Upload>) -> Result<(), StoreError> {
         match upload {
             Some(upload) => self.set_setting(
@@ -370,9 +389,7 @@ impl Store {
             }
             return Ok(Distribution::Delete);
         }
-        let upload = self
-            .picture_upload()?
-            .filter(|upload| now - upload.uploaded_at <= WEEK_MS);
+        let upload = self.fresh_picture_upload()?;
         if let (Some(upload), Some((Some(sent), _))) = (&upload, &cache)
             && sent.as_slice() == upload.blob_id.0
         {
@@ -406,80 +423,103 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Whether contacts' profile pictures are wanted at all (Android's appearance setting).
-    pub fn receive_pictures(&self) -> Result<bool, StoreError> {
-        Ok(self.setting(SETTING_RECEIVE)?.as_deref() != Some("0"))
+    /// Whether contacts' profile pictures are shown ([`SETTING_SHOW`]).
+    pub fn pictures_shown(&self) -> Result<bool, StoreError> {
+        Ok(self.setting(SETTING_SHOW)?.as_deref() != Some("0"))
     }
 
-    /// Ask `identity` for their picture (we have none, e.g. it was never received or the
-    /// backup carried none): queued in the outbox; `true` if queued now. At most once per
-    /// backoff step ([`REQUEST_PAUSES_MS`]); the marking and the queueing are one transaction,
-    /// which also keeps concurrent triggers from queueing twice.
-    pub fn request_picture(&self, identity: &str) -> Result<bool, StoreError> {
-        if !self.receive_pictures()? {
+    /// The version of a contact's picture to show: 0, as for none, while they aren't shown.
+    pub fn shown_contact_picture_version(&self, identity: &str) -> Result<i64, StoreError> {
+        if self.pictures_shown()? {
+            self.contact_picture_version(identity)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// [`Self::shown_contact_picture_version`] of every contact with one, in one query.
+    pub fn shown_contact_picture_versions(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+        if self.pictures_shown()? {
+            self.contact_picture_versions()
+        } else {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    /// A restore brought `identity` without their picture: they are to be asked once
+    /// ([`Self::request_restored_picture`]).
+    pub fn mark_picture_restored(&self, identity: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO picture_restored (identity) VALUES (?1)",
+            [identity],
+        )?;
+        Ok(())
+    }
+
+    /// No need to ask `identity` any more: they sent or deleted their picture, or are gone.
+    pub fn forget_restored_picture(&self, identity: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM picture_restored WHERE identity = ?1",
+            [identity],
+        )?;
+        Ok(())
+    }
+
+    /// Who is still to be asked after a restore, sorted.
+    pub fn restored_pictures(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT identity FROM picture_restored ORDER BY identity")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Ask `identity` for their picture if a restore left them without one (Android's
+    /// `OutgoingContactRequestProfilePictureTask`): queued in the outbox, once; `true` if queued
+    /// now. The mark and the queueing are one step, so that it is once. While pictures aren't
+    /// shown, or `identity` can't be asked right now, the mark stays for later.
+    pub fn request_restored_picture(&self, identity: &str) -> Result<bool, StoreError> {
+        // Not shown, so nothing to ask them for: what they send anyway still comes in.
+        let marked: i64 = self.conn.query_row(
+            "SELECT count(*) FROM picture_restored WHERE identity = ?1",
+            [identity],
+            |row| row.get(0),
+        )?;
+        if marked == 0 || !self.pictures_shown()? {
             return Ok(false);
         }
         if self.contact_picture_version(identity)? != 0
             || identity == "ECHOECHO"
             || identity.starts_with('*')
         {
+            self.forget_restored_picture(identity)?;
             return Ok(false);
         }
-        let now = now_ms();
-        let state: Option<(i64, i64)> = self
-            .conn
-            .query_row(
-                "SELECT attempts, next_at FROM picture_requests WHERE identity = ?1",
-                [identity],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let attempts = match state {
-            Some((_, next_at)) if now < next_at => return Ok(false),
-            Some((attempts, _)) => attempts.max(0),
-            None => 0,
-        };
-        let pause = REQUEST_PAUSES_MS[usize::try_from(attempts)
-            .unwrap_or(usize::MAX)
-            .min(REQUEST_PAUSES_MS.len() - 1)];
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let queued = (|| -> Result<(), StoreError> {
-            self.conn.execute(
-                "INSERT OR REPLACE INTO picture_requests (identity, requested_at, attempts, next_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![identity, now, attempts + 1, now + pause],
-            )?;
-            self.outbox_add(
-                identity,
-                libthreema::common::MessageId::random().0,
-                OUTBOX_REQUEST_PICTURE,
-                &json!({}),
-            )
-        })();
-        match queued {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(true)
-            }
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
+        // Nobody to ask: a revoked ID, or someone we blocked.
+        if self.is_explicitly_blocked(identity)?
+            || self.contact(identity)?.is_some_and(|c| {
+                c.activity_state == libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid
+            })
+        {
+            return Ok(false);
         }
-    }
-
-    /// Hold picture requests to `identity` for `pause_ms` without sending one (their picture
-    /// was deleted, or its blob is gone).
-    pub fn pause_picture_requests(&self, identity: &str, pause_ms: i64) -> Result<(), StoreError> {
-        let now = now_ms();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO picture_requests (identity, requested_at, attempts, next_at)
-             VALUES (?1, ?2,
-                     coalesce((SELECT attempts FROM picture_requests WHERE identity = ?1), 0),
-                     ?3)",
-            params![identity, now, now + pause_ms],
+        // The emulator's demo contacts don't exist.
+        #[cfg(feature = "demo")]
+        if identity.starts_with("DEMO") {
+            return Ok(false);
+        }
+        let step = self.step()?;
+        self.forget_restored_picture(identity)?;
+        self.outbox_add(
+            identity,
+            libthreema::common::MessageId::random().0,
+            OUTBOX_REQUEST_PICTURE,
+            &json!({}),
         )?;
-        Ok(())
+        step.commit()?;
+        Ok(true)
     }
 
     /// A contact's new picture descriptor arrived: kept until the download succeeded (it
@@ -490,6 +530,7 @@ impl Store {
         identity: &str,
         picture: &crate::groups::GroupPicture,
     ) -> Result<i64, StoreError> {
+        self.forget_restored_picture(identity)?;
         let old: i64 = self
             .conn
             .query_row(
@@ -500,6 +541,8 @@ impl Store {
             .optional()?
             .unwrap_or(0);
         let generation = next_version(old);
+        // From the contact, so newer than what another device said of it.
+        self.cancel_synced_picture(&contact_picture_name(identity))?;
         self.conn.execute(
             "INSERT OR REPLACE INTO picture_downloads
                  (identity, blob, key, size, generation, attempts, next_at)
@@ -606,6 +649,143 @@ impl Store {
         Ok(true)
     }
 
+    /// Our new picture is here and the other devices of the group are to get it: noted until it
+    /// is on its way to them, so a failed upload can't lose that.
+    pub(crate) fn owe_own_picture_sync(&self) -> Result<(), StoreError> {
+        if self.multi_device()?.is_some() {
+            self.set_setting(crate::store::keys::OWN_PICTURE_SYNC_OWED, "1")?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn own_picture_sync_owed(&self) -> Result<bool, StoreError> {
+        Ok(self
+            .setting(crate::store::keys::OWN_PICTURE_SYNC_OWED)?
+            .is_some())
+    }
+
+    pub(crate) fn own_picture_synced(&self) -> Result<(), StoreError> {
+        self.delete_setting(crate::store::keys::OWN_PICTURE_SYNC_OWED)
+    }
+
+    /// A device of the group changed a picture: what it said, in place of what it said before.
+    pub(crate) fn set_synced_picture(
+        &self,
+        target: &str,
+        blob: Option<&crate::sync::SyncedBlob>,
+    ) -> Result<(), StoreError> {
+        let old: i64 = self
+            .conn
+            .query_row(
+                "SELECT generation FROM synced_pictures WHERE target = ?1",
+                [target],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO synced_pictures
+                 (target, blob, key, nonce, generation, attempts, next_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+            params![
+                target,
+                blob.map(|blob| blob.id.0.to_vec()),
+                blob.map(|blob| blob.key.to_vec()),
+                blob.map(|blob| blob.nonce.to_vec()),
+                next_version(old)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What is still to be done for `target`: the picture (`None`: it was removed) and its
+    /// generation.
+    pub(crate) fn synced_picture(
+        &self,
+        target: &str,
+    ) -> Result<Option<(Option<crate::sync::SyncedBlob>, i64)>, StoreError> {
+        type Row = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, i64);
+        let row: Option<Row> = self
+            .conn
+            .query_row(
+                "SELECT blob, key, nonce, generation FROM synced_pictures WHERE target = ?1",
+                [target],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(blob, key, nonce, generation)| {
+            let synced = (|| {
+                Some(crate::sync::SyncedBlob {
+                    id: BlobId(blob?.try_into().ok()?),
+                    key: key?.try_into().ok()?,
+                    nonce: nonce?.try_into().ok()?,
+                })
+            })();
+            (synced, generation)
+        }))
+    }
+
+    /// Those past their pause (startup, reconnect, maintenance).
+    pub(crate) fn due_synced_pictures(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT target FROM synced_pictures WHERE next_at <= ?1")?;
+        let rows = statement.query_map([now_ms()], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Stored, or gone for good: drops the row if it still is this generation.
+    pub(crate) fn clear_synced_picture(
+        &self,
+        target: &str,
+        generation: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM synced_pictures WHERE target = ?1 AND generation = ?2",
+            params![target, generation],
+        )?;
+        Ok(())
+    }
+
+    /// Something newer than the sync decided about this picture (a change here, a message from
+    /// the contact or the group's creator), or what it belongs to is gone.
+    pub(crate) fn cancel_synced_picture(&self, target: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM synced_pictures WHERE target = ?1", [target])?;
+        Ok(())
+    }
+
+    /// Fetching it failed for a passing reason: again later, as long as the mirror may have it.
+    pub(crate) fn synced_picture_failed(
+        &self,
+        target: &str,
+        generation: i64,
+    ) -> Result<(), StoreError> {
+        let attempts: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT attempts FROM synced_pictures WHERE target = ?1 AND generation = ?2",
+                params![target, generation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(attempts) = attempts else {
+            return Ok(());
+        };
+        if attempts + 1 >= DOWNLOAD_MAX_ATTEMPTS {
+            return self.clear_synced_picture(target, generation);
+        }
+        let pause = DOWNLOAD_PAUSES_MS[usize::try_from(attempts)
+            .unwrap_or(usize::MAX)
+            .min(DOWNLOAD_PAUSES_MS.len() - 1)];
+        self.conn.execute(
+            "UPDATE synced_pictures SET attempts = ?3, next_at = ?4
+             WHERE target = ?1 AND generation = ?2",
+            params![target, generation, attempts + 1, now_ms() + pause],
+        )?;
+        Ok(())
+    }
+
     /// _Common Request Profile Picture Receive Steps_ (or our picture changed: everyone).
     pub fn purge_picture_distribution(&self, receiver: Option<&str>) -> Result<(), StoreError> {
         match receiver {
@@ -622,6 +802,62 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_synced_picture_is_kept_until_it_is_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let blob = |byte| crate::sync::SyncedBlob {
+            id: BlobId([byte; 16]),
+            key: [byte; 32],
+            nonce: [byte; 24],
+        };
+        store.set_synced_picture("me", Some(&blob(1))).unwrap();
+        let (stored, first) = store.synced_picture("me").unwrap().unwrap();
+        assert_eq!(stored.unwrap().id.0, [1; 16]);
+        assert_eq!(store.due_synced_pictures().unwrap(), ["me"]);
+
+        // A passing failure: not due for now, and tried again later.
+        store.synced_picture_failed("me", first).unwrap();
+        assert!(store.due_synced_pictures().unwrap().is_empty());
+        assert!(store.synced_picture("me").unwrap().is_some());
+
+        // A newer sync takes its place, due at once; what the older one fetched doesn't count.
+        store.set_synced_picture("me", Some(&blob(2))).unwrap();
+        let (stored, second) = store.synced_picture("me").unwrap().unwrap();
+        assert_eq!(stored.unwrap().nonce, [2; 24]);
+        assert_ne!(first, second);
+        assert_eq!(store.due_synced_pictures().unwrap(), ["me"]);
+        store.clear_synced_picture("me", first).unwrap();
+        assert!(store.synced_picture("me").unwrap().is_some());
+
+        // Removed: still something to do, no blob.
+        store.set_synced_picture("me", None).unwrap();
+        let (stored, third) = store.synced_picture("me").unwrap().unwrap();
+        assert!(stored.is_none());
+        store.clear_synced_picture("me", third).unwrap();
+        assert!(store.synced_picture("me").unwrap().is_none());
+
+        // It doesn't go on for ever.
+        store.set_synced_picture("me", Some(&blob(3))).unwrap();
+        for _ in 0..DOWNLOAD_MAX_ATTEMPTS {
+            if let Some((_, generation)) = store.synced_picture("me").unwrap() {
+                store.synced_picture_failed("me", generation).unwrap();
+            }
+        }
+        assert!(store.synced_picture("me").unwrap().is_none());
+
+        // The contact's own word is newer than what a device said of them.
+        let contact = contact_picture_name("00000BOB");
+        store.set_synced_picture(&contact, Some(&blob(4))).unwrap();
+        let picture = crate::groups::GroupPicture {
+            blob_id: BlobId([5; 16]),
+            key: [5; 32],
+            size: 3,
+        };
+        store.set_picture_download("00000BOB", &picture).unwrap();
+        assert!(store.synced_picture(&contact).unwrap().is_none());
+    }
 
     #[test]
     fn safe_release_round_trip() {
@@ -645,51 +881,75 @@ mod tests {
     }
 
     #[test]
-    fn picture_request_backoff() {
+    fn no_picture_requests_to_revoked_or_blocked_ids() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
-        // Queued once, then held back by the backoff.
-        assert!(store.request_picture("00000BOB").unwrap());
-        assert!(!store.request_picture("00000BOB").unwrap());
-        // Gateway and no-picture IDs are never asked.
-        assert!(!store.request_picture("*THREEMA").unwrap());
-        assert!(!store.request_picture("ECHOECHO").unwrap());
-        // The pause passed: asked again, counting up.
+        let mut revoked = crate::contacts::test_contact("00000BOB");
+        revoked.activity_state = libthreema::protobuf::d2d_sync::contact::ActivityState::Invalid;
+        store.upsert_contact(&revoked).unwrap();
+        store.mark_picture_restored("00000BOB").unwrap();
+        assert!(!store.request_restored_picture("00000BOB").unwrap());
+
         store
-            .conn
-            .execute(
-                "UPDATE picture_requests SET next_at = 0 WHERE identity = '00000BOB'",
-                [],
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &json!({ "blockedContacts": ["0000CARL"] }).to_string(),
             )
             .unwrap();
-        assert!(store.request_picture("00000BOB").unwrap());
-        let attempts: i64 = store
-            .conn
-            .query_row(
-                "SELECT attempts FROM picture_requests WHERE identity = '00000BOB'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(attempts, 2);
-        // A stored picture clears the state (a later deletion starts fresh) and ends requests.
-        store.set_contact_picture("00000BOB", Some(1)).unwrap();
-        assert!(!store.request_picture("00000BOB").unwrap());
-        let rows: i64 = store
-            .conn
-            .query_row(
-                "SELECT count(*) FROM picture_requests WHERE identity = '00000BOB'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(rows, 0);
-        // Deleted and paused: no request until the pause is over.
-        store.set_contact_picture("00000BOB", None).unwrap();
-        store
-            .pause_picture_requests("00000BOB", REQUEST_PAUSE_DELETED_MS)
-            .unwrap();
-        assert!(!store.request_picture("00000BOB").unwrap());
+        store.mark_picture_restored("0000CARL").unwrap();
+        assert!(!store.request_restored_picture("0000CARL").unwrap());
+
+        assert!(store.outbox().unwrap().is_empty());
+    }
+
+    /// Android's rule: a request only for who was restored, and only one. A contact who simply
+    /// has no picture is never asked, which is what cost a message per contact for ever.
+    #[test]
+    fn only_the_restored_are_asked_for_a_picture_and_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        assert!(!store.request_restored_picture("00000BOB").unwrap());
+        assert!(store.outbox().unwrap().is_empty());
+
+        store.mark_picture_restored("00000BOB").unwrap();
+        assert!(store.request_restored_picture("00000BOB").unwrap());
+        assert_eq!(store.outbox().unwrap().len(), 1);
+        assert!(!store.request_restored_picture("00000BOB").unwrap());
+        assert_eq!(store.outbox().unwrap().len(), 1);
+        assert!(store.restored_pictures().unwrap().is_empty());
+
+        // Gateway and no-picture IDs are never asked, and that settles it.
+        for id in ["*THREEMA", "ECHOECHO"] {
+            store.mark_picture_restored(id).unwrap();
+            assert!(!store.request_restored_picture(id).unwrap());
+        }
+        assert!(store.restored_pictures().unwrap().is_empty());
+        assert_eq!(store.outbox().unwrap().len(), 1);
+    }
+
+    /// What they send answers it: a new picture, a deletion, as on Android, whichever comes first.
+    #[test]
+    fn a_picture_arriving_or_deleted_ends_the_wish_to_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let picture = crate::groups::GroupPicture {
+            blob_id: BlobId([1; 16]),
+            key: [7; 32],
+            size: 9,
+        };
+        store.mark_picture_restored("00000BOB").unwrap();
+        store.set_picture_download("00000BOB", &picture).unwrap();
+        assert!(!store.request_restored_picture("00000BOB").unwrap());
+
+        store.mark_picture_restored("0000CARL").unwrap();
+        store.set_contact_picture("0000CARL", None).unwrap();
+        assert!(!store.request_restored_picture("0000CARL").unwrap());
+
+        store.mark_picture_restored("0000DORA").unwrap();
+        store.set_contact_picture("0000DORA", Some(1)).unwrap();
+        assert!(!store.request_restored_picture("0000DORA").unwrap());
+
+        assert!(store.outbox().unwrap().is_empty());
     }
 
     #[test]
@@ -750,16 +1010,29 @@ mod tests {
             store
                 .conn
                 .execute_batch(
-                    "DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;
+                    "ALTER TABLE web_sessions DROP COLUMN label;
+                     ALTER TABLE messages DROP COLUMN written_out;
+                     ALTER TABLE groups DROP COLUMN kicked;
+                     DROP TABLE synced_pictures; DROP TABLE group_picture_sends;
+                     ALTER TABLE groups DROP COLUMN picture_pending;
+                     ALTER TABLE messages DROP COLUMN no_receipts;
+                     DROP TABLE group_member_lookups; DROP TABLE group_picture_syncs;
+                     DROP TABLE chat_tones;
+                     DROP TRIGGER messages_search_insert; DROP TRIGGER messages_search_update;
                      DROP TRIGGER messages_search_delete; DROP INDEX messages_mentions;
                      DROP TABLE messages_search; DROP TABLE marked_unread_chats;
                      DROP TRIGGER chat_summaries_insert; DROP TRIGGER chat_summaries_sort;
                      DROP TRIGGER chat_summaries_state; DROP TRIGGER chat_summaries_delete;
-                     DROP TABLE chat_summaries;
-                     DROP TABLE picture_requests; DROP TABLE picture_downloads;
+                     DROP TABLE chat_summaries; DROP TABLE awaiting_reflection;
+                     DROP TABLE picture_restored; DROP TABLE picture_downloads;
+                     DROP INDEX messages_pending; DROP INDEX messages_uploading;
+                     DROP INDEX messages_media_to_come; DROP INDEX messages_starred;
+                     DROP INDEX messages_by_time; DROP INDEX messages_media;
+                     DROP INDEX pending_receivers_by_receiver;
                      DROP INDEX messages_position; DROP TRIGGER messages_sort_key;
                      ALTER TABLE messages DROP COLUMN sort_key;
                      DROP TABLE android_import_ids;
+                     DROP TABLE reflected_waiting;
                      INSERT INTO settings (key, value) VALUES ('pictureRequested:00000BOB', '1000');
                      PRAGMA user_version = 26;",
                 )
@@ -772,17 +1045,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let (attempts, next_at): (i64, i64) = store
-            .conn
-            .query_row(
-                "SELECT attempts, next_at FROM picture_requests WHERE identity = '00000BOB'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!((attempts, next_at), (1, 1000 + 6 * HOUR_MS));
-        // The old marker no longer suppresses recovery forever: long overdue, so it queues.
-        assert!(store.request_picture("00000BOB").unwrap());
+        // Nobody was restored by this: they aren't asked.
+        assert!(!store.request_restored_picture("00000BOB").unwrap());
     }
 
     #[test]

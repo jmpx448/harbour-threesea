@@ -1,0 +1,5 @@
+module harbour.threesea
+AnimatedMedia 1.0 AnimatedMedia.qml
+CallVideo 1.0 CallVideo.qml
+JsonListModel 1.0 JsonListModel.qml
+ListFilter 1.0 ListFilter.qml

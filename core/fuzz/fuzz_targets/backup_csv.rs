@@ -5,7 +5,9 @@
 use threesea_core::android_backup::{csv::Table, nonces, polls::ArchivePolls};
 
 libfuzzer_sys::fuzz_target!(|text: &str| {
-    let table = Table::parse(text);
+    let Ok(table) = Table::parse(text) else {
+        return;
+    };
     let _ = nonces::read(&table, "ABCD1234");
     let (polls, _) = ArchivePolls::read(&table, Some(&table), Some(&table));
     let _ = polls.message(text);

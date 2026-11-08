@@ -2,7 +2,6 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../../components"
-import "../../components/Errors.js" as Errors
 
 // Settings → Advanced → View log: what Threesea logged (fixed texts, kinds, codes and
 // counts; never message content or addresses, CLAUDE.md §7.3). The pulley saves a support
@@ -53,11 +52,12 @@ Page {
                 //% "Save support package"
                 text: qsTrId("threesea-me-log-save")
                 onClicked: backend.call("logPackage", { directory: StandardPaths.download },
-                                        function(ok, result, kind, message) {
+                                        function(ok) {
                     Notices.show(ok
                                  //% "Saved to Downloads"
                                  ? qsTrId("threesea-la-saved-downloads")
-                                 : Errors.text(kind, message), Notice.Short, Notice.Center)
+                                 //% "Could not save the support package to Downloads."
+                                 : qsTrId("threesea-la-log-save-failed"), Notice.Long, Notice.Center)
                 })
             }
             MenuItem {

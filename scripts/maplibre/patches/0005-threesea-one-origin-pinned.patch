@@ -1,0 +1,102 @@
+From: penttimus <348773418+penttimus@users.noreply.github.com>
+Subject: [PATCH] Threesea: one origin, pinned keys, no redirects
+
+harbour-threesea (AGPL-3.0) may contact Threema's servers only, with their TLS keys pinned
+(its CLAUDE.md §7.5, §7.6; ADR 0032). The app sets THREESEA_MAP_ORIGIN and THREESEA_MAP_PINS
+from its core; this downloader refuses every URL outside the origin before curl sees it, pins
+the keys, follows no redirect and speaks HTTPS only. Applied after rinigus' 0003 and 0004. This patch is under
+BSD-2-Clause, like the code it changes.
+
+--- a/platform/default/src/mbgl/storage/http_file_source.cpp
++++ b/platform/default/src/mbgl/storage/http_file_source.cpp
+@@ -21,6 +21,7 @@
+ #include <cstring>
+ #include <cstdio>
+ #include <optional>
++#include <cstdlib>
+ 
+ static void handleError(CURLMcode code) {
+     if (code != CURLM_OK) {
+@@ -36,6 +37,26 @@
+ 
+ namespace mbgl {
+ 
++// Threesea (scripts/maplibre/patches): every download goes to one origin, with its TLS keys
++// pinned. The app sets both before the first map (THREESEA_MAP_ORIGIN, e.g.
++// "https://map.threema.ch/", and THREESEA_MAP_PINS, "sha256//<base64>;..." from its core's pin
++// table). Anything else is refused before curl sees it: no name lookup, no connection. Without
++// both variables nothing is fetched at all.
++namespace threesea {
++static const char *env(const char *name) {
++    const char *value = std::getenv(name);
++    return value && *value ? value : nullptr;
++}
++static bool allowed(const std::string &url) {
++    const char *origin = env("THREESEA_MAP_ORIGIN");
++    if (!origin || !env("THREESEA_MAP_PINS")) return false;
++    const size_t length = std::strlen(origin);
++    // An origin ends in "/": a prefix then fixes scheme, host and port.
++    if (length < 9 || std::strncmp(origin, "https://", 8) != 0 || origin[length - 1] != '/') return false;
++    return url.compare(0, length, origin) == 0;
++}
++} // namespace threesea
++
+ class HTTPFileSource::Impl {
+ public:
+     Impl(const ResourceOptions &resourceOptions_, const ClientOptions &clientOptions_);
+@@ -103,6 +124,10 @@
+     curl_slist *headers = nullptr;
+ 
+     char error[CURL_ERROR_SIZE] = {0};
++
++    // A refused URL: answered with an error from the run loop, never handed to curl.
++    bool added = false;
++    util::Timer refused;
+ };
+ 
+ HTTPFileSource::Impl::Impl(const ResourceOptions &resourceOptions_, const ClientOptions &clientOptions_)
+@@ -269,6 +294,17 @@
+       resource(std::move(resource_)),
+       callback(std::move(callback_)),
+       handle(context->getHandle()) {
++    if (!threesea::allowed(resource.url)) {
++        refused.start(Duration::zero(), Duration::zero(), [this] {
++            auto callback_ = callback;
++            Response response_;
++            response_.error = std::make_unique<Response::Error>(Response::Error::Reason::Other,
++                                                                "Refused: not the map server");
++            callback_(response_);
++        });
++        return;
++    }
++
+     // If there's already a response, set the correct etags/modified headers to make sure we are
+     // getting a 304 response if possible. This avoids redownloading unchanged data.
+     if (resource.priorEtag) {
+@@ -290,7 +326,12 @@
+ #endif
+     handleError(curl_easy_setopt(handle, CURLOPT_PRIVATE, this));
+     handleError(curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error));
+-    handleError(curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1));
++    // No redirects (they could lead elsewhere), HTTPS only, the origin's keys pinned.
++    handleError(curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L));
++    handleError(curl_easy_setopt(handle, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS)));
++    handleError(curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L));
++    handleError(curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L));
++    handleError(curl_easy_setopt(handle, CURLOPT_PINNEDPUBLICKEY, threesea::env("THREESEA_MAP_PINS")));
+     handleError(curl_easy_setopt(handle, CURLOPT_URL, resource.url.c_str()));
+     handleError(curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, writeCallback));
+     handleError(curl_easy_setopt(handle, CURLOPT_WRITEDATA, this));
+@@ -306,10 +347,11 @@
+ 
+     // Start requesting the information.
+     handleError(curl_multi_add_handle(context->multi, handle));
++    added = true;
+ }
+ 
+ HTTPRequest::~HTTPRequest() {
+-    if (curl_multi_remove_handle(context->multi, handle) != CURLM_OK) {
++    if (added && curl_multi_remove_handle(context->multi, handle) != CURLM_OK) {
+         mbgl::Log::Error(mbgl::Event::HttpRequest, "Error removing curl multi handle");
+     }
+ 

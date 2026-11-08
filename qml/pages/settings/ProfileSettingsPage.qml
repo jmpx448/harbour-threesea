@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
-import Sailfish.Pickers 1.0
 import "../../components"
 import "../../components/Errors.js" as Errors
 import "../../components/Verification.js" as Verification
 
 // My profile (Settings, and the first row of Contacts), laid out like a contact's page: the
 // People card with picture, nickname and ID, then nickname, revocation password, linked e-mail
-// and number, who gets the picture, the public key; picture, QR code and removing the ID in the
-// pulley (Android: My ID).
+// and number, who gets the picture, the public key; sharing the ID, QR code and removing the ID in
+// the pulley, the picture by tapping it, copying the ID by holding it down (Android: My ID).
 Page {
     id: page
     allowedOrientations: Orientation.All
@@ -28,10 +27,27 @@ Page {
             page.linking = ""
             if (ok) {
                 page.profile = result
-                if (done && result.linkedMobilePending) done()
+                if (done) done(result)
             } else {
                 Notices.show(Errors.text(errorKind, message), Notice.Long, Notice.Center)
             }
+        })
+    }
+
+    // Here, not in the picker: the answer can outlast it, and with its scope gone it would reach
+    // nobody.
+    function setPicture(path) {
+        backend.setProfilePicture(path, function(ok, result, kind, message) {
+            if (ok) page.profile = result
+            else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+        })
+    }
+
+    // Others can't find the ID by it any more, and linking it again takes a new confirmation.
+    function removeLink(command, args, kind) {
+        //% "Removing link"
+        Remorse.popupAction(page, qsTrId("threesea-la-removing-link"), function() {
+            page.link(command, args, kind)
         })
     }
 
@@ -40,7 +56,12 @@ Page {
         var dialog = pageStack.push(Qt.resolvedUrl("../MobileCodeDialog.qml"),
                                     { number: page.profile.linkedMobilePending })
         dialog.accepted.connect(function() { page.link("verifyMobile", { code: dialog.code }, "mobile") })
-        dialog.cancelRequested.connect(function() { page.link("linkMobile", { number: "" }, "mobile") })
+        dialog.cancelRequested.connect(function() {
+            //% "Cancelling link"
+            Remorse.popupAction(page, qsTrId("threesea-la-cancelling-link"), function() {
+                page.link("linkMobile", { number: "" }, "mobile")
+            })
+        })
     }
 
     Connections {
@@ -60,6 +81,8 @@ Page {
         }
     }
 
+    IdentityShare { id: identityShare }
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
@@ -68,19 +91,21 @@ Page {
             MenuItem {
                 //% "Remove ID from this device"
                 text: qsTrId("threesea-me-delete-data")
-                onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("../DeleteDataDialog.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../DeleteDataDialog.qml"), {}, function(dialog) {
                     dialog.accepted.connect(function() {
+                        var pin = dialog.pin
                         // Last chance to undo, like Jolla's own destructive actions.
                         //% "Removing ID and data"
                         Remorse.popupAction(page, qsTrId("threesea-la-removing-data"), function() {
-                            backend.call("deleteAllData", {}, function() {
-                                backend.refreshContacts()
-                                backend.refresh()
-                            })
+                            backend.removeAllData(pin)
                         })
                     })
-                }
+                })
+            }
+            MenuItem {
+                //% "Share my ID"
+                text: qsTrId("threesea-me-share-my-id")
+                onClicked: identityShare.shareIdentity(page.profile.identity || backend.identity)
             }
             MenuItem {
                 //% "My QR code"
@@ -89,14 +114,10 @@ Page {
             }
         }
 
-        Component {
-            id: profilePicturePicker
-            ImagePickerPage {
-                onSelectedContentPropertiesChanged: backend.setProfilePicture(selectedContentProperties.filePath,
-                                                                              function(ok, result) {
-                    if (ok) page.profile = result
-                })
-            }
+        PictureChooser {
+            id: pictureChooser
+            host: page
+            onChosen: page.setPicture(path)
         }
 
         Column {
@@ -125,7 +146,7 @@ Page {
                         textRightMargin: 0
                         //% "Nickname"
                         label: qsTrId("threesea-la-nickname")
-                        //% "Shown to new contacts"
+                        //% "Shown to the people you write to"
                         placeholderText: qsTrId("threesea-la-nickname-placeholder")
                         font.pixelSize: Theme.fontSizeLarge
                         Component.onCompleted: backend.call("profile", {}, function(ok, result) {
@@ -145,7 +166,12 @@ Page {
                         width: parent.width
                         text: page.profile.identity || backend.identity
                         font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.secondaryColor
+                        color: identityArea.pressed ? Theme.highlightColor : Theme.secondaryColor
+                        MouseArea {
+                            id: identityArea
+                            anchors.fill: parent
+                            onPressAndHold: identityMenu.open(menuHost)
+                        }
                     }
                 }
             }
@@ -154,7 +180,12 @@ Page {
             Item {
                 id: menuHost
                 width: parent.width
-                height: pictureMenu.height
+                height: pictureMenu.height + identityMenu.height
+            }
+
+            IdentityMenu {
+                id: identityMenu
+                identity: page.profile.identity || backend.identity
             }
 
             ContextMenu {
@@ -165,14 +196,23 @@ Page {
                           ? qsTrId("threesea-la-change-profile-picture")
                           //% "Set profile picture"
                           : qsTrId("threesea-la-set-profile-picture")
-                    onClicked: pageStack.push(profilePicturePicker)
+                    onClicked: pictureChooser.pick()
+                }
+                MenuItem {
+                    //% "Take photo"
+                    text: qsTrId("threesea-me-take-picture")
+                    onClicked: pictureChooser.shoot()
                 }
                 MenuItem {
                     visible: page.profile.pictureVersion > 0
                     //% "Remove profile picture"
                     text: qsTrId("threesea-me-remove-profile-picture")
-                    onClicked: backend.call("removeProfilePicture", {}, function(ok, result) {
-                        if (ok) page.profile = result
+                    //% "Removing picture"
+                    onClicked: Remorse.popupAction(page, qsTrId("threesea-la-removing-picture"), function() {
+                        backend.call("removeProfilePicture", {}, function(ok, result, kind, message) {
+                            if (ok) page.profile = result
+                            else Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                        })
                     })
                 }
             }
@@ -187,10 +227,17 @@ Page {
                 property bool working: false
                 function refresh(cached) {
                     backend.call("revocationStatus", { cached: cached }, function(ok, result) {
-                        if (ok) revocationButton.status = result
+                        // The stored state never replaces what the server just said.
+                        if (ok && !(cached && revocationButton.status.checked)) revocationButton.status = result
                     })
                 }
                 Component.onCompleted: { refresh(true); refresh(false) }
+                Connections {
+                    target: backend
+                    // Back online with the state still unknown: the server can say now.
+                    onConnectionStateChanged: if (backend.connectionState === "connected"
+                                                  && !revocationButton.status.checked) revocationButton.refresh(false)
+                }
                 //% "ID revocation"
                 label: qsTrId("threesea-la-revocation")
                 value: working
@@ -202,14 +249,16 @@ Page {
                             ? qsTrId("threesea-la-revocation-set-at").arg(Format.formatDate(new Date(status.setAt), Formatter.DateMedium))
                             //% "Password set"
                             : qsTrId("threesea-la-revocation-set"))
-                         //% "No password set"
-                         : qsTrId("threesea-la-revocation-not-set")
+                         : status.checked
+                           //% "No password set"
+                           ? qsTrId("threesea-la-revocation-not-set")
+                           //% "Not checked yet"
+                           : qsTrId("threesea-la-revocation-not-checked")
                 enabled: !working
-                onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("../RevocationPasswordDialog.qml"))
+                onClicked: window.pushWithPin(Qt.resolvedUrl("../RevocationPasswordDialog.qml"), {}, function(dialog) {
                     dialog.accepted.connect(function() {
                         revocationButton.working = true
-                        backend.call("setRevocationPassword", { password: dialog.password },
+                        backend.call("setRevocationPassword", { password: dialog.password, pin: dialog.pin },
                                      function(ok, result, kind, message) {
                             revocationButton.working = false
                             if (ok) {
@@ -219,7 +268,7 @@ Page {
                             }
                         })
                     })
-                }
+                })
             }
 
             // Identity links (Android's): only on the user's request (CLAUDE.md §7.4).
@@ -239,8 +288,14 @@ Page {
                 onClicked: {
                     var dialog = pageStack.push(Qt.resolvedUrl("../LinkDialog.qml"),
                                                 { kind: "email", current: page.profile.linkedEmail || "" })
-                    dialog.accepted.connect(function() { page.link("linkEmail", { email: dialog.value.trim() }, "email") })
-                    dialog.unlinkRequested.connect(function() { page.link("linkEmail", { email: "" }, "email") })
+                    dialog.accepted.connect(function() {
+                        page.link("linkEmail", { email: dialog.value.trim() }, "email", function(result) {
+                            // Threema answers "linked" at once, and sends nothing.
+                            //% "This address is already linked to your ID, so no e-mail is needed."
+                            if (!result.linkedEmailPending) Notices.show(qsTrId("threesea-la-email-already-linked"), Notice.Long, Notice.Center)
+                        })
+                    })
+                    dialog.unlinkRequested.connect(function() { page.removeLink("linkEmail", { email: "" }, "email") })
                 }
             }
             ValueButton {
@@ -265,9 +320,15 @@ Page {
                         current: page.profile.linkedMobile ? "+" + String(page.profile.linkedMobile).replace(/^\+/, "") : ""
                     })
                     dialog.accepted.connect(function() {
-                        page.link("linkMobile", { number: dialog.value }, "mobile", function() { askCodeLater.start() })
+                        // What the dialog showed, exactly.
+                        page.link("linkMobile", { number: "+" + dialog.normalized }, "mobile", function(result) {
+                            if (result.linkedMobilePending) askCodeLater.start()
+                            // Threema answers "linked" at once, and sends nothing.
+                            //% "This number is already linked to your ID, so no SMS is needed."
+                            else Notices.show(qsTrId("threesea-la-phone-already-linked"), Notice.Long, Notice.Center)
+                        })
                     })
-                    dialog.unlinkRequested.connect(function() { page.link("linkMobile", { number: "" }, "mobile") })
+                    dialog.unlinkRequested.connect(function() { page.removeLink("linkMobile", { number: "" }, "mobile") })
                 }
             }
 

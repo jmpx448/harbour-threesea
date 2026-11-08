@@ -1,24 +1,55 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 .pragma library
 
+// While the core brings the stored data up to date (`backend.upgrading`).
+function upgradingHint() {
+    //% "Updating the stored chats. This can take a moment; keep Threesea open."
+    return qsTrId("threesea-la-upgrading-hint")
+}
+
 // User-facing text for an error kind returned by the core (see core/src/app.rs ApiError).
 function text(kind, message) {
     switch (kind) {
     case "network":
         //% "Could not reach the Threema servers. Check your internet connection and try again."
         return qsTrId("threesea-la-error-network")
+    case "messageTooLong":
+        // Message texts and captions, and also group and list names and polls.
+        //% "The text is too long. Shorten it and try again."
+        return qsTrId("threesea-la-error-text-too-long")
+    case "pollResultsTooLong":
+        //% "The results of this poll are too long to send. The poll stays open."
+        return qsTrId("threesea-la-error-poll-results-too-long")
     case "licenseFormat":
         //% "A license key looks like ABCDE-12345."
         return qsTrId("threesea-la-error-license-format")
     case "backupDecrypt":
-        //% "Wrong password, or the ID backup is damaged."
+        //% "Wrong password, or the backup is damaged."
         return qsTrId("threesea-la-error-backup-decrypt")
     case "backupVersion":
         //% "This backup's format is not supported."
         return qsTrId("threesea-la-error-backup-version")
+    case "backupNoIdentity":
+        //% "This backup holds no Threema ID. Restore the ID from Threema Safe or an ID backup, then import this backup in Settings, Backup, Data backup."
+        return qsTrId("threesea-la-error-backup-no-identity")
     case "backupInvalid":
         //% "The file could not be read as a Threema backup."
         return qsTrId("threesea-la-error-backup-invalid")
+    case "backupWrite":
+        //% "The backup could not be written. Check the backup folder."
+        return qsTrId("threesea-la-error-backup-write")
+    case "backupNoRoom":
+        //% "The backup folder's storage has too little free space for a backup. Free some space or choose another folder."
+        return qsTrId("threesea-la-error-backup-no-room")
+    case "backupRunning":
+        //% "A backup is being written right now."
+        return qsTrId("threesea-la-error-backup-running")
+    case "backupNoFolder":
+        //% "Choose a backup folder first."
+        return qsTrId("threesea-la-error-backup-no-folder")
+    case "backupNoPassword":
+        //% "Enter a backup password first."
+        return qsTrId("threesea-la-error-backup-no-password")
     case "backupIdentity":
         //% "This backup belongs to a different Threema ID or key."
         return qsTrId("threesea-la-error-backup-identity")
@@ -34,6 +65,9 @@ function text(kind, message) {
     case "safeTooLarge":
         //% "The backup is larger than the Threema Safe server allows."
         return qsTrId("threesea-la-error-safe-too-large")
+    case "safeDamaged":
+        //% "This Threema Safe backup is damaged and can't be read."
+        return qsTrId("threesea-la-error-safe-damaged")
     case "identityFormat":
         //% "A Threema ID has 8 characters, letters and digits."
         return qsTrId("threesea-la-error-identity-format")
@@ -49,6 +83,12 @@ function text(kind, message) {
     case "contactBlocked":
         //% "You have blocked this contact."
         return qsTrId("threesea-la-error-contact-blocked")
+    case "contactRevoked":
+        //% "This Threema ID was revoked."
+        return qsTrId("threesea-la-error-contact-revoked")
+    case "contactUnknown":
+        //% "Block unknown senders is on, and this person is not one of your contacts."
+        return qsTrId("threesea-la-error-contact-unknown")
     case "fileNotDownloaded":
         //% "Download the file first."
         return qsTrId("threesea-la-error-file-not-downloaded")
@@ -59,8 +99,11 @@ function text(kind, message) {
         //% "This is not a Threema contact QR code."
         return qsTrId("threesea-la-error-qr-invalid")
     case "qrMismatch":
-        //% "The code does not match this contact's key. Ask them to show their code again."
+        //% "This code has the right Threema ID but a different key from the one known for it, so it may be forged. It was not accepted. Compare the codes with this person directly."
         return qsTrId("threesea-la-error-qr-mismatch")
+    case "qrExpired":
+        //% "This code has expired. Scan it directly from the other person's app."
+        return qsTrId("threesea-la-error-qr-expired")
     case "groupLeft":
         //% "You are no longer in this group."
         return qsTrId("threesea-la-error-group-left")
@@ -70,6 +113,21 @@ function text(kind, message) {
     case "fileTooLarge":
         //% "Files can be at most 100 MB."
         return qsTrId("threesea-la-error-file-too-large")
+    case "shareTooLarge":
+        //% "That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes."
+        return qsTrId("threesea-la-error-share-too-large")
+    case "videoKeepsMetadata":
+        // Where nobody can be asked: the chat was left, or a forward ended with the window gone.
+        //% "A video was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file."
+        return qsTrId("threesea-la-error-video-metadata")
+    case "fileKeepsMetadata":
+        // A picture from this phone, and nobody left to ask: the chat was left, or it goes to several.
+        //% "A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file."
+        return qsTrId("threesea-la-error-file-picture-metadata")
+    case "pictureKeepsMetadata":
+        // A forward ended with the window gone, so nobody can be asked.
+        //% "A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. Save it, and it can be sent as a file."
+        return qsTrId("threesea-la-error-picture-metadata")
     case "linkUnknownCode":
         //% "This is not a code of Threema for Desktop. Scan the code it shows when you open it."
         return qsTrId("threesea-la-error-link-unknown-code")
@@ -77,28 +135,64 @@ function text(kind, message) {
         //% "This code is for Threema Web. Scan the code of Threema for Desktop instead."
         return qsTrId("threesea-la-error-link-web-code")
     case "webCodeInvalid":
-        //% "This is not a Threema Web code. Open web.threema.ch and scan the code it shows."
-        return qsTrId("threesea-la-error-web-code")
+        //% "This is not a Threema Web code. Scan the code Threema Web shows in the browser."
+        return qsTrId("threesea-la-error-not-web-code")
     case "webVersion":
         //% "This version of Threema Web can't be used. Reload the page in the browser."
         return qsTrId("threesea-la-error-web-version")
     case "webSessionNotFound":
         //% "This Threema Web session no longer exists."
         return qsTrId("threesea-la-error-web-session")
+    case "webDisabled":
+        //% "Threema Web is switched off. Turn it on in the settings under Threema Web."
+        return qsTrId("threesea-la-error-web-disabled")
+    case "webAlreadyPaired":
+        //% "This browser is already in the list under Threema Web. Remove it there to connect it with a new code."
+        return qsTrId("threesea-la-error-web-already-paired")
     case "linkVersion":
         //% "This version of Threema for Desktop can't be linked. Please update both apps."
         return qsTrId("threesea-la-error-link-version")
     case "linkFailed":
         //% "Linking didn't work. Check the connection on both devices and try again."
         return qsTrId("threesea-la-error-link-failed")
+    case "linkRemoved":
+        //% "Linking didn't finish, so the devices in the device group were removed again. The computer had already received your ID. Close Threema for Desktop, open it again and scan its new code."
+        return qsTrId("threesea-la-error-link-removed")
+    case "linkUncertain":
+        //% "Linking didn't finish, but the computer received your ID and may be linked anyway. Linked devices shows what is linked once you are online, and you can remove it there."
+        return qsTrId("threesea-la-error-link-uncertain")
+    case "groupCallFull":
+        //% "This group call is full."
+        return qsTrId("threesea-la-error-group-call-full")
+    case "groupCallNotRunning":
+        //% "This group call has ended."
+        return qsTrId("threesea-la-error-group-call-not-running")
+    case "groupCallVersion":
+        //% "This group call needs a different version of the app."
+        return qsTrId("threesea-la-error-group-call-version")
+    case "groupCallConnection":
+        //% "The connection to the group call failed."
+        return qsTrId("threesea-la-error-group-call-connection")
+    case "groupCallAudio":
+        //% "The microphone or the speaker stopped working, so the group call ended."
+        return qsTrId("threesea-la-error-group-call-audio")
     case "notGif":
         //% "This picture is not a GIF."
         return qsTrId("threesea-la-error-not-gif")
+    case "contactNotFound":
+        //% "Add this ID to your contacts to write to it."
+        return qsTrId("threesea-la-error-contact-not-found")
+    case "groupNotFound":
+        //% "This group is no longer on this device."
+        return qsTrId("threesea-la-error-group-not-found")
+    case "noIdentity":
+        //% "Create or restore your Threema ID first."
+        return qsTrId("threesea-la-error-no-identity")
     case "notSupportedByContact":
-        //% "This contact's app doesn't support this."
+        //% "The app on the other side doesn't support this."
         return qsTrId("threesea-la-error-not-supported-by-contact")
     case "messageTooOld":
-        //% "Messages can only be changed for 6 hours."
+        //% "Messages can be edited or deleted for everyone for 6 hours after sending."
         return qsTrId("threesea-la-error-message-too-old")
     case "reactionNotSupported":
         //% "This contact's app only understands thumbs up and thumbs down."
@@ -115,6 +209,8 @@ function text(kind, message) {
     case "wrongPin":
         //% "Wrong PIN"
         return qsTrId("threesea-la-wrong-pin")
+    case "pinLockout":
+        return qsTrId("threesea-la-pin-paused", parseInt(message, 10))
     case "pinTooShort":
         //% "The PIN needs at least 4 digits."
         return qsTrId("threesea-la-error-pin-short")
@@ -126,11 +222,59 @@ function text(kind, message) {
     case "privateChatsExist":
         //% "Remove all chats from the private chats first."
         return qsTrId("threesea-la-error-private-chats-exist")
+    case "serverTrouble":
+        //% "Threema's server didn't accept this. Try again later."
+        return qsTrId("threesea-la-error-server-trouble")
+    case "rateLimited":
+        //% "Threema's servers are busy. Try again in a few minutes."
+        return qsTrId("threesea-la-error-rate-limited")
+    case "serverUnexplained":
+        //% "Threema's servers turned this down and gave no reason. Try again later."
+        return qsTrId("threesea-la-error-server-unexplained")
+    case "reportRefused":
+        //% "Threema didn't accept the report. Try again later."
+        return qsTrId("threesea-la-error-report-refused")
+    case "idSearchInput":
+        //% "Enter a phone number with its country code, or an e-mail address."
+        return qsTrId("threesea-la-error-id-search-input")
+    case "identityExists":
+        //% "This device already has a Threema ID."
+        return qsTrId("threesea-la-error-identity-exists")
+    case "diskFull":
+        //% "The phone's storage is full. Free some space."
+        return qsTrId("threesea-la-error-disk-full")
+    case "upgradeNoRoom":
+        //% "Updating the stored chats needs more free space. Free some space; the chats stay as they were until then."
+        return qsTrId("threesea-la-error-upgrade-no-room")
+    case "storeTooNew":
+        //% "This version of Threesea is older than your stored data. Install the newest version."
+        return qsTrId("threesea-la-error-store-too-new")
+    case "storeKey":
+        // With SQLCipher a wrong key and a damaged first page are the same error.
+        //% "The stored data could not be opened: the key does not fit, or the file is damaged. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone."
+        return qsTrId("threesea-la-error-store-key")
+    case "storeDamaged":
+        //% "Part of the stored data could not be read. It may be damaged. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone."
+        return qsTrId("threesea-la-error-store-damaged")
+    case "storeUnreadable":
+        //% "The stored data could not be read. Check that the phone has free storage."
+        return qsTrId("threesea-la-error-store-unreadable")
+    case "store":
+        //% "The stored data could not be opened."
+        return qsTrId("threesea-la-error-store")
+    case "keyMissing":
+        //% "The key to the stored data was not found in the phone's key storage, so the data could not be opened. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone."
+        return qsTrId("threesea-la-error-key-missing")
+    case "secrets":
+        //% "Threesea could not get the key to its data from the phone's key storage. Allow the access if the phone asks for it."
+        return qsTrId("threesea-la-error-secrets")
     case "server":
-        // Message from the Threema server, possibly already localized.
-        return message
+        // Message from the Threema server, possibly already localized. Stored errors keep only
+        // the kind, so there may be none.
+        return message || qsTrId("threesea-la-error-server-trouble")
     default:
-        //% "Something went wrong: %1"
-        return qsTrId("threesea-la-error-internal").arg(message)
+        // Internal errors carry English for developers, or a system's wording: never shown.
+        //% "Something went wrong."
+        return qsTrId("threesea-la-error-internal-plain")
     }
 }

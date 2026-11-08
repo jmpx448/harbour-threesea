@@ -15,7 +15,9 @@
 #include "groupcallengine.h"
 #include "aec/echocanceller.h"
 #include "dtlscertificate.h"
+#include "vp8filter.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QImage>
 #include <QTransform>
@@ -401,6 +403,8 @@ bool GroupCallEngine::buildAudio(const QString &offer)
     gst_object_unref(playbackPad);
     gst_object_unref(playback);
     m_micVolume = gst_bin_get_by_name(GST_BIN(sendBin), "mic");
+    // Muted while there was no pipeline yet ("Joining…" takes seconds).
+    g_object_set(m_micVolume, "mute", m_muted ? TRUE : FALSE, nullptr);
     m_mixer = gst_bin_get_by_name(GST_BIN(bin), "mix");
     return true;
 }
@@ -592,8 +596,10 @@ void GroupCallEngine::linkMicrophone()
     }
     GstPad *sink = gst_element_request_pad_simple(m_webrtc, "sink_0");
     GstPad *src = gst_element_get_static_pad(m_sendTail, "src");
+    bool working = true;
     if (!sink || gst_pad_link(src, sink) != GST_PAD_LINK_OK) {
         qWarning() << "group call audio: cannot link the microphone";
+        working = false;
     }
     gst_object_unref(src);
     if (sink) {
@@ -601,9 +607,16 @@ void GroupCallEngine::linkMicrophone()
     }
     gst_object_unref(m_sendTail);
     m_sendTail = nullptr;
-    gst_element_sync_state_with_parent(m_sendBin);
+    if (!gst_element_sync_state_with_parent(m_sendBin)) {
+        qWarning() << "group call audio: the microphone doesn't start";
+        working = false;
+    }
     gst_object_unref(m_sendBin);
     m_sendBin = nullptr;
+    // Without the microphone the call only seems to run; queued, this is in the middle of the setup.
+    if (!working) {
+        QMetaObject::invokeMethod(this, "onError", Qt::QueuedConnection, Q_ARG(QString, QStringLiteral("media")));
+    }
     // The branch joined a playing pipeline: without the latency rtpsession knows no running
     // time, so it can't make sender reports and sends no RTCP at all.
     gst_bin_recalculate_latency(GST_BIN(m_pipeline));
@@ -611,6 +624,7 @@ void GroupCallEngine::linkMicrophone()
 
 void GroupCallEngine::setMuted(bool muted)
 {
+    m_muted = muted;
     if (m_micVolume) {
         g_object_set(m_micVolume, "mute", muted ? TRUE : FALSE, nullptr);
     }
@@ -686,7 +700,9 @@ void GroupCallEngine::stop()
     m_remotePassword.clear();
     m_pendingChannel.clear();
     m_receivedChannel.clear();
-    // This call's DTLS private key (PEM) is not kept beyond it.
+    // Our copy of this call's DTLS private key (PEM). GStreamer's own copies (the elements' `pem`
+    // and the DTLS agents it keeps per PEM) are out of our reach and not cleared; the key is good
+    // for this call only.
     m_certificate.fill('\0');
     m_certificate.clear();
     m_candidates.clear();
@@ -755,6 +771,11 @@ void GroupCallEngine::stop()
     gst_object_unref(m_pipeline);
     m_webrtc = nullptr;
     m_pipeline = nullptr;
+    // The pipeline's threads are gone. What they queued belongs to this call: an error or a
+    // description must not reach the next one.
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
+    QMutexLocker locker(&m_framesLock);
+    m_pendingFrames.clear();
 }
 
 // --- GStreamer threads: hand everything over to this object's thread. ---
@@ -818,7 +839,20 @@ void GroupCallEngine::onElementAdded(GstBin *, GstBin *, GstElement *element, vo
     GstElementFactory *factory = gst_element_get_factory(element);
     if (factory && g_strcmp0(GST_OBJECT_NAME(factory), "dtlssrtpdec") == 0) {
         g_object_set(element, "pem", engine->m_certificate.constData(), nullptr);
+        // All that comes in over the transport passes here.
+        GstPad *sink = gst_element_get_static_pad(element, "sink");
+        if (sink) {
+            gst_pad_add_probe(sink, static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST),
+                              reinterpret_cast<GstPadProbeCallback>(&GroupCallEngine::onNetworkBuffer), engine, nullptr);
+            gst_object_unref(sink);
+        }
     }
+}
+
+int GroupCallEngine::onNetworkBuffer(GstPad *, GstPadProbeInfo *, void *self)
+{
+    ++static_cast<GroupCallEngine *>(self)->m_packetsReceived;
+    return GST_PAD_PROBE_OK;
 }
 
 void GroupCallEngine::onChannelOpenCb(GstWebRTCDataChannel *, void *self)
@@ -845,6 +879,8 @@ struct IncomingStream
     // Degrees clockwise to show the picture upright (the sender's video orientation extension:
     // Threema's apps send their camera's pictures unrotated).
     std::atomic<int> rotation{0};
+    // VP8 only.
+    Vp8Filter vp8;
 };
 
 void GroupCallEngine::onPadAdded(GstElement *, GstPad *pad, void *self)
@@ -994,6 +1030,10 @@ int GroupCallEngine::onDecrypt(GstPad *, GstPadProbeInfo *info, void *data)
     if (!out) {
         return GST_PAD_PROBE_DROP;
     }
+    if (stream->codec == CODEC_VP8 && !stream->vp8.passes(out)) {
+        gst_buffer_unref(out);
+        return GST_PAD_PROBE_DROP;
+    }
     gst_buffer_unref(GST_PAD_PROBE_INFO_BUFFER(info));
     GST_PAD_PROBE_INFO_DATA(info) = out;
     return GST_PAD_PROBE_OK;
@@ -1129,17 +1169,62 @@ int GroupCallEngine::onLocalSample(GstElement *sink, void *self)
 int GroupCallEngine::onRemoteSample(GstElement *sink, void *data)
 {
     auto *stream = static_cast<IncomingStream *>(data);
-    QImage image = sampleImage(GST_APP_SINK(sink));
+    GroupCallEngine *engine = stream->engine;
     const quint32 participant = stream->participant;
-    if (image.isNull() || participant == UINT32_MAX) {
+    bool wanted = participant != UINT32_MAX;
+    if (wanted) {
+        QMutexLocker locker(&engine->m_framesLock);
+        // The GUI is behind: pictures must not pile up in its queue.
+        wanted = !engine->m_pendingFrames.contains(participant);
+        if (wanted) {
+            engine->m_pendingFrames.insert(participant);
+        }
+    }
+    if (!wanted) {
+        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+        if (sample) {
+            gst_sample_unref(sample);
+        }
+        return GST_FLOW_OK;
+    }
+    QImage image = sampleImage(GST_APP_SINK(sink));
+    if (image.isNull()) {
+        QMutexLocker locker(&engine->m_framesLock);
+        engine->m_pendingFrames.remove(participant);
         return GST_FLOW_OK;
     }
     if (const int rotation = stream->rotation) {
         image = image.transformed(QTransform().rotate(rotation));
     }
-    QMetaObject::invokeMethod(stream->engine, "participantFrame", Qt::QueuedConnection,
-                              Q_ARG(quint32, participant), Q_ARG(QImage, image));
+    QMetaObject::invokeMethod(engine, "onParticipantFrame", Qt::QueuedConnection, Q_ARG(quint32, participant),
+                              Q_ARG(QImage, image));
     return GST_FLOW_OK;
+}
+
+void GroupCallEngine::onParticipantFrame(quint32 participant, const QImage &image)
+{
+    {
+        QMutexLocker locker(&m_framesLock);
+        m_pendingFrames.remove(participant);
+    }
+    emit participantFrame(participant, image);
+}
+
+// Inside the microphone's or the speaker's bin (the volume and the mixer stay ours after the bins
+// went into the pipeline).
+bool GroupCallEngine::isSharedAudio(GstObject *source) const
+{
+    for (GstElement *member : {m_micVolume, m_mixer}) {
+        GstObject *bin = member ? gst_object_get_parent(GST_OBJECT(member)) : nullptr;
+        if (bin) {
+            const bool inside = gst_object_has_as_ancestor(source, bin);
+            gst_object_unref(bin);
+            if (inside) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // On this object's thread (GLib main loop): latency changes and errors.
@@ -1157,6 +1242,12 @@ int GroupCallEngine::onBusMessage(GstBus *, GstMessage *message, void *self)
         gst_message_parse_error(message, &error, nullptr);
         qWarning() << "group call pipeline error:" << (error ? error->message : "");
         g_clear_error(&error);
+        // Without the microphone's or the speaker's branch the call only seems to run (a tile
+        // showing the microphone on while nobody hears us). One participant's receive branch
+        // failing costs only that participant, and the call goes on.
+        if (engine->isSharedAudio(GST_MESSAGE_SRC(message))) {
+            QMetaObject::invokeMethod(engine, "onError", Qt::QueuedConnection, Q_ARG(QString, QStringLiteral("media")));
+        }
         break;
     }
     default:

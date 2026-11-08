@@ -7,10 +7,14 @@ import "../components/Format.js" as Fmt
 
 Page {
     id: page
+    objectName: "holdsPin"
+    readonly property bool safePage: true
     allowedOrientations: Orientation.All
 
     property var status: ({ enabled: false })
     property bool working: false
+    // The app lock's PIN, while this page lives (window.pushWithPin).
+    property string pin
 
     // After a restore: what still waits to be imported (it needs the directory server), what the
     // import skipped and why, and the last failure. Shown only while something needs attention.
@@ -45,6 +49,8 @@ Page {
             working = false
             if (ok) {
                 page.status = result
+                //% "Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires."
+                if (result.serverCopyDeleted === false) errorLabel.text = qsTrId("threesea-la-safe-server-copy-left")
             } else {
                 errorLabel.text = Errors.text(kind, message)
                 refresh()
@@ -52,9 +58,9 @@ Page {
         })
     }
 
-    function askPassword() {
-        var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"))
-        dialog.accepted.connect(function() { page.run("safeEnable", { password: dialog.password }) })
+    function askPassword(changing) {
+        var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"), { changing: changing === true })
+        dialog.accepted.connect(function() { page.run("safeEnable", { password: dialog.password, pin: page.pin }) })
     }
 
     Component.onCompleted: refresh()
@@ -78,7 +84,7 @@ Page {
                 //% "Change password"
                 text: qsTrId("threesea-me-safe-change-password")
                 enabled: !page.working
-                onClicked: page.askPassword()
+                onClicked: page.askPassword(true)
             }
             MenuItem {
                 visible: page.pendingImports > 0
@@ -111,13 +117,13 @@ Page {
                 busy: page.working
                 //% "Threema Safe"
                 text: qsTrId("threesea-la-threema-safe")
-                //% "Encrypted daily backup of your ID, profile, contacts, groups and settings."
-                description: qsTrId("threesea-la-safe-description")
+                //% "Encrypted backup of your ID, profile, contacts, groups and settings, updated when something changes. For your chats, use Data backup."
+                description: qsTrId("threesea-la-safe-description-changes")
                 onClicked: {
                     if (page.working) return
                     if (page.status.enabled) {
-                        //% "Turning off Threema Safe"
-                        remorse.execute(qsTrId("threesea-la-safe-disabling"), function() { page.run("safeDisable") })
+                        //% "Turning off and deleting the backup"
+                        remorse.execute(qsTrId("threesea-la-safe-disabling-delete"), function() { page.run("safeDisable", { pin: page.pin }) })
                     } else {
                         page.askPassword()
                     }
@@ -145,8 +151,8 @@ Page {
 
             DetailItem {
                 visible: page.status.enabled && !!page.status.lastError
-                //% "Last attempt"
-                label: qsTrId("threesea-la-safe-last-attempt")
+                //% "Last attempt failed"
+                label: qsTrId("threesea-la-safe-last-attempt-failed")
                 value: page.status.lastError ? Errors.text(page.status.lastError, "") : ""
             }
 

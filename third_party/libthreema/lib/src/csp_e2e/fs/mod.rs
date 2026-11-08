@@ -20,13 +20,16 @@ use tracing::{debug, info, warn};
 use self::session::{DhType, Session, SessionError, SessionId, SessionState, supported_version_range};
 use crate::{
     common::{
-        ThreemaId,
+        self, ThreemaId,
         keys::{ClientKey, PublicKey},
     },
     model::provider::ProviderError,
-    protobuf::csp_e2e_fs::{
-        Accept, Encapsulated, Envelope, Init, Reject, Terminate, Version, encapsulated, envelope, reject,
-        terminate,
+    protobuf::{
+        common::GroupIdentity,
+        csp_e2e_fs::{
+            Accept, Encapsulated, Envelope, Init, Reject, Terminate, Version, encapsulated, envelope, reject,
+            terminate,
+        },
     },
 };
 
@@ -65,9 +68,21 @@ pub enum FsStatus {
     MessageRejected {
         /// ID of the rejected (outer) message.
         message_id: u64,
+        /// The group the peer says the message was for, if it named a valid one.
+        group_identity: Option<common::GroupIdentity>,
+        /// Whether the reject ended a session we had. Every message sent in a session the peer
+        /// lost is rejected on its own; only the first of them finds the session still there.
+        session_known: bool,
     },
-    /// The peer terminated the session.
-    Terminated,
+    /// The peer ended a session, or said it has forward security disabled for one we don't have
+    /// (the only unknown session this is reported for: the sender's feature mask is out of date).
+    Terminated {
+        /// Whether it ended a session we had.
+        session_known: bool,
+    },
+    /// A message arrived without forward security although the session with its sender covers
+    /// that message type: the sender dropped it, or someone else holds its long-term key.
+    MessageWithoutFs,
 }
 
 /// Storage of FS sessions (implemented by the app, persisted encrypted, never backed up) plus the
@@ -115,12 +130,19 @@ pub trait FsSessionStore {
     ) -> Result<usize, ProviderError>;
 
     /// Queue an FS control envelope (encoded [`Envelope`]) to be sent to `peer` as a `0xa0`
-    /// message with a new random message ID, no flags and no nickname.
+    /// message with a new random message ID, no flags and no nickname. `peer_public_key` is known
+    /// when this answers a message of `peer`, who may not be a contact yet: an Init comes before
+    /// the message that creates the contact.
     ///
     /// # Errors
     ///
     /// Storage failures.
-    fn enqueue_control(&mut self, peer: ThreemaId, envelope: Vec<u8>) -> Result<(), ProviderError>;
+    fn enqueue_control(
+        &mut self,
+        peer: ThreemaId,
+        peer_public_key: Option<PublicKey>,
+        envelope: Vec<u8>,
+    ) -> Result<(), ProviderError>;
 
     /// Report a user-visible event.
     ///
@@ -136,6 +158,8 @@ pub struct FsContext {
     pub(crate) store: Box<core::cell::RefCell<dyn FsSessionStore>>,
     /// Peer ratchet to turn once the current incoming message is acknowledged.
     pub(crate) pending_commit: Option<PeerRatchetCommit>,
+    /// Forward security is off (see [`FsContext::answering_only`]).
+    answering_only: bool,
 }
 
 impl FsContext {
@@ -145,6 +169,19 @@ impl FsContext {
         Self {
             store,
             pending_commit: None,
+            answering_only: false,
+        }
+    }
+
+    /// Forward security is off here, but incoming envelopes get the answer the protocol asks of a
+    /// client that doesn't support it: a message in an envelope is rejected, so that the sender
+    /// can send it again without, and everything else is discarded. No session is created or
+    /// used.
+    #[must_use]
+    pub fn answering_only(store: Box<core::cell::RefCell<dyn FsSessionStore>>) -> Self {
+        Self {
+            answering_only: true,
+            ..Self::new(store)
         }
     }
 }
@@ -177,17 +214,20 @@ fn envelope_bytes(session_id: SessionId, content: envelope::Content) -> Vec<u8> 
 fn send_reject(
     store: &mut dyn FsSessionStore,
     peer: ThreemaId,
+    peer_public_key: PublicKey,
     session_id: SessionId,
     message_id: u64,
+    group_identity: Option<GroupIdentity>,
     cause: reject::Cause,
 ) -> Result<(), ProviderError> {
     store.enqueue_control(
         peer,
+        Some(peer_public_key),
         envelope_bytes(
             session_id,
             envelope::Content::Reject(Reject {
                 message_id,
-                group_identity: None,
+                group_identity,
                 cause: cause as i32,
             }),
         ),
@@ -197,11 +237,13 @@ fn send_reject(
 fn send_terminate(
     store: &mut dyn FsSessionStore,
     peer: ThreemaId,
+    peer_public_key: Option<PublicKey>,
     session_id: SessionId,
     cause: terminate::Cause,
 ) -> Result<(), ProviderError> {
     store.enqueue_control(
         peer,
+        peer_public_key,
         envelope_bytes(
             session_id,
             envelope::Content::Terminate(Terminate { cause: cause as i32 }),
@@ -230,6 +272,26 @@ pub(crate) fn process_incoming(
     };
     let mut store = fs.store.borrow_mut();
     let store = &mut *store;
+    if fs.answering_only {
+        if let Some(envelope::Content::Encapsulated(encapsulated)) = envelope.content {
+            info!(?session_id, "Rejecting FS message, forward security is off");
+            send_reject(
+                store,
+                peer,
+                *peer_public_key,
+                session_id,
+                outer_message_id,
+                encapsulated.group_identity,
+                reject::Cause::DisabledByLocal,
+            )?;
+        } else {
+            info!(
+                ?session_id,
+                "Discarding FS control message, forward security is off"
+            );
+        }
+        return Ok(IncomingFsOutcome::Handled);
+    }
     match envelope.content {
         Some(envelope::Content::Init(init)) => {
             handle_init(
@@ -249,25 +311,43 @@ pub(crate) fn process_incoming(
         },
         Some(envelope::Content::Reject(reject)) => {
             info!(?session_id, cause = reject.cause, "FS reject received");
-            store.delete(peer, session_id)?;
+            let session_known = store.get(peer, session_id)?.is_some();
+            if session_known {
+                store.delete(peer, session_id)?;
+            }
             store.status(
                 peer,
                 FsStatus::MessageRejected {
                     message_id: reject.message_id,
+                    group_identity: reject
+                        .group_identity
+                        .as_ref()
+                        .and_then(|group_identity| common::GroupIdentity::try_from(group_identity).ok()),
+                    session_known,
                 },
             )?;
             Ok(IncomingFsOutcome::Handled)
         },
         Some(envelope::Content::Terminate(terminate)) => {
             info!(?session_id, cause = terminate.cause, "FS terminate received");
-            if store.get(peer, session_id)?.is_some() {
+            let session_known = store.get(peer, session_id)?.is_some();
+            if session_known {
                 store.delete(peer, session_id)?;
-                store.status(peer, FsStatus::Terminated)?;
+            }
+            if session_known || terminate.cause == terminate::Cause::DisabledByLocal as i32 {
+                store.status(peer, FsStatus::Terminated { session_known })?;
             }
             Ok(IncomingFsOutcome::Handled)
         },
         Some(envelope::Content::Encapsulated(encapsulated)) => {
-            let outcome = handle_encapsulated(store, peer, session_id, outer_message_id, &encapsulated)?;
+            let outcome = handle_encapsulated(
+                store,
+                peer,
+                *peer_public_key,
+                session_id,
+                outer_message_id,
+                &encapsulated,
+            )?;
             if let IncomingFsOutcome::Inner { .. } = outcome {
                 fs.pending_commit = Some(PeerRatchetCommit {
                     peer,
@@ -311,12 +391,19 @@ fn handle_init(
         Ok(session) => session,
         Err(error) => {
             warn!(%error, "Cannot accept FS init");
-            return send_terminate(store, peer, session_id, terminate::Cause::Reset);
+            return send_terminate(
+                store,
+                peer,
+                Some(*peer_public_key),
+                session_id,
+                terminate::Cause::Reset,
+            );
         },
     };
     store.store(&session)?;
     store.enqueue_control(
         peer,
+        Some(*peer_public_key),
         envelope_bytes(
             session_id,
             envelope::Content::Accept(Accept {
@@ -345,7 +432,13 @@ fn handle_accept(
 ) -> Result<(), ProviderError> {
     let Some(mut session) = store.get(peer, session_id)? else {
         warn!(?session_id, "FS accept for unknown session");
-        return send_terminate(store, peer, session_id, terminate::Cause::UnknownSession);
+        return send_terminate(
+            store,
+            peer,
+            Some(*peer_public_key),
+            session_id,
+            terminate::Cause::UnknownSession,
+        );
     };
     match session.process_accept(
         client_key,
@@ -364,7 +457,13 @@ fn handle_accept(
         Err(error) => {
             warn!(%error, "Cannot process FS accept");
             store.delete(peer, session_id)?;
-            send_terminate(store, peer, session_id, terminate::Cause::Reset)
+            send_terminate(
+                store,
+                peer,
+                Some(*peer_public_key),
+                session_id,
+                terminate::Cause::Reset,
+            )
         },
     }
 }
@@ -380,6 +479,7 @@ fn dh_type_of(encapsulated: &Encapsulated) -> DhType {
 fn handle_encapsulated(
     store: &mut dyn FsSessionStore,
     peer: ThreemaId,
+    peer_public_key: PublicKey,
     session_id: SessionId,
     outer_message_id: u64,
     encapsulated: &Encapsulated,
@@ -389,8 +489,10 @@ fn handle_encapsulated(
         send_reject(
             store,
             peer,
+            peer_public_key,
             session_id,
             outer_message_id,
+            encapsulated.group_identity.clone(),
             reject::Cause::UnknownSession,
         )?;
         return Ok(IncomingFsOutcome::Handled);
@@ -398,13 +500,16 @@ fn handle_encapsulated(
     let dh_type = dh_type_of(encapsulated);
     let reject_and_delete =
         |store: &mut dyn FsSessionStore, reason: &str| -> Result<IncomingFsOutcome, ProviderError> {
+            // log-ok: `reason` is one of this file's fixed texts
             warn!(?session_id, reason, "Rejecting FS message");
             store.delete(peer, session_id)?;
             send_reject(
                 store,
                 peer,
+                peer_public_key,
                 session_id,
                 outer_message_id,
+                encapsulated.group_identity.clone(),
                 reject::Cause::StateMismatch,
             )?;
             store.status(peer, FsStatus::Reset)?;
@@ -474,6 +579,33 @@ fn handle_encapsulated(
     })
 }
 
+/// A message arrived from `peer` outside of an envelope: report it if the best session with `peer`
+/// would have covered `message_type` (Android's `warnIfMessageWithoutForwardSecurityReceived`).
+pub(crate) fn check_message_without_fs(
+    fs: &FsContext,
+    peer: ThreemaId,
+    message_type: u8,
+) -> Result<(), ProviderError> {
+    let Some(required) = minimum_version_for(message_type).filter(|_| !fs.answering_only) else {
+        return Ok(());
+    };
+    let mut store = fs.store.borrow_mut();
+    let Some(session) = store.get_best(peer)? else {
+        return Ok(());
+    };
+    if session
+        .minimum_incoming_applied_version()
+        .is_ok_and(|minimum| required <= minimum)
+    {
+        warn!(
+            message_type,
+            "Message without forward security on an active session"
+        );
+        store.status(peer, FsStatus::MessageWithoutFs)?;
+    }
+    Ok(())
+}
+
 /// Turn the peer ratchet past the acknowledged incoming message and store it.
 pub(crate) fn commit_peer_ratchet(fs: &mut FsContext) -> Result<(), ProviderError> {
     let Some(commit) = fs.pending_commit.take() else {
@@ -519,6 +651,8 @@ pub struct Encapsulation {
 
 /// Encapsulate an outgoing 1:1 message (`inner_type`, `inner_data` without padding) for `peer`.
 /// The caller must have checked that the peer supports forward security (feature mask).
+/// `group_identity` is the group of a group message: required for those by the protocol, so that
+/// a peer who can't decrypt it can say which message of which group it rejects; `None` for 1:1.
 ///
 /// # Errors
 ///
@@ -531,6 +665,7 @@ pub fn encapsulate(
     peer_public_key: &PublicKey,
     inner_type: u8,
     inner_data: &[u8],
+    group_identity: Option<GroupIdentity>,
     now_ms: u64,
 ) -> Result<Encapsulation, EncapsulationError> {
     let mut prelude = Vec::new();
@@ -586,7 +721,7 @@ pub fn encapsulate(
                 counter,
                 offered_version: offered,
                 applied_version: applied,
-                group_identity: None,
+                group_identity,
                 encrypted_inner,
             }),
         )),
@@ -616,7 +751,7 @@ pub fn terminate_all_with_cause(
 ) -> Result<(), ProviderError> {
     while let Some(session) = store.get_best(peer)? {
         store.delete(peer, session.id)?;
-        send_terminate(store, peer, session.id, cause)?;
+        send_terminate(store, peer, None, session.id, cause)?;
     }
     Ok(())
 }

@@ -20,23 +20,41 @@ ListItem {
     property bool outgoing: model.outgoing
     // This message, for the parts in Loaders below: there `item` is the Loader's own property.
     readonly property Item message: item
-    // The neighbour in this newest-first model (index + 1).
-    property var olderMessage: null
+    // The neighbour in this newest-first model (index + 1): only what the layout asks of it, and
+    // as plain values, so a new row that leaves the neighbour as it was changes nothing further.
+    property bool hasOlder: false
+    property real olderCreatedAt: 0
+    property bool olderOutgoing: false
+    property string olderSender: ""
+    property string olderKind: ""
+    // The list is moving, by a flick or the quick scroll: what can wait for it, waits.
+    property bool listMoving: false
+    // The chat's pictures may stay decoded in Qt's image cache (FileContent).
+    property bool cachePictures: false
     // The contact understands any emoji; otherwise only thumbs up/down (legacy reactions).
     property bool anyReaction: true
+    // Distribution lists have no reactions at all, not even the thumbs.
+    property bool canReact: true
 
     // The contact understands edits / deletions for everyone.
     property bool canEdit: false
+    // Notes (a notes group): edited and deleted at any age, as on Android.
+    property bool noAgeLimit: false
     property bool canDelete: false
     // Distribution lists: the quoted message would not be in the receivers' chats.
     property bool canQuote: true
+    // A blocked contact, a revoked ID or a group we left: nothing goes out, so what would send
+    // something isn't offered. Reactions already there stay as they are.
+    property bool readOnly: false
 
     // Selecting messages (chat pulley → Select messages): taps select, no menu, and a selected
     // bubble stays lit like a pressed one.
     property bool selectionMode: false
     property bool selected: false
     signal selectToggled()
-    highlighted: down || menuOpen || selected
+    // A jump (a quote, a search hit) landed here just now.
+    property bool landed: false
+    highlighted: down || menuOpen || selected || landed
 
     // Apply or withdraw one of our reactions.
     signal react(string emoji, bool apply)
@@ -52,10 +70,16 @@ ListItem {
     // Tapped a file message: show it, or fetch it first.
     signal fileRequested()
     signal saveRequested()
+    signal drawRequested()
     signal gifFavouriteRequested()
     signal forwardRequested()
     signal starToggled()
     signal detailsRequested()
+    signal resendRequested()
+    signal cancelTransferRequested()
+    signal shareRequested()
+    // Held a reaction: who reacted.
+    signal reactionsRequested()
     signal locationRequested()
     signal pollRequested()
     signal closePollRequested()
@@ -69,21 +93,21 @@ ListItem {
     readonly property bool isLocation: model.kind === "location"
     // The core sends `mentions` only when the text (or caption) has @[ID] tags.
     readonly property bool hasMentions: !!model.mentions && (model.kind === "text" || isFile)
-    // In the view, not only built: a GIF scrolled past needn't be decoded frame by frame.
-    readonly property bool onScreen: ListView.view
-                                     && y + height > ListView.view.contentY
-                                     && y < ListView.view.contentY + ListView.view.height
-    // Shown as StyledText (mentionLabel): mentions, or Threema's emoji pictures (Settings →
-    // Appearance → Emoji style); otherwise the plain LinkedLabel.
-    readonly property bool richText: hasMentions
-                                     || (backend.threemaEmoji && Fmt.mayHaveEmoji(model.kind === "text" ? model.text
-                                                                                    : isFile ? model.body.caption : ""))
+    readonly property Item chatView: ListView.view
+    readonly property string ownText: (model.kind === "text" ? model.text : isFile ? model.body.caption : "") || ""
+    // Shown as StyledText (mentionLabel): mentions, *formatting*, or Threema's emoji pictures
+    // (Settings → Appearance → Emoji style); otherwise the plain LinkedLabel.
+    readonly property bool richText: hasMentions || Fmt.mayHaveMarkup(ownText)
+                                     || (backend.threemaEmoji && Fmt.mayHaveEmoji(ownText))
 
     readonly property bool isDeleted: model.kind === "deleted"
-    readonly property bool isEdited: model.kind === "text" && !!model.editedAt
-    // Ours, sent and young enough; never-sent messages are simply changed or removed.
-    readonly property bool unsent: outgoing && (model.state === 0 || model.state === 4)
-    readonly property bool recent: Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
+    readonly property bool isEdited: (model.kind === "text" || isFile) && !!model.editedAt
+    // Ours, sent and young enough; messages nobody can have yet are simply changed or removed. Once
+    // its send has begun someone may have it, even while one member keeps it pending.
+    readonly property bool unsent: outgoing && ((model.state === 0 && !model.writtenOut) || model.state === 4)
+    // It didn't go out, for good: a tap or the menu sends it again.
+    readonly property bool failed: outgoing && model.state === 4 && !isDeleted
+    readonly property bool recent: noAgeLimit || Date.now() - model.createdAt < Fmt.EDIT_DELETE_MAX_AGE_MS
 
     // Inner Repeaters have their own `model`.
     readonly property var reactions: model.reactions
@@ -96,12 +120,12 @@ ListItem {
     readonly property real unreadGap: showUnread ? unreadLine.height + 2 * Theme.paddingMedium : 0
     readonly property string dayText: Fmt.day(model.createdAt)
     // The oldest message's day is in the page's day band already.
-    readonly property bool showDay: !!olderMessage && Fmt.day(olderMessage.createdAt) !== dayText
+    readonly property bool showDay: hasOlder && Fmt.day(olderCreatedAt) !== dayText
     // Group chats: who wrote it (shown above the first bubble of a run); empty in 1:1 chats.
     property string senderName: ""
-    readonly property bool firstOfRun: showDay || !olderMessage || olderMessage.kind === "status"
-                                       || olderMessage.outgoing !== outgoing
-                                       || olderMessage.sender !== model.sender
+    readonly property bool firstOfRun: showDay || !hasOlder || olderKind === "status"
+                                       || olderOutgoing !== outgoing
+                                       || olderSender !== (model.sender || "")
     readonly property real maxTextWidth: width - Theme.itemSizeLarge - 2 * Theme.paddingMedium
     readonly property color textColor: highlighted || outgoing ? Theme.highlightColor : Theme.primaryColor
     readonly property real topGap: firstOfRun ? Theme.paddingLarge : Theme.paddingSmall
@@ -124,6 +148,7 @@ ListItem {
 
     onClicked: {
         if (selectionMode) selectToggled()
+        else if (failed && !readOnly) resendRequested()
         else if (isFile) fileRequested()
         else if (isPoll) pollRequested()
         else if (isLocation) locationRequested()
@@ -134,11 +159,16 @@ ListItem {
         id: contextMenuComponent
         ContextMenu {
             id: contextMenu
+            readonly property string copyableText: Fmt.copyText(model.kind, model.text, model.body, model.mentions)
+            // Its upload or file download is on the way.
+            readonly property bool transferring: item.isFile && (model.body.fileState === 1
+                                                                 || (item.outgoing && model.body.uploadState === 1))
             readonly property bool canDeleteEveryone: item.outgoing && !item.isDeleted && !item.isPoll
                                                       && !item.unsent && item.canDelete && item.recent
+                                                      && !item.readOnly
             Row {
                 id: reactionRow
-                visible: !item.isStatus && !item.isDeleted
+                visible: item.canReact && !item.readOnly && !item.isStatus && !item.isDeleted
                 width: parent.width
                 // Threema's quick reactions, then any other emoji (Android's "+").
                 readonly property var quick: item.anyReaction
@@ -196,7 +226,7 @@ ListItem {
                                           ? qsTrId("threesea-me-unstar-short")
                                           //% "Star"
                                           : qsTrId("threesea-me-star") })
-                    if (item.canQuote && !item.isStatus && !item.isDeleted && !item.isPoll)
+                    if (item.canQuote && !item.readOnly && !item.isStatus && !item.isDeleted && !item.isPoll)
                         //% "Quote"
                         list.push({ id: "quote", icon: "icon-m-message-reply", text: qsTrId("threesea-me-quote") })
                     return list
@@ -209,18 +239,40 @@ ListItem {
                 }
             }
             MenuItem {
+                //% "Send again"
+                text: qsTrId("threesea-me-send-again")
+                visible: item.failed && !item.readOnly
+                onClicked: item.resendRequested()
+            }
+            MenuItem {
+                text: item.isFile && model.body.fileState === 1
+                      //% "Stop download"
+                      ? qsTrId("threesea-me-stop-download")
+                      //% "Stop sending"
+                      : qsTrId("threesea-me-stop-upload")
+                visible: contextMenu.transferring
+                onClicked: item.cancelTransferRequested()
+            }
+            MenuItem {
                 //% "Copy"
                 text: qsTrId("threesea-me-copy")
-                visible: model.kind === "text" || item.isLocation
-                onClicked: Clipboard.text = item.isLocation
-                           ? Number(model.body.latitude).toFixed(6) + ", " + Number(model.body.longitude).toFixed(6)
-                           : Fmt.withMentions(model.text, model.mentions)
+                visible: contextMenu.copyableText.length > 0
+                onClicked: Clipboard.text = contextMenu.copyableText
+            }
+            MenuItem {
+                //% "Share"
+                text: qsTrId("threesea-me-share")
+                visible: contextMenu.copyableText.length > 0 || (item.isFile && model.body.fileState === 2)
+                onClicked: item.shareRequested()
             }
             MenuItem {
                 //% "Edit"
                 text: qsTrId("threesea-me-edit")
-                visible: item.outgoing && model.kind === "text"
-                         && (model.state === 0 || (!item.unsent && item.canEdit && item.recent))
+                // Nobody can have it yet: simply changed. Otherwise, like a sent one, it takes an
+                // edit message, as someone may have it (the core's edit_message).
+                visible: item.outgoing && !item.readOnly && model.kind === "text"
+                         && ((model.state === 0 && !model.writtenOut)
+                             || (model.state !== 4 && item.canEdit && item.recent))
                 onClicked: item.editRequested()
             }
             MenuItem {
@@ -228,6 +280,14 @@ ListItem {
                 text: qsTrId("threesea-me-save-downloads")
                 visible: item.isFile && model.body.fileState === 2
                 onClicked: item.saveRequested()
+            }
+            MenuItem {
+                //% "Draw on it"
+                text: qsTrId("threesea-me-draw-on-picture")
+                visible: item.isFile && model.body.fileState === 2 && !item.readOnly
+                         && model.body.rendering !== "file" && Fmt.isPicture(model.body.mediaType)
+                         && String(model.body.mediaType).toLowerCase() !== "image/gif"
+                onClicked: item.drawRequested()
             }
             MenuItem {
                 //% "Add to favourite GIFs"
@@ -239,7 +299,7 @@ ListItem {
             MenuItem {
                 //% "Close poll"
                 text: qsTrId("threesea-me-close-poll")
-                visible: item.myOpenPoll
+                visible: item.myOpenPoll && !item.readOnly
                 onClicked: item.closePollRequested()
             }
             MenuItem {
@@ -426,6 +486,7 @@ ListItem {
                         anchors.fill: parent
                         enabled: !message.selectionMode
                         onClicked: message.quotedRequested()
+                        onPressAndHold: message.openMenu()
                     }
                 }
             }
@@ -465,7 +526,13 @@ ListItem {
                 FileContent {
                     messageId: model.id
                     body: model.body
-                    onScreen: message.onScreen
+                    // In the view, not only built: a GIF scrolled past needn't be decoded frame
+                    // by frame. Only a GIF asks, so other bubbles don't follow the scrolling.
+                    onScreen: !isGif || (!!message.chatView
+                                         && message.y + message.height > message.chatView.contentY
+                                         && message.y < message.chatView.contentY + message.chatView.height)
+                    listMoving: message.listMoving
+                    cachePictures: message.cachePictures
                     maxWidth: message.maxTextWidth
                     highlighted: message.highlighted
                     textColor: message.textColor
@@ -484,8 +551,8 @@ ListItem {
             LinkedLabel {
                 id: textLabel
                 y: content.fileHeight
-                // With mentions or emoji pictures this only finds the links; mentionLabel shows
-                // the result.
+                // With mentions, formatting or emoji pictures this only finds the links;
+                // mentionLabel shows the result.
                 visible: content.hasText && !content.rich
                 width: Math.min(implicitWidth, item.maxTextWidth)
                 plainText: item.richText ? (model.kind === "text" ? model.text : model.body.caption || "")
@@ -515,8 +582,8 @@ ListItem {
                 onLinkActivated: item.selectionMode ? item.selectToggled() : window.openLink(link, true)
             }
 
-            // Mentions in bold, in the ambience's highlight colour, to catch the eye; emoji as
-            // pictures, a bit larger than the text like Threema's.
+            // Mentions in bold, in the ambience's highlight colour, to catch the eye; the sender's
+            // formatting; emoji as pictures, a bit larger than the text like Threema's.
             Loader {
                 id: mentionLoader
                 y: content.fileHeight
@@ -528,11 +595,14 @@ ListItem {
                 Text {
                     visible: content.hasText
                     width: message.maxTextWidth
-                    text: !message.richText ? ""
-                          : Fmt.markEmoji(message.hasMentions ? Fmt.markMentions(textLabel.text, model.mentions, Theme.highlightColor)
-                                                           : textLabel.text,
-                                          textLabel.emojiSize)
-                    textFormat: Text.StyledText
+                    text: {
+                        if (!message.richText) return ""
+                        var html = Fmt.markMarkup(textLabel.text)
+                        if (message.hasMentions) html = Fmt.markMentions(html, model.mentions, Theme.highlightColor)
+                        if (Fmt.needsRichText(html)) html = Fmt.colourLinks(html, textLabel.linkColor)
+                        return backend.threemaEmoji ? Fmt.markEmoji(html, textLabel.emojiSize) : html
+                    }
+                    textFormat: Fmt.needsRichText(text) ? Text.RichText : Text.StyledText
                     wrapMode: Text.Wrap
                     font: textLabel.font
                     color: textLabel.color
@@ -649,7 +719,8 @@ ListItem {
                 MouseArea {
                     anchors.fill: parent
                     enabled: !item.selectionMode
-                    onClicked: item.toggleReaction(modelData.emoji)
+                    onClicked: if (!item.readOnly) item.toggleReaction(modelData.emoji)
+                    onPressAndHold: item.reactionsRequested()
                 }
             }
         }

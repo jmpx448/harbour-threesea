@@ -226,11 +226,13 @@ impl App {
     }
 
     /// `sendGifFavourite`: send it to `identity` like a GIF from the device.
-    pub(crate) fn send_gif_favourite(
+    pub(crate) async fn send_gif_favourite(
         &mut self,
         identity: String,
         id: i64,
     ) -> Result<Value, ApiError> {
+        // Before anything of the favourite: the chat decides whether there is anything to do.
+        self.readable_conversation(&identity)?;
         let favourite = self
             .store
             .gif_favourite(id)?
@@ -244,18 +246,21 @@ impl App {
             read(MediaPart::File)?.ok_or_else(|| ApiError::Internal("favourite missing".into()))?;
         let thumbnail = read(MediaPart::Thumbnail)?.unwrap_or_default();
         self.attachments = vec![data, thumbnail];
-        let result = self.send_file(OutgoingFile {
-            identity,
-            path: None,
-            name: Some("favourite.gif".into()),
-            media_type: "image/gif".into(),
-            caption: None,
-            rendering: "media".into(),
-            width: favourite.width,
-            height: favourite.height,
-            duration: None,
-            encode: None,
-        });
+        let result = self
+            .send_file(OutgoingFile {
+                identity,
+                path: None,
+                name: Some("favourite.gif".into()),
+                media_type: "image/gif".into(),
+                caption: None,
+                rendering: "media".into(),
+                width: favourite.width,
+                height: favourite.height,
+                duration: None,
+                encode: None,
+                keep_metadata: false,
+            })
+            .await;
         self.attachments.clear();
         result
     }

@@ -234,11 +234,8 @@ impl InternalCspMessageEncoder for LocationMessage {
                 writer.write("\n".as_bytes())?;
                 writer.write(address.as_bytes())?;
             },
-            (Some(name), None) => {
-                warn!(
-                    name,
-                    "Discarding name in location message without an associated address"
-                );
+            (Some(_), None) => {
+                warn!("Discarding name in location message without an associated address");
             },
             (Some(name), Some(address)) => {
                 writer.write("\n".as_bytes())?;
@@ -446,50 +443,165 @@ impl InternalCspMessageEncoder for DeleteMessage {
     }
 }
 
-/// Maximum byte length of a file name.
-const FILE_NAME_LENGTH_MAX: usize = 256;
-/// Maximum byte length of a caption.
-const FILE_CAPTION_LENGTH_MAX: usize = 6000;
+/// A field that may be anything: of another type it counts as absent, so that one sloppy value
+/// doesn't lose the message (Android keeps metadata untyped and coerces the rest).
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// A rendering type: an unassigned number means a plain file (the spec), not a number means none
+/// was given.
+fn lenient_rendering_type<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.as_f64().map(|number| {
+        if (1.0_f64..2.0_f64).contains(&number) {
+            1
+        } else if (2.0_f64..3.0_f64).contains(&number) {
+            2
+        } else {
+            0
+        }
+    }))
+}
+
+/// The size in bytes, also when written as a float or in a string, which Android's `getInt` takes
+/// too. Only shown, so a negative one is just 0.
+fn lenient_size<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    if let Some(size) = value.as_u64() {
+        return Ok(size);
+    }
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()));
+    match number {
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "Floats convert saturating, and a size this large is nonsense either way"
+        )]
+        Some(size) => Ok(size as u64),
+        None => Err(serde::de::Error::custom("size is not a number")),
+    }
+}
+
+/// The media type: Android's `getString` takes any value, so one that isn't a text doesn't lose the
+/// message. Here it means no type, which shows as a plain file.
+fn lenient_media_type<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.as_str().unwrap_or_default().to_owned())
+}
 
 /// The JSON of a `file` message (see `csp.struct.yml`). Unknown fields are ignored; `i` is the
-/// deprecated fallback for `j`.
+/// deprecated fallback for `j`. What the message can't do without (key, blobs, size) has to be
+/// right; the rest is taken leniently, and the spec's limits on name and caption are for sending.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct FileMessageJson {
-    #[serde(rename = "j", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "j",
+        default,
+        deserialize_with = "lenient_rendering_type",
+        skip_serializing_if = "Option::is_none"
+    )]
     rendering_type: Option<u8>,
-    #[serde(rename = "i", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "i",
+        default,
+        deserialize_with = "lenient_rendering_type",
+        skip_serializing_if = "Option::is_none"
+    )]
     deprecated_rendering_type: Option<u8>,
     #[serde(rename = "k")]
     key: String,
     #[serde(rename = "b")]
     blob_id: String,
-    #[serde(rename = "m", default)]
+    #[serde(rename = "m", default, deserialize_with = "lenient_media_type")]
     media_type: String,
-    #[serde(rename = "n", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "n",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     name: Option<String>,
-    #[serde(rename = "s")]
+    #[serde(rename = "s", deserialize_with = "lenient_size")]
     size: u64,
     #[serde(rename = "t", default, skip_serializing_if = "Option::is_none")]
     thumbnail_blob_id: Option<String>,
-    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "p",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     thumbnail_media_type: Option<String>,
-    #[serde(rename = "d", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "d",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     caption: Option<String>,
-    #[serde(rename = "c", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "c",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     correlation_id: Option<String>,
-    #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     metadata: Option<FileMetadataJson>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct FileMetadataJson {
-    #[serde(rename = "w", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "w",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     width: Option<u32>,
-    #[serde(rename = "h", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "h",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     height: Option<u32>,
-    #[serde(rename = "a", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "a",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     animated: Option<bool>,
-    #[serde(rename = "d", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "d",
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     duration: Option<f64>,
 }
 
@@ -512,20 +624,6 @@ impl InternalCspMessageDecoder for FileMessage {
                 .map(BlobId)
                 .ok_or_else(|| invalid("blob id"))
         };
-        if json
-            .name
-            .as_ref()
-            .is_some_and(|name| name.len() > FILE_NAME_LENGTH_MAX)
-        {
-            return Err(invalid("name too long"));
-        }
-        if json
-            .caption
-            .as_ref()
-            .is_some_and(|caption| caption.len() > FILE_CAPTION_LENGTH_MAX)
-        {
-            return Err(invalid("caption too long"));
-        }
         let rendering_type = match json.rendering_type.or(json.deprecated_rendering_type) {
             Some(1) => FileRenderingType::Media,
             Some(2) => FileRenderingType::Sticker,
@@ -552,6 +650,7 @@ impl InternalCspMessageDecoder for FileMessage {
                 height: metadata.height,
                 animated: metadata.animated,
                 duration: metadata.duration,
+                legacy_nonce: None,
             },
         })
     }
@@ -588,6 +687,79 @@ impl InternalCspMessageEncoder for FileMessage {
             }),
         };
         writer.write(&serde_json::to_vec(&json).expect("file message JSON must serialize"))
+    }
+}
+
+/// The deprecated media messages come in as the [`FileMessage`] they would be today, as on Android
+/// (`LegacyMessageTransformer`); nobody may send them any more. What follows their fields is ignored.
+struct DeprecatedMedia;
+impl DeprecatedMedia {
+    const AUDIO_MEDIA_TYPE: &str = "audio/aac";
+    const IMAGE_MEDIA_TYPE: &str = "image/jpeg";
+    const VIDEO_MEDIA_TYPE: &str = "video/mpeg";
+
+    fn file(media_type: &str, key: [u8; 32], blob_id: BlobId, size: u32) -> FileMessage {
+        FileMessage {
+            rendering_type: FileRenderingType::Media,
+            key,
+            blob_id,
+            media_type: media_type.to_owned(),
+            name: None,
+            size: u64::from(size),
+            thumbnail_blob_id: None,
+            thumbnail_media_type: None,
+            caption: None,
+            correlation_id: None,
+            metadata: FileMetadata::default(),
+        }
+    }
+
+    /// `deprecated-image`: no key, the blob is encrypted between sender and receiver with a nonce.
+    fn decode_image(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let nonce = reader.read_fixed::<24>()?;
+        let _ = reader.read_remaining();
+        let mut file = Self::file(Self::IMAGE_MEDIA_TYPE, [0; 32], blob_id, size);
+        file.metadata.legacy_nonce = Some(nonce);
+        Ok(file)
+    }
+
+    /// `deprecated-group-image`.
+    fn decode_group_image(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        let _ = reader.read_remaining();
+        Ok(Self::file(Self::IMAGE_MEDIA_TYPE, key, blob_id, size))
+    }
+
+    /// `deprecated-audio`, also wrapped for a group.
+    fn decode_audio(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let duration = reader.read_u16_le()?;
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        let _ = reader.read_remaining();
+        let mut file = Self::file(Self::AUDIO_MEDIA_TYPE, key, blob_id, size);
+        file.metadata.duration = Some(f64::from(duration));
+        Ok(file)
+    }
+
+    /// `deprecated-video`, also wrapped for a group.
+    fn decode_video(reader: &mut impl ByteReader) -> Result<FileMessage, CspMessageDecodeError> {
+        let duration = reader.read_u16_le()?;
+        let blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let size = reader.read_u32_le()?;
+        let thumbnail_blob_id = BlobId(reader.read_fixed::<{ BlobId::LENGTH }>()?);
+        let _thumbnail_size = reader.read_u32_le()?;
+        let key = reader.read_fixed::<32>()?;
+        let _ = reader.read_remaining();
+        let mut file = Self::file(Self::VIDEO_MEDIA_TYPE, key, blob_id, size);
+        file.thumbnail_blob_id = Some(thumbnail_blob_id);
+        file.thumbnail_media_type = Some(Self::IMAGE_MEDIA_TYPE.to_owned());
+        file.metadata.duration = Some(f64::from(duration));
+        Ok(file)
     }
 }
 
@@ -821,6 +993,15 @@ impl CspMessageDecoder for IncomingMessageBody {
             CspE2eMessageType::File => {
                 Self::Contact(ContactMessageBody::File(FileMessage::decode(&mut reader)?))
             },
+            CspE2eMessageType::DeprecatedImage => Self::Contact(ContactMessageBody::File(
+                DeprecatedMedia::decode_image(&mut reader)?,
+            )),
+            CspE2eMessageType::DeprecatedAudio => Self::Contact(ContactMessageBody::File(
+                DeprecatedMedia::decode_audio(&mut reader)?,
+            )),
+            CspE2eMessageType::DeprecatedVideo => Self::Contact(ContactMessageBody::File(
+                DeprecatedMedia::decode_video(&mut reader)?,
+            )),
 
             CspE2eMessageType::ContactSetProfilePicture => Self::Contact(
                 ContactMessageBody::SetProfilePicture(SetProfilePictureMessage::decode(&mut reader)?),
@@ -883,6 +1064,21 @@ impl CspMessageDecoder for IncomingMessageBody {
 
             CspE2eMessageType::GroupFile => member(&mut reader, |group_reader| {
                 Ok(GroupMessageBody::File(FileMessage::decode(group_reader)?))
+            })?,
+            CspE2eMessageType::GroupImage => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(DeprecatedMedia::decode_group_image(
+                    group_reader,
+                )?))
+            })?,
+            CspE2eMessageType::GroupAudio => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(DeprecatedMedia::decode_audio(
+                    group_reader,
+                )?))
+            })?,
+            CspE2eMessageType::GroupVideo => member(&mut reader, |group_reader| {
+                Ok(GroupMessageBody::File(DeprecatedMedia::decode_video(
+                    group_reader,
+                )?))
             })?,
             CspE2eMessageType::GroupReaction => member(&mut reader, |group_reader| {
                 Ok(GroupMessageBody::Reaction(ReactionMessage::decode(group_reader)?))
@@ -1321,11 +1517,162 @@ mod tests {
             )
             .is_err()
         );
-        let long_name = format!(
-            r#"{{"k":"0101010101010101010101010101010101010101010101010101010101010101","b":"00112233445566778899aabbccddeeff","m":"a","s":1,"n":"{}"}}"#,
-            "x".repeat(257)
+        // No size, or one that isn't a number.
+        let key = "0101010101010101010101010101010101010101010101010101010101010101";
+        let blob = "00112233445566778899aabbccddeeff";
+        assert!(decode(&format!(r#"{{"k":"{key}","b":"{blob}","m":"a"}}"#)).is_err());
+        assert!(decode(&format!(r#"{{"k":"{key}","b":"{blob}","m":"a","s":"big"}}"#)).is_err());
+    }
+
+    #[test]
+    fn deprecated_media_come_in_as_file_messages() {
+        let blob = [0xb1; 16];
+        let thumbnail = [0xb2; 16];
+        let key = [0x4b; 32];
+        let nonce = [0x4e; 24];
+        let group_header = [b"CREATOR1".as_slice(), &7_u64.to_le_bytes()].concat();
+        let contact = |message_type, data: &[u8]| {
+            let IncomingMessageBody::Contact(ContactMessageBody::File(file)) =
+                IncomingMessageBody::decode(test_sender(), message_type, data).unwrap()
+            else {
+                panic!("expected a file message")
+            };
+            file
+        };
+        let group = |message_type, data: &[u8]| {
+            let data = [group_header.as_slice(), data].concat();
+            let IncomingMessageBody::Group(IncomingGroupMessageBody {
+                body: GroupMessageBody::File(file),
+                ..
+            }) = IncomingMessageBody::decode(test_sender(), message_type, &data).unwrap()
+            else {
+                panic!("expected a group file message")
+            };
+            file
+        };
+
+        // Image: blob, size, nonce. Sealed between us, so without a key of its own.
+        let image = [blob.as_slice(), &1000_u32.to_le_bytes(), &nonce].concat();
+        let file = contact(CspE2eMessageType::DeprecatedImage, &image);
+        assert_eq!(file.rendering_type, FileRenderingType::Media);
+        assert_eq!(file.media_type, "image/jpeg");
+        assert_eq!(file.blob_id.0, blob);
+        assert_eq!(file.size, 1000);
+        assert_eq!(file.metadata.legacy_nonce, Some(nonce));
+
+        // Group image: blob, size, key.
+        let group_image = [blob.as_slice(), &1000_u32.to_le_bytes(), &key].concat();
+        let file = group(CspE2eMessageType::GroupImage, &group_image);
+        assert_eq!(file.media_type, "image/jpeg");
+        assert_eq!((file.key, file.size), (key, 1000));
+        assert_eq!(file.metadata.legacy_nonce, None);
+
+        // Audio: duration, blob, size, key.
+        let audio = [
+            &30_u16.to_le_bytes(),
+            blob.as_slice(),
+            &2000_u32.to_le_bytes(),
+            &key,
+        ]
+        .concat();
+        for file in [
+            contact(CspE2eMessageType::DeprecatedAudio, &audio),
+            group(CspE2eMessageType::GroupAudio, &audio),
+        ] {
+            assert_eq!(file.media_type, "audio/aac");
+            assert_eq!((file.key, file.size), (key, 2000));
+            assert_eq!(file.metadata.duration, Some(30.0));
+            assert_eq!(file.blob_id.0, blob);
+        }
+
+        // Video: duration, blob, size, thumbnail, its size, key.
+        let video = [
+            &60_u16.to_le_bytes(),
+            blob.as_slice(),
+            &3000_u32.to_le_bytes(),
+            &thumbnail,
+            &40_u32.to_le_bytes(),
+            &key,
+        ]
+        .concat();
+        for file in [
+            contact(CspE2eMessageType::DeprecatedVideo, &video),
+            group(CspE2eMessageType::GroupVideo, &video),
+        ] {
+            assert_eq!(file.media_type, "video/mpeg");
+            assert_eq!((file.key, file.size), (key, 3000));
+            assert_eq!(file.metadata.duration, Some(60.0));
+            assert_eq!(file.thumbnail_blob_id.unwrap().0, thumbnail);
+            assert_eq!(file.thumbnail_media_type.as_deref(), Some("image/jpeg"));
+        }
+
+        // Too short is still wrong, and more than there should be is ignored as on Android.
+        assert!(
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::DeprecatedImage, &image[..39])
+                .is_err()
         );
-        assert!(decode(&long_name).is_err());
+        let longer = [image.as_slice(), &[0_u8; 3]].concat();
+        assert_eq!(contact(CspE2eMessageType::DeprecatedImage, &longer).size, 1000);
+    }
+
+    #[test]
+    fn sloppy_file_messages_are_kept() {
+        let decode = |fields: &str| {
+            let json = format!(
+                r#"{{"k":"0101010101010101010101010101010101010101010101010101010101010101","b":"00112233445566778899aabbccddeeff","m":"image/jpeg",{fields}}}"#
+            );
+            let IncomingMessageBody::Contact(ContactMessageBody::File(file)) =
+                IncomingMessageBody::decode(test_sender(), CspE2eMessageType::File, json.as_bytes()).unwrap()
+            else {
+                panic!("expected a file message")
+            };
+            file
+        };
+        // Metadata of the wrong type counts as absent, field by field or as a whole.
+        let file = decode(r#""s":1,"x":{"w":800.5,"h":"600","a":"yes","d":"long"}"#);
+        assert_eq!(file.metadata, FileMetadata::default());
+        let file = decode(r#""s":1,"x":{"w":800,"h":-1,"d":3}"#);
+        assert_eq!(file.metadata.width, Some(800));
+        assert_eq!(file.metadata.height, None);
+        assert_eq!(file.metadata.duration, Some(3.0));
+        assert_eq!(decode(r#""s":1,"x":"none""#).metadata, FileMetadata::default());
+        // A float size, a negative one, or one in a string.
+        assert_eq!(decode(r#""s":12345.0"#).size, 12345);
+        assert_eq!(decode(r#""s":-1"#).size, 0);
+        assert_eq!(decode(r#""s":"123""#).size, 123);
+        assert_eq!(decode(r#""s":"12.5""#).size, 12);
+        // An unassigned rendering type is a plain file, and not falling back to `i`.
+        for rendering in [r#""j":300,"i":1"#, r#""j":-1,"i":1"#, r#""j":3,"i":1"#] {
+            let file = decode(&format!(r#""s":1,{rendering}"#));
+            assert_eq!(file.rendering_type, FileRenderingType::File, "{rendering}");
+        }
+        assert_eq!(
+            decode(r#""s":1,"j":1.0"#).rendering_type,
+            FileRenderingType::Media
+        );
+        // Not a number: as if not given.
+        assert_eq!(
+            decode(r#""s":1,"j":"x","i":2"#).rendering_type,
+            FileRenderingType::Sticker
+        );
+        // A media type that isn't one means none.
+        let json = br#"{"k":"0101010101010101010101010101010101010101010101010101010101010101","b":"00112233445566778899aabbccddeeff","m":5,"s":1}"#;
+        let IncomingMessageBody::Contact(ContactMessageBody::File(file)) =
+            IncomingMessageBody::decode(test_sender(), CspE2eMessageType::File, json).unwrap()
+        else {
+            panic!("expected a file message")
+        };
+        assert_eq!(file.media_type, "");
+        // Texts of the wrong type are gone, and too long ones stay: the limits are for sending.
+        let file = decode(r#""s":1,"n":5,"d":["x"],"p":1,"c":{}"#);
+        assert_eq!(file.name, None);
+        assert_eq!(file.caption, None);
+        assert_eq!(file.thumbnail_media_type, None);
+        assert_eq!(file.correlation_id, None);
+        let long = "ä".repeat(3500);
+        let file = decode(&format!(r#""s":1,"n":"{long}","d":"{long}""#));
+        assert_eq!(file.name.as_deref(), Some(long.as_str()));
+        assert_eq!(file.caption.as_deref(), Some(long.as_str()));
     }
 
     fn group_roundtrip(sender: &str, body: GroupMessageBody) -> (Vec<u8>, IncomingMessageBody) {

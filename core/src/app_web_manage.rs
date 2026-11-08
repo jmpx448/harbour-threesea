@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Threema Web: contacts, groups, distribution lists and the profile, changed from the browser
 //! (`create/`, `update/`, `delete/` of `contact`, `group`, `distributionList`, `update/profile`,
-//! `request/groupSync`, `request/contactDetail`). Each runs our own commands, then tells our UI
-//! and the browsers (contacts/groups changed, `update/receivers` for lists).
+//! `request/groupSync`, `request/contactDetail`). Each runs our own commands, then tells our UI;
+//! the browsers hear of the change from the next refresh, like of any other.
 
 use rmpv::Value;
 use serde_json::json;
 
 use crate::{
     app::App,
+    app_web_data::receiver_type,
     providers::CoreEvent,
     web::{
         arp::{self, Incoming, map},
@@ -18,6 +19,34 @@ use crate::{
 };
 
 type Code = &'static str;
+
+/// Threema's limit for a contact's first and last name, in bytes.
+const CONTACT_NAME_BYTES_MAX: usize = 256;
+
+/// Threema's limit for our nickname, in bytes. The browser counts UTF-16 units and would keep
+/// showing a nickname that `setNickname` cuts.
+const NICKNAME_BYTES_MAX: usize = 32;
+
+/// The browser's code for a failed command that takes a name: a name too long has its own.
+fn name_error(kind: &str, otherwise: Code) -> Code {
+    if kind == "messageTooLong" {
+        "valueTooLong"
+    } else {
+        otherwise
+    }
+}
+
+/// The contact an `update/contact` is about: threema-web and Android name it `identity`.
+fn contact_arg<'a>(incoming: &Incoming<'a>) -> Option<&'a str> {
+    incoming.arg("identity").or_else(|| incoming.arg("id"))
+}
+
+/// What a request says of a picture.
+enum Picture {
+    Unchanged,
+    Removed,
+    New(Vec<u8>),
+}
 
 /// A string field: `Some(None)` for an explicit `null` (clear it), `None` if left out.
 fn optional<'a>(data: Option<&'a Value>, name: &str) -> Option<Option<&'a str>> {
@@ -44,64 +73,71 @@ impl App {
             .find(|receiver| field(receiver, "id").and_then(Value::as_str) == Some(id))
     }
 
-    /// Tell our UI and the browsers that receivers of `kind` changed.
+    /// Tell our UI that receivers of `kind` changed.
     fn web_receivers_changed(&mut self, kind: &str) {
         let event = match kind {
             "contact" => CoreEvent::ContactsChanged,
             "group" => CoreEvent::GroupsChanged,
-            _ => {
-                if let Ok(lists) = self.web_receivers_of("distributionList") {
-                    let update = arp::message(
-                        "update",
-                        "receivers",
-                        Some(map(vec![("type", "distributionList".into())])),
-                        Some(Value::Array(lists)),
-                    );
-                    let sessions: Vec<i64> = self.web.subscriptions.keys().copied().collect();
-                    for session in sessions {
-                        self.send_web(session, update.clone());
-                    }
-                }
-                CoreEvent::Call(json!({ "event": "chatsChanged" }))
-            }
+            _ => CoreEvent::Call(json!({ "event": "chatsChanged" })),
         };
         let _ = self.media_events.send(event);
     }
 
-    /// A picture from the browser as our JPEG (512 px) for `cmd` (`setGroupPicture`,
-    /// `setProfilePicture`), or its removal (`remove`) for an explicit `null`.
-    async fn web_picture(
+    /// A picture from the browser, made into our JPEG (512 px) on a blocking thread; done before
+    /// anything changes, so that one that can't be read refuses the request as a whole.
+    async fn web_picture(data: Option<&Value>) -> Result<Picture, Code> {
+        let Some(avatar) = data.and_then(|data| field(data, "avatar")) else {
+            return Ok(Picture::Unchanged);
+        };
+        if avatar.is_nil() {
+            return Ok(Picture::Removed);
+        }
+        let bytes = avatar.as_slice().ok_or("invalidAvatar")?.to_vec();
+        let memory = crate::media::reserve_memory_within(
+            images::decoding_memory(&bytes),
+            crate::media::COMMAND_MEMORY_WAIT,
+        )
+        .await;
+        crate::media::off_thread(move || {
+            let _memory = memory;
+            images::scaled_jpeg(&bytes, images::AVATAR_HIGH_MAX, 85)
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(Picture::New)
+        .ok_or("invalidAvatar")
+    }
+
+    /// Run `set` (`setGroupPicture`, `setProfilePicture`) or `remove` for what `web_picture` found.
+    async fn web_apply_picture(
         &mut self,
-        data: Option<&Value>,
+        picture: Picture,
         set: serde_json::Value,
         remove: serde_json::Value,
     ) -> Result<(), Code> {
-        let Some(avatar) = data.and_then(|data| field(data, "avatar")) else {
-            return Ok(());
-        };
-        if avatar.is_nil() {
-            return self
+        match picture {
+            Picture::Unchanged => Ok(()),
+            Picture::Removed => self
                 .web_command(remove)
                 .await
                 .map(|_| ())
-                .map_err(|_| "badRequest");
-        }
-        let jpeg = avatar
-            .as_slice()
-            .and_then(|bytes| images::scaled_jpeg(bytes, images::AVATAR_HIGH_MAX, 85))
-            .ok_or("badRequest")?;
-        let mut set = set;
-        set["id"] = json!(0);
-        let reply: serde_json::Value = serde_json::from_str(
-            &self
-                .handle_with(&set.to_string(), vec![zeroize::Zeroizing::new(jpeg)])
-                .await,
-        )
-        .unwrap_or_default();
-        if reply["ok"] == true {
-            Ok(())
-        } else {
-            Err("badRequest")
+                .map_err(|_| "badRequest"),
+            Picture::New(jpeg) => {
+                let mut set = set;
+                set["id"] = json!(0);
+                let reply: serde_json::Value = serde_json::from_str(
+                    &self
+                        .handle_with(&set.to_string(), vec![zeroize::Zeroizing::new(jpeg)])
+                        .await,
+                )
+                .unwrap_or_default();
+                if reply["ok"] == true {
+                    Ok(())
+                } else {
+                    Err("badRequest")
+                }
+            }
         }
     }
 
@@ -115,13 +151,17 @@ impl App {
         // Private chats stay out of the browser's reach (ADR 0013): also for managing them, not
         // only for reading (security audit 2026-10-27, S02).
         let invalid = match (incoming.kind, incoming.sub_type) {
-            ("update", "contact") => Some("invalidContact"),
-            ("update" | "delete", "group") | ("request", "groupSync") => Some("invalidGroup"),
-            ("update" | "delete", "distributionList") => Some("invalidDistributionList"),
+            ("update", "contact") => Some(("invalidContact", contact_arg(incoming))),
+            ("update" | "delete", "group") | ("request", "groupSync") => {
+                Some(("invalidGroup", incoming.arg("id")))
+            }
+            ("update" | "delete", "distributionList") => {
+                Some(("invalidDistributionList", incoming.arg("id")))
+            }
             _ => None,
         };
-        if let Some(code) = invalid
-            && self.web_receiver_key(incoming.arg("id")).is_err()
+        if let Some((code, target)) = invalid
+            && self.web_receiver_key(target).is_err()
         {
             return Some(Err(code));
         }
@@ -155,11 +195,21 @@ impl App {
                 }
             }
             ("update", "contact") => {
-                let Some(id) = incoming.arg("id").map(str::to_owned) else {
+                let Ok(id) = self.web_receiver_key(contact_arg(incoming)) else {
                     return Some(Err("invalidContact"));
                 };
+                if receiver_type(&id) != "contact" {
+                    return Some(Err("invalidContact"));
+                }
                 let first = optional(data, "firstName");
                 let last = optional(data, "lastName");
+                let too_long = |name: Option<Option<&str>>| {
+                    name.flatten()
+                        .is_some_and(|name| name.trim().len() > CONTACT_NAME_BYTES_MAX)
+                };
+                if too_long(first) || too_long(last) {
+                    return Some(Err("valueTooLong"));
+                }
                 if first.is_some() || last.is_some() {
                     let current = self.store.contact(&id).ok().flatten();
                     let keep = |new: Option<Option<&str>>, old: Option<String>| match new {
@@ -177,7 +227,7 @@ impl App {
                 Ok(arp::message(
                     "update",
                     "contact",
-                    Some(map(vec![("id", id.as_str().into())])),
+                    Some(map(vec![("identity", id.as_str().into())])),
                     Some(map(vec![(
                         "receiver",
                         self.web_receiver("contact", &id).unwrap_or(Value::Nil),
@@ -199,9 +249,10 @@ impl App {
                 {
                     Ok(group) => {
                         let key = group["key"].as_str().unwrap_or_default().to_owned();
+                        let picture = Self::web_picture(data).await.unwrap_or(Picture::Unchanged);
                         let _ = self
-                            .web_picture(
-                                data,
+                            .web_apply_picture(
+                                picture,
                                 json!({"cmd": "setGroupPicture", "key": key}),
                                 json!({"cmd": "removeGroupPicture", "key": key}),
                             )
@@ -217,16 +268,23 @@ impl App {
                             )])),
                         ))
                     }
-                    Err(kind) => Err(if kind == "groupNameTooLong" {
-                        "valueTooLong"
-                    } else {
-                        "badRequest"
-                    }),
+                    Err(kind) => Err(name_error(&kind, "badRequest")),
                 }
             }
             ("update", "group") => {
                 let Some(key) = incoming.arg("id").map(str::to_owned) else {
                     return Some(Err("invalidGroup"));
+                };
+                // Before anything changes: a name too long leaves the members as they were.
+                if optional(data, "name")
+                    .flatten()
+                    .is_some_and(|name| Self::check_name(name).is_err())
+                {
+                    return Some(Err("valueTooLong"));
+                }
+                let picture = match Self::web_picture(data).await {
+                    Ok(picture) => picture,
+                    Err(code) => return Some(Err(code)),
                 };
                 if let Some(members) = members(data) {
                     if members.is_empty() {
@@ -253,8 +311,8 @@ impl App {
                     }
                 }
                 if let Err(code) = self
-                    .web_picture(
-                        data,
+                    .web_apply_picture(
+                        picture,
                         json!({"cmd": "setGroupPicture", "key": key}),
                         json!({"cmd": "removeGroupPicture", "key": key}),
                     )
@@ -343,7 +401,7 @@ impl App {
                             )])),
                         ))
                     }
-                    Err(_) => Err("badRequest"),
+                    Err(kind) => Err(name_error(&kind, "badRequest")),
                 }
             }
             ("update", "distributionList") => {
@@ -355,12 +413,11 @@ impl App {
                     return Some(Err("noMembers"));
                 }
                 let name = optional(data, "name").map(|name| name.unwrap_or_default().to_owned());
-                if self
+                if let Err(kind) = self
                     .web_command(json!({"cmd": "updateDistributionList", "key": key, "name": name, "members": members}))
                     .await
-                    .is_err()
                 {
-                    return Some(Err("invalidDistributionList"));
+                    return Some(Err(name_error(&kind, "invalidDistributionList")));
                 }
                 self.web_receivers_changed("distributionList");
                 Ok(arp::message(
@@ -389,8 +446,15 @@ impl App {
                 Ok(confirm())
             }
             ("update", "profile") => {
+                let picture = match Self::web_picture(data).await {
+                    Ok(picture) => picture,
+                    Err(code) => return Some(Err(code)),
+                };
                 if let Some(nickname) = optional(data, "publicNickname") {
                     let nickname = nickname.unwrap_or_default();
+                    if nickname.trim().len() > NICKNAME_BYTES_MAX {
+                        return Some(Err("valueTooLong"));
+                    }
                     if self
                         .web_command(json!({"cmd": "setNickname", "nickname": nickname}))
                         .await
@@ -400,8 +464,8 @@ impl App {
                     }
                 }
                 if let Err(code) = self
-                    .web_picture(
-                        data,
+                    .web_apply_picture(
+                        picture,
                         json!({"cmd": "setProfilePicture"}),
                         json!({"cmd": "removeProfilePicture"}),
                     )
@@ -452,6 +516,7 @@ impl App {
         };
         result.map_err(|_| "badRequest")?;
         self.tell_connection(crate::connection::ToConnection::SendPending);
+        self.send_group_pictures();
         Ok(())
     }
 }

@@ -3,7 +3,7 @@ use super::{
     contact::{Contact, ContactUpdate},
     message::{IncomingMessage, WebSessionResumeMessage},
 };
-use crate::common::{MessageId, Nonce, ThreemaId};
+use crate::common::{GroupIdentity, MessageId, Nonce, ThreemaId};
 
 /// Provider errors.
 #[derive(Debug, thiserror::Error)]
@@ -228,6 +228,13 @@ pub trait ConversationProvider {
         id: MessageId,
     ) -> Result<bool, ProviderError>;
 
+    /// Return whether the user is in the group `group_identity`: it exists and is not marked as _left_.
+    ///
+    /// # Errors
+    ///
+    /// This function is considered infallible and should not return an error.
+    fn is_in_group(&self, group_identity: GroupIdentity) -> Result<bool, ProviderError>;
+
     /// Set the typing indicator for a specific 1:1 conversation.
     ///
     /// 1. If the referred contact does not exist, return [`ProviderError::InvalidState`].¹
@@ -347,12 +354,15 @@ pub mod in_memory {
 
     type InMemoryDbContacts = HashMap<ThreemaId, (Contact, Option<ProfilePicture>)>;
 
+    /// The groups the user is in, with their members.
+    type InMemoryDbGroups = HashMap<GroupIdentity, HashSet<ThreemaId>>;
+
     /// In-memory contacts provider.
     pub struct InMemoryDbContactProvider {
         pub(crate) user_identity: ThreemaId,
         pub(crate) blocked_identities: Rc<RefCell<HashSet<ThreemaId>>>,
         pub(crate) contacts: Rc<RefCell<InMemoryDbContacts>>,
-        pub(crate) _groups: Rc<RefCell<HashMap<GroupIdentity, bool>>>, // TODO(LIB-16): Implement groups
+        pub(crate) groups: Rc<RefCell<InMemoryDbGroups>>,
     }
     impl ContactProvider for InMemoryDbContactProvider {
         fn is_explicitly_blocked(&self, identity: ThreemaId) -> Result<bool, ProviderError> {
@@ -376,8 +386,11 @@ pub mod in_memory {
             }
 
             // Check if the identity is a member of an active group
-            // TODO(LIB-16): Implement groups
-            Ok(false)
+            Ok(self
+                .groups
+                .borrow()
+                .values()
+                .any(|members| members.contains(&identity)))
         }
 
         fn has(&self, identity: ThreemaId) -> Result<bool, ProviderError> {
@@ -523,6 +536,7 @@ pub mod in_memory {
     pub struct InMemoryDbMessageProvider {
         pub(crate) contacts: Rc<RefCell<InMemoryDbContacts>>,
         pub(crate) conversations: Rc<RefCell<InMemoryDbConversations>>,
+        pub(crate) groups: Rc<RefCell<InMemoryDbGroups>>,
     }
     impl ConversationProvider for InMemoryDbMessageProvider {
         fn message_is_marked_used(
@@ -537,6 +551,10 @@ pub mod in_memory {
                 }
             }
             Ok(false)
+        }
+
+        fn is_in_group(&self, group_identity: GroupIdentity) -> Result<bool, ProviderError> {
+            Ok(self.groups.borrow().contains_key(&group_identity))
         }
 
         fn set_typing_indicator(
@@ -601,6 +619,8 @@ pub mod in_memory {
         pub blocked_identities: Vec<ThreemaId>,
         /// Initial contacts.
         pub contacts: Vec<Contact>,
+        /// The groups the user is in, with their members.
+        pub groups: Vec<(GroupIdentity, Vec<ThreemaId>)>,
     }
 
     /// In-memory database.
@@ -611,7 +631,7 @@ pub mod in_memory {
         pub(crate) settings: Rc<RefCell<InMemoryDbSettings>>,
         pub(crate) blocked_identities: Rc<RefCell<HashSet<ThreemaId>>>,
         pub(crate) contacts: Rc<RefCell<InMemoryDbContacts>>,
-        pub(crate) groups: Rc<RefCell<HashMap<GroupIdentity, bool>>>, // TODO(LIB-16): Implement groups
+        pub(crate) groups: Rc<RefCell<InMemoryDbGroups>>,
         pub(crate) conversations: Rc<RefCell<InMemoryDbConversations>>,
     }
 
@@ -629,7 +649,12 @@ pub mod in_memory {
                         .map(|contact| (contact.identity, (contact, None)))
                         .collect(),
                 )),
-                groups: Rc::new(RefCell::new(HashMap::new())), // TODO(LIB-16): Implement groups
+                groups: Rc::new(RefCell::new(
+                    init.groups
+                        .into_iter()
+                        .map(|(group, members)| (group, members.into_iter().collect()))
+                        .collect(),
+                )),
                 conversations: Rc::new(RefCell::new(HashMap::new())),
             }
         }
@@ -661,7 +686,7 @@ pub mod in_memory {
                 user_identity: self.user_identity,
                 blocked_identities: Rc::clone(&self.blocked_identities),
                 contacts: Rc::clone(&self.contacts),
-                _groups: Rc::clone(&self.groups),
+                groups: Rc::clone(&self.groups),
             }
         }
 
@@ -671,6 +696,7 @@ pub mod in_memory {
             InMemoryDbMessageProvider {
                 contacts: Rc::clone(&self.contacts),
                 conversations: Rc::clone(&self.conversations),
+                groups: Rc::clone(&self.groups),
             }
         }
     }

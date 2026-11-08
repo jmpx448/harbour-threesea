@@ -4,7 +4,11 @@
 // THREESEA_TEST_BAD_FINGERPRINT=1: the callee gets a wrong fingerprint for the caller and must
 // refuse the call without any audio passing either way, also while its check is delayed (the
 // event loop is kept busy meanwhile): exits 0 then.
+// THREESEA_TEST_MUTED=1: muted before the pipeline exists, the pipeline's microphone starts muted
+// and follows later changes: exits 0 right after building it, without a call.
 #include "callengine.h"
+
+#include <gst/gst.h>
 
 #include <QCoreApplication>
 #include <QImage>
@@ -13,6 +17,21 @@
 #include <QThread>
 #include <QTimer>
 #include <cstdio>
+
+class CallEngineTest
+{
+public:
+    static bool hasPipeline(const CallEngine &engine) { return engine.m_micVolume != nullptr; }
+    // What the pipeline's microphone is really set to; false without a pipeline.
+    static bool microphoneMuted(const CallEngine &engine)
+    {
+        gboolean muted = FALSE;
+        if (engine.m_micVolume) {
+            g_object_get(engine.m_micVolume, "mute", &muted, nullptr);
+        }
+        return muted;
+    }
+};
 
 int main(int argc, char **argv)
 {
@@ -72,7 +91,11 @@ int main(int argc, char **argv)
                     // Off again: the camera branch must go away cleanly.
                     caller.setCamera(false, true);
                 }
-                app.exit(channelOk && framesOk ? 0 : 1);
+                // The bridge's watch on a running call relies on this count.
+                const bool packetsOk = caller.packetsReceived() > 0 && callee.packetsReceived() > 0;
+                std::printf("packets received: caller %u, callee %u\n", caller.packetsReceived(),
+                            callee.packetsReceived());
+                app.exit(channelOk && framesOk && packetsOk ? 0 : 1);
             });
         }
     };
@@ -134,6 +157,18 @@ int main(int argc, char **argv)
         turn.insert(QStringLiteral("urls"), QVariantList() << QString::fromUtf8(testTurn));
         turn.insert(QStringLiteral("username"), QStringLiteral("test"));
         turn.insert(QStringLiteral("password"), QStringLiteral("test"));
+    }
+    if (!qgetenv("THREESEA_TEST_MUTED").isEmpty()) {
+        CallEngine muted;
+        muted.setMuted(true);
+        muted.startOffer(turn, false, false);
+        const bool startedMuted = CallEngineTest::microphoneMuted(muted);
+        muted.setMuted(false);
+        const bool followed = CallEngineTest::hasPipeline(muted) && !CallEngineTest::microphoneMuted(muted);
+        std::printf("pipeline: %d, started muted: %d, followed: %d\n", CallEngineTest::hasPipeline(muted), startedMuted,
+                    followed);
+        muted.stop();
+        return startedMuted && followed ? 0 : 1;
     }
     caller.startOffer(turn, false, video);
     const int result = app.exec();

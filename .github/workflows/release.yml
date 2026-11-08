@@ -18,10 +18,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The full checks (tests, clippy, format, logging rule, cargo audit) gate everything below.
+  # All of CI but its builds (checks, every text translated, libthreema's tests, the SDK tests)
+  # gates everything below.
   checks:
     if: github.ref == 'refs/heads/release'
     uses: ./.github/workflows/ci.yml
+    with:
+      release_gate: true
 
   version:
     needs: checks
@@ -62,6 +65,10 @@ jobs:
           mkdir out
           cp RPMS/${{ matrix.flavour }}/harbour-threesea-${{ matrix.flavour }}-${{ needs.version.outputs.version }}-*.${{ matrix.arch }}.rpm out/
           ls -l out
+      - name: Look inside the package
+        # The licence texts in it; no demo data in a phone build (CLAUDE.md §10; i486 is the
+        # emulator's and carries it on purpose).
+        run: scripts/check-package.sh out/*.rpm
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rpm-${{ matrix.flavour }}-${{ matrix.arch }}
@@ -99,8 +106,8 @@ jobs:
 
           ---
           Install **one** flavour for your phone's architecture (`aarch64` for current devices,
-          `armv7hl` for older ones), e.g. `pkcon install-local harbour-threesea-full-….aarch64.rpm`
-          in developer mode. `SHA256SUMS` lists the files' checksums; `gh attestation verify
+          `armv7hl` for older ones), e.g. `devel-su pkcon install-local
+          harbour-threesea-full-….aarch64.rpm` in developer mode. `SHA256SUMS` lists the files' checksums; `gh attestation verify
           <file> --repo ${{ github.repository }}` checks that a file was built here from this
           release's source.
           EOF

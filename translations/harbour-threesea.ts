@@ -12,7 +12,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-backup-decrypt">
-            <source>Wrong password, or the ID backup is damaged.</source>
+            <source>Wrong password, or the backup is damaged.</source>
+            <oldsource>Wrong password, or the ID backup is damaged.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-password-short">
@@ -47,16 +48,8 @@
             <source>Enter your license key first.</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-error-internal">
-            <source>Something went wrong: %1</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-verification-full">
             <source>Fully verified</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-verification-server">
-            <source>Verified by the server</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-verification-none">
@@ -100,7 +93,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-deleting-contact">
-            <source>Deleting contact</source>
+            <source>Deleting contact and chat</source>
+            <oldsource>Deleting contact</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-edit">
@@ -143,10 +137,6 @@
             <source>Contacts</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-deleting">
-            <source>Deleting</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-no-contacts">
             <source>No contacts</source>
             <translation type="unfinished" />
@@ -168,20 +158,12 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-no-chats-hint">
-            <source>Pull down to write a message</source>
-            <oldsource>Chats will appear here once messaging is ready.</oldsource>
+            <source>Swipe left to choose a contact</source>
+            <oldsource>Pull down to write a message</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-remove">
             <source>Remove</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-delete-data-intro">
-            <source>This removes your Threema ID, contacts, chats and settings from this device. Your ID itself is not revoked: you can restore it later from Threema Safe or an ID backup — without one of them, the ID is lost.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-delete-data-confirm">
-            <source>I have a backup or no longer need this ID</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-save">
@@ -224,10 +206,6 @@
             <source>Your Threema ID</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-identity-intro">
-            <source>Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe or an ID backup.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-bt-create-identity">
             <source>Create new ID</source>
             <translation type="unfinished" />
@@ -260,10 +238,6 @@
             <source>Restore ID backup</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-restore-intro">
-            <source>Paste the ID backup (80 characters in groups of four, like XXXX-XXXX-…) and enter the password you chose when you created it.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-id-backup">
             <source>ID backup</source>
             <translation type="unfinished" />
@@ -288,14 +262,6 @@
             <source>Threema Safe</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-safe-description">
-            <source>Encrypted daily backup of your ID, profile, contacts, groups and settings.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-safe-disabling">
-            <source>Turning off Threema Safe</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-se-status">
             <source>Status</source>
             <translation type="unfinished" />
@@ -306,10 +272,6 @@
         </message>
         <message id="threesea-la-safe-not-yet">
             <source>Not yet</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-safe-last-attempt">
-            <source>Last attempt</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-safe-size">
@@ -332,10 +294,6 @@
             <source>Enable</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-safe-password-intro">
-            <source>Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, once a day. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-password">
             <source>Password</source>
             <translation type="unfinished" />
@@ -346,10 +304,6 @@
         </message>
         <message id="threesea-he-restore-safe">
             <source>Restore from Threema Safe</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-restore-safe-intro">
-            <source>Enter your Threema ID and your Threema Safe password. Your profile, contacts, groups and settings are restored with it.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-safe-password">
@@ -420,10 +374,6 @@
             <source>Threesea could not start</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-startup-failed-hint">
-            <source>The encrypted storage could not be opened (%1).</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-location">
             <source>Location</source>
             <translation type="unfinished" />
@@ -469,19 +419,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-keep-running-description">
-            <source>Threesea stays connected after you close it, so new messages arrive right away. Uses a little more battery.</source>
+            <source>Threesea stays connected after you close it, so new messages arrive right away. After you turn on the phone, it connects once you open it. Uses more battery.</source>
+            <oldsource>Threesea stays connected after you close it, so new messages arrive right away. Uses a little more battery.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-status-fs-established">
-            <source>Forward secrecy is active for this chat.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-status-fs-reset">
-            <source>Forward secrecy was reset. Affected messages are sent again.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-status-fs-terminated">
-            <source>Forward secrecy for this chat was ended by the contact.</source>
+            <source>Perfect Forward Secrecy is active for this chat.</source>
+            <oldsource>Forward secrecy is active for this chat.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-today">
@@ -501,11 +445,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-not-supported-by-contact">
-            <source>This contact's app doesn't support this.</source>
+            <source>The app on the other side doesn't support this.</source>
+            <oldsource>This contact's app doesn't support this.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-message-too-old">
-            <source>Messages can only be changed for 6 hours.</source>
+            <source>Messages can be edited or deleted for everyone for 6 hours after sending.</source>
+            <oldsource>Messages can only be changed for 6 hours.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-message-deleted">
@@ -573,7 +519,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-cannot-play">
-            <source>Can't play voice messages on this device</source>
+            <source>This voice message could not be played</source>
+            <oldsource>Can't play voice messages on this device</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-group-left">
@@ -830,10 +777,6 @@
             <source>Show message content</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-notification-preview-description">
-            <source>Otherwise notifications only say that there is a new message, e.g. on the lock screen.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-me-quote">
             <source>Quote</source>
             <translation type="unfinished" />
@@ -862,7 +805,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-qr-mismatch">
-            <source>The code does not match this contact's key. Ask them to show their code again.</source>
+            <source>This code has the right Threema ID but a different key from the one known for it, so it may be forged. It was not accepted. Compare the codes with this person directly.</source>
+            <oldsource>The code does not match this contact's key. Ask them to show their code again.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-verify-qr">
@@ -1024,10 +968,6 @@
             <source>Blocked</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-no-maps-app">
-            <source>No maps app installed. Long press to copy the coordinates.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-me-send-location">
             <source>Send location</source>
             <translation type="unfinished" />
@@ -1089,7 +1029,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-cannot-play-video">
-            <source>Can't play videos on this device</source>
+            <source>This video could not be played</source>
+            <oldsource>Can't play videos on this device</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-select-messages">
@@ -1265,14 +1206,6 @@
             <oldsource>No photos or videos</oldsource>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-me-stop-sharing-picture">
-            <source>Stop sharing profile picture</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-me-share-picture">
-            <source>Share profile picture</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-wrong-pin">
             <source>Wrong PIN</source>
             <translation type="unfinished" />
@@ -1286,7 +1219,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-private-needs-lock">
-            <source>Private chats need an app lock. Set up a PIN in Settings, App lock.</source>
+            <source>Private chats need an app lock. Set one up in Settings, Security, App lock.</source>
+            <oldsource>Private chats need an app lock. Set up a PIN in Settings, App lock.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-private-chats-exist">
@@ -1347,17 +1281,12 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-lock-app-description">
-            <source>Ask whenever Threesea is opened. Private chats always ask.</source>
-            <oldsource>Ask for the PIN whenever Threesea is opened. Private chats always ask for it.</oldsource>
+            <source>Ask when Threesea starts, and when you come back to it after the time you choose. Private chats always ask.</source>
+            <oldsource>Ask whenever Threesea is opened. Private chats always ask.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-lock-after">
             <source>Lock</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-app-lock-info">
-            <source>With a lock you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the PIN or passphrase, you can only get back in by removing your ID from this device and restoring it from a backup.</source>
-            <oldsource>With a PIN you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the PIN, you can only get back in by removing your ID from this device and restoring it from a backup.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-private-chats">
@@ -1550,7 +1479,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-enter-to-send-description">
-            <source>Enter sends the message, Shift+Enter starts a new line. Off: Enter starts a new line, Shift+Enter sends.</source>
+            <source>Enter sends the message. Off: Enter starts a new line and the send button sends. On a hardware keyboard, Shift+Enter does the opposite.</source>
+            <oldsource>Enter sends the message, Shift+Enter starts a new line. Off: Enter starts a new line, Shift+Enter sends.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-se-advanced">
@@ -1634,7 +1564,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-nickname-placeholder">
-            <source>Shown to new contacts</source>
+            <source>Shown to the people you write to</source>
+            <oldsource>Shown to new contacts</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-change-profile-picture">
@@ -1742,11 +1673,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-policy-default-on">
-            <source>Like in Settings (on)</source>
+            <source>Same as in Settings (on)</source>
+            <oldsource>Like in Settings (on)</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-policy-default-off">
-            <source>Like in Settings (off)</source>
+            <source>Same as in Settings (off)</source>
+            <oldsource>Like in Settings (off)</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-policy-send">
@@ -1779,10 +1712,6 @@
         </message>
         <message id="threesea-se-data-encryption">
             <source>Encryption of stored data</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-data-passphrase-description">
-            <source>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone, and receives messages once it is entered.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-older-1-year">
@@ -1822,7 +1751,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-clean-up-media-description">
-            <source>Photos, videos, voice messages and files go; the messages and their previews stay. They can be downloaded again as long as Threema still has them.</source>
+            <source>Photos, videos, voice messages and files are deleted from this device, usually for good; the messages and their previews stay. Starred messages and messages still on their way keep their files.</source>
+            <oldsource>Photos, videos, voice messages and files go; the messages and their previews stay. They can be downloaded again as long as Threema still has them.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-clean-up-messages">
@@ -1830,7 +1760,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-clean-up-messages-description">
-            <source>Starred messages are kept.</source>
+            <source>Starred messages, open polls and messages still on their way stay.</source>
+            <oldsource>Starred messages are kept.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-se-clean-up-age">
@@ -1909,10 +1840,6 @@
             <source>Emoji graphics by Twemoji (github.com/jdecked/twemoji), licensed under CC-BY 4.0.</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-me-emoji-threema">
-            <source>Threema</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-me-emoji-system">
             <source>System</source>
             <translation type="unfinished" />
@@ -1983,11 +1910,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-ipv6">
-            <source>IPv6 for messages</source>
+            <source>IPv6</source>
+            <oldsource>IPv6 for messages</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-ipv6-description">
-            <source>Connect to Threema over IPv6 where the network has it. Off: IPv4 only.</source>
+            <source>Messages, files and calls use IPv6 where the network has it. Off: Threesea uses IPv4 for them.</source>
+            <oldsource>Connect to Threema over IPv6 where the network has it. Off: IPv4 only.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-not-gif">
@@ -2073,10 +2002,6 @@
         </message>
         <message id="threesea-la-link-intro">
             <source>Open Threema for Desktop on your computer. It shows a QR code; scan it on the next page.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-link-pfs">
-            <source>While a device is linked, chats with your contacts use end-to-end encryption without Perfect Forward Secrecy. It comes back when you remove the last linked device.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-link-emoji-mismatch">
@@ -2268,12 +2193,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-relay-calls-description">
-            <source>Calls go through a Threema server, which keeps your IP address hidden from the other side. The sound may be a little worse.</source>
-            <oldsource>Calls go through a Threema server, so the other side does not see your IP address. The sound may be a little worse.</oldsource>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-call-incoming-video">
-            <source>Incoming video call</source>
+            <source>Calls go through a Threema server, which keeps your IP address hidden from the other side. Call quality may be lower.</source>
+            <oldsource>Calls go through a Threema server, which keeps your IP address hidden from the other side. The sound may be a little worse.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-video-call">
@@ -2285,11 +2206,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-video-calls">
-            <source>Video calls</source>
+            <source>Video in one-to-one calls</source>
+            <oldsource>Video calls</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-video-calls-description">
-            <source>Calls can show the camera of both sides; each side turns its camera on when it wants.</source>
+            <source>One-to-one calls can show the camera of both sides; each side turns its camera on when it wants.</source>
+            <oldsource>Calls can show the camera of both sides; each side turns its camera on when it wants.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-video-quality">
@@ -2309,7 +2232,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-video-quality-description">
-            <source>Both sides use the lower of their two settings.</source>
+            <source>Both sides use the lower of their two settings. Calls that go only through a relay (Always relay calls, or with an unverified contact) use Standard at most.</source>
+            <oldsource>Both sides use the lower of their two settings.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-switch-camera">
@@ -2367,20 +2291,12 @@
             <source>Join</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-error-web-code">
-            <source>This is not a Threema Web code. Open web.threema.ch and scan the code it shows.</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-error-web-version">
             <source>This version of Threema Web can't be used. Reload the page in the browser.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-error-web-session">
             <source>This Threema Web session no longer exists.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-qr-not-web">
-            <source>This is a contact's code. Scan the code web.threema.ch shows.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-web-trust">
@@ -2417,10 +2333,6 @@
         </message>
         <message id="threesea-la-web-not-connected">
             <source>Not connected</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-web-ended">
-            <source>Threema Web disconnected: %1</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-scan-web-code">
@@ -2499,7 +2411,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-log-level-description">
-            <source>How much Threesea writes to the system log, to help find the cause of a problem.</source>
+            <source>How much Threesea logs, to help find the cause of a problem.</source>
+            <oldsource>How much Threesea writes to the system log, to help find the cause of a problem.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-se-disclaimer">
@@ -2565,7 +2478,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-keep-running-description-full">
-            <source>Threesea starts when you turn on the phone and stays connected after you close it, so new messages arrive right away. Uses a little more battery.</source>
+            <source>Threesea starts when you turn on the phone and stays connected after you close it, so new messages arrive right away. Uses more battery.</source>
+            <oldsource>Threesea starts when you turn on the phone and stays connected after you close it, so new messages arrive right away. Uses a little more battery.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-se-updates">
@@ -2693,10 +2607,6 @@
             <source>Contents</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-android-backup-version">
-            <source>Format version</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-android-backup-identity">
             <source>Threema ID</source>
             <translation type="unfinished" />
@@ -2753,10 +2663,6 @@
             <source>Groups</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-android-backup-key-conflicts">
-            <source>Conflicting keys</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-android-backup-existing">
             <source>Already on this device</source>
             <translation type="unfinished" />
@@ -2779,10 +2685,6 @@
         </message>
         <message id="threesea-la-android-import-reactions">
             <source>Reactions</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-android-import-unsupported">
-            <source>Not supported yet</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-se-android-backup-create">
@@ -2832,24 +2734,12 @@
             <source>Backup written: %1</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-android-backup-nonces">
-            <source>Replay protection entries</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-android-import-polls">
             <source>Polls</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-import">
             <source>Import</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-android-backup-import-intro">
-            <source>Adds what is missing: contacts, groups and pictures, then messages and media. Everything already on this device stays as it is. Nothing is sent.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-android-backup-import-other">
-            <source>This backup belongs to another Threema ID or key. It can only be imported on the device of that ID.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-android-backup-import-duration">
@@ -2886,10 +2776,6 @@
         </message>
         <message id="threesea-he-data-backup">
             <source>Data backup</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-data-backup-description">
-            <source>Encrypted backups of chats, contacts and settings, in the format of Threema for Android: they restore here and there.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-se-data-backup-import">
@@ -2933,11 +2819,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-forward-secrecy">
-            <source>Forward secrecy</source>
+            <source>Perfect Forward Secrecy</source>
+            <oldsource>Forward secrecy</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-forward-secrecy-description">
-            <source>Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts or resets.</source>
+            <source>Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts, resets or is turned off.</source>
+            <oldsource>Protects chats with keys that change continuously. Messages are end-to-end encrypted either way; contacts see a security notice when the protection starts or resets.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-view-log">
@@ -2981,7 +2869,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-device-cookie-body">
-            <source>The Threema server noticed a connection from another device with your Threema ID. If that was not you or one of your linked devices, contact Threema support.</source>
+            <source>Threema's server noticed a connection from another device with your Threema ID. If you recently used your ID on another phone, you can ignore this. An ID works on one phone at a time: new messages go only to the phone that connected last. If you didn't, your private key may be compromised: protect this phone and its data, and create a new ID.</source>
+            <oldsource>The Threema server noticed a connection from another device with your Threema ID. If that was not you or one of your linked devices, contact Threema support.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-delete-for-me">
@@ -3051,11 +2940,13 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-receive-pictures">
-            <source>Accept profile pictures</source>
+            <source>Show profile pictures</source>
+            <oldsource>Accept profile pictures</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-receive-pictures-description">
-            <source>Contacts who share their profile picture are shown with it.</source>
+            <source>Contacts who share their profile picture are shown with it. Pictures they send keep arriving while this is off, and appear when it is turned on again.</source>
+            <oldsource>Contacts who share their profile picture are shown with it.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-group-calls">
@@ -3063,7 +2954,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-group-calls-description">
-            <source>Groups can have calls everyone in the group can join.</source>
+            <source>You can start group calls and join the ones running in your groups.</source>
+            <oldsource>Groups can have calls everyone in the group can join.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-he-rename-device">
@@ -3131,7 +3023,8 @@
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-keep-messages-description">
-            <source>Older messages are deleted by themselves, with their media. Starred messages, open polls and messages still on their way stay.</source>
+            <source>Messages older than the chosen time are deleted by themselves, with their media. Starred messages, open polls, messages still on their way and groups with only you in them stay.</source>
+            <oldsource>Older messages are deleted by themselves, with their media. Starred messages, open polls and messages still on their way stay.</oldsource>
             <translation type="unfinished" />
         </message>
         <message id="threesea-la-exporting-chat">
@@ -3160,10 +3053,6 @@
         </message>
         <message id="threesea-la-export-chat-media-description">
             <source>Everything that has been downloaded to this phone goes into the archive.</source>
-            <translation type="unfinished" />
-        </message>
-        <message id="threesea-la-export-chat-password-description">
-            <source>With a password the archive is encrypted (AES-256) and any ZIP program asks for it when opening. Empty: no password.</source>
             <translation type="unfinished" />
         </message>
         <message id="threesea-me-limit-any">
@@ -3234,10 +3123,6 @@
             <source>Threesea stays offline until a license key is accepted. Your chats stay on this device.</source>
             <translation type="unfinished" />
         </message>
-        <message id="threesea-la-spam-reporting-deleting">
-            <source>Reporting and deleting</source>
-            <translation type="unfinished" />
-        </message>
         <message id="threesea-la-spam-reported">
             <source>Reported to Threema as spam.</source>
             <translation type="unfinished" />
@@ -3280,6 +3165,1827 @@
         </message>
         <message id="threesea-la-spam-report-failed">
             <source>The report could not be sent.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-address-book-none-new" numerus="yes">
+            <source>%n address book entries checked, no new contacts.</source>
+            <translation>
+                <numerusform>%n address book entry checked, no new contacts.</numerusform>
+                <numerusform>%n address book entries checked, no new contacts.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-address-book-empty">
+            <source>No phone numbers or e-mail addresses found in the address book.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-link-mobile-target">
+            <source>The code goes to +%1.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-email-already-linked">
+            <source>This address is already linked to your ID, so no e-mail is needed.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-phone-already-linked">
+            <source>This number is already linked to your ID, so no SMS is needed.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ae">
+            <source>United Arab Emirates</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-at">
+            <source>Austria</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-au">
+            <source>Australia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-be">
+            <source>Belgium</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-bg">
+            <source>Bulgaria</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-br">
+            <source>Brazil</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ca">
+            <source>Canada</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ch">
+            <source>Switzerland</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-cn">
+            <source>China</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-cy">
+            <source>Cyprus</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-cz">
+            <source>Czechia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-de">
+            <source>Germany</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-dk">
+            <source>Denmark</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ee">
+            <source>Estonia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-es">
+            <source>Spain</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-fi">
+            <source>Finland</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-fr">
+            <source>France</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-gb">
+            <source>United Kingdom</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-gr">
+            <source>Greece</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-hr">
+            <source>Croatia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-hu">
+            <source>Hungary</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ie">
+            <source>Ireland</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-il">
+            <source>Israel</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-in">
+            <source>India</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-is">
+            <source>Iceland</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-it">
+            <source>Italy</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-jp">
+            <source>Japan</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-kr">
+            <source>South Korea</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-li">
+            <source>Liechtenstein</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-lu">
+            <source>Luxembourg</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-lv">
+            <source>Latvia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-mt">
+            <source>Malta</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-mx">
+            <source>Mexico</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-nl">
+            <source>Netherlands</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-no">
+            <source>Norway</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-nz">
+            <source>New Zealand</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-pl">
+            <source>Poland</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-pt">
+            <source>Portugal</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ro">
+            <source>Romania</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-rs">
+            <source>Serbia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ru">
+            <source>Russia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-se">
+            <source>Sweden</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-sg">
+            <source>Singapore</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-si">
+            <source>Slovenia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-sk">
+            <source>Slovakia</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-tr">
+            <source>Turkey</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-ua">
+            <source>Ukraine</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-us">
+            <source>United States</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-country-za">
+            <source>South Africa</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-address-book-country-automatic">
+            <source>Automatic</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-address-book-country-automatic-code">
+            <source>Automatic (+%1)</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-address-book-country">
+            <source>Numbers without a country code</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-address-book-country-description">
+            <source>Address book numbers written without a country code count as from this country. Automatic goes by your linked phone number, else by the device's region. Numbers from other countries are found when written with + and their country code.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-no-emoji-found">
+            <source>No emoji found</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-upgrading-hint">
+            <source>Updating the stored chats. This can take a moment; keep Threesea open.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-text-too-long">
+            <source>The text is too long. Shorten it and try again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-poll-results-too-long">
+            <source>The results of this poll are too long to send. The poll stays open.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-backup-no-identity">
+            <source>This backup holds no Threema ID. Restore the ID from Threema Safe or an ID backup, then import this backup in Settings, Backup, Data backup.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-backup-write">
+            <source>The backup could not be written. Check the backup folder.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-backup-no-room">
+            <source>The backup folder's storage has too little free space for a backup. Free some space or choose another folder.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-backup-running">
+            <source>A backup is being written right now.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-backup-no-folder">
+            <source>Choose a backup folder first.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-backup-no-password">
+            <source>Enter a backup password first.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-safe-damaged">
+            <source>This Threema Safe backup is damaged and can't be read.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-contact-revoked">
+            <source>This Threema ID was revoked.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-contact-unknown">
+            <source>Block unknown senders is on, and this person is not one of your contacts.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-qr-expired">
+            <source>This code has expired. Scan it directly from the other person's app.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-video-metadata">
+            <source>A video was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-file-picture-metadata">
+            <source>A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. It can still be sent as a file.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-picture-metadata">
+            <source>A picture was not sent, because its metadata, which can hold where and when it was made, could not be removed. Save it, and it can be sent as a file.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-not-web-code">
+            <source>This is not a Threema Web code. Scan the code Threema Web shows in the browser.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-web-disabled">
+            <source>Threema Web is switched off. Turn it on in the settings under Threema Web.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-web-already-paired">
+            <source>This browser is already in the list under Threema Web. Remove it there to connect it with a new code.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-link-removed">
+            <source>Linking didn't finish, so the devices in the device group were removed again. The computer had already received your ID. Close Threema for Desktop, open it again and scan its new code.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-link-uncertain">
+            <source>Linking didn't finish, but the computer received your ID and may be linked anyway. Linked devices shows what is linked once you are online, and you can remove it there.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-group-call-full">
+            <source>This group call is full.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-group-call-not-running">
+            <source>This group call has ended.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-group-call-version">
+            <source>This group call needs a different version of the app.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-group-call-connection">
+            <source>The connection to the group call failed.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-group-call-audio">
+            <source>The microphone or the speaker stopped working, so the group call ended.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-contact-not-found">
+            <source>Add this ID to your contacts to write to it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-group-not-found">
+            <source>This group is no longer on this device.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-no-identity">
+            <source>Create or restore your Threema ID first.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-server-trouble">
+            <source>Threema's server didn't accept this. Try again later.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-rate-limited">
+            <source>Threema's servers are busy. Try again in a few minutes.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-server-unexplained">
+            <source>Threema's servers turned this down and gave no reason. Try again later.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-report-refused">
+            <source>Threema didn't accept the report. Try again later.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-id-search-input">
+            <source>Enter a phone number with its country code, or an e-mail address.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-identity-exists">
+            <source>This device already has a Threema ID.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-disk-full">
+            <source>The phone's storage is full. Free some space.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-upgrade-no-room">
+            <source>Updating the stored chats needs more free space. Free some space; the chats stay as they were until then.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-store-too-new">
+            <source>This version of Threesea is older than your stored data. Install the newest version.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-store-key">
+            <source>The stored data could not be opened: the key does not fit, or the file is damaged. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-store-damaged">
+            <source>Part of the stored data could not be read. It may be damaged. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-store-unreadable">
+            <source>The stored data could not be read. Check that the phone has free storage.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-store">
+            <source>The stored data could not be opened.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-key-missing">
+            <source>The key to the stored data was not found in the phone's key storage, so the data could not be opened. Threesea leaves the data as it is. It is worth closing Threesea and opening it again, then restarting the phone.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-secrets">
+            <source>Threesea could not get the key to its data from the phone's key storage. Allow the access if the phone asks for it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-internal-plain">
+            <source>Something went wrong.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-gif">
+            <source>GIF</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-lock-private-passphrase">
+            <source>Passphrase for private chats</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-lock-private-pin">
+            <source>PIN for private chats</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-group-no-longer-member">
+            <source>You are no longer a member of this group.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-group-call-started-unnamed">
+            <source>A group call started.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-group-call-started">
+            <source>%1 started a group call.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-group-call-you-started">
+            <source>You started a group call.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-group-call-ended">
+            <source>The group call ended.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-fs-session-reset">
+            <source>Perfect Forward Secrecy was reset. This can happen when the contact changes devices or reinstalls the app.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-fs-message-rejected">
+            <source>Perfect Forward Secrecy was reset. Affected messages are sent again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-fs-message-without">
+            <source>A message without Perfect Forward Secrecy was received. Check with the contact that they turned it off on purpose.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-fs-unavailable">
+            <source>Perfect Forward Secrecy is off in this chat because this contact's app is not using it at the moment.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-status-fs-session-ended">
+            <source>The Perfect Forward Secrecy session with this contact ended.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-copy-id">
+            <source>Copy ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-copied">
+            <source>Copied</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-share-id">
+            <source>Share ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-share-id">
+            <source>Share ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-send-again">
+            <source>Send again</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-stop-download">
+            <source>Stop download</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-stop-upload">
+            <source>Stop sending</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-share">
+            <source>Share</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-draw-on-picture">
+            <source>Draw on it</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-saved-n-downloads" numerus="yes">
+            <source>Saved %n file(s) to Downloads</source>
+            <translation>
+                <numerusform>Saved %n file to Downloads</numerusform>
+                <numerusform>Saved %n files to Downloads</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-download-failed">
+            <source>The file could not be downloaded. It may no longer be on the server.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-send-in-turn-failed">
+            <source>Threesea did not send everything</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-not-sent-to-chats" numerus="yes">
+            <source>Not everything went to %n chat(s)</source>
+            <translation>
+                <numerusform>Not everything went to %n chat</numerusform>
+                <numerusform>Not everything went to %n chats</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-sent-to-chats" numerus="yes">
+            <source>On its way to %n chat(s)</source>
+            <translation>
+                <numerusform>On its way to %n chat</numerusform>
+                <numerusform>On its way to %n chats</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-send-in-turn-lost">
+            <source>Some chats did not get what you sent them. Send it to them again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-locked-notification-reply-body">
+            <source>Open it and enter your PIN or passphrase to send your reply and receive messages.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-startup-failed-notification-body">
+            <source>Open it to see why. Messages arrive again once it runs.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-failing-notification">
+            <source>Threema Safe backup failing</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-failing-notification-body" numerus="yes">
+            <source>Threema Safe hasn't been able to back up for %n day(s). Tap to check.</source>
+            <translation>
+                <numerusform>Threema Safe hasn't been able to back up for %n day. Tap to check.</numerusform>
+                <numerusform>Threema Safe hasn't been able to back up for %n days. Tap to check.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-reason-login-refused">
+            <source>Threema's server keeps closing the connection during login.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reason-another-connection">
+            <source>Another device keeps taking over this Threema ID. An ID works on one phone at a time, so Threesea tries again every 10 minutes.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reason-mediator-version">
+            <source>Threema's server for linked devices no longer accepts this version of Threesea.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reason-mediator-device-limit">
+            <source>Threema's server for linked devices turned this device away: this Threema ID has reached its limit of linked devices.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reason-mediator-duplicate">
+            <source>Another connection under this device's login took over on Threema's server for linked devices.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reason-mediator-queue-full">
+            <source>Too many messages are waiting for this device on Threema's server for linked devices, so it closed the connection.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reason-mediator-other">
+            <source>Threema's server for linked devices closed the connection (code %1).</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-server-message-notification">
+            <source>Message from Threema's server</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-opens-after-call">
+            <source>Opens when the call is over</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-capture-discarded">
+            <source>The photo or video waiting to be sent was discarded</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-mobile-verified">
+            <source>Phone number confirmed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-share-before-setup">
+            <source>Set up Threesea first, then share this again</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-storage-problem-title">
+            <source>Saving messages failed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-storage-problem-body">
+            <source>Threesea can't write to its data, so new messages wait on the server, for a limited time. Check that this device has free storage. The log in Settings, Advanced has the error code.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-connected-notification">
+            <source>Connected to Threema Web</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-connected-notification-body" numerus="yes">
+            <source>%n browser(s) can read and send your messages through this phone. Tap to manage.</source>
+            <translation>
+                <numerusform>%n browser can read and send your messages through this phone. Tap to manage.</numerusform>
+                <numerusform>%n browsers can read and send your messages through this phone. Tap to manage.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-web-certificate-notification">
+            <source>Threema Web server has a new certificate</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-certificate-notification-body">
+            <source>Tap to decide whether to trust it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-call-decline">
+            <source>Decline</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-call-answer">
+            <source>Answer</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-app-locked-reply-body">
+            <source>Open it and enter your PIN or passphrase to send your reply.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-updated">
+            <source>Threesea was updated</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-removed">
+            <source>Threesea was removed from this device</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent">
+            <source>Your reply was not sent</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-app-locked-body">
+            <source>Something new has arrived. Open it and enter your PIN or passphrase to see it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-removed-body">
+            <source>Close it to end it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-updated-body">
+            <source>Close it and open it again to use the new version.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-updated-open-body">
+            <source>Tap to open the new version.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-updated-closed-body">
+            <source>Open it to receive messages again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent-ended-kept">
+            <source>Threesea ended before sending it. Your text is kept as a draft in its chat.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent-ended">
+            <source>Threesea ended before sending it. Write it again in the chat.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-linked-remain">
+            <source>This phone could not reach the server, so your linked devices stay linked to this ID.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent-body">
+            <source>Threesea could not start. Open it to see why.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent-yet">
+            <source>It is sent when you next open Threesea.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent-kept">
+            <source>%1 Your text is kept as a draft in the chat.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reply-not-sent-late">
+            <source>It reached Threesea too late. Write it again in the chat.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-share-empty">
+            <source>What was shared holds nothing to send</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-share-own-files">
+            <source>Files of Threesea's own were left out of what was shared</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-call-route-failed">
+            <source>The sound could not be switched</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-recording-discarded">
+            <source>Recording stopped and discarded</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-failed">
+            <source>The ID was not removed: %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-backup-reminder">
+            <source>Back up your Threema ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-backup-reminder-body">
+            <source>A backup brings your ID, contacts and groups back on a new phone. Tap to set up Threema Safe.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-server-copy-left">
+            <source>Threema Safe is off. The backup could not be deleted from Threema's server, so it stays there until it expires.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-device-removal-failed">
+            <source>Removing linked devices did not finish. Linked devices shows what is still linked, and you can try again there.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-flavour">
+            <source>Flavour</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-flavour-full">
+            <source>Full</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-flavour-lite">
+            <source>Lite</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-emoji-search">
+            <source>Emoji search terms from threema-android (AGPL-3.0).</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-license-copyright">
+            <source>Copyright © 2026 the Threesea developers. libthreema and the code taken from threema-android: copyright Threema AG.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-license-source">
+            <source>Source code and bug reports: %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-bt-license-agpl">
+            <source>License text</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-bt-license-notices">
+            <source>Third-party licenses</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-add-scanned-contact">
+            <source>Adds this Threema ID to your contacts with the key from Threema's directory. To verify it, scan the QR code in the other person's app.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-app-lock-about">
+            <source>With a lock you can also make chats private: they are hidden from the chat list and are opened from its bottom menu. If you forget the app lock's PIN or passphrase, the way back in is to delete Threesea's data folder .local/share/org.threesea/harbour-threesea with the chats and media in it, restart the phone and restore from a backup. A passphrase for the stored data stays set: Threesea asks for it first.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-call-interrupted">
+            <source>Connection interrupted…</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-call-unverified">
+            <source>The connection could not be verified. The call was ended.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-call-connection-failed">
+            <source>Connection failed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-camera-photo-failed">
+            <source>The photo could not be taken.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-camera-video-failed">
+            <source>The video could not be recorded.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-sending-drawing">
+            <source>Sending drawing</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-discarding-drawing">
+            <source>Discarding drawing</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-discarding-recording">
+            <source>Discarding recording</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-recording-held">
+            <source>Recording stopped. Send it or discard it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-recording-not-playable">
+            <source>This recording could not be played. It can still be sent.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-spam-reporting-group">
+            <source>Reporting, blocking, leaving and deleting</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-spam-reporting-contact">
+            <source>Reporting, blocking and deleting</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-polls">
+            <source>Polls</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-polls-waiting" numerus="yes">
+            <source>%n poll(s) waiting for your vote</source>
+            <translation>
+                <numerusform>%n poll waiting for your vote</numerusform>
+                <numerusform>%n polls waiting for your vote</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-revoked-input">
+            <source>This Threema ID was revoked</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-recording-paused">
+            <source>Paused %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-choose-chats-accept">
+            <source>Choose</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-search-chats-contacts">
+            <source>Search chats and contacts</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-search-no-chats-contacts">
+            <source>No chats or contacts found</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-clean-up-scope">
+            <source>Groups with only you in them are cleaned up too, and private chats while they are unlocked.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-clean-up-all-chats">
+            <source>Clean up all chats</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-confirm-send">
+            <source>Send</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-confirm-forward-to">
+            <source>Forward to %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-confirm-send-to">
+            <source>Send to %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-confirm-caption">
+            <source>Caption</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-confirm-message">
+            <source>Message</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-confirm-include-captions">
+            <source>Include captions</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-add-to-contacts">
+            <source>Add to contacts</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-contact-share-picture">
+            <source>Share profile picture</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-search-contacts">
+            <source>Search contacts</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-search-no-contacts">
+            <source>No contacts found</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-lock-now">
+            <source>Lock now</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-import-unfinished">
+            <source>Your Data backup isn't fully imported yet. Tap to import it again; it continues where it stopped.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-notifications-back-on">
+            <source>Notifications on</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-notifications-off-8-hours">
+            <source>Notifications off for 8 hours</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-chats-not-loaded">
+            <source>The chats could not be loaded</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-import-intro">
+            <source>Adds what is missing: contacts, groups and pictures, then messages and media. Everything already on this device stays as it is. No messages are sent.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-import-other">
+            <source>This backup belongs to another Threema ID or key. To import it, first restore that ID on this device.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-import-unreadable">
+            <source>The Threema ID in this backup isn't readable with this password. The file may be damaged. Only a backup of this device's ID is imported.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-import-no-id">
+            <source>This backup holds no Threema ID. Only a backup of this device's ID is imported.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-contents">
+            <source>Encrypted backups of your Threema ID, chats, contacts, groups and media, in the format of Threema for Android.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-android-export-running">
+            <source>Writing the backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-android-export-left-out" numerus="yes">
+            <source>%n chat(s) stayed out of the last backup: restoring them needs the contact's key, which could not be fetched. The next backup tries again.</source>
+            <translation>
+                <numerusform>%n chat stayed out of the last backup: restoring it needs the contact's key, which could not be fetched. The next backup tries again.</numerusform>
+                <numerusform>%n chats stayed out of the last backup: restoring them needs the contact's key, which could not be fetched. The next backup tries again.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-android-export-files-left-out" numerus="yes">
+            <source>%n file(s) stayed out of the last backup: they could not be read on this phone.</source>
+            <translation>
+                <numerusform>%n file stayed out of the last backup: it could not be read on this phone.</numerusform>
+                <numerusform>%n files stayed out of the last backup: they could not be read on this phone.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-safe-last-attempt-failed">
+            <source>Last attempt failed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-restore-data-backup">
+            <source>Restore from Data backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-restore-data-backup-intro">
+            <source>Choose a Data backup from Threema for Android or Threesea and enter its password. It brings your ID, contacts, groups, chats and media. The password stays on this device.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-restore-one-phone">
+            <source>An ID works on one phone at a time: new messages go only to the phone that connected last.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-reason-too-large">
+            <source>too large to import</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-reason-damaged">
+            <source>damaged in the backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-reason-other-key">
+            <source>a different key in the backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-reason-not-here">
+            <source>not on this device</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-imported-except">
+            <source>The backup is imported, except for what is listed below. Everything already on this device stayed as it was.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-restored-private">
+            <source>Chats that were marked private come back as ordinary, visible chats. To hide them again, set up an app lock in Settings and choose Make private in the chat list.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-received-list-missing">
+            <source>The list of messages already received isn't part of this import. Messages sent again are recognised from what this device receives from now on.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-key-conflicts">
+            <source>Contacts with a different key (kept as here)</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-local-avatars">
+            <source>Pictures chosen for contacts on the other device, left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-groups-left-out">
+            <source>Groups left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-unsent">
+            <source>Messages that were never sent (kept as failed)</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-chats-left-out">
+            <source>Chats left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-chats-too-large">
+            <source>Chats too large to import</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-chats-damaged">
+            <source>Damaged chats left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-messages-left-out">
+            <source>Messages left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-collisions">
+            <source>Messages here from another sender (kept as here)</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-reactions-left-out">
+            <source>Reactions left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-reaction-files-left-out">
+            <source>Lists of reactions left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-entries-left-out">
+            <source>Entries left out</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-media-missing">
+            <source>Media not in the backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-se-data-backup-left-out">
+            <source>Chats that weren't imported</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-uid-conflicts">
+            <source>Messages also found in another chat</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-backup-foreign-group-chats">
+            <source>Group chats mostly from non-members</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-goes">
+            <source>This removes your Threema ID, contacts, chats, media and settings from this device.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-comes-back-data-backup">
+            <source>Your ID itself is not revoked: you can restore it later from Threema Safe, an ID backup or a Data backup — without one of them, the ID is lost. Chats and media come back only from a Data backup.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-stays">
+            <source>Pictures saved to the Threesea folder in Pictures, and backups and files you exported, stay on this device. A Threema Safe backup stays on the server.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-linked">
+            <source>Your linked devices are removed from this ID first, which takes a connection. If this phone can't reach the server then, they stay linked and keep the ID.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-delete-data-have-a-backup">
+            <source>I have a Threema Safe, ID or Data backup, or no longer need this ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-share-id-backup">
+            <source>Share ID backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-bt-share">
+            <source>Share</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-bt-done">
+            <source>Done</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-closing-id-backup">
+            <source>Closing ID backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-export-chat-password-note">
+            <source>At least 8 characters. With a password the messages and files in the archive are encrypted with AES-256, and it opens in ZIP programs with AES support, such as 7-Zip; the names of the files stay readable. Empty: not encrypted, anyone who gets the file can read it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-rename-list">
+            <source>Rename list</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-choose-picture">
+            <source>Choose picture</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-take-picture">
+            <source>Take photo</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-removing-picture">
+            <source>Removing picture</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-license-key-changed">
+            <source>License key changed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-change-license-key">
+            <source>Change license key</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-identity-intro-id-export">
+            <source>Your Threema ID identifies you to your contacts. Create a new one, or restore the ID you already use from Threema Safe, an ID backup (Threema for Android calls it an ID export) or a Data backup. A Data backup brings your chats as well.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-bt-restore-data-backup">
+            <source>Restore from Data backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-cannot-show-picture">
+            <source>This picture could not be shown</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-media-position">
+            <source>%1 of %2</source>
+            <extracomment>The photo or video shown, and how many the chat has. %1 is its number, %2 how many</extracomment>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-select-all">
+            <source>Select all</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-select">
+            <source>Select</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-select-media-hint">
+            <source>Tap to select</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-all-contacts-on-list">
+            <source>All your contacts are on this list</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-all-contacts-in-group">
+            <source>All your contacts are in this group</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-reactions">
+            <source>Reactions</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-nickname-ask-title">
+            <source>Choose a nickname</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-nickname-ask-text">
+            <source>This name goes with your messages. Contacts who haven't given you a name of their own see it. You can change it in Settings, My profile.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-photo-text">
+            <source>Text on the photo</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-photo-text">
+            <source>Text</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-passphrase-note">
+            <source>If you forget it, Threesea can start fresh only without what it has stored on this phone. Your ID and chats can then come back from a backup, if you have one.</source>
+            <oldsource>If you forget it, everything Threesea has stored on this phone is lost.</oldsource>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-try-again">
+            <source>Try again</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-choose-place">
+            <source>Choose a place</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-place-search">
+            <source>Search by name</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-place-use-own">
+            <source>Use your position</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-places-found">
+            <source>Places found</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-places-nearby">
+            <source>Places nearby</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-places-need-position">
+            <source>Places are found around your position</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-places-failed">
+            <source>Threema's map server did not answer</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-places-none">
+            <source>No places found</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-places-failed-hint">
+            <source>Check your internet connection and pull down to try again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-places-none-hint">
+            <source>Search by name to look further away.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-polls">
+            <source>Polls</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-no-polls">
+            <source>No polls in this chat</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-se-polls-closed">
+            <source>Closed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-se-polls-open">
+            <source>Open</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-poll-waiting">
+            <source>Waiting for your vote</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-restore-intro-scan">
+            <source>Scan the QR code of the ID backup or paste its text (80 characters in groups of four, like XXXX-XXXX-…), and enter the password you chose when you created it. Threema for Android calls it an ID export. It brings your ID. Chats come from a Data backup, which Settings, Backup can import afterwards.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-find-id-none">
+            <source>No Threema ID is linked to this.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-safe-find-id">
+            <source>Find my ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-find-id-intro">
+            <source>Enter the phone number or e-mail address linked to your Threema ID. It is hashed on this device, and Threema's directory is asked with the hash.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-find-id-phone">
+            <source>Phone number</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-find-id-email">
+            <source>E-mail address</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-bt-safe-find-id">
+            <source>Find</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-se-safe-find-id-found">
+            <source>Linked IDs</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-description-changes">
+            <source>Encrypted backup of your ID, profile, contacts, groups and settings, updated when something changes. For your chats, use Data backup.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-disabling-delete">
+            <source>Turning off and deleting the backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-continue">
+            <source>Continue</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-change">
+            <source>Change</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-password-change-intro">
+            <source>Choose a new password for Threema Safe. A new backup replaces the one made with the old password. Only your password (at least 8 characters) unlocks it: if you forget it, the backup cannot be recovered.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-password-intro-changes">
+            <source>Threema Safe stores an encrypted backup of your ID, profile, contacts, groups and settings on Threema's servers, updated when something changes. For your chats, use Data backup. Only your password (at least 8 characters) unlocks it — if you forget it, the backup cannot be recovered.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-setup-skip">
+            <source>Continue without a backup</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-setup-skip-description">
+            <source>Your ID, contacts and groups then exist on this phone alone, and go with it. Settings, Backup can turn Threema Safe on or export an ID backup at any time.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-safe-find-id">
+            <source>Find my ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-restore-safe-intro-data-backup">
+            <source>Enter your Threema ID and your Threema Safe password. Your profile, contacts, groups and settings are restored with it. Chats come from a Data backup, which Settings, Backup can import afterwards.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-not-id-backup">
+            <source>This is not an ID backup. Scan the QR code of your ID backup.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-not-web-code">
+            <source>This is a contact's code. Scan the code Threema Web shows.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-link-verify">
+            <source>This is a link to a Threema ID. To verify it, scan the QR code in the other person's app.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-id-backup-elsewhere">
+            <source>This is an ID backup. It restores an ID while the app is being set up.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-unknown">
+            <source>This is not a Threema QR code.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-scan-hint-id-backup">
+            <source>Point the camera at the QR code of your ID backup.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-scan-hint-web">
+            <source>Point the camera at the QR code Threema Web shows.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-search-names-messages">
+            <source>Names and messages</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-messages">
+            <source>Messages</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-remove-star">
+            <source>Remove star</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-search-nothing-at-all">
+            <source>No chats, contacts or messages found</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-waiting">
+            <source>No position yet. Check that location is on in Settings → Location. Outdoors this goes faster.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-own">
+            <source>Your position</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-place">
+            <source>Place</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-last-known">
+            <source>Your last known position, from %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-place-server">
+            <source>To find places, Threema's map server gets your position and what you search for.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-use-last-known">
+            <source>Use your last known position, from</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-update-check-failed">
+            <source>Could not check for updates. Try again later.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-emoji-twemoji">
+            <source>Twemoji</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-safe-on-failing">
+            <source>On, the last attempt failed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-leave-device-group">
+            <source>Leave</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-leave-device-group-text">
+            <source>This device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</source>
+            <oldsource>If you leave, this device connects directly again. The other devices keep your ID and stay in their group, and only they can remove themselves from then on.</oldsource>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-link-desktop">
+            <source>Link Threema for Desktop</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-link-next">
+            <source>Next</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-link-grant">
+            <source>Threema for Desktop gets your Threema ID with its private key, your contacts and groups, and can read and send messages as you. Link only your own computer.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-link-pfs-if-on">
+            <source>While a device is linked, chats with your contacts use end-to-end encryption without Perfect Forward Secrecy. If it was on, it comes back when the last linked device is removed.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-link-scan-again">
+            <source>Scan again</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-clear-reflected-left-out">
+            <source>Clear count of messages not kept</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-reflected-left-out" numerus="yes">
+            <source>%n message(s) received on your other devices weren't kept on this phone.</source>
+            <translation>
+                <numerusform>%n message received on your other devices wasn't kept on this phone.</numerusform>
+                <numerusform>%n messages received on your other devices weren't kept on this phone.</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-linked-devices-offline">
+            <source>Waiting for the connection</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-linked-devices-failed">
+            <source>The list of linked devices did not load</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-linked-devices-offline-hint">
+            <source>The linked devices appear here once the server answers.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-linked-devices-failed-hint">
+            <source>Open this page again to load it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-log-save-failed">
+            <source>Could not save the support package to Downloads.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-keep-messages-remorse">
+            <source>Deleting older messages</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-cleaning-up">
+            <source>Cleaning up</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-notifications-calls">
+            <source>Notify about new messages and missed calls</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-notification-preview-who-description">
+            <source>Otherwise notifications show who wrote, but not what, e.g. on the lock screen.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-se-notifications-calls">
+            <source>Calls</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-call-tone">
+            <source>Ringtone</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-call-tone-system">
+            <source>System call tone</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-inapp-sound-voice-description">
+            <source>A soft sound between two voice messages playing one after the other.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-exclusion-list-description">
+            <source>Finding contacts from the address book will not add or rename these Threema IDs.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-clear-contact-policies-description">
+            <source>The read receipt and typing indicator choices made on single contacts' pages go back to the settings above.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-contact-policies-cleared" numerus="yes">
+            <source>Cleared for %n contact(s)</source>
+            <translation>
+                <numerusform>Cleared for %n contact</numerusform>
+                <numerusform>Cleared for %n contacts</numerusform>
+            </translation>
+        </message>
+        <message id="threesea-la-forward-secrecy-linked">
+            <source>Off while other devices are linked to this ID. Your choice here applies again when the last one is removed.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-removing-link">
+            <source>Removing link</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-cancelling-link">
+            <source>Cancelling link</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-share-my-id">
+            <source>Share my ID</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-revocation-not-checked">
+            <source>Not checked yet</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-passphrase-about">
+            <source>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, pull down where it is asked for to start fresh, without what Threesea has stored on this phone: Threema Safe or an ID backup brings your ID back, a Data backup your chats.</source>
+            <oldsource>Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, everything Threesea has stored on this phone is lost. Threema Safe or an ID backup keeps your ID, a Data backup your chats.</oldsource>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-pair-grants">
+            <source>This code connects a browser to your Threema ID. That browser can read your contacts and chats and send messages in your name.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-pair-only-yours">
+            <source>Allow it only if you opened Threema Web yourself and the code is on your own screen. If someone sent you this code, go back.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-pair-remembered">
+            <source>If the browser asks to be remembered, it can connect again without a new code until you remove it from Threema Web in the settings.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-rename-browser">
+            <source>Rename browser</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-browser-name">
+            <source>Browser name</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-browser-name-description">
+            <source>Only this phone shows this name. Left empty, the browser's own name is shown.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-scan-again">
+            <source>The new certificate is trusted. Scan the code in the browser again to connect it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-disconnected-kept">
+            <source>Threema Web disconnected. Tap the browser to connect it again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-disconnected">
+            <source>Threema Web disconnected.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-removing">
+            <source>Removing</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-web-remove-all">
+            <source>Remove all browsers</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-removing-all">
+            <source>Removing all browsers</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-enabled">
+            <source>Threema Web</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-enabled-description">
+            <source>Lets the browsers listed here connect to this phone and use your chats. Turning it off disconnects them and keeps them in the list.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-tap-hint">
+            <source>Tap a browser to connect or disconnect it. Threema Web must be open in the browser to connect. A disconnected browser can connect again when it is opened; removing it or turning off the switch above keeps it out.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-web-rename">
+            <source>Rename</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-se-web-servers">
+            <source>Allowed servers</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-web-servers-description">
+            <source>Self-hosted Threema Web servers you allowed. Removing one also removes its browsers, and the next code naming it asks again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-share-refused-several">
+            <source>Nothing was sent. Blocked or revoked, and taken off the choice: %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-choose-several-chats">
+            <source>Choose several chats</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-startup-try-again">
+            <source>Pull down to try again.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-startup-code">
+            <source>Code: %1</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-removal-stuck">
+            <source>Removing the ID did not finish</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-removal-stuck-hint">
+            <source>Pull down to try again, or close Threesea and open it again (%1).</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-enter-data-passphrase">
+            <source>Enter the passphrase of your stored data</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-video-keeps-metadata-send">
+            <source>Send as it is</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-video-keeps-metadata-cancel">
+            <source>Don't send</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-video-keeps-metadata">
+            <source>This video keeps what its file says about it</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-picture-keeps-metadata">
+            <source>This picture keeps what its file says about it</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-video-keeps-metadata-description">
+            <source>Threesea can't remove the metadata of this file. It can hold where and when the video was made and on what device, and the recipient gets all of it, along with the file's name: %1. Sent as it is, it goes out as a plain file.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-picture-keeps-metadata-description">
+            <source>Threesea can't remove the metadata of this file. It can hold where and when the picture was made and on what device, and the recipient gets all of it, along with the file's name: %1. Sent as it is, it goes out as a plain file.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-ended-early">
+            <source>Threesea ended before it was done</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-ended-early-body">
+            <source>Your last files or draft did not reach the chat. Add them again there.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-error-share-too-large">
+            <source>That is too much to share at once. Select fewer files or smaller ones, or try again in a few minutes.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-verification-partly">
+            <source>Partly verified</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-cldr">
+            <source>Unicode CLDR: those search terms are likely derived from its emoji annotations (Unicode License v3).</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-verification-partly-explained">
+            <source>Partly verified: found in your address book, or checked with their code from a picture. Scanning their code with the camera, in person, verifies them fully.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-qr-verified-picture">
+            <source>The code in the picture matches %1's key. For full verification, scan their code with the camera, in person.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-remove-devices-again">
+            <source>Remove</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-leave-device-group-choice">
+            <source>Your linked devices</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-leave-device-group-not-finished">
+            <source>Removing your linked devices did not finish, so they may still be linked.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-remove-devices-first">
+            <source>Remove the linked devices first</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-remove-devices-first-description">
+            <source>Tries again now, best once you are online. This device stays in the group until they are removed, so it can still remove a lost or stolen computer.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-leave-device-group-only">
+            <source>Leave on this device only</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-linked-devices-read-failed">
+            <source>The list of linked devices could not be read</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-image-cache">
+            <source>Keep pictures in memory</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-image-cache-description">
+            <source>Chat pictures scroll back in faster: they stay decoded and unencrypted in the app's memory while it runs, until the app locks or a chat is made private. This uses more memory. Private chats load their pictures anew each time.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-start-fresh">
+            <source>Start fresh</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-goes">
+            <source>This deletes Threesea's own data on this phone: chats, contacts, media, settings and your Threema ID. Backups and pictures saved to your folders stay.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-comes-back">
+            <source>You can then restore your ID from Threema Safe, an ID backup or a Data backup, and your chats from a Data backup. Without one of them, the ID is lost.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-linked">
+            <source>Devices linked to your ID stay linked to it.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-start-fresh-understood">
+            <source>Delete the stored data</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-starting-fresh">
+            <source>Deleting the stored data</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-startup-try-again-or-fresh">
+            <source>Pull down to try again, or to start fresh without the stored data.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-start-fresh">
+            <source>Start fresh</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-data-passphrase-forgotten">
+            <source>Forgotten it? Pull down to start fresh without the stored data.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-maplibre">
+            <source>The map: MapLibre Native and its Qt bindings (BSD-2-Clause), mapbox-gl-qml by rinigus (LGPL-3.0) and his Sailfish packaging pkg-maplibre-gl-native (MIT). Their exact sources: github.com/maplibre/maplibre-native-qt 3.0.0, github.com/rinigus/pkg-maplibre-gl-native 3.0.0+git2 and github.com/rinigus/mapbox-gl-qml 3.2.1, with this app's patches in its source under scripts/maplibre.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-map-data">
+            <source>Map data © OpenMapTiles © OpenStreetMap contributors (ODbL), from Threema's map server.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-open-in-maps">
+            <source>Open in maps app</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-no-maps-app-installed">
+            <source>No maps app installed</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-me-copy-coordinates">
+            <source>Copy coordinates</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-he-choose">
+            <source>Choose</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-map-point">
+            <source>A point on the map</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-on-map">
+            <source>Choose on the map</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-location-map-server">
+            <source>The map comes from Threema's map server, which learns the area shown. The places on it come from Threema's places server, which gets the middle of the map.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-key-confirmation-notification">
+            <source>Threesea is waiting for your OK</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-key-confirmation-notification-body">
+            <source>After a restart the phone asks once whether Threesea may read the key to its data. Confirm that to receive messages.</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-credit-finnish">
+            <source>The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.</source>
             <translation type="unfinished" />
         </message>
     </context>

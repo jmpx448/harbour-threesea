@@ -42,7 +42,9 @@ export "CARGO_TARGET_${TRIPLE_ENV}_LINKER=$WRAP"
 TRIPLE_US=$(echo "$TRIPLE" | tr '-' '_')
 export "CC_$TRIPLE_US=$WRAP"
 export "AR_$TRIPLE_US=/opt/cross/bin/${GCC%gcc}ar"
-# Bundled SQLCipher builds against the target's OpenSSL (libcrypto).
+# Bundled SQLCipher is the core's C code: the hardening flags the Rust around it doesn't need.
+export "CFLAGS_$TRIPLE_US=-fstack-protector-strong -D_FORTIFY_SOURCE=2"
+# It builds against the target's OpenSSL (libcrypto).
 case "$ARCH" in aarch64) LIBDIR=usr/lib64 ;; *) LIBDIR=usr/lib ;; esac
 export OPENSSL_INCLUDE_DIR="$SYSROOT/usr/include" OPENSSL_LIB_DIR="$SYSROOT/$LIBDIR"
 export PROTOC="${PROTOC:-$("$ROOT/scripts/fetch-protoc.sh")}"
@@ -53,7 +55,10 @@ export CARGO_HOME="${CARGO_HOME_OVERRIDE:-$ROOT/target/cargo-home}"
 cd "$ROOT"
 # The emulator build (and only that one) carries the made-up demo chats, `demoData`: no x86
 # device runs Sailfish OS, so this never reaches a phone. See core/src/demo.rs.
-case "$ARCH" in i486) FEATURES="--features demo" ;; *) FEATURES="" ;; esac
+case "$ARCH" in i486) FEATURES="demo" ;; *) FEATURES="" ;; esac
+# A store's build (STORE=1, scripts/sdk-build.sh) leaves the GitHub update check out (ADR 0014).
+if [ "${STORE:-0}" = 1 ]; then FEATURES="${FEATURES:+$FEATURES,}store"; fi
+[ -n "$FEATURES" ] && FEATURES="--features $FEATURES"
 # shellcheck disable=SC2086 # FEATURES is empty or one flag pair
 cargo build --locked --release --target "$TRIPLE" -p threesea-core $FEATURES
 echo "$ROOT/target/$TRIPLE/release/libthreesea_core.a"

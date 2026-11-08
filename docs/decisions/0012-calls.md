@@ -34,6 +34,13 @@ build for three architectures.
   project's extraction of WebRTC's audio processing, BSD), pinned, as our own processing step.
 - Phone tests stay in the last phase (earpiece/speaker routing, echo, ringing while locked,
   proximity): built from documentation and emulator checks, fixed then.
+- Earpiece or loudspeaker goes through the audio policy's route manager (its `speaker` feature,
+  only offered if it says so at runtime; `bridge/callroute.h`), not through another stream role:
+  the echo canceller stays in the path and the engines change nothing. A call moves there by
+  itself only once a camera is on, since Android's voice calls say "video" too. Whether the
+  feature's name holds and moves these streams is the phone's to say. No Bluetooth entry and no
+  "end the call when Bluetooth goes" setting unless the phone test shows they are needed
+  (docs/voice-video-device-checklist.md, "Ringing, routes and the screen in calls").
 - Order: 1:1 audio → 1:1 video → group calls → Threema Web (the same webrtcbin, it only needs
   data channels; SaltyRTC in the core) → calls in Jolla's own phone app (Telepathy plugin,
   Chum).
@@ -64,6 +71,8 @@ build for three architectures.
   certificate per call and puts it on webrtcbin's DTLS decoders when the transports are added
   (deep-element-added). webrtcbin computes the SDP fingerprint earlier, from its default
   certificate, so the engine writes our certificate's fingerprint into every SDP it hands out.
+  The engine wipes its copy of the private key when the call ends; the copies GStreamer took of
+  the PEM are out of our reach and not cleared. The key is good for that one call.
 - webrtcbin does not check the peer's certificate against the SDP fingerprint. The engine does,
   once the peer connection is up, and ends the call on a mismatch (otherwise anyone on the media
   path could take a call over; libwebrtc checks it). DTLS, and so SRTP, is up before that check

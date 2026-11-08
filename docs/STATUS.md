@@ -41,9 +41,10 @@ Verified in the emulator with a real Threema Shop license (portrait-native scree
 - ID backup exported → app data wiped → license re-entered → ID restored from the backup
   (`identity/fetch_priv` with the challenge solver) → same ID.
 
-Open finding: after a reboot, Sailfish Secrets shows its own "Authorize" prompt once before the
-app gets the database key (emulator has no device lock code). Verify on a phone with a lock code
-that the collection unlocks silently with the device; important for the Chum background service.
+Finding, settled 2026-11-08 (issue #2, a phone with a lock code): after every boot Sailfish
+Secrets shows its own "Authorize" prompt once before the app gets the database key; the collection
+does not unlock silently with the device. That is how Secrets works, ADR 0010 has the details. A
+notification now says what the prompt is for.
 
 Threema Safe (2026-10-21), verified in the emulator with the test ID:
 - KDF matches upstream's test vector; live `config` over pinned TLS.
@@ -146,7 +147,8 @@ Forward secrecy (1:1) done:
   official app's Init was accepted, its 4DH-encapsulated delivery receipts decrypted ("first 4DH
   message"), our encapsulated replies delivered and receipted, no Reject/Terminate.
 - Lessons: (1) feature masks go stale → contacts are refreshed from the directory daily and an
-  existing FS session counts as FS support; (2) "Block unknown senders" silently drops first
+  existing FS session counts as FS support (reversed since: ADR 0020, forward secrecy follows
+  the peer's announced features); (2) "Block unknown senders" silently drops first
   messages from strangers (works as designed, but tests must keep it off).
 
 Notifications (done early, Phase 4 item): one per chat, group title + "Sender: text", quick
@@ -197,6 +199,8 @@ plural forms for English and German. Checked in the emulator with the user local
 Locations: send the current position (push-up menu → Send location; optional place name),
 received locations as bubbles with name/address/coordinates, tap opens a maps app (geo:),
 long press copies the coordinates, forwarding works. No map tiles or address lookup (§7.6).
+*(Since 2026-11-04, ADR 0030: a place nearby or found by name comes from Threema's own
+`poi.threema.ch`, as on Android; still no map and no address lookup.)*
 Tested in the emulator with a fixed test position (the emulator has no positioning): sent to
 ECHOECHO and echoed back.
 
@@ -719,7 +723,9 @@ From a report on a real device (design: `docs/android-backup-design.md`). Done:
   (old markers migrate), requests also from group messages / chat open / bounded batches on
   connect, persisted downloads with retries, generation guard against set/set/delete races,
   monotonic picture versions, `profileChanged` for the own picture, Avatar placeholder until
-  the image decodes.
+  the image decodes. *(Superseded 2026-11-04 by ADR 0026: pictures are asked for only after a
+  restore, once per restored contact, as on Android; the chat-open and group-message triggers and
+  the backoff are gone, migration 38.)*
 
 Android full-backup (ZIP) import, done so far:
 - `core::android_backup`: container reader (zip crate, AES-256/WinZip AE like Zip4j, strict
@@ -861,8 +867,9 @@ again — if it fails, send the journal lines around "device join failed".
   security notices (session churn); the switch is the escape while the churn's cause is
   hunted with the new log. Related guard: a message the peer rejects twice over forward
   security now stays failed (warning icon, manual resend) instead of bouncing without end.
-- Updates restart the app (user request 2026-10-28; Full only — Lite quits when closed and
-  Harbour restricts scriptlets): `%posttrans` finds running instances by executable path
+- Updates restart the app (user request 2026-10-28; Full only, as Harbour restricts scriptlets;
+  Lite can keep running after its window closes too, and since ADR 0027 both flavours notice a
+  changed package by themselves): `%posttrans` finds running instances by executable path
   (`/proc/*/exe`, also "(deleted)" after the replace; `comm` is truncated), sends SIGTERM,
   waits up to 15 s (then SIGKILL), and starts the new version with `background()` on each
   affected user's session bus via `runuser` — only for users who had it running. `%preun`
@@ -978,7 +985,9 @@ Features:
 - Settings → Appearance: message text size (small/normal/large, from the theme's own sizes), a
   chat background (Android's wallpaper; one picture behind the messages, under the theme's
   dimmer so the bubbles stay readable) and "Accept profile pictures" (Android's
-  `receive_profilepics`; off: contacts' pictures are neither asked for nor downloaded).
+  `receive_profilepics`). *(Changed 2026-11-04, ADR 0023: now "Show profile pictures"; as on
+  Android, pictures that arrive are always downloaded and stored and the setting decides what is
+  shown; with it off we send no requests.)*
 - Settings → Media & storage: "Keep messages" (Android's auto-delete, 1 week … 1 year), run by
   maintenance twice a day with the clean-up's rules — which now keep open polls and messages
   still on their way, besides starred ones. And "Video size" (Full only): a video's longest edge
@@ -1257,10 +1266,11 @@ Written down in `docs/release.md`.
 All 792 texts are translated, plurals included: `scripts/translations-fr.py` beside the German
 one, `translations/harbour-threesea-fr.ts` in the `.pro` and in
 `scripts/update-translations.sh`, and the built `harbour-threesea-fr.qm` is in the package
-(checked in the RPM's file list). Style: vouvoiement, French typography (narrow space before
-`: ; ! ?`, « quotes »), Threema's own terms (ID Threema, Threema Safe, confirmations de
-lecture, sondage, transférer, débloquer); "discussion" for a chat, as Threema's French
-interface has it.
+(checked in the RPM's file list). Style: vouvoiement, French typography (a non-breaking space
+before `: ; ! ? »` and after «, put in by `fill`), Threema's own terms (ID Threema, Threema Safe,
+accusés de lecture, sondage, transférer, débloquer); "discussion" for a chat, as Threema's
+French interface has it. (Corrected after the audit of 2026-11-04: an earlier version said
+"narrow space" and "confirmations de lecture".)
 
 The language cannot be seen in the emulator: its image carries only the C and POSIX locales
 (`locale -a`), so Qt's system locale can never become French — nor German, which is why that
@@ -1473,4 +1483,93 @@ Bluetooth buttons, the proximity changes (no sensor in the emulator), the 10 min
 stop, the automatic resume being held back.
 
 Noticed on the way, not changed: Settings → Security says "App lock on" whenever a lock record
-exists (`SettingsPage.qml`), also with `appLock:false`.
+exists (`SettingsPage.qml`), also with `appLock:false`. *(Fixed 2026-11-04: a PIN without the lock reads "PIN for private
+chats".)*
+
+## Linking a number, and what a sync reports (2026-11-04)
+
+A tester asked why no verification SMS arrived. Linking isn't needed to find friends: the address book
+switch is enough, `match_address_book` never reads our own links (nor does Android's
+`IdentityLookupClient`). Linking only lets others find you.
+
+Done: the link dialog takes only numbers with a country code and shows the one the code will go to
+(ADR 0016); `(0)` and Hungary's `06` in `normalize_phone`; a notice when Threema answers "already
+linked", which sends no SMS or e-mail and used to show nothing, possibly what the tester hit (not
+confirmed by them); a manual address book sync always reports its result.
+
+Not fixed, waiting for a decision: the country for address book numbers without `+`, and the Italian
+and US/Canadian rules (ADR 0016).
+
+Tested: the core's tests; in the emulator, a national number (hint, can't accept), `+49 (0) 171 …`
+("+49171…" shown, can accept; cancelled, nothing was sent), and the "none found" notice with an empty
+address book. Long notices scroll, so their whole text can be read.
+
+Not tested: an actual link, the "already linked" notices, the "entries checked" and failure notices,
+and a real address book (`docs/voice-video-device-checklist.md`, section U).
+
+Open, and it may matter more than the rest: the reader may not read anything. In both app runs tried in the
+emulator the log says `Failed to attach key memory region for qtcontacts-sqlite-np`, `Failed to open
+contacts transient store`, `Unable to open synchronous engine database connection`. A contact added by
+hand to the emulator's database (no aggregate, so that alone may explain it) came back as "none found".
+Whether this is the emulator, the sandbox or that entry isn't known; a phone with a real address book
+decides it, and if it fails there too, the sync has never worked on a device. `AddressBookReader.qml` also
+reads details right after the asynchronous `ensureComplete()`; the plugin's source suggests
+`requiredProperty` already loads them, unconfirmed.
+
+Settled 2026-11-08: matching works on a phone with a real address book, so the reader does read there
+and those errors don't carry over from the emulator.
+
+## The audit of 2026-11-04 and its fixes (2026-11-04 to 2026-11-05)
+
+A review of the whole app (AI-run, like the earlier ones) found about 570 points, from wrong texts to
+leaks of private data; each was checked again, and those that held went into some 70 packages of
+work. The report is not part of the repository; what it changed is here, in the CHANGELOG's next
+release and in ADRs 0017–0030. About 600 commits on the branch `audit-fixes`, each package built and
+tested on its own and then merged; of the 450 points with a recorded result, 435 are fixed or were
+already fixed, the rest are below.
+
+By area, in short:
+
+- **Private data**: photos and videos of private chats stay out of the Gallery folder; hidden private
+  chats are closed to every command (a test tries all of them); notifications carry no name, text or
+  Reply while the app is locked; place names and identities are out of libthreema's logs; pictures
+  from Threema Web, forwarded pictures, GIFs and Qt's re-encoded photos lose their metadata (JPEG
+  comments and PNG text included), videos keep only what a player needs (ADR 0025, 0029).
+- **The core's loop**: long work (Threema Safe, linking, exports, maintenance, lookups) runs beside it
+  (ADR 0028), which closes P01 of the deep re-audit for the UI's commands (Threema Web's still
+  answer in the loop); heavy media work runs off the core thread within a memory budget.
+- **Receiving**: what a message brings is stored in one step before it is acknowledged; a failing
+  store is told apart from a bad network and leaves the message on the server; read receipts,
+  delivery receipts and forward secrecy answers wait in the store until they went out.
+- **Forward secrecy** follows the peer's feature mask (ADR 0020, reversing lesson (1) of Phase 2);
+  blocked senders get no session (ADR 0019); revoked IDs get nothing.
+- **Groups and linked devices**: group sync, members unknown to the phone, removal versus leaving,
+  pictures through the mirror, linking and removing devices by the mediator's word (ADR 0017).
+- **Lifecycle**: removing the ID replaces the database and its key (ADR 0018); the app notices its
+  package changing (ADR 0027); clean ends within seconds; startup failures say why.
+- **Transfers** time out by a stall, not by their length, and try again by themselves (ADR 0024).
+- **UI**: Android's extras the user chose (drawing on photos, a place from Threema's map server
+  without a map (ADR 0030), a chat's polls, square profile pictures from the gallery or camera,
+  names for Threema Web sessions), pause and listen while recording, text formatting, emoji search,
+  a picture viewer that swipes, forwarding to several chats, an incoming call notification, a
+  loudspeaker switch, restoring from a data backup at the first start, ID backups as QR codes.
+- **Tests and CI**: a fake chat server for the connection, every C function under AddressSanitizer,
+  store upgrades from every schema with data in it, TLS refusals, sync round trips, every QML page
+  loaded on real Silica (`scripts/test-pages.sh`), RPMs looked into (`scripts/check-package.sh`);
+  CI runs libthreema's and the SDK tests and all builds on every push.
+
+Decided against, with the reason in the package results (the user may overrule): clearing the log
+once on upgrade (it rotates and can be cleared; the CHANGELOG says older logs may hold place
+names), SQLCipher's `cipher_memory_security`, a question-free camera scan on the Threema Web page,
+a silent camera on unknown codes, a delayed device-group drop after leaving, a "Close" beside
+"Scan again", the remaining group control messages to blocked members (they keep a group in step,
+ADR 0019), a QML length pre-check before sending, and an immediate save of an emptied draft.
+
+Waiting for the user: the wording of §7.1 for a call's DTLS key in GStreamer's copies; sharing a
+message's media with other apps (text sharing is in; media would need a copy other apps can read,
+held on a branch); a map for choosing a place (whether the tile hosts are Threema's, and a renderer
+Qt 5.6 can use); whether Qt's image cache may keep decoded pictures of non-private chats.
+
+Open: the German and French texts for everything new or reworded (the translation step, last);
+the phone checks, collected in `docs/voice-video-device-checklist.md`; the OrganizationName
+(CLAUDE.md §11).

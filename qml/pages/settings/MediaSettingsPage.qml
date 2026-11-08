@@ -12,6 +12,8 @@ Page {
 
     property var media: ({})
     property var storage: ({})
+    // A clean-up that removed many messages rewrites the database, and the core waits for it.
+    property bool cleaning: false
 
     readonly property var kinds: ["image", "audio", "video", "file"]
     readonly property var kindNames: [
@@ -83,6 +85,22 @@ Page {
         backend.call("setMediaSettings", args, function(ok, result) { if (ok) page.media = result })
     }
 
+    // A shorter period deletes history for good at the next maintenance, so it gets a remorse;
+    // what deletes nothing more applies at once and calls off a shorter one still counting down.
+    // The box keeps showing the applied value until then (ChoiceBox).
+    function chooseKeepDays(days) {
+        var current = page.media.autoDeleteDays || 0
+        if (days > 0 && (current === 0 || days < current)) {
+            //% "Deleting older messages"
+            keepRemorse.execute(qsTrId("threesea-la-keep-messages-remorse"), function() {
+                page.set({ autoDeleteDays: days })
+            })
+        } else {
+            if (keepRemorse.active) keepRemorse.cancel()
+            page.set({ autoDeleteDays: days })
+        }
+    }
+
     function kindsText(list) {
         if (!list || list.length === 0) {
             //% "Nothing"
@@ -106,8 +124,17 @@ Page {
 
     Component.onCompleted: load()
 
+    RemorsePopup { id: keepRemorse }
+
+    BusyLabel {
+        running: page.cleaning
+        //% "Cleaning up"
+        text: qsTrId("threesea-la-cleaning-up")
+    }
+
     SilicaFlickable {
         anchors.fill: parent
+        visible: !page.cleaning
         contentHeight: column.height + Theme.paddingLarge
 
         Column {
@@ -200,14 +227,24 @@ Page {
                 value: Format.formatFileSize(page.storage.databaseBytes || 0)
             }
 
+            TextSwitch {
+                automaticCheck: false
+                checked: backend.imageCache
+                //% "Keep pictures in memory"
+                text: qsTrId("threesea-la-image-cache")
+                //% "Chat pictures scroll back in faster: they stay decoded and unencrypted in the app's memory while it runs, until the app locks or a chat is made private. This uses more memory. Private chats load their pictures anew each time."
+                description: qsTrId("threesea-la-image-cache-description")
+                onClicked: backend.imageCache = !checked
+            }
+
             ChoiceBox {
                 //% "Keep messages"
                 label: qsTrId("threesea-la-keep-messages")
                 options: page.keepNames
                 choice: Math.max(0, page.keepDays.indexOf(page.media.autoDeleteDays || 0))
-                //% "Older messages are deleted by themselves, with their media. Starred messages, open polls and messages still on their way stay."
+                //% "Messages older than the chosen time are deleted by themselves, with their media. Starred messages, open polls, messages still on their way and groups with only you in them stay."
                 description: qsTrId("threesea-la-keep-messages-description")
-                onChosen: page.set({ autoDeleteDays: page.keepDays[index] })
+                onChosen: page.chooseKeepDays(page.keepDays[index])
             }
 
             SettingsButton {
@@ -219,7 +256,9 @@ Page {
                         var args = { days: dialog.days, messages: dialog.messages }
                         //% "Deleting"
                         Remorse.popupAction(page, qsTrId("threesea-la-deleting-message"), function() {
+                            page.cleaning = true
                             backend.call("cleanUp", args, function(ok, result, kind, message) {
+                                page.cleaning = false
                                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                                 page.load()
                             })

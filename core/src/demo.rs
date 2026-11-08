@@ -8,8 +8,8 @@
 //!
 //! Everything here is made up and local: contacts `DEMO0001`… with a fixed dummy public key,
 //! messages inserted straight into the store, pictures and voice files generated in memory.
-//! Nothing is sent, no blob is fetched, no key material is touched, and no device build
-//! contains any of it.
+//! Writing it sends nothing, fetches no blob and touches no key material, opening a demo chat
+//! asks nobody for a picture (`Store::request_restored_picture`), and no device build contains any of it.
 
 use image::codecs::jpeg::JpegEncoder;
 use libthreema::protobuf::{d2d_sync, d2d_sync::contact as pc};
@@ -596,7 +596,7 @@ impl Seeder<'_> {
 
         // Location, a quote of it, an edited message and one deleted for everyone.
         let location = json!({
-            "lat": 59.9139, "lon": 10.7522, "accuracy": 12.0,
+            "latitude": 59.9139, "longitude": 10.7522, "accuracy": 12.0,
             "name": "North pier", "address": "Havnegata 1",
         });
         let located = self.chat(

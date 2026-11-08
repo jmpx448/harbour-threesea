@@ -47,8 +47,13 @@ public:
     void setRemoteAnswer(const QString &sdp);
     // 10 ms audio frames played in the last call (tests).
     unsigned audioFramesReceived() const { return m_framesReceived; }
+    // What came in over the network so far (before decryption; none if that couldn't be counted):
+    // while it grows the connection is alive, whoever speaks.
+    unsigned packetsReceived() const { return m_packetsReceived; }
     // `[{candidate, sdpMid, sdpMLineIndex}]`; kept until the remote description is set.
     void addRemoteCandidates(const QVariantList &candidates);
+    // Also before the pipeline exists: it starts as asked, and a new call keeps this until told
+    // otherwise.
     void setMuted(bool muted);
     // A message for the peer's data channel (o2o-call.proto envelope from the core); kept until
     // the channel is open.
@@ -77,8 +82,11 @@ private slots:
     void onError(const QString &reason);
     void onChannelOpen();
     void onChannelData(const QByteArray &data);
+    void onRemoteFrame(const QImage &image);
 
 private:
+    friend class CallEngineTest;
+
     // `vp8PayloadType` < 0: no video sending.
     bool build(const QVariantMap &turn, bool relayOnly, int opusPayloadType, int vp8PayloadType);
     void removeCamera();
@@ -104,15 +112,19 @@ private:
     static int onCaptureBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onPlaybackBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static int onMediaBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
+    static int onNetworkBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
+    static int onVp8Frame(GstPad *pad, GstPadProbeInfo *info, void *filter);
     void flushChannel();
     void descriptionCreated(GstPromise *promise, const char *field, const QString &type);
 
     GstElement *m_pipeline = nullptr;
     GstElement *m_webrtc = nullptr;
     GstElement *m_micVolume = nullptr;
+    bool m_muted = false;
     GstWebRTCDataChannel *m_channel = nullptr;
     QScopedPointer<EchoCanceller> m_echoCanceller;
-    // This call's DTLS certificate and key (PEM, ECDSA P-256).
+    // This call's DTLS certificate and key (PEM, ECDSA P-256). This copy is wiped in stop(); the
+    // copies GStreamer makes when it gets them are not cleared (see there).
     QByteArray m_certificate;
     QString m_fingerprint;
     // The peer's, from its SDP: checked against its certificate once DTLS is up.
@@ -120,6 +132,9 @@ private:
     // 10 ms frames through the microphone and to the speaker (logged at the end of a call).
     std::atomic<unsigned> m_framesSent{0};
     std::atomic<unsigned> m_framesReceived{0};
+    std::atomic<unsigned> m_packetsReceived{0};
+    // A picture of the peer is on its way to the GUI: the next ones are dropped until it got there.
+    std::atomic<bool> m_remoteFramePending{false};
     unsigned m_busWatch = 0;
     bool m_remoteSet = false;
     bool m_connected = false;

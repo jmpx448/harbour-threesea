@@ -394,6 +394,7 @@ impl State {
             };
             IncomingPayload::decode_from_datagram(datagram)?
         };
+        // log-ok: its Debug prints the variant's name only
         debug!(?payload, "Received payload");
 
         // Set and return the next state and instruction

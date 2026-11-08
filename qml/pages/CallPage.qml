@@ -4,6 +4,7 @@ import Sailfish.Silica 1.0
 import harbour.threesea 1.0
 import "../components"
 import "../components/Format.js" as Fmt
+import "../components/Errors.js" as Errors
 
 // A 1:1 call (ADR 0012), laid out like Jolla's phone app: the picture and name in the upper
 // half, the state or the running time under them, the buttons at the bottom; in video calls the
@@ -15,7 +16,7 @@ Page {
 
     property var contact: ({})
     // Kept: `calls.identity` is cleared once the call is over, the page may still show.
-    property string identity: calls.identity
+    property string identity
     // Our own picture hidden (the camera keeps sending).
     property bool hideSelf: false
     // Seconds since the call connected, for the running time.
@@ -23,14 +24,25 @@ Page {
 
     readonly property string state: calls.state
 
-    backNavigation: state === "ended"
+    backNavigation: state === "ended" || state === "idle"
     allowedOrientations: Orientation.Portrait
 
     function load() {
-        if (page.identity.length === 0) return
-        backend.call("contact", { identity: page.identity }, function(ok, result) {
-            if (ok) page.contact = result
+        var identity = page.identity
+        if (identity.length === 0) return
+        backend.call("contact", { identity: identity }, function(ok, result) {
+            if (ok && page.identity === identity) page.contact = result
         })
+    }
+
+    // A new call can come in while this page still shows the last one's end.
+    function follow() {
+        if (calls.identity.length === 0 || calls.identity === page.identity) return
+        page.identity = calls.identity
+        page.contact = ({})
+        page.hideSelf = false
+        page.seconds = 0
+        load()
     }
 
     function stateText() {
@@ -43,17 +55,29 @@ Page {
             //% "Ringing…"
             return qsTrId("threesea-la-call-ringing")
         case "incoming":
-            return calls.video
-                    //% "Incoming video call"
-                    ? qsTrId("threesea-la-call-incoming-video")
-                    //% "Incoming call"
-                    : qsTrId("threesea-la-call-incoming")
+            // Android's voice calls say "video" as well, so an incoming call can't tell.
+            //% "Incoming call"
+            return qsTrId("threesea-la-call-incoming")
         case "connecting":
             //% "Connecting…"
             return qsTrId("threesea-la-call-connecting")
         case "active":
-            return Math.floor(seconds / 60) + ":" + ("0" + (seconds % 60)).slice(-2)
+            return calls.interrupted
+                    //% "Connection interrupted…"
+                    ? qsTrId("threesea-la-call-interrupted")
+                    : Math.floor(seconds / 60) + ":" + ("0" + (seconds % 60)).slice(-2)
         case "ended":
+            if (calls.failure === "certificate") {
+                //% "The connection could not be verified. The call was ended."
+                return qsTrId("threesea-la-call-unverified")
+            }
+            if (calls.failure === "connection") {
+                //% "Connection failed"
+                return qsTrId("threesea-la-call-connection-failed")
+            }
+            if (calls.failure.indexOf("contact") === 0) {
+                return Errors.text(calls.failure, "")
+            }
             return calls.result === "finished" || calls.result === "aborted"
                     //% "Call ended"
                     ? qsTrId("threesea-la-call-ended")
@@ -62,16 +86,21 @@ Page {
         return ""
     }
 
-    Component.onCompleted: {
-        identity = identity // break the binding: keep who it was
-        load()
-    }
+    Component.onCompleted: follow()
 
     Connections {
         target: calls
-        onStateChanged: {
-            if (calls.state === "idle" && page.status === PageStatus.Active) pageStack.pop()
-        }
+        onStateChanged: page.follow()
+    }
+
+    // Over: back to what is underneath, as soon as this page is in view. The call can have ended
+    // behind the lock page, whose own pop is still going on when this page comes into view, or
+    // behind a group call's page (a group call takes the microphone over).
+    Timer {
+        running: page.state === "idle" && page.status === PageStatus.Active
+        interval: 100
+        repeat: true
+        onTriggered: if (!pageStack.busy && pageStack.currentPage === page) pageStack.pop()
     }
 
     Timer {
@@ -85,7 +114,8 @@ Page {
     // The other side's video while its camera is on, and our camera's preview: like a chat's
     // bubbles (radius, square outer bottom corner), on the ambience; the controls under them.
     readonly property bool remoteVideo: calls.video && calls.remoteCamera && remote.hasFrame
-    readonly property bool inCall: state !== "incoming" && state !== "ended"
+    readonly property bool inCall: state !== "incoming" && state !== "ended" && state !== "idle"
+    readonly property bool atEar: inCall && !calls.camera && !calls.remoteCamera && !callRoute.speaker
 
     SilicaFlickable {
         anchors.fill: parent
@@ -171,6 +201,9 @@ Page {
                 spacing: Theme.paddingSmall
 
                 Label {
+                    width: Math.min(implicitWidth, header.width - 2 * Theme.horizontalPageMargin)
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
                     font.pixelSize: page.remoteVideo ? Theme.fontSizeMedium : Theme.fontSizeLarge
                     color: Theme.secondaryHighlightColor
                     text: page.stateText()
@@ -214,7 +247,8 @@ Page {
                 bottom: parent.bottom
                 bottomMargin: page.remoteVideo ? Theme.paddingLarge : Theme.itemSizeHuge
             }
-            spacing: calls.video ? Theme.itemSizeMedium : Theme.itemSizeLarge
+            spacing: calls.video && callRoute.available ? Theme.paddingLarge
+                     : calls.video ? Theme.itemSizeMedium : Theme.itemSizeLarge
 
             IconButton {
                 anchors.verticalCenter: parent.verticalCenter
@@ -230,9 +264,20 @@ Page {
                 onClicked: calls.camera = !calls.camera
             }
             IconButton {
+                visible: callRoute.available
+                anchors.verticalCenter: parent.verticalCenter
+                icon.source: "image://theme/icon-m-speaker"
+                highlighted: down || callRoute.speaker
+                onClicked: callRoute.speaker = !callRoute.speaker
+            }
+            IconButton {
                 icon.source: "image://theme/icon-l-reject"
                 onClicked: calls.hangUp()
             }
         }
+    }
+
+    EarGuard {
+        atEar: page.atEar
     }
 }

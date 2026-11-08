@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import harbour.threesea 1.0
 import "../components"
 import "../components/Errors.js" as Errors
 
@@ -58,6 +59,14 @@ Page {
         return ids
     }
 
+    // Keyed, so a reload keeps the rows, and a running remorse with them.
+    JsonListModel {
+        id: recipients
+        keyField: "identity"
+        roles: ["identity", "displayName"]
+    }
+    onListChanged: recipients.update(list.members)
+
     Component.onCompleted: load()
 
     Connections {
@@ -68,8 +77,11 @@ Page {
     RemorsePopup { id: remorse }
 
     SilicaListView {
+        id: listView
         anchors.fill: parent
-        model: page.list.members
+        model: recipients
+
+        StayAtTop { target: listView }
 
         PullDownMenu {
             MenuItem {
@@ -86,7 +98,8 @@ Page {
                 //% "Rename"
                 text: qsTrId("threesea-me-rename")
                 onClicked: {
-                    var dialog = pageStack.push(Qt.resolvedUrl("GroupNameDialog.qml"), { name: page.list.name })
+                    var dialog = pageStack.push(Qt.resolvedUrl("GroupNameDialog.qml"),
+                                                { name: page.list.name, distributionList: true })
                     dialog.accepted.connect(function() { page.update({ name: dialog.name }) })
                 }
             }
@@ -106,6 +119,10 @@ Page {
             }
             Item { width: 1; height: Theme.paddingLarge }
             MediaButton {
+                identity: page.identity
+                name: page.list.displayName || ""
+            }
+            ExportChatButton {
                 identity: page.identity
                 name: page.list.displayName || ""
             }
@@ -130,7 +147,7 @@ Page {
         delegate: ListItem {
             id: item
             contentHeight: Theme.itemSizeSmall
-            onClicked: pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: modelData.identity })
+            onClicked: pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: model.identity })
 
             Label {
                 anchors {
@@ -140,7 +157,7 @@ Page {
                     rightMargin: Theme.paddingMedium
                     verticalCenter: parent.verticalCenter
                 }
-                text: modelData.displayName
+                text: model.displayName
                 truncationMode: TruncationMode.Fade
                 color: item.highlighted ? Theme.highlightColor : Theme.primaryColor
             }
@@ -152,7 +169,7 @@ Page {
                     verticalCenter: parent.verticalCenter
                 }
                 icon.source: "image://theme/icon-m-clear"
-                onClicked: page.removeMember(item, modelData.identity, modelData.displayName)
+                onClicked: page.removeMember(item, model.identity, model.displayName)
             }
         }
 

@@ -1,0 +1,5 @@
+"identity","publickey","verification","acid","firstname","lastname","nick_name","last_update","hidden","archived","identity_id"
+"B0B0B0B0","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","SERVER_VERIFIED","","Bob","Builder","Tricky ""quote"", semi;colon, back\\slash, emoji 🎉,
+second line","1700000000000","0","0","17"
+"ANNANNAN","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","FULLY_VERIFIED","","Ann","","","","0","1","42"
+"CCCCCCCC","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","UNVERIFIED","","","","","","1","0","99"

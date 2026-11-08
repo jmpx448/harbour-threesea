@@ -5,16 +5,13 @@
 
 use std::rc::Rc;
 
-use libthreema::{
-    common::{GroupIdentity, ThreemaId},
-    protobuf::d2d_sync::contact as pc,
-};
+use libthreema::common::{GroupIdentity, ThreemaId};
 use serde_json::{Value, json};
 
 use crate::{
-    app::{ApiError, App},
+    app::{ApiError, App, Shared},
     connection::ToConnection,
-    contacts::{self, Lookup},
+    contacts,
     groups::{
         self, Group, GroupPicture, OUTBOX_GROUP_LEAVE, OUTBOX_GROUP_NAME, OUTBOX_GROUP_SETUP,
     },
@@ -43,7 +40,54 @@ pub(crate) fn title(
         .join(", ")
 }
 
-impl App {
+/// A group's picture, encrypted and uploaded for its members (persisted).
+pub(crate) async fn upload_group_picture(
+    https: &crate::https::HttpsClient,
+    data: &[u8],
+) -> Result<GroupPicture, media::MediaError> {
+    let mut key = [0_u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    let blob_id = media::upload(
+        https,
+        &media::encrypt_blob(&key, MediaPart::File, data),
+        true,
+    )
+    .await?;
+    Ok(GroupPicture {
+        blob_id,
+        key,
+        size: u32::try_from(data.len()).unwrap_or(u32::MAX),
+    })
+}
+
+/// The blob expired, or the key is wrong, or it is far too large: no later try changes that.
+pub(crate) fn picture_is_gone(error: &media::MediaError) -> bool {
+    matches!(
+        error,
+        media::MediaError::Decrypt | media::MediaError::TooLarge | media::MediaError::Status(404)
+    )
+}
+
+/// Fetch and decrypt a contact's or group's picture: refused by its claimed size before anything
+/// is fetched, and cut off at the same limit whatever it claimed.
+async fn fetch_picture(
+    https: &crate::https::HttpsClient,
+    picture: &GroupPicture,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, media::MediaError> {
+    if picture.size as usize > media::MAX_PICTURE_DOWNLOAD {
+        return Err(media::MediaError::TooLarge);
+    }
+    let blob = media::download(
+        https,
+        &picture.blob_id,
+        media::BlobScope::Public,
+        media::MAX_PICTURE_DOWNLOAD,
+    )
+    .await?;
+    media::decrypt_blob(&picture.key, MediaPart::File, &blob)
+}
+
+impl Shared {
     pub(crate) fn user(&self) -> Result<String, ApiError> {
         Ok(self
             .store
@@ -59,7 +103,9 @@ impl App {
             .flatten()
             .map_or_else(|| identity.to_owned(), |c| contacts::display_name(&c))
     }
+}
 
+impl Shared {
     pub(crate) fn group_json(&self, group: &Group) -> Result<Value, ApiError> {
         let user = self.user()?;
         let mut json = group.to_json(&user, |m| self.display_name_of(m));
@@ -67,8 +113,11 @@ impl App {
         if let Some(members) = json["members"].as_array_mut() {
             for member in members {
                 let identity = member["identity"].as_str().unwrap_or_default().to_owned();
-                member["pictureVersion"] =
-                    json!(self.store.contact_picture_version(&identity).unwrap_or(0));
+                member["pictureVersion"] = json!(
+                    self.store
+                        .shown_contact_picture_version(&identity)
+                        .unwrap_or(0)
+                );
             }
         }
         json["notifications"] = self.store.chat_notifications_json(&group.key);
@@ -84,21 +133,16 @@ impl App {
     pub(crate) fn group_title(&self, group: &Group) -> String {
         title(&group.name, &group.members, &|m| self.display_name_of(m))
     }
+}
 
-    pub(crate) fn groups_json(&self) -> Result<Value, ApiError> {
-        let mut list = Vec::new();
-        for group in self.store.groups()? {
-            let mut value = self.group_json(&group)?;
-            value["title"] = json!(self.group_title(&group));
-            list.push(value);
-        }
-        Ok(json!({ "groups": list }))
-    }
-
+impl Shared {
     pub(crate) fn group_info(&self, key: &str) -> Result<Value, ApiError> {
         let group = self.store.group(key)?.ok_or(ApiError::GroupNotFound)?;
         let mut value = self.group_json(&group)?;
         value["title"] = json!(self.group_title(&group));
+        value["private"] = json!(self.store.is_private(key)?);
+        // A note deleted "for everyone" would only differ from a plain delete on linked devices.
+        value["canDelete"] = json!(!group.is_notes() || self.store.multi_device()?.is_some());
         Ok(value)
     }
 
@@ -114,7 +158,9 @@ impl App {
         }
         Ok((group, user))
     }
+}
 
+impl App {
     /// Valid member identities: known contacts, without ourselves and duplicates.
     pub(crate) fn member_list(
         &self,
@@ -197,7 +243,8 @@ impl App {
         self.group_info(key)
     }
 
-    /// `setGroupMembers` (creator): setup to everyone old and new, the state to new members.
+    /// `setGroupMembers` (creator): the setup to everyone old and new, the name and picture to new
+    /// members.
     pub(crate) fn set_group_members(
         &mut self,
         key: &str,
@@ -219,29 +266,23 @@ impl App {
         if added.is_empty() && removed.is_empty() {
             return self.group_info(key);
         }
-        let receivers: Vec<String> = members.iter().chain(&removed).cloned().collect();
+        // Whoever is removed gets an empty list (csp.struct.yml): it says enough, and who else is
+        // in the group from here on is none of their business.
         self.store.group_outbox_add(
             key,
-            &receivers,
+            &removed,
+            OUTBOX_GROUP_SETUP,
+            &json!({ "members": [] }),
+        )?;
+        self.store.group_outbox_add(
+            key,
+            &members,
             OUTBOX_GROUP_SETUP,
             &json!({ "members": members }),
         )?;
         group.members = members;
         self.store.upsert_group(&group)?;
-        if !added.is_empty() {
-            self.store.group_outbox_add(
-                key,
-                &added,
-                OUTBOX_GROUP_NAME,
-                &json!({ "name": group.name }),
-            )?;
-            self.store.group_outbox_add(
-                key,
-                &added,
-                groups::OUTBOX_GROUP_DELETE_PICTURE,
-                &json!({}),
-            )?;
-        }
+        groups::send_name_and_picture(&self.store, &group, &added)?;
         for member in &added {
             self.store.insert_status(
                 key,
@@ -255,6 +296,10 @@ impl App {
             )?;
         }
         self.tell_connection(ToConnection::SendPending);
+        if !added.is_empty() {
+            self.send_group_pictures();
+            self.announce_running_group_call(key, added);
+        }
         self.group_info(key)
     }
 
@@ -284,13 +329,16 @@ impl App {
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
+}
 
+impl Shared {
     /// Fetch a group's (new) picture into the media store; the UI reloads it via its version.
     pub(crate) fn download_group_picture(&self, key: String) {
         let https = self.https.clone();
         let store = Rc::clone(&self.store);
         let media = std::sync::Arc::clone(&self.media);
         let events = self.media_events.clone();
+        let connection = self.connection.borrow().clone();
         tokio::task::spawn_local(async move {
             let Ok(Some(group)) = store.group(&key) else {
                 return;
@@ -298,13 +346,13 @@ impl App {
             let Some(picture) = group.picture.clone() else {
                 return;
             };
-            let result = async {
-                // No `done`: the blob is persisted for every member.
-                let blob =
-                    media::download(&https, &picture.blob_id, media::BlobScope::Public).await?;
-                media::decrypt_blob(&picture.key, MediaPart::File, &blob)
-            }
-            .await;
+            // Superseded while waiting for a slot? Then the newer picture's task does the work.
+            let wanted = || matches!(store.group(&key), Ok(Some(group)) if group.picture.as_ref() == Some(&picture));
+            let Some(_slot) = media::slot_if_wanted(&media::PICTURE_SLOTS, wanted).await else {
+                return;
+            };
+            // No `done`: the blob is persisted for every member.
+            let result = fetch_picture(&https, &picture).await;
             match result {
                 Ok(data) => {
                     // Still the same picture? Then write and apply it — the check and the write
@@ -316,42 +364,117 @@ impl App {
                     {
                         group.picture_version =
                             crate::profile_pictures::next_version(group.picture_version);
-                        if store.upsert_group(&group).is_ok() {
+                        if store.store_new_group_picture(&group).is_ok() {
                             let _ = events.send(CoreEvent::GroupsChanged);
+                            // Now that it is here, for the other devices too.
+                            crate::app_multidevice::reflect_group_picture(
+                                &store,
+                                &https,
+                                &media,
+                                &key,
+                                connection.as_ref(),
+                            )
+                            .await;
                         }
                     }
                 }
-                Err(error) => tracing::warn!(%error, "group picture download failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "group picture download failed");
+                    // Whatever no later try changes: nothing limits these tries otherwise.
+                    if !error.is_transient()
+                        && let Err(error) = store.group_picture_gone(&key, &picture)
+                    {
+                        tracing::warn!(%error, "gone group picture not noted");
+                    }
+                }
             }
         });
     }
 
+    /// Whoever is to get a group's picture from us: uploaded anew, then sent to them. What fails
+    /// for a passing reason stays noted, for the next `resume_picture_downloads`.
+    pub(crate) fn send_group_pictures(&self) {
+        let Ok(keys) = self.store.groups_owing_picture() else {
+            return;
+        };
+        for key in keys {
+            let store = Rc::clone(&self.store);
+            let https = self.https.clone();
+            let media = std::sync::Arc::clone(&self.media);
+            let connection = self.connection.borrow().clone();
+            tokio::task::spawn_local(async move {
+                let Ok(Some(group)) = store.group(&key) else {
+                    return;
+                };
+                let on_device = if group.picture_version == 0 {
+                    Ok(None)
+                } else {
+                    media.read_picture(&key)
+                };
+                let uploaded = match on_device {
+                    Ok(Some(data)) => upload_group_picture(&https, &data).await.map(Some),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
+                };
+                let fresh = match uploaded {
+                    Ok(fresh) => fresh,
+                    Err(error) => {
+                        tracing::warn!(%error, "group picture not uploaded");
+                        // No later try changes that: they can ask again.
+                        if !error.is_transient()
+                            && let Err(error) = store.forget_group_picture_sends(&key)
+                        {
+                            tracing::warn!(%error, "group picture sends not cleared");
+                        }
+                        return;
+                    }
+                };
+                match store.finish_group_picture_sends(&key, group.picture_version, fresh) {
+                    Ok(true) => {
+                        if let Some(connection) = &connection {
+                            let _ = connection.send(ToConnection::SendPending);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "group picture not queued"),
+                }
+            });
+        }
+    }
+}
+
+impl App {
     /// `setGroupPicture` (creator): attachment 0 is the JPEG (prepared by the bridge); uploaded
     /// persistently, then sent to every member.
     pub(crate) async fn set_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
-        let (mut group, _) = self.own_group(key)?;
+        self.own_group(key)?;
         let data = std::mem::take(&mut self.attachments)
             .into_iter()
             .next()
             .filter(|data| !data.is_empty())
             .ok_or_else(|| ApiError::Internal("no picture".into()))?;
-        let mut picture_key = [0_u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut picture_key);
-        let blob_id = media::upload(
-            &self.https,
-            &media::encrypt_blob(&picture_key, MediaPart::File, &data),
-            true,
-        )
+        let key = key.to_owned();
+        self.detached(crate::detached::Lane::InTurn, |app| async move {
+            app.upload_new_group_picture(&key, &data).await
+        })
         .await
-        .map_err(|e| ApiError::Network(e.to_string()))?;
+    }
+}
+
+impl Shared {
+    /// The long part of [`Self::set_group_picture`].
+    async fn upload_new_group_picture(&self, key: &str, data: &[u8]) -> Result<Value, ApiError> {
+        let picture = upload_group_picture(&self.https, data)
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
         self.media
-            .write_picture(key, &data)
+            .write_picture(key, data)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let picture = GroupPicture {
-            blob_id,
-            key: picture_key,
-            size: u32::try_from(data.len()).unwrap_or(u32::MAX),
-        };
+        // As it is by now: it may have changed during the upload.
+        let (mut group, _) = self.own_group(key)?;
+        // Newer than what another device said of it, and everyone gets it now.
+        self.store.cancel_synced_picture(key)?;
+        self.store.forget_group_picture_sends(key)?;
         self.store.group_outbox_add(
             key,
             &group.members,
@@ -360,14 +483,18 @@ impl App {
         )?;
         group.picture = Some(picture);
         group.picture_version = now_ms();
-        self.store.upsert_group(&group)?;
+        self.store.store_new_group_picture(&group)?;
         self.tell_connection(ToConnection::SendPending);
+        // Locked during the upload: a private group's details stay in the core.
+        self.check_visible_group(key)?;
         self.group_info(key)
     }
 
     /// `removeGroupPicture` (creator).
-    pub(crate) fn remove_group_picture(&mut self, key: &str) -> Result<Value, ApiError> {
+    pub(crate) fn remove_group_picture(&self, key: &str) -> Result<Value, ApiError> {
         let (mut group, _) = self.own_group(key)?;
+        self.store.cancel_synced_picture(key)?;
+        self.store.forget_group_picture_sends(key)?;
         self.store.group_outbox_add(
             key,
             &group.members,
@@ -381,43 +508,127 @@ impl App {
         self.tell_connection(ToConnection::SendPending);
         self.group_info(key)
     }
-
-    /// Group members we have no contact for: look them up and store them with acquaintance level
-    /// _group_ (not shown as contacts). Pending group messages are sent once they are known.
-    pub(crate) fn fetch_members(&self, identities: Vec<String>) {
-        let https = self.https.clone();
-        let store = Rc::clone(&self.store);
-        let events = self.media_events.clone();
-        tokio::task::spawn_local(async move {
-            match contacts::lookup(&https, &identities).await {
-                Ok(found) => {
-                    for (_, result) in found {
-                        if let Lookup::Found(contact) = result {
-                            let mut contact = *contact;
-                            if store
-                                .contact(&contact.identity.to_string())
-                                .ok()
-                                .flatten()
-                                .is_some()
-                            {
-                                continue;
-                            }
-                            contact.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
-                            if let Err(error) = store.upsert_contact(&contact) {
-                                tracing::warn!(%error, "storing a group member failed");
-                            }
-                        }
-                    }
-                    // Reload contact names; the media/progress channel also triggers sending.
-                    let _ = events.send(CoreEvent::ContactsChanged);
-                }
-                Err(error) => tracing::warn!(%error, "looking up group members failed"),
-            }
-        });
-    }
 }
 
 impl App {
+    /// [`resolve_members`] off the connection's path, for what the connection didn't ask itself:
+    /// the retry on reconnect and in maintenance, and what a group sync named. Quiet work: a
+    /// wake-up holds the device up for it, and it goes when the ID does.
+    pub(crate) fn fetch_members(&mut self, identities: Vec<String>) {
+        // Read from the queue after the wipe: there is nobody left to store them for.
+        if self.identity_removed {
+            return;
+        }
+        if let Err(error) = self.store.owe_member_lookups(&identities) {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
+        if self.store.directory_resting() {
+            return;
+        }
+        self.detached_quietly(
+            crate::detached::Lane::Free,
+            move |shared| async move {
+                let Some(resolved) =
+                    resolve_members(&shared.https, &shared.config, &shared.store, &identities)
+                        .await
+                else {
+                    return;
+                };
+                if resolved.synced {
+                    let connection = shared.connection.borrow().clone();
+                    if let Some(connection) = connection {
+                        let _ = connection.send(ToConnection::ReflectSync);
+                    }
+                }
+                let events = &shared.media_events;
+                if resolved.groups_changed {
+                    let _ = events.send(CoreEvent::GroupsChanged);
+                }
+                for message in resolved.lines {
+                    let _ = events.send(CoreEvent::MessageAdded { message });
+                }
+                // Reload contact names; the media/progress channel also triggers sending.
+                let _ = events.send(CoreEvent::ContactsChanged);
+            },
+            |_, ()| {},
+        );
+    }
+}
+
+/// What [`resolve_members`] changed.
+#[derive(Debug, Default)]
+pub(crate) struct ResolvedMembers {
+    /// Something went into the sync queue for the other devices.
+    pub synced: bool,
+    /// A group lost a member.
+    pub groups_changed: bool,
+    /// "Added" lines of those the directory knows, for the UI.
+    pub lines: Vec<crate::messages::Message>,
+}
+
+/// Group members (and creators someone waits for) we have no contact for: look them up and store
+/// them with acquaintance level _group_, not shown as contacts; what waited for them can then be
+/// sent. Those the directory doesn't know leave their groups, so that nothing waits for them.
+/// What the other devices are owed of them goes out in the same store step
+/// (`sync::members_looked_up`). `None` if it failed: whoever is left without a contact is found
+/// again by [`crate::store::Store::unresolved_members`] on reconnect and in maintenance. So is
+/// whoever is over this hour's allowance, as they are not asked for now.
+pub(crate) async fn resolve_members(
+    https: &crate::https::HttpsClient,
+    config: &libthreema::common::config::Config,
+    store: &crate::store::Store,
+    identities: &[String],
+) -> Option<ResolvedMembers> {
+    let allowed = store.member_lookup_allowance(identities.len());
+    if allowed < identities.len() {
+        tracing::info!(
+            wanted = identities.len(),
+            allowed,
+            "group member lookups limited for now"
+        );
+    }
+    if allowed == 0 {
+        return None;
+    }
+    let results = match contacts::lookup(https, config, &identities[..allowed]).await {
+        Ok(results) => results,
+        Err(error) => {
+            if matches!(error, crate::directory::DirectoryError::RateLimited) {
+                store.rest_directory_calls();
+            }
+            tracing::warn!(%error, "looking up group members failed");
+            return None;
+        }
+    };
+    let invalid: Vec<String> = results
+        .iter()
+        .filter(|(_, result)| matches!(result, contacts::Lookup::Invalid))
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    store.note_invalid_ids(&invalid);
+    let stored = crate::sync::members_looked_up(store, results)
+        .and_then(|looked_up| Ok((looked_up, store.drop_invalid_members(&invalid)?)));
+    match stored {
+        Ok((looked_up, groups_changed)) => {
+            tracing::info!(
+                looked_up = allowed,
+                invalid = invalid.len(),
+                "group members looked up"
+            );
+            Some(ResolvedMembers {
+                synced: looked_up.queued,
+                groups_changed,
+                lines: looked_up.lines,
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, "storing group members failed");
+            None
+        }
+    }
+}
+
+impl Shared {
     /// Fetch a contact's (new) picture, whose descriptor `picture_downloads` keeps until this
     /// succeeds. Published only if it is still the newest state after the download: a set or
     /// delete that arrived meanwhile wins (the generation changed or the row is gone), and the
@@ -432,12 +643,13 @@ impl App {
             let Ok(Some((picture, generation))) = store.picture_download(&identity) else {
                 return;
             };
-            let result = async {
-                let blob =
-                    media::download(&https, &picture.blob_id, media::BlobScope::Public).await?;
-                media::decrypt_blob(&picture.key, MediaPart::File, &blob)
-            }
-            .await;
+            // Superseded while waiting for a slot? Then the newer picture's task does the work.
+            let wanted =
+                || matches!(store.picture_download(&identity), Ok(Some((_, g))) if g == generation);
+            let Some(_slot) = media::slot_if_wanted(&media::PICTURE_SLOTS, wanted).await else {
+                return;
+            };
+            let result = fetch_picture(&https, &picture).await;
             match result {
                 Ok(data) => {
                     // Still the newest? Everything from the check to the version advance runs
@@ -458,16 +670,10 @@ impl App {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "contact picture download failed");
-                    let gone = matches!(error, media::MediaError::Decrypt)
-                        || matches!(&error, media::MediaError::Server(s) if s.contains("404"));
-                    if gone {
-                        // The blob expired (or the key is wrong): retrying the download is
-                        // useless; only a freshly requested picture helps.
+                    if picture_is_gone(&error) {
+                        // The blob expired (or the key is wrong, or it is far too large):
+                        // retrying the download is useless.
                         let _ = store.cancel_picture_download(&identity);
-                        let _ = store.pause_picture_requests(
-                            &identity,
-                            crate::profile_pictures::REQUEST_PAUSE_EXPIRED_MS,
-                        );
                     } else {
                         let _ = store.picture_download_failed(&identity, generation);
                     }
@@ -480,11 +686,7 @@ impl App {
     /// contact descriptors past their backoff, and group pictures that never made it onto the
     /// device (their descriptor lives in `groups.picture`; version 0 means not stored yet).
     pub(crate) fn resume_picture_downloads(&self) {
-        // Contacts' pictures only while they are wanted (Android's "Receive profile pictures",
-        // which also stops ones that were still pending); groups' pictures are not affected.
-        if self.store.receive_pictures().unwrap_or(true)
-            && let Ok(due) = self.store.due_picture_downloads()
-        {
+        if let Ok(due) = self.store.due_picture_downloads() {
             for identity in due {
                 self.download_contact_picture(identity);
             }
@@ -494,12 +696,83 @@ impl App {
                 self.download_group_picture(key);
             }
         }
+        if let Ok(due) = self.store.due_synced_pictures() {
+            for target in due {
+                self.apply_synced_picture(target);
+            }
+        }
+        self.send_group_pictures();
+        self.reflect_owed_pictures();
+        // A member whose lookup failed or never got to run: the other devices are owed them too.
+        if let Err(error) = self.store.note_unresolved_member_lookups() {
+            tracing::warn!(%error, "noting group members to look up failed");
+        }
+        // To the core loop: this can run in a task beside it, and the lookups are kept track of
+        // there.
+        let due = self.member_lookups_due();
+        if !due.is_empty() {
+            let _ = self.media_events.send(CoreEvent::UnknownMembers(due));
+        }
     }
 
+    /// What the other devices are still owed: a picture not on the mirror yet.
+    pub(crate) fn reflect_owed_pictures(&self) {
+        if self.store.own_picture_sync_owed().unwrap_or(false) {
+            let store = Rc::clone(&self.store);
+            let https = self.https.clone();
+            let media = std::sync::Arc::clone(&self.media);
+            let connection = self.connection.borrow().clone();
+            tokio::task::spawn_local(async move {
+                crate::app_multidevice::reflect_own_picture(
+                    &store,
+                    &https,
+                    &media,
+                    connection.as_ref(),
+                )
+                .await;
+            });
+        }
+        if let Ok(owed) = self.store.group_picture_syncs() {
+            for key in owed {
+                let store = Rc::clone(&self.store);
+                let https = self.https.clone();
+                let media = std::sync::Arc::clone(&self.media);
+                let connection = self.connection.borrow().clone();
+                tokio::task::spawn_local(async move {
+                    crate::app_multidevice::reflect_group_picture(
+                        &store,
+                        &https,
+                        &media,
+                        &key,
+                        connection.as_ref(),
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+}
+
+impl Shared {
+    /// Members whose lookup failed, never got to run or waited for a rest to end.
+    pub(crate) fn member_lookups_due(&self) -> Vec<String> {
+        let mut due = self.store.outstanding_member_lookups().unwrap_or_default();
+        due.extend(self.store.owed_member_lookups().unwrap_or_default());
+        // Whoever a group or something queued still waits for, however that came about.
+        due.extend(self.store.unresolved_members().unwrap_or_default());
+        due.sort();
+        due.dedup();
+        due
+    }
+}
+
+impl App {
     /// `setProfilePicture`: our picture (attachment 0, a JPEG prepared by the bridge). Everyone
     /// gets it with our next message to them.
     /// `setProfilePicture`: attachments are the picture and (optionally) its Threema Safe copy.
     pub(crate) fn set_profile_picture(&mut self) -> Result<Value, ApiError> {
+        self.store
+            .cancel_synced_picture(crate::profile_pictures::OWN_PICTURE)?;
         let mut attachments = std::mem::take(&mut self.attachments).into_iter();
         let data = attachments
             .next()
@@ -520,11 +793,14 @@ impl App {
         self.store.set_picture_upload(None)?;
         self.store.purge_picture_distribution(None)?;
         self.store.bump_profile_picture_version()?;
+        self.store.owe_own_picture_sync()?;
         self.profile_json()
     }
 
     /// `removeProfilePicture`: contacts get a removal with our next message.
     pub(crate) fn remove_profile_picture(&mut self) -> Result<Value, ApiError> {
+        self.store
+            .cancel_synced_picture(crate::profile_pictures::OWN_PICTURE)?;
         self.media
             .remove_picture(crate::profile_pictures::OWN_PICTURE);
         self.media
@@ -573,5 +849,211 @@ impl App {
             .to_string();
         self.store.set_picture_recipient(&id, share)?;
         self.contact_json(&id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use libthreema::common::BlobId;
+    use zeroize::Zeroizing;
+
+    use super::*;
+    use crate::{app::StartConfig, store::StoredIdentity};
+
+    fn app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            &StartConfig {
+                data_dir: dir.path().to_owned(),
+                app_version: "0.1.0".into(),
+                language: "en".into(),
+                country: "US".into(),
+                model: "test".into(),
+                os_version: "5.1".into(),
+                pictures_dir: None,
+                calls: false,
+                log_level: None,
+                update_check: false,
+            },
+            &[3; 32],
+        )
+        .unwrap();
+        app.store
+            .set_identity(&StoredIdentity {
+                threema_id: "USER0001".into(),
+                client_key: Zeroizing::new([9; 32]),
+                server_group: "01".into(),
+            })
+            .unwrap();
+        (dir, app)
+    }
+
+    /// Our group with these members, all of them contacts; and who gets what is queued.
+    fn own_group(app: &mut App, members: &[&str]) -> String {
+        for member in ["AAAAAAAA", "BBBBBBBB", "CCCCCCCC"] {
+            app.store
+                .upsert_contact(&contacts::test_contact(member))
+                .unwrap();
+        }
+        let members: Vec<String> = members.iter().map(|m| (*m).to_owned()).collect();
+        let group = app.create_group("Crew", &members).unwrap();
+        let key = group["key"].as_str().unwrap().to_owned();
+        for entry in app.store.outbox().unwrap() {
+            app.store.outbox_remove(&key, entry.message_id).unwrap();
+        }
+        key
+    }
+
+    fn queued(app: &App, key: &str) -> Vec<(String, Value, Vec<String>)> {
+        app.store
+            .outbox()
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                let receivers = app.store.pending_receivers(key, entry.message_id).unwrap();
+                (entry.kind, entry.body, receivers)
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_removed_does_not_learn_who_else_is_in_the_group() {
+        let (_dir, mut app) = app();
+        let key = own_group(&mut app, &["AAAAAAAA", "BBBBBBBB"]);
+        app.set_group_members(&key, &["BBBBBBBB".to_owned(), "CCCCCCCC".to_owned()])
+            .unwrap();
+        let queued = queued(&app, &key);
+        assert_eq!(
+            queued[0],
+            (
+                OUTBOX_GROUP_SETUP.to_owned(),
+                json!({ "members": [] }),
+                vec!["AAAAAAAA".to_owned()]
+            )
+        );
+        assert_eq!(
+            queued[1],
+            (
+                OUTBOX_GROUP_SETUP.to_owned(),
+                json!({ "members": ["BBBBBBBB", "CCCCCCCC"] }),
+                vec!["BBBBBBBB".to_owned(), "CCCCCCCC".to_owned()]
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_added_gets_the_groups_picture() {
+        let (_dir, mut app) = app();
+        let key = own_group(&mut app, &["AAAAAAAA"]);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        let picture = GroupPicture {
+            blob_id: BlobId([1; 16]),
+            key: [2; 32],
+            size: 3,
+        };
+        group.picture = Some(picture.clone());
+        app.store.upsert_group(&group).unwrap();
+
+        app.set_group_members(&key, &["AAAAAAAA".to_owned(), "BBBBBBBB".to_owned()])
+            .unwrap();
+
+        let added = vec!["BBBBBBBB".to_owned()];
+        let queued = queued(&app, &key);
+        assert_eq!(
+            queued[1],
+            (
+                OUTBOX_GROUP_NAME.to_owned(),
+                json!({ "name": "Crew" }),
+                added.clone()
+            )
+        );
+        assert_eq!(
+            queued[2],
+            (
+                groups::OUTBOX_GROUP_SET_PICTURE.to_owned(),
+                picture.to_json(),
+                added
+            )
+        );
+        assert_eq!(queued.len(), 3);
+    }
+
+    /// Set here or on another device, it is on the device: a new upload for whoever is added, and
+    /// only once that has worked does anything go out, after the setup and the name.
+    #[tokio::test(flavor = "current_thread")]
+    async fn someone_added_waits_for_a_new_upload_of_a_picture_that_is_here() {
+        let (_dir, mut app) = app();
+        let key = own_group(&mut app, &["AAAAAAAA"]);
+        let mut group = app.store.group(&key).unwrap().unwrap();
+        group.picture_version = 7;
+        app.store.upsert_group(&group).unwrap();
+
+        app.store.outbox_clear(&key).unwrap();
+        // The upload itself is never run here: the test has no network.
+        let tasks = tokio::task::LocalSet::new();
+        let entered = tasks.enter();
+        app.set_group_members(&key, &["AAAAAAAA".to_owned(), "BBBBBBBB".to_owned()])
+            .unwrap();
+        drop(entered);
+        let sent = |app: &App| -> Vec<String> {
+            queued(app, &key).into_iter().map(|entry| entry.0).collect()
+        };
+        assert_eq!(sent(&app), [OUTBOX_GROUP_SETUP, OUTBOX_GROUP_NAME]);
+        assert_eq!(
+            app.store.groups_owing_picture().unwrap(),
+            std::slice::from_ref(&key)
+        );
+
+        // An upload that took longer than a newer picture: they stay for the next try.
+        let fresh = GroupPicture {
+            blob_id: BlobId([8; 16]),
+            key: [9; 32],
+            size: 3,
+        };
+        assert!(
+            !app.store
+                .finish_group_picture_sends(&key, 6, Some(fresh.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            app.store.groups_owing_picture().unwrap(),
+            std::slice::from_ref(&key)
+        );
+
+        assert!(
+            app.store
+                .finish_group_picture_sends(&key, 7, Some(fresh.clone()))
+                .unwrap()
+        );
+        assert!(app.store.groups_owing_picture().unwrap().is_empty());
+        let queued = queued(&app, &key);
+        assert_eq!(
+            queued[2],
+            (
+                groups::OUTBOX_GROUP_SET_PICTURE.to_owned(),
+                fresh.to_json(),
+                vec!["BBBBBBBB".to_owned()]
+            )
+        );
+        // The next one's starting point, should the file ever be gone.
+        let group = app.store.group(&key).unwrap().unwrap();
+        assert_eq!(group.picture, Some(fresh));
+        assert_eq!(group.picture_version, 7);
+        assert!(app.store.groups_with_pending_picture().unwrap().is_empty());
+    }
+
+    /// A picture that says it is too large isn't even asked for (the test has no network).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_picture_claiming_too_much_is_not_fetched() {
+        let https = crate::https::HttpsClient::new().unwrap();
+        let picture = GroupPicture {
+            blob_id: BlobId([1; 16]),
+            key: [2; 32],
+            size: u32::try_from(media::MAX_PICTURE_DOWNLOAD).unwrap() + 1,
+        };
+        assert!(matches!(
+            fetch_picture(&https, &picture).await,
+            Err(media::MediaError::TooLarge)
+        ));
     }
 }

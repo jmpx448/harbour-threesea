@@ -1,20 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 TARGET = harbour-threesea
 
-VERSION = 0.2.0
+VERSION = 0.3.0
 DEFINES += APP_VERSION=\\\"$$VERSION\\\"
 
 # i18n: id-based (qsTrId) like Jolla's apps. The base .ts carries the engineering English
 # (//% comments); keep unfinished entries so it becomes the fallback .qm.
 CONFIG += sailfishapp sailfishapp_i18n sailfishapp_i18n_idbased sailfishapp_i18n_unfinished c++14 link_pkgconfig
 # sailfishapp listed explicitly: setting PKGCONFIG here otherwise drops it from the link line.
-PKGCONFIG += sailfishapp sailfishsecrets
+PKGCONFIG += sailfishapp sailfishsecrets nemonotifications-qt5
 
 # The Rust core is built beforehand by scripts/build-core.sh into
 # target/<rust triple>/release/libthreesea_core.a; RUST_TRIPLE is passed by the spec file.
 isEmpty(RUST_TRIPLE): RUST_TRIPLE = x86_64-unknown-linux-gnu
 CORE_LIB = $$PWD/target/$$RUST_TRIPLE/release/libthreesea_core.a
 !exists($$CORE_LIB): error("Missing $$CORE_LIB - run scripts/build-core.sh first")
+
+# Hardening beyond the SDK's optflags (plain -fstack-protector, no RELRO flags): full RELRO for the
+# binary, which parses network data and media through native libraries, the stronger stack
+# protection, and checked libc calls also where optflags don't reach (the AEC wrapper below). The
+# core (scripts/build-core.sh) and the bundled echo canceller (rpm/harbour-threesea.spec) get the same.
+HARDENING_FLAGS = -fstack-protector-strong -D_FORTIFY_SOURCE=2
+QMAKE_CXXFLAGS += $$HARDENING_FLAGS
+QMAKE_LFLAGS += -Wl,-z,relro,-z,now
 
 QT += dbus multimedia network sensors
 
@@ -25,6 +33,7 @@ PRE_TARGETDEPS += $$CORE_LIB
 
 SOURCES += \
     bridge/animatedimage.cpp \
+    bridge/applifecycle.cpp \
     bridge/gifdecoder.cpp \
     bridge/callmanager.cpp \
     bridge/callvideo.cpp \
@@ -35,9 +44,14 @@ SOURCES += \
     bridge/enterkeyfilter.cpp \
     bridge/emojihighlighter.cpp \
     bridge/filepreparer.cpp \
+    bridge/mediareader.cpp \
+    bridge/installcheck.cpp \
     bridge/jsonlistmodel.cpp \
+    bridge/listfilter.cpp \
     bridge/main.cpp \
     bridge/mediaimageprovider.cpp \
+    bridge/photoedit.cpp \
+    bridge/callroute.cpp \
     bridge/proximitymonitor.cpp \
     bridge/secretstore.cpp \
     bridge/softsound.cpp \
@@ -48,6 +62,8 @@ SOURCES += \
 
 HEADERS += \
     bridge/animatedimage.h \
+    bridge/applifecycle.h \
+    bridge/endofprocess.h \
     bridge/gifdecoder.h \
     bridge/callmanager.h \
     bridge/callvideo.h \
@@ -58,10 +74,19 @@ HEADERS += \
     bridge/enterkeyfilter.h \
     bridge/emojihighlighter.h \
     bridge/filepreparer.h \
+    bridge/filetype.h \
+    bridge/mediareader.h \
+    bridge/installcheck.h \
     bridge/jsonlistmodel.h \
+    bridge/listfilter.h \
+    bridge/maplogfilter.h \
     bridge/mediaimageprovider.h \
+    bridge/photoedit.h \
+    bridge/peerimage.h \
+    bridge/callroute.h \
     bridge/proximitymonitor.h \
     bridge/offlinenetwork.h \
+    bridge/coreresult.h \
     bridge/secretstore.h \
     bridge/softsound.h \
     bridge/threesebackend.h \
@@ -70,6 +95,7 @@ HEADERS += \
     bridge/voicerecorder.h
 
 DISTFILES += \
+    notifications/x-threesea.call.conf \
     qml/harbour-threesea.qml \
     qml/cover/CoverPage.qml \
     qml/pages/*.qml \
@@ -85,6 +111,15 @@ SAILFISHAPP_ICONS = 86x86 108x108 128x128 172x172
 emojis.files = emojis/*.png
 emojis.path = /usr/share/$${TARGET}/emojis
 INSTALLS += emojis
+# The emoji panel's search terms by language, from Threema Android, as well.
+emojisearch.files = emojis/search/*.csv
+emojisearch.path = /usr/share/$${TARGET}/emojis/search
+INSTALLS += emojisearch
+
+# The AGPL and the third-party notices (scripts/make-notices.py), shown by About.
+licenses.files = LICENSE THIRD-PARTY-NOTICES.txt
+licenses.path = /usr/share/$${TARGET}/licenses
+INSTALLS += licenses
 
 # Developer tool for the emulator (`qmake CONFIG+=demo`, set by scripts/sdk-build.sh for i486
 # only): the made-up chats, asked for over D-Bus (scripts/emulator-demo.sh) so that no build
@@ -104,11 +139,15 @@ full {
     service.files = systemd/harbour-threesea.service
     service.path = /usr/lib/systemd/user
     INSTALLS += service
+    # An incoming call's notification (priority, display on); lipstick reads these by category.
+    callnotification.files = notifications/x-threesea.call.conf
+    callnotification.path = /usr/share/lipstick/notificationcategories
+    INSTALLS += callnotification
     # Calls (ADR 0012): the media engine on the system's GStreamer webrtcbin.
     PKGCONFIG += gstreamer-1.0 gstreamer-sdp-1.0 gstreamer-webrtc-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-rtp-1.0 nice
     SOURCES += bridge/callengine.cpp bridge/dtlscertificate.cpp bridge/groupcallengine.cpp \
         bridge/earpieceplayer.cpp bridge/videotranscoder.cpp
-    HEADERS += bridge/callengine.h bridge/dtlscertificate.h bridge/groupcallengine.h bridge/aec/echocanceller.h \
+    HEADERS += bridge/callengine.h bridge/dtlscertificate.h bridge/groupcallengine.h bridge/vp8filter.h bridge/aec/echocanceller.h \
         bridge/earpieceplayer.h bridge/videotranscoder.h
     # Echo cancellation: the bundled webrtc-audio-processing, built statically by the spec file
     # into WAP_PREFIX (meson, third_party/webrtc-audio-processing). Our wrapper is the only file
@@ -120,16 +159,17 @@ full {
     AEC_SOURCES = bridge/aec/echocanceller.cpp
     aec.input = AEC_SOURCES
     aec.output = ${QMAKE_FILE_BASE}.o
-    aec.commands = $$QMAKE_CXX -c -std=c++17 -O2 -fPIC $$WAP_CFLAGS ${QMAKE_FILE_IN} -o ${QMAKE_FILE_OUT}
+    aec.commands = $$QMAKE_CXX -c -std=c++17 -O2 -fPIC $$HARDENING_FLAGS $$WAP_CFLAGS ${QMAKE_FILE_IN} -o ${QMAKE_FILE_OUT}
     aec.variable_out = OBJECTS
     QMAKE_EXTRA_COMPILERS += aec
     LIBS += $$system($$WAP_PC --static --libs webrtc-audio-processing-2)
 }
 DISTFILES += bridge/callengine.cpp bridge/callengine.h bridge/dtlscertificate.cpp bridge/dtlscertificate.h \
-    bridge/groupcallengine.cpp bridge/groupcallengine.h bridge/aec/echocanceller.cpp bridge/aec/echocanceller.h \
+    bridge/groupcallengine.cpp bridge/groupcallengine.h bridge/vp8filter.h bridge/aec/echocanceller.cpp bridge/aec/echocanceller.h \
     bridge/earpieceplayer.cpp bridge/earpieceplayer.h bridge/videotranscoder.cpp bridge/videotranscoder.h
 DISTFILES += systemd/harbour-threesea.service
 
 TRANSLATIONS += translations/harbour-threesea.ts \
     translations/harbour-threesea-de.ts \
-    translations/harbour-threesea-fr.ts
+    translations/harbour-threesea-fr.ts \
+    translations/harbour-threesea-fi.ts

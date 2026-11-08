@@ -209,7 +209,7 @@ impl State {
         }
 
         // Request the unknown identities from the directory (and the work directory, if needed).
-        info!(identities = ?contacts.unknown, "Fetching identities");
+        info!(n_identities = contacts.unknown.len(), "Fetching identities");
         let instruction = ContactsLookupInstruction {
             directory_request: directory::request_identities(
                 &context.client_info,
@@ -257,7 +257,7 @@ impl State {
             for mut contact in directory_result {
                 // Ensure the contact was requested
                 if !unknown.remove(&contact.identity) {
-                    warn!(identity = ?contact.identity, "Discarding identity not requested");
+                    warn!("Discarding identity not requested");
                     continue;
                 }
 
@@ -265,8 +265,7 @@ impl State {
                 if let Some(predefined_contact) = context.config.predefined_contacts.get(&contact.identity)
                     && let Err(error) = predefined_contact.update(&mut contact)
                 {
-                    error!(identity = ?contact.identity, ?error,
-                            "Unable to update contact from predefined contact");
+                    error!(?error, "Unable to update contact from predefined contact");
                     return Err(CspE2eProtocolError::InternalError(
                         format!("Unable to update contact from predefined contact: {error}").into(),
                     ));
@@ -274,8 +273,7 @@ impl State {
 
                 // Add the contact
                 let Entry::Vacant(entry) = state.contacts.known.entry(contact.identity) else {
-                    error!(identity = ?contact.identity,
-                        "Accounting error, identity already known");
+                    error!("Accounting error, identity already known");
                     continue;
                 };
                 let _ = entry.insert(ContactResult::NewContact(contact.clone()));
@@ -286,7 +284,7 @@ impl State {
             for identity in unknown {
                 match state.contacts.known.entry(identity) {
                     Entry::Occupied(_) => {
-                        error!(?identity, "Accounting error, identity already known");
+                        error!("Accounting error, identity already known");
                     },
                     Entry::Vacant(entry) => {
                         let _ = entry.insert(ContactResult::Invalid(identity));
@@ -301,19 +299,13 @@ impl State {
             (Flavor::Work(_), Some(work_directory_result)) => {
                 let work_directory_result = work_directory::handle_contacts_result(work_directory_result)?;
                 for work_contact in work_directory_result {
-                    let identity = work_contact.identity;
-
                     // Update the contact
                     let Entry::Occupied(mut entry) = state.contacts.known.entry(work_contact.identity) else {
-                        warn!(?identity, "Discarding work contact not requested");
+                        warn!("Discarding work contact not requested");
                         continue;
                     };
                     if let Err(error) = entry.get_mut().update_from_work_contact(work_contact) {
-                        error!(
-                            ?identity,
-                            ?error,
-                            "Unable to update contact result from work contact"
-                        );
+                        error!(?error, "Unable to update contact result from work contact");
                         return Err(CspE2eProtocolError::ServerError(format!(
                             "Unable to update contact result from work contact: {error}"
                         )));

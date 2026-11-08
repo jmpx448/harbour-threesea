@@ -54,6 +54,19 @@ fn state(message: &Message) -> Value {
     serde_json::from_str(&message.body).unwrap_or(Value::Null)
 }
 
+fn is_closed(poll: &Message) -> bool {
+    state(poll)["state"] == 1
+}
+
+/// Whether a poll still waits for `identity`'s vote: open, and nothing chosen.
+pub fn awaits_vote(poll: &Message, identity: &str) -> bool {
+    let state = state(poll);
+    state["state"] != 1
+        && state["votes"][identity]
+            .as_array()
+            .is_none_or(|chosen| chosen.is_empty())
+}
+
 /// A new poll's UI state; checks the protocol's limits.
 pub fn new_poll(
     poll_id: u64,
@@ -123,6 +136,16 @@ pub fn setup_json(poll: &Value) -> String {
         json["p"] = json!(participants);
     }
     json.to_string()
+}
+
+/// Whether closing this poll, results included, fits a message (poll ID and, in a group, its
+/// identity in front). There is no shorter form: a poll can't turn to summary mode when it closes,
+/// other clients discard that.
+pub fn closing_fits(poll: &Value) -> bool {
+    const IN_FRONT: usize = 8 + 16;
+    let mut closed = poll.clone();
+    closed["state"] = json!(1);
+    setup_json(&closed).len() + IN_FRONT <= crate::messages::MESSAGE_BODY_MAX
 }
 
 /// Our UI state from a received `poll-setup` JSON.
@@ -218,10 +241,30 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
+        // Older versions kept the entry of a poll someone deleted for everyone: a placeholder
+        // that takes no votes and can't be closed.
         Ok(match id {
-            Some(id) => self.message(id)?,
+            Some(id) => self.message(id)?.filter(|message| message.kind == "poll"),
             None => None,
         })
+    }
+
+    /// The polls of a chat: the open ones first, then the closed, each newest first.
+    pub fn conversation_polls(&self, conversation: &str) -> Result<Vec<Message>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM messages WHERE kind = 'poll' AND id IN
+                 (SELECT message FROM polls WHERE conversation = ?1)
+             ORDER BY sort_key DESC, id DESC",
+        )?;
+        let ids = statement
+            .query_map([conversation], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut polls = Vec::with_capacity(ids.len());
+        for id in ids {
+            polls.extend(self.message(id)?);
+        }
+        polls.sort_by_key(is_closed);
+        Ok(polls)
     }
 
     pub fn register_poll(
@@ -286,11 +329,7 @@ pub fn receive_setup(
             if current["state"] == 1 || !closing {
                 return Ok((None, None));
             }
-            // Close with the given results; nothing else may change.
-            current["state"] = json!(1);
-            current["votes"] = poll["votes"].clone();
-            current["choices"] = poll["choices"].clone();
-            current["summary"] = poll["summary"].clone();
+            close_with_results(&mut current, &poll);
             let changed = store.set_message_body(existing.id, &current)?;
             // And a message of its own in the chat, like Android's "Poll closed": the results.
             let body = current.to_string();
@@ -351,10 +390,7 @@ pub fn reflect_setup(
             if current["state"] == 1 || !closing {
                 return Ok((None, None));
             }
-            current["state"] = json!(1);
-            current["votes"] = poll["votes"].clone();
-            current["choices"] = poll["choices"].clone();
-            current["summary"] = poll["summary"].clone();
+            close_with_results(&mut current, &poll);
             let changed = store.set_message_body(existing.id, &current)?;
             let added = store.insert_reflected_outgoing(
                 conversation,
@@ -366,6 +402,52 @@ pub fn reflect_setup(
             Ok((added, changed))
         }
     }
+}
+
+/// Close a poll with the results of its closing setup (`closing`, as [`from_setup`] reads it): who
+/// voted for what and the totals, by choice ID. Nothing else may change (the spec's "ignore any
+/// other fields"; Android takes the names too): the creator can't reword the choices under votes
+/// already cast. Votes for choices the poll doesn't have count for nothing.
+fn close_with_results(current: &mut Value, closing: &Value) {
+    let known: Vec<Value> = current["choices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|choice| choice["id"].clone())
+        .collect();
+    let mut votes = serde_json::Map::new();
+    for (voter, chosen) in closing["votes"].as_object().into_iter().flatten() {
+        let chosen: Vec<Value> = chosen
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|choice| known.contains(choice))
+            .cloned()
+            .collect();
+        if !chosen.is_empty() {
+            votes.insert(voter.clone(), Value::Array(chosen));
+        }
+    }
+    for choice in current["choices"].as_array_mut().into_iter().flatten() {
+        let total = closing["choices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|given| given["id"] == choice["id"])
+            .map(|given| given["total"].clone());
+        match (choice.as_object_mut(), total) {
+            (Some(choice), Some(total)) if !total.is_null() => {
+                choice.insert("total".to_owned(), total);
+            }
+            (Some(choice), _) => {
+                choice.remove("total");
+            }
+            (None, _) => {}
+        }
+    }
+    current["state"] = json!(1);
+    current["votes"] = Value::Object(votes);
+    current["summary"] = closing["summary"].clone();
 }
 
 /// _Common Poll Vote Receive Steps_.
@@ -408,6 +490,137 @@ fn valid_vote(poll: &Value, choices: &Value) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poll with voters voting on every choice, its results as long as they get.
+    fn poll_with_voters(voters: usize, choices: usize) -> Value {
+        let voted: Vec<usize> = (0..choices).collect();
+        let votes: serde_json::Map<String, Value> = (0..voters)
+            .map(|voter| (format!("V{voter:07}"), json!(voted)))
+            .collect();
+        json!({
+            "pollId": "0000000000000001",
+            "description": "Lunch?",
+            "state": 0,
+            "multiple": true,
+            "choices": voted.iter().map(|&id| json!({"id": id, "name": "A"})).collect::<Vec<_>>(),
+            "votes": votes,
+        })
+    }
+
+    /// A closing goes out with everyone's votes, or not at all: summary mode isn't open to a poll
+    /// that was announced as a list.
+    #[test]
+    fn closing_a_poll_fits_a_message_or_says_so() {
+        assert!(closing_fits(&poll_with_voters(20, 4)));
+        let large = poll_with_voters(255, 10);
+        assert!(!closing_fits(&large));
+        assert_eq!(large["state"], 0);
+    }
+
+    /// A poll deleted before this version's rule, by a client that shouldn't have: votes and a
+    /// close leave its placeholder alone, and no "Poll closed" without a question appears.
+    #[test]
+    fn a_deleted_poll_takes_no_votes_and_cant_be_closed() {
+        for keep_entry in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+            let setup = json!({"s": 0, "a": 0, "t": 0, "d": "Who?", "c": [{"i": 0, "n": "a"}]});
+            let (poll, _) = receive_setup(
+                &store,
+                "ABCD1234",
+                "ABCD1234",
+                false,
+                1,
+                1,
+                9,
+                &setup.to_string(),
+            )
+            .unwrap();
+            let poll = poll.unwrap();
+            store.mark_deleted(poll.id, 5).unwrap();
+            if keep_entry {
+                store
+                    .register_poll("ABCD1234", "ABCD1234", 9, poll.id)
+                    .unwrap();
+            }
+
+            let vote = receive_vote(&store, "ABCD1234", "B0B0B0B0", "ABCD1234", 9, "[[0, 1]]");
+            assert!(vote.unwrap().is_none());
+            let closing = json!({"s": 1, "a": 0, "t": 0, "d": "Who?", "p": [], "c": [{"i": 0, "n": "a", "r": []}]});
+            let (added, changed) = receive_setup(
+                &store,
+                "ABCD1234",
+                "ABCD1234",
+                false,
+                2,
+                2,
+                9,
+                &closing.to_string(),
+            )
+            .unwrap();
+            assert!(added.is_none() && changed.is_none());
+            let stored = store.message(poll.id).unwrap().unwrap();
+            assert_eq!(
+                (stored.kind.as_str(), stored.body.as_str()),
+                ("deleted", "")
+            );
+        }
+    }
+
+    /// Closing takes the results and nothing else: choice texts stay what people voted for, in a
+    /// poll closed by a member and in one closed on another device of ours, and the results
+    /// message says the same.
+    #[test]
+    fn closing_a_poll_keeps_its_choice_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let setup = json!({"s": 0, "a": 0, "t": 0, "d": "Who pays?",
+                           "c": [{"i": 0, "n": "Alice"}, {"i": 1, "n": "Bob"}]});
+        let closing = json!({"s": 1, "a": 0, "t": 0, "d": "Who is nice?", "p": ["B0B0B0B0", "C0C0C0C0"],
+                             "c": [{"i": 0, "n": "Bob", "r": [1, 0]}, {"i": 1, "n": "Alice", "r": [0, 1]},
+                                   {"i": 7, "n": "Carol", "r": [1, 1]}]});
+        let (setup, closing) = (setup.to_string(), closing.to_string());
+        let check = |poll: &Message, closed: &Message, changed: &Message| {
+            for body in [&closed.body, &changed.body] {
+                let body: Value = serde_json::from_str(body).unwrap();
+                assert_eq!(body["description"], "Who pays?");
+                assert_eq!(body["state"], 1);
+                assert_eq!(
+                    body["choices"],
+                    json!([{"id": 0, "name": "Alice"}, {"id": 1, "name": "Bob"}])
+                );
+                // The results by choice ID, and the choice that isn't one is gone.
+                assert_eq!(body["votes"], json!({"B0B0B0B0": [0], "C0C0C0C0": [1]}));
+            }
+            assert_eq!(changed.id, poll.id);
+        };
+
+        let (poll, _) =
+            receive_setup(&store, "ABCD1234", "ABCD1234", false, 1, 1, 9, &setup).unwrap();
+        let (closed, changed) =
+            receive_setup(&store, "ABCD1234", "ABCD1234", false, 2, 2, 9, &closing).unwrap();
+        check(&poll.unwrap(), &closed.unwrap(), &changed.unwrap());
+
+        let (poll, _) = reflect_setup(&store, "ABCD1234", "ECHOECHO", 3, 1, 10, &setup).unwrap();
+        let (closed, changed) =
+            reflect_setup(&store, "ABCD1234", "ECHOECHO", 4, 2, 10, &closing).unwrap();
+        check(&poll.unwrap(), &closed.unwrap(), &changed.unwrap());
+    }
+
+    /// A summary poll's totals come with the close, by choice ID.
+    #[test]
+    fn closing_a_summary_poll_takes_the_totals_by_id() {
+        let mut current = json!({"state": 0, "summary": false, "votes": {"B0B0B0B0": [0]},
+                                 "choices": [{"id": 0, "name": "a"}, {"id": 1, "name": "b"}]});
+        let closing = json!({"summary": true, "votes": {},
+                             "choices": [{"id": 1, "name": "x", "total": 3}, {"id": 0, "name": "y", "total": 1}]});
+        close_with_results(&mut current, &closing);
+        assert_eq!(
+            current,
+            json!({"state": 1, "summary": true, "votes": {},
+                   "choices": [{"id": 0, "name": "a", "total": 1}, {"id": 1, "name": "b", "total": 3}]})
+        );
+    }
 
     #[test]
     fn a_received_vote_stays_within_the_poll() {

@@ -17,6 +17,9 @@ typedef struct ThreeseaCore ThreeseaCore;
 typedef void (*ThreeseaEventCallback)(void *user_data, const char *json);
 
 char *threesea_core_version(void);
+/* What the bundled map renderer may fetch: JSON {"origin": "https://…/", "pins": "sha256//…;…"}
+ * (ADR 0032). Needs no running core. Free with threesea_string_free. */
+char *threesea_map_policy(void);
 
 /* A log line from the bridge (Qt warnings, QML errors) into the core's outputs (journal and
  * the in-app log file). level: "debug", "info" or anything else for warning. */
@@ -32,6 +35,15 @@ void threesea_core_send_data(ThreeseaCore *core, const char *request_json, const
                              const uint8_t *extra, size_t extra_len);
 /* Blocks until the core thread has stopped; no callbacks after it returns. */
 void threesea_core_stop(ThreeseaCore *core);
+/* For the end of the process: waits a few seconds at most. True: as threesea_core_stop. False: the
+ * core thread still runs and can still call back, so keep user_data and leave with _exit. */
+bool threesea_core_quit(ThreeseaCore *core);
+/* The core's mark of a removal of the ID that never finished (the app was killed in it):
+ * -1 none, else whether linked devices remain (0 or 1). */
+int threesea_data_removal_mark(const char *data_dir);
+/* Removes everything in the data directory (database, media, logs): the ID is being removed. The
+ * core must have stopped. False if something stayed. */
+bool threesea_data_remove(const char *data_dir);
 
 /* Decrypted media of a message (thumbnail or file) from the encrypted media store; thread-safe.
  * NULL if not on the device. Free with threesea_buffer_free(buffer, *out_len). */
@@ -42,6 +54,10 @@ uint8_t *threesea_voice_decode(const ThreeseaCore *core, int64_t message, size_t
 /* A picture that isn't a message's (group picture: name = group key); NULL if none. */
 uint8_t *threesea_picture_read(const ThreeseaCore *core, const char *name, size_t *out_len);
 void threesea_buffer_free(uint8_t *buffer, size_t len);
+
+/* The size of the picture of the video at `path` as a player shows it, from the file's index (MP4 and
+ * QuickTime). False if it can't be told. Any thread, no core needed. */
+bool threesea_video_size(const char *path, uint32_t *width, uint32_t *height);
 
 /* Database key encryption with the app lock passphrase (ADR 0009); scrypt, so slow: call off the
  * GUI thread. Buffers are freed with threesea_buffer_free; NULL on failure (wrong passphrase). */
@@ -60,6 +76,11 @@ char *threesea_qr_decode(const uint8_t *grey, size_t width, size_t height);
 ptrdiff_t threesea_group_call_encrypt(uint8_t codec, const uint8_t *frame, size_t len, uint8_t *out, size_t out_cap);
 ptrdiff_t threesea_group_call_decrypt(uint32_t participant, uint8_t codec, const uint8_t *frame, size_t len,
                                       uint8_t *out, size_t out_cap);
+/* Whether a received VP8 frame may reach the decoder: 1 yes, 0 no, -1 no and it was a key frame
+ * that is too large or broken. `*waiting` is the stream's state (starts out true), used on the
+ * stream's thread only. */
+int32_t threesea_call_vp8_filter(const uint8_t *frame, size_t len, bool *waiting);
+
 /* Encrypt one of our VP8 frames of simulcast layer `layer` (0 l, 1 m, 2 h) and split it into RTP
  * payloads (VP8 descriptor included) of at most max_payload bytes, written one after the other
  * into `out`, their lengths into `lengths`. Returns the number of payloads, or -1: drop it. */

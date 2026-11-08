@@ -27,9 +27,26 @@ match templates"), and every launch already goes through D-Bus activation (ADR 0
 ## Consequences
 - After a reboot the connection comes up at login, before the user opens the app.
 - Battery: the same as leaving the app running after closing it; still to measure on a device.
-- Sailfish Secrets asks "Authorize" when a new build first reads the database key, and in the
-  emulator after every user-session restart, also at login for the background start (on the lock
-  screen). Whether a phone with a device code asks after each boot is still to be checked.
+- Sailfish Secrets asks "Authorize" when a new build first reads the database key, and after
+  every boot, also on a phone with a device code (issue #2, 2026-11-08): a `DeviceLock` collection
+  is locked after boot and the first read with `SystemInteraction` always starts the system's
+  authentication flow (`getCollectionSecretWithMetadata` in sailfish-secrets); with
+  `DeviceLockKeepUnlocked` it then stays open until the next boot. `CustomLock` asks too. So the
+  background start needs one confirmation per boot. A start without it would mean keeping the key
+  outside Secrets, against CLAUDE.md §5 and §7, so it stays. The prompt's words are the system's:
+  `SecretStore` first reads without interaction (`PreventInteraction`, answered
+  `CollectionIsLockedError` while locked), and while the prompt then waits with no window open a
+  notification says what it is for. Cancelled, it is the failed start's notification.
+  Lipstick restarting takes the prompt away too, and Secrets reports that the same as a real
+  Cancel (`InteractionViewUserCanceledError`, seen on a phone, issue #2). With no window open the
+  app asks once more after 10 s, as nothing else would. So a real Cancel in the background shows
+  the prompt one more time; with a window open the start's error page has Try again.
+- Lipstick going away ends the app whatever it is doing: Qt's Wayland plugin calls `::exit(1)`
+  when the connection breaks, so the app can't stay. Lipstick can restart soon after login (seen
+  a minute after it, issue #2). The unit therefore stays active after its call
+  (`RemainAfterExit=yes`): with `Requires=lipstick.service` a restart of lipstick, explicit or by
+  its `Restart=always`, restarts the unit too, and `After=` makes that wait until lipstick is up.
+  The window isn't brought back, only the background run.
 - With "Encrypt stored data" (ADR 0009) the background start can only show "Threesea is
   locked" until the passphrase is entered.
 - Chum itself builds from source on OBS, which needs Rust ≥ 1.95 (open question in CLAUDE.md §11).

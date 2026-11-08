@@ -543,6 +543,7 @@ async fn main() -> anyhow::Result<()> {
         },
         contacts: vec![],
         blocked_identities: vec![],
+        groups: vec![],
     });
     let csp_e2e_context = CspE2eProtocolContextInit {
         client_info: ClientInfo::Libthreema,

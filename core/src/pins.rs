@@ -24,15 +24,15 @@ impl Store {
     }
 
     fn save_pinned(&self, order: &[String]) -> Result<(), StoreError> {
-        let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute("DELETE FROM pinned_chats", [])?;
+        let step = self.step()?;
+        self.conn.execute("DELETE FROM pinned_chats", [])?;
         for (position, conversation) in order.iter().enumerate() {
-            transaction.execute(
+            self.conn.execute(
                 "INSERT INTO pinned_chats (conversation, position) VALUES (?1, ?2)",
                 params![conversation, i64::try_from(position).unwrap_or(i64::MAX)],
             )?;
         }
-        transaction.commit()?;
+        step.commit()?;
         Ok(())
     }
 

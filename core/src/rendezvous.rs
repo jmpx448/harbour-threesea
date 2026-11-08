@@ -28,6 +28,11 @@ const JOIN_PREFIX: &str = "threema://device-group/join#";
 const CHUNK: usize = 1024 * 1024;
 /// Time for the other device to answer on the relay.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time for one chunk to leave: a relay that stopped reading doesn't hold us up for ever. (One
+/// chunk, not one message: how long a message may take depends on its size.)
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Time for the goodbye on the relay.
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LinkError {
@@ -122,7 +127,14 @@ impl RendezvousLink {
             .try_into()
             .map_err(|_| LinkError::NotJoinCode)?;
         let pid = path.path_id;
-        let socket = Datagrams::connect(&path.url).await?;
+        let socket = timeout(CONNECT_TIMEOUT, Datagrams::connect(&path.url))
+            .await
+            .map_err(|_| LinkError::Timeout)??;
+        Self::over(socket, ak, pid).await
+    }
+
+    /// The handshake up to nomination over a connected relay.
+    async fn over(socket: Datagrams, ak: [u8; 32], pid: u32) -> Result<Self, LinkError> {
         let (protocol, initial) =
             RendezvousProtocol::new_as_rrd(true, RendezvousAuthenticationKey(ak), &[pid]);
         let mut link = Self {
@@ -146,7 +158,9 @@ impl RendezvousLink {
         bytes.extend_from_slice(&header);
         bytes.extend_from_slice(payload);
         for chunk in bytes.chunks(CHUNK) {
-            self.socket.send(chunk.to_vec()).await?;
+            timeout(WRITE_TIMEOUT, self.socket.send(chunk.to_vec()))
+                .await
+                .map_err(|_| LinkError::Timeout)??;
         }
         Ok(())
     }
@@ -217,8 +231,18 @@ impl RendezvousLink {
     }
 
     pub async fn close(self) {
-        self.socket.close().await;
+        let _ = timeout(CLOSE_TIMEOUT, self.socket.close()).await;
     }
+}
+
+/// A code as Threema for Desktop shows it, with this D2D protocol version.
+#[cfg(test)]
+pub(crate) fn test_join_code(d2d_protocol_version: u32) -> String {
+    tests::code(
+        Type::RequestToJoin(libthreema::protobuf::common::Unit {}),
+        d2d_protocol_version,
+        "wss://rendezvous-1.threema.ch/11/abc",
+    )
 }
 
 #[cfg(test)]
@@ -230,8 +254,9 @@ mod tests {
     };
 
     use super::*;
+    use libthreema::d2d_rendezvous::{RendezvousOutgoingFrame, RendezvousPathStateUpdate};
 
-    fn code(variant: Type, version: u32, url: &str) -> String {
+    pub(super) fn code(variant: Type, version: u32, url: &str) -> String {
         let offer = DeviceGroupJoinRequestOrOffer {
             version: 0,
             d2d_protocol_version: version,
@@ -307,5 +332,118 @@ mod tests {
             parse_join_code(&data_encoding::BASE64.encode(&web)),
             Err(LinkError::WebCode)
         ));
+    }
+
+    /// Threema for Desktop's side of the relay: the new device, the rendezvous initiator, which
+    /// leaves the nomination to us.
+    struct NewDevice {
+        socket: Datagrams,
+        protocol: RendezvousProtocol,
+        pid: u32,
+        rph: [u8; 32],
+    }
+
+    impl NewDevice {
+        async fn write(socket: &mut Datagrams, frame: &RendezvousOutgoingFrame) {
+            let (header, payload) = frame.encode();
+            socket.send([&header[..], payload].concat()).await.unwrap();
+        }
+
+        /// Up to the nomination; an error ends it as an app would, closing the connection.
+        async fn handshake(mut socket: Datagrams, ak: [u8; 32], pid: u32) -> Result<Self, String> {
+            let mut protocol =
+                RendezvousProtocol::new_as_rid(false, RendezvousAuthenticationKey(ak), &[pid]);
+            loop {
+                let chunk = socket.receive().await.map_err(|error| error.to_string())?;
+                protocol
+                    .add_chunks(pid, &[&chunk])
+                    .map_err(|error| error.to_string())?;
+                while let Some(result) = protocol
+                    .process_frame(pid)
+                    .map_err(|error| error.to_string())?
+                {
+                    if let Some(frame) = &result.outgoing_frame {
+                        Self::write(&mut socket, frame).await;
+                    }
+                    if let Some(RendezvousPathStateUpdate::Nominated { rph }) = result.state_update
+                    {
+                        return Ok(Self {
+                            socket,
+                            protocol,
+                            pid,
+                            rph: rph.0,
+                        });
+                    }
+                }
+            }
+        }
+
+        async fn receive(&mut self) -> Vec<u8> {
+            loop {
+                let chunk = self.socket.receive().await.unwrap();
+                self.protocol.add_chunks(self.pid, &[&chunk]).unwrap();
+                while let Some(result) = self.protocol.process_frame(self.pid).unwrap() {
+                    if let Some(data) = result.incoming_ulp_data {
+                        return data;
+                    }
+                }
+            }
+        }
+
+        async fn send(&mut self, data: Vec<u8>) {
+            let frame = self
+                .protocol
+                .create_ulp_frame(data)
+                .unwrap()
+                .outgoing_frame
+                .unwrap();
+            Self::write(&mut self.socket, &frame).await;
+        }
+    }
+
+    /// Both devices end up on the same path with the same emojis, and data goes both ways, the
+    /// essential data in chunks.
+    #[tokio::test(flavor = "current_thread")]
+    async fn linking_runs_both_ways_over_the_relay() {
+        let (ours, theirs) = crate::websocket::loopback().await;
+        let (link, device) = tokio::join!(
+            RendezvousLink::over(ours, [3; 32], 7),
+            NewDevice::handshake(theirs, [3; 32], 7)
+        );
+        let (mut link, mut device) = (link.unwrap(), device.unwrap());
+        assert_eq!(link.rph, device.rph);
+        assert_eq!(
+            link.emoji_indices(),
+            [0, 1, 2].map(|i| usize::from(device.rph[i] % 128))
+        );
+
+        let essential: Vec<u8> = (0..CHUNK * 5 / 2).map(|i| (i % 251) as u8).collect();
+        // The limit only keeps a defect from hanging the test run.
+        let ((), received) = timeout(
+            Duration::from_secs(120),
+            futures_util::future::join(
+                async { link.send(essential.clone()).await.unwrap() },
+                device.receive(),
+            ),
+        )
+        .await
+        .expect("the essential data never arrived whole");
+        assert!(received == essential, "the essential data, whole");
+
+        device.send(b"registered".to_vec()).await;
+        assert_eq!(link.receive().await.unwrap(), b"registered");
+    }
+
+    /// A new device with another key (a code from somewhere else) gets nowhere.
+    #[tokio::test(flavor = "current_thread")]
+    async fn another_key_ends_the_linking() {
+        let (ours, theirs) = crate::websocket::loopback().await;
+        let (link, device) = tokio::join!(
+            RendezvousLink::over(ours, [3; 32], 7),
+            NewDevice::handshake(theirs, [4; 32], 7)
+        );
+        assert!(device.is_err());
+        let error = link.err().expect("no link");
+        assert!(matches!(error, LinkError::Socket(_)), "{error}");
     }
 }

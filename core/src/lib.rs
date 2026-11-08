@@ -11,6 +11,8 @@ pub mod app;
 pub mod app_android_backup;
 pub mod app_calls;
 pub mod app_chat_export;
+#[cfg(test)]
+mod app_command_tests;
 pub mod app_contacts;
 pub mod app_group_calls;
 pub mod app_groups;
@@ -36,10 +38,14 @@ pub mod contacts;
 /// Made-up chats for the emulator build; never part of a device build (see `demo.rs`).
 #[cfg(feature = "demo")]
 pub mod demo;
+pub(crate) mod detached;
+pub(crate) mod dial;
 pub mod directory;
 pub mod distribution_lists;
 pub mod ffi;
+pub mod file_types;
 pub mod fs_store;
+pub mod gif;
 pub mod gifs;
 pub mod group_call_frames;
 pub mod group_call_handshake;
@@ -53,8 +59,10 @@ pub mod links;
 pub mod media;
 pub mod mentions;
 pub mod messages;
+pub mod mp4;
 pub mod multidevice;
 pub mod pins;
+pub(crate) mod places;
 pub mod polls;
 pub mod profile_pictures;
 pub mod providers;
@@ -71,6 +79,7 @@ pub mod transport;
 pub mod updates;
 pub mod voice;
 pub mod web;
+pub mod webp;
 pub mod websocket;
 
 /// Version of this crate, as reported to the UI.

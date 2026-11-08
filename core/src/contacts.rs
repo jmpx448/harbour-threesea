@@ -8,7 +8,7 @@
 
 use data_encoding::BASE64;
 use libthreema::{
-    common::{FeatureMask, ThreemaId, keys::PublicKey},
+    common::{FeatureMask, ThreemaId, config::Config, keys::PublicKey},
     https::HttpsResult,
     model::contact::{Contact, ContactInit},
     protobuf::d2d_sync::{
@@ -129,6 +129,15 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the user put `identity` on the block list.
+    pub fn is_explicitly_blocked(&self, identity: &str) -> Result<bool, StoreError> {
+        let settings = self.setting(crate::store::keys::APP_SETTINGS)?;
+        Ok(settings
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["blockedContacts"].as_array().cloned())
+            .is_some_and(|blocked| blocked.iter().any(|id| id.as_str() == Some(identity))))
+    }
+
     /// One contact.
     pub fn contact(&self, identity: &str) -> Result<Option<Contact>, StoreError> {
         Ok(self
@@ -164,6 +173,117 @@ pub enum Lookup {
     Found(Box<ContactInit>),
     /// Revoked or never existed.
     Invalid,
+    /// A predefined contact with a key other than its known one: a wrong answer, not to be used.
+    Refused,
+}
+
+/// Whether a contact's feature mask says it supports forward secrecy.
+#[must_use]
+pub fn has_fs_support(contact: &Contact) -> bool {
+    contact.feature_mask.0 & libthreema::common::FeatureMask::FORWARD_SECURITY_SUPPORT != 0
+}
+
+/// What a directory lookup says about a stored contact: its feature mask and activity state. A
+/// stored key is never replaced here. Returns whether something changed, and so has to be stored.
+pub fn apply_lookup(config: &Config, contact: &mut Contact, result: Lookup) -> bool {
+    let state = |c: &Contact| {
+        (
+            c.feature_mask.0,
+            c.activity_state,
+            c.identity_type,
+            c.verification_level,
+            c.nickname.clone(),
+        )
+    };
+    let before = state(contact);
+    match result {
+        Lookup::Found(fresh) => {
+            contact.feature_mask = fresh.feature_mask;
+            contact.activity_state = fresh.activity_state;
+            contact.identity_type = fresh.identity_type;
+        }
+        Lookup::Invalid => contact.activity_state = pc::ActivityState::Invalid,
+        // A wrong answer changes nothing.
+        Lookup::Refused => return false,
+    }
+    // Added before predefined contacts were pinned.
+    let _ = pin_predefined(config, contact);
+    before != state(contact)
+}
+
+/// What `identity/check` says about a stored contact, as Android's `ContactUpdateWorker` takes it:
+/// an unknown state or a missing mask leaves that part alone, and an inactive ID doesn't bring a
+/// revoked one back. Returns whether something changed.
+pub fn apply_identity_check(
+    config: &Config,
+    contact: &mut Contact,
+    check: crate::directory::IdentityCheck,
+) -> bool {
+    let state = |c: &Contact| {
+        (
+            c.feature_mask.0,
+            c.activity_state,
+            c.verification_level,
+            c.nickname.clone(),
+        )
+    };
+    let before = state(contact);
+    match check.state {
+        0 => contact.activity_state = pc::ActivityState::Active,
+        1 if contact.activity_state == pc::ActivityState::Active => {
+            contact.activity_state = pc::ActivityState::Inactive;
+        }
+        2 => contact.activity_state = pc::ActivityState::Invalid,
+        _ => {}
+    }
+    if let Some(mask) = check.feature_mask {
+        contact.feature_mask = FeatureMask(mask);
+    }
+    // Added before predefined contacts were pinned.
+    let _ = pin_predefined(config, contact);
+    before != state(contact)
+}
+
+impl Store {
+    /// What a directory lookup found for `identity`, on a fresh read of the contact: a lookup takes
+    /// a while, and a rename or a deletion meanwhile stands. The other devices get what changed,
+    /// to be told to reflect it by whoever gets `true`. Returns whether something changed.
+    pub fn store_lookup(
+        &self,
+        config: &Config,
+        identity: &str,
+        result: Lookup,
+    ) -> Result<bool, StoreError> {
+        let Some(mut contact) = self.contact(identity)? else {
+            return Ok(false);
+        };
+        let before = contact.clone();
+        let changed = apply_lookup(config, &mut contact, result);
+        if changed {
+            let step = self.step()?;
+            self.upsert_contact(&contact)?;
+            crate::sync::queue_directory_change(self, &before, &contact)?;
+            step.commit()?;
+        }
+        Ok(changed)
+    }
+}
+
+/// Threema's own contacts have a known key ([`Config::predefined_contacts`]): another one is refused
+/// (`false`), the right one counts as fully verified and brings the known nickname, like
+/// libthreema's lookup and Android's `requireValidContact`. Anyone else stays as they are.
+#[must_use]
+pub fn pin_predefined(config: &Config, c: &mut ContactInit) -> bool {
+    let Some(predefined) = config.predefined_contacts.get(&c.identity) else {
+        return true;
+    };
+    if predefined.public_key != c.public_key {
+        tracing::warn!("predefined contact with another key refused");
+        return false;
+    }
+    c.verification_level = pc::VerificationLevel::FullyVerified;
+    c.nickname = Some(predefined.nickname.clone());
+    true
 }
 
 #[derive(Deserialize)]
@@ -187,9 +307,7 @@ fn parse_fetch_bulk(result: HttpsResult) -> Result<Vec<FetchedIdentity>, Directo
     let response = result?;
     match response.status {
         200 => Ok(serde_json::from_slice::<Response>(&response.body)?.identities),
-        429 => Err(DirectoryError::Server(
-            "Too many requests, please try again later.".into(),
-        )),
+        429 => Err(DirectoryError::RateLimited),
         status => Err(DirectoryError::Status(status)),
     }
 }
@@ -239,10 +357,30 @@ fn contact_init(entry: &FetchedIdentity) -> Option<ContactInit> {
     })
 }
 
+/// `state` in a directory answer: revoked. Android's `ValidContactsLookupSteps` takes it as invalid.
+const DIRECTORY_STATE_INVALID: u8 = 2;
+
+/// What the directory's answer says about `id`.
+fn lookup_result(config: &Config, fetched: &[FetchedIdentity], id: &str) -> Lookup {
+    let found = fetched
+        .iter()
+        .find(|f| f.identity == id && f.state != DIRECTORY_STATE_INVALID)
+        .and_then(contact_init);
+    let Some(mut contact) = found else {
+        return Lookup::Invalid;
+    };
+    if pin_predefined(config, &mut contact) {
+        Lookup::Found(Box::new(contact))
+    } else {
+        Lookup::Refused
+    }
+}
+
 /// `POST identity/fetch_bulk` for up to a few hundred IDs. IDs missing from the answer are
 /// invalid (revoked or never existed).
 pub async fn lookup(
     client: &HttpsClient,
+    config: &Config,
     identities: &[String],
 ) -> Result<Vec<(String, Lookup)>, DirectoryError> {
     let mut results = Vec::with_capacity(identities.len());
@@ -256,14 +394,7 @@ pub async fn lookup(
                 .await,
         )?;
         for id in chunk {
-            let found = fetched
-                .iter()
-                .find(|f| &f.identity == id)
-                .and_then(contact_init);
-            results.push((
-                id.clone(),
-                found.map_or(Lookup::Invalid, |c| Lookup::Found(Box::new(c))),
-            ));
+            results.push((id.clone(), lookup_result(config, &fetched, id)));
         }
     }
     Ok(results)
@@ -311,10 +442,149 @@ pub fn sort_key(c: &Contact, by_last_name: bool) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if name.is_empty() {
-        display_name(c).trim_start_matches('~').to_lowercase()
+        folded(display_name(c).trim_start_matches('~'))
     } else {
-        name.to_lowercase()
+        folded(&name)
     }
+}
+
+/// Letters that sort as other letters, lower case: what a primary-strength collator (Android's
+/// contact list) does for the alphabets names here mostly come in. All Latin letters with a mark,
+/// ligatures and a few more that stand for a base letter, then Greek and Cyrillic where the accent
+/// isn't a letter of its own. By hand: this one list doesn't justify a new dependency and Unicode's
+/// normalization tables in the package.
+const FOLDED: &[(&str, &str)] = &[
+    ("ªàáâãäåāăąǎǟǡǻȁȃȧḁẚạảấầẩẫậắằẳẵặ", "a"),
+    ("æǣǽ", "ae"),
+    ("ƀƃɓḃḅḇ", "b"),
+    ("çćĉċčƈȼɕḉ", "c"),
+    ("ðďđƌȡɖɗḋḍḏḑḓ", "d"),
+    ("ȸ", "db"),
+    ("ǆǳ", "dz"),
+    ("ǝəɛèéêëēĕėęěȅȇȩɇḕḗḙḛḝẹẻẽếềểễệ", "e"),
+    ("ƒḟ", "f"),
+    ("ﬀ", "ff"),
+    ("ﬃ", "ffi"),
+    ("ﬄ", "ffl"),
+    ("ﬁ", "fi"),
+    ("ﬂ", "fl"),
+    ("ĝğġģǥǧǵɠḡ", "g"),
+    ("ĥħȟɦḣḥḧḩḫẖ", "h"),
+    ("ƕ", "hv"),
+    ("ìíîïĩīĭįıǐȉȋɨḭḯỉị", "i"),
+    ("ĳ", "ij"),
+    ("ĵǰȷɉɟʄʝ", "j"),
+    ("ķƙǩḱḳḵ", "k"),
+    ("ĺļľŀłƚȴɫɬɭḷḹḻḽ", "l"),
+    ("ǉ", "lj"),
+    ("ɱḿṁṃ", "m"),
+    ("ñńņňŉŋƞǹȵɲɳṅṇṉṋ", "n"),
+    ("ǌ", "nj"),
+    ("ɔºòóôõöøōŏőơǒǫǭǿȍȏȫȭȯȱṍṏṑṓọỏốồổỗộớờởỡợ", "o"),
+    ("œ", "oe"),
+    ("ƣ", "oi"),
+    ("ȣ", "ou"),
+    ("ƥṕṗ", "p"),
+    ("ĸɋʠ", "q"),
+    ("ȹ", "qp"),
+    ("ŕŗřȑȓɍɼɽɾṙṛṝṟ", "r"),
+    ("śŝşšſșȿʂṡṣṥṧṩẛẜẝ", "s"),
+    ("ß", "ss"),
+    ("ﬅﬆ", "st"),
+    ("ţťŧƫƭțȶʈṫṭṯṱẗ", "t"),
+    ("þ", "th"),
+    ("ùúûüũūŭůűųưǔǖǘǚǜȕȗṳṵṷṹṻụủứừửữự", "u"),
+    ("ʋṽṿ", "v"),
+    ("ŵẁẃẅẇẉẘ", "w"),
+    ("ẋẍ", "x"),
+    ("ýÿŷƴȳɏẏẙỳỵỷỹỿ", "y"),
+    ("źżžƶȥɀʐʑẑẓẕ", "z"),
+    ("ά", "α"),
+    ("έ", "ε"),
+    ("ή", "η"),
+    ("ίϊΐ", "ι"),
+    ("ό", "ο"),
+    ("ς", "σ"),
+    ("ύϋΰ", "υ"),
+    ("ώ", "ω"),
+    ("ёѐ", "е"),
+    ("ѓ", "г"),
+    ("ќ", "к"),
+    ("ѝ", "и"),
+];
+
+/// Cyrillic letters that only look like a base letter with a mark: typed as two characters they
+/// are still the letter they are as one.
+const COMPOSED: &[(char, char, char)] = &[
+    ('и', '\u{306}', 'й'),
+    ('у', '\u{306}', 'ў'),
+    ('і', '\u{308}', 'ї'),
+];
+
+/// What is searched for by name, word by word: any order, any case, accents or none.
+pub fn name_query(query: &str) -> Vec<String> {
+    folded(query)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether each word of a `name_query` is somewhere in these names. No words: no match.
+pub fn names_match<'a>(query: &[String], names: impl IntoIterator<Item = &'a str>) -> bool {
+    let names: Vec<String> = names.into_iter().map(folded).collect();
+    !query.is_empty()
+        && query
+            .iter()
+            .all(|word| names.iter().any(|name| name.contains(word.as_str())))
+}
+
+/// All a contact goes by: what `names_match` looks through.
+pub fn all_names(c: &Contact) -> impl Iterator<Item = &str> {
+    [
+        c.first_name.as_deref(),
+        c.last_name.as_deref(),
+        c.nickname.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// `text` in lower case with its letters' accents taken off, also those typed as a mark of their
+/// own after the letter, so that names sort as the alphabet does, whatever their accents.
+fn folded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for letter in text.chars().flat_map(char::to_lowercase) {
+        if letter.is_ascii() {
+            out.push(letter);
+        } else if let Some((_, _, whole)) = COMPOSED
+            .iter()
+            .find(|(base, mark, _)| *mark == letter && out.ends_with(*base))
+        {
+            out.pop();
+            out.push(*whole);
+        } else if !('\u{300}'..='\u{36f}').contains(&letter) {
+            match FOLDED.iter().find(|(from, _)| from.contains(letter)) {
+                Some((_, to)) => out.push_str(to),
+                None => out.push(letter),
+            }
+        }
+    }
+    out
+}
+
+/// The section a [`sort_key`] files under: its first letter, or `#` for all the rest (digits,
+/// signs, emoji), like Jolla People. Only a capital that folds back to the very letter the key
+/// sorts by: a letter whose capital is another letter's would make a second section of that one.
+pub fn section(sort_key: &str) -> String {
+    sort_key
+        .chars()
+        .next()
+        .filter(|first| first.is_alphabetic())
+        .and_then(|first| {
+            let capital = first.to_uppercase().next()?;
+            (folded(&capital.to_string()) == first.to_string()).then_some(capital)
+        })
+        .map_or_else(|| "#".to_owned(), String::from)
 }
 
 /// JSON for the UI.
@@ -340,8 +610,10 @@ pub fn to_json(c: &Contact) -> Value {
         "canEdit": c.feature_mask.0 & libthreema::common::FeatureMask::EDIT_MESSAGE_SUPPORT != 0,
         "canDelete": c.feature_mask.0 & libthreema::common::FeatureMask::DELETE_MESSAGE_SUPPORT != 0,
         "canPoll": c.feature_mask.0 & libthreema::common::FeatureMask::POLL_SUPPORT != 0,
-        "canCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_AUDIO_CALL_SUPPORT != 0,
-        "canVideoCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_VIDEO_CALL_SUPPORT != 0,
+        "canCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_AUDIO_CALL_SUPPORT != 0
+            && c.activity_state != pc::ActivityState::Invalid,
+        "canVideoCall": c.feature_mask.0 & libthreema::common::FeatureMask::O2O_VIDEO_CALL_SUPPORT != 0
+            && c.activity_state != pc::ActivityState::Invalid,
         // 32-byte key, shown as fingerprint-like groups in the UI.
         "publicKey": c.public_key.to_string(),
         // This contact's own choice (Android): 0 like the app setting, 1 send, 2 don't send.
@@ -376,22 +648,32 @@ pub fn typing_policy(choice: u8) -> Option<TypingIndicatorPolicy> {
 }
 
 /// Apply a Threema Safe contact entry to a freshly looked-up contact (`ThreemaSafeServiceImpl`
-/// restore): names, verification (level 2 only if the backed-up key matches), hidden flag,
-/// creation time and receipt/typing overrides.
+/// restore): names, verification, hidden flag, creation time and receipt/typing overrides.
+///
+/// A contact verified in person keeps the key from the backup and its level, also if the directory
+/// answers with another one: that is exactly what the verification is for. Anyone else starts out
+/// unverified with the directory's key, since a backup carries no key to compare for them;
+/// address book matching raises them again.
 pub fn apply_backup(mut c: ContactInit, b: &backup::Contact) -> ContactInit {
     c.first_name = b.firstname.clone().filter(|s| !s.is_empty());
     c.last_name = b.lastname.clone().filter(|s| !s.is_empty());
     c.nickname = b.nickname.clone().filter(|s| !s.is_empty());
-    let key_matches = b
-        .publickey
-        .as_deref()
+    let verified_key = (b.verification == 2)
+        .then_some(b.publickey.as_deref())
+        .flatten()
         .and_then(|k| BASE64.decode(k.as_bytes()).ok())
-        .is_some_and(|k| k.as_slice() == hex_bytes(&c.public_key.to_string()).as_slice());
-    c.verification_level = match b.verification {
-        2 if key_matches => pc::VerificationLevel::FullyVerified,
-        1 | 2 => pc::VerificationLevel::ServerVerified,
-        _ => pc::VerificationLevel::Unverified,
-    };
+        .and_then(|k| <[u8; PublicKey::LENGTH]>::try_from(k).ok())
+        .map(PublicKey::from);
+    match verified_key {
+        Some(key) => {
+            if key != c.public_key {
+                tracing::warn!("restored verified contact differs from the directory, key kept");
+            }
+            c.public_key = key;
+            c.verification_level = pc::VerificationLevel::FullyVerified;
+        }
+        None => c.verification_level = pc::VerificationLevel::Unverified,
+    }
     if b.work_verified {
         c.work_verification_level = pc::WorkVerificationLevel::WorkSubscriptionVerified;
     }
@@ -424,6 +706,17 @@ pub(crate) fn hex_bytes(hex: &str) -> Vec<u8> {
     data_encoding::HEXLOWER_PERMISSIVE
         .decode(hex.as_bytes())
         .unwrap_or_default()
+}
+
+/// The directory's match answer names another key than the stored one for this contact. "Verified
+/// by the server" doesn't hold any more (Android's `SynchronizeAndroidContactsUseCase`); a contact
+/// verified in person stays as it is. Returns whether the level changed.
+pub fn distrust_changed_key(c: &mut ContactInit) -> bool {
+    if c.verification_level == pc::VerificationLevel::ServerVerified {
+        c.verification_level = pc::VerificationLevel::Unverified;
+        return true;
+    }
+    false
 }
 
 /// A stored contact as a Threema Safe entry (`ThreemaSafeServiceImpl` backup writer).
@@ -495,6 +788,54 @@ mod tests {
     }
 
     #[test]
+    fn a_lookup_updates_the_mask_and_state_and_nothing_else_of_a_stored_contact() {
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let mut stored = contact_init(&entry("ABCD1234")).unwrap();
+        let key = stored.public_key;
+
+        let mut dropped = entry("ABCD1234");
+        dropped.feature_mask = 0;
+        dropped.public_key = BASE64.encode(&[8; 32]);
+        let fresh = Box::new(contact_init(&dropped).unwrap());
+        assert!(apply_lookup(
+            &config,
+            &mut stored,
+            Lookup::Found(fresh.clone())
+        ));
+        assert_eq!(stored.feature_mask.0, 0);
+        assert!(stored.public_key == key, "a stored key is never replaced");
+        assert!(!apply_lookup(&config, &mut stored, Lookup::Found(fresh)));
+
+        assert!(!apply_lookup(&config, &mut stored, Lookup::Refused));
+        assert_eq!(stored.activity_state, pc::ActivityState::Active);
+        assert!(apply_lookup(&config, &mut stored, Lookup::Invalid));
+        assert_eq!(stored.activity_state, pc::ActivityState::Invalid);
+    }
+
+    #[test]
+    fn a_lookup_stands_only_for_what_it_found_on_the_contact_as_it_is_now() {
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let mut dropped = entry("ABCD1234");
+        dropped.feature_mask = 0;
+        let found = || Lookup::Found(Box::new(contact_init(&dropped).unwrap()));
+
+        // Deleted while the lookup was on the way: it doesn't come back.
+        assert!(!store.store_lookup(&config, "ABCD1234", found()).unwrap());
+        assert!(store.contact("ABCD1234").unwrap().is_none());
+
+        // Renamed meanwhile: the name stands.
+        let mut contact = contact_init(&entry("ABCD1234")).unwrap();
+        contact.first_name = Some("Anna".into());
+        store.upsert_contact(&contact).unwrap();
+        assert!(store.store_lookup(&config, "ABCD1234", found()).unwrap());
+        let stored = store.contact("ABCD1234").unwrap().unwrap();
+        assert_eq!(stored.first_name.as_deref(), Some("Anna"));
+        assert_eq!(stored.feature_mask.0, 0);
+    }
+
+    #[test]
     fn sort_keys() {
         let mut c = contact_init(&entry("ECHOECHO")).unwrap();
         c.first_name = Some("Anna".into());
@@ -505,6 +846,67 @@ mod tests {
         c.last_name = None;
         c.nickname = Some("Echo".into());
         assert_eq!(sort_key(&c, true), "echo");
+    }
+
+    #[test]
+    fn accents_sort_and_file_under_their_letter() {
+        for (name, key, letter) in [
+            ("Ärne", "arne", "A"),
+            ("Émile", "emile", "E"),
+            ("Özlem", "ozlem", "O"),
+            ("Ørjan", "orjan", "O"),
+            ("Łukasz", "lukasz", "L"),
+            ("Straße", "strasse", "S"),
+            // A base letter and its accent as two characters.
+            ("A\u{308}rne", "arne", "A"),
+            ("İpek", "ipek", "I"),
+            ("Ёлка", "елка", "Е"),
+            ("Άννα", "αννα", "Α"),
+            // Latin letters with a mark, wherever Unicode has them, and ligatures.
+            ("Ṣade", "sade", "S"),
+            ("Ḍiya", "diya", "D"),
+            ("Ḿaria", "maria", "M"),
+            ("ǖlo", "ulo", "U"),
+            ("ȧda", "ada", "A"),
+            ("ƒelix", "felix", "F"),
+            ("ĳsbrand", "ijsbrand", "I"),
+            ("ﬁona", "fiona", "F"),
+            ("ſara", "sara", "S"),
+            ("Əli", "eli", "E"),
+            // Letters of their own stay that, however they were typed.
+            ("Йоанн", "йоанн", "Й"),
+            ("И\u{306}оанн", "йоанн", "Й"),
+            ("Їжак", "їжак", "Ї"),
+            ("Анна", "анна", "А"),
+        ] {
+            let mut c = contact_init(&entry("ECHOECHO")).unwrap();
+            c.first_name = Some(name.into());
+            let found = sort_key(&c, false);
+            assert_eq!(found, key, "{name}");
+            assert_eq!(section(&found), letter, "{name}");
+        }
+    }
+
+    /// Every letter the table folds sorts among the base letters, and a capital that isn't what
+    /// the key sorts by never gives a section.
+    #[test]
+    fn the_table_leads_only_to_what_sorts_in_the_alphabet() {
+        for (from, to) in FOLDED {
+            assert!(!to.is_empty());
+            for letter in from.chars() {
+                assert_eq!(folded(&letter.to_string()), *to, "{letter}");
+                let first = to.chars().next().unwrap();
+                assert_ne!(section(to), "#", "{letter}");
+                assert_eq!(section(&first.to_string()), section(to));
+            }
+        }
+    }
+
+    #[test]
+    fn everything_but_letters_files_under_one_section() {
+        for name in ["42", "😀 Party", "(Anna)", ""] {
+            assert_eq!(section(&folded(name)), "#", "{name}");
+        }
     }
 
     #[test]
@@ -559,13 +961,91 @@ mod tests {
         assert_eq!(again.publickey, b.publickey);
         assert_eq!(again.read_receipts, 2);
 
-        // Level 2 with a different key is downgraded.
+        // Level 2 with a different key: the backup's key, still verified, not the directory's.
         let mut other = b.clone();
         other.publickey = Some(BASE64.encode(&[8; 32]));
+        let restored = apply_backup(c.clone(), &other);
         assert_eq!(
-            apply_backup(c, &other).verification_level,
-            pc::VerificationLevel::ServerVerified
+            restored.verification_level,
+            pc::VerificationLevel::FullyVerified
         );
+        assert_eq!(restored.public_key, PublicKey::from([8; 32]));
+
+        // Level 2 without a usable key, and level 1: the directory's key, unverified.
+        for (verification, key) in [
+            (2, None),
+            (2, Some(BASE64.encode(&[8; 31]))),
+            (1, Some(BASE64.encode(&[8; 32]))),
+            (1, None),
+        ] {
+            let mut other = b.clone();
+            other.verification = verification;
+            other.publickey = key;
+            let restored = apply_backup(c.clone(), &other);
+            assert_eq!(
+                restored.verification_level,
+                pc::VerificationLevel::Unverified
+            );
+            assert_eq!(restored.public_key, c.public_key);
+        }
+    }
+
+    #[test]
+    fn predefined_contacts_are_pinned() {
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let id = ThreemaId::try_from("*3MATOKN").unwrap();
+        let known = config.predefined_contacts.get(&id).unwrap();
+
+        // What the directory says about it decides nothing but whether it is used.
+        let answer = |key: &[u8]| FetchedIdentity {
+            public_key: BASE64.encode(key),
+            ..entry("*3MATOKN")
+        };
+        let right = hex_bytes(&known.public_key.to_string());
+        let Lookup::Found(contact) = lookup_result(&config, &[answer(&right)], "*3MATOKN") else {
+            panic!("the right key is taken");
+        };
+        assert_eq!(
+            contact.verification_level,
+            pc::VerificationLevel::FullyVerified
+        );
+        assert_eq!(contact.nickname.as_deref(), Some(known.nickname.as_str()));
+        assert!(matches!(
+            lookup_result(&config, &[answer(&[9; 32])], "*3MATOKN"),
+            Lookup::Refused
+        ));
+        assert!(matches!(
+            lookup_result(&config, &[], "*3MATOKN"),
+            Lookup::Invalid
+        ));
+
+        // Restored from a backup, as unverified or with another key: the same.
+        let mut restored = *contact;
+        restored.verification_level = pc::VerificationLevel::Unverified;
+        assert!(pin_predefined(&config, &mut restored));
+        assert_eq!(
+            restored.verification_level,
+            pc::VerificationLevel::FullyVerified
+        );
+        restored.public_key = PublicKey::from([9; 32]);
+        assert!(!pin_predefined(&config, &mut restored));
+
+        // Everyone else stays as they are.
+        let mut other = contact_init(&entry("ABCD1234")).unwrap();
+        assert!(pin_predefined(&config, &mut other));
+        assert_eq!(other.verification_level, pc::VerificationLevel::Unverified);
+    }
+
+    #[test]
+    fn a_changed_key_takes_the_servers_verification_only() {
+        let mut c = contact_init(&entry("ABCD1234")).unwrap();
+        c.verification_level = pc::VerificationLevel::ServerVerified;
+        assert!(distrust_changed_key(&mut c));
+        assert_eq!(c.verification_level, pc::VerificationLevel::Unverified);
+        assert!(!distrust_changed_key(&mut c), "nothing more to take");
+        c.verification_level = pc::VerificationLevel::FullyVerified;
+        assert!(!distrust_changed_key(&mut c));
+        assert_eq!(c.verification_level, pc::VerificationLevel::FullyVerified);
     }
 
     #[test]
@@ -577,6 +1057,68 @@ mod tests {
         c.first_name = Some("Eve".into());
         c.last_name = Some("Echo".into());
         assert_eq!(display_name(&c), "Eve Echo");
+    }
+
+    #[test]
+    fn an_identity_check_changes_what_it_knows_about() {
+        use crate::directory::IdentityCheck;
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let mut contact = test_contact("BBBBBBBB");
+        let check = |state, feature_mask| IdentityCheck {
+            state,
+            feature_mask,
+        };
+        assert!(apply_identity_check(
+            &config,
+            &mut contact,
+            check(1, Some(7))
+        ));
+        assert_eq!(contact.activity_state, pc::ActivityState::Inactive);
+        assert_eq!(contact.feature_mask.0, 7);
+        // Nothing new, an unknown state, no mask.
+        assert!(!apply_identity_check(
+            &config,
+            &mut contact,
+            check(1, Some(7))
+        ));
+        assert!(!apply_identity_check(&config, &mut contact, check(9, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Inactive);
+        assert_eq!(contact.feature_mask.0, 7);
+        // Revoked keeps the mask it had; inactive doesn't undo that, active does.
+        assert!(apply_identity_check(&config, &mut contact, check(2, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Invalid);
+        assert_eq!(contact.feature_mask.0, 7);
+        assert!(!apply_identity_check(&config, &mut contact, check(1, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Invalid);
+        assert!(apply_identity_check(&config, &mut contact, check(0, None)));
+        assert_eq!(contact.activity_state, pc::ActivityState::Active);
+    }
+
+    #[test]
+    fn an_id_the_directory_says_is_revoked_is_invalid() {
+        let answer = |state: u8| {
+            let body = format!(
+                r#"{{"identities":[{{"identity":"ABCD1234","publicKey":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=","state":{state}}}]}}"#
+            );
+            parse_fetch_bulk(Ok(libthreema::https::HttpsResponse {
+                status: 200,
+                body: body.into_bytes(),
+            }))
+            .unwrap()
+        };
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        assert!(matches!(
+            lookup_result(&config, &answer(0), "ABCD1234"),
+            Lookup::Found(_)
+        ));
+        assert!(matches!(
+            lookup_result(&config, &answer(1), "ABCD1234"),
+            Lookup::Found(_)
+        ));
+        assert!(matches!(
+            lookup_result(&config, &answer(2), "ABCD1234"),
+            Lookup::Invalid
+        ));
     }
 
     #[test]
@@ -602,7 +1144,8 @@ mod live_tests {
     #[ignore = "contacts the real Threema directory server"]
     async fn echoecho_exists_and_bogus_id_is_invalid() {
         let client = HttpsClient::new().unwrap();
-        let results = lookup(&client, &["ECHOECHO".into(), "ZZZZZZZ9".into()])
+        let config = Config::from(libthreema::common::config::ConfigEnvironment::Production);
+        let results = lookup(&client, &config, &["ECHOECHO".into(), "ZZZZZZZ9".into()])
             .await
             .unwrap();
         let Lookup::Found(echo) = &results[0].1 else {

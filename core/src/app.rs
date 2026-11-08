@@ -14,9 +14,12 @@ use libthreema::{
         config::{Config, ConfigEnvironment, Flavor},
         keys::ClientKey,
     },
-    csp_e2e::identity::create::{
-        CreateIdentityContext, CreateIdentityLoop, CreateIdentityResponse, CreateIdentityResult,
-        CreateIdentityTask, SerialLicense,
+    csp_e2e::{
+        CspE2eProtocolError,
+        identity::create::{
+            CreateIdentityContext, CreateIdentityLoop, CreateIdentityResponse,
+            CreateIdentityResult, CreateIdentityTask, SerialLicense,
+        },
     },
     id_backup::{IdentityBackupData, decrypt_identity_backup, encrypt_identity_backup},
 };
@@ -25,6 +28,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::{
+    detached::Lane,
     directory::{self, ClientVersion, DirectoryError},
     https::HttpsClient,
     store::{Store, StoreError, StoredIdentity, keys},
@@ -35,6 +39,9 @@ pub const MIN_BACKUP_PASSWORD_LENGTH: usize = 8;
 
 /// How often a running app asks the directory about its license.
 const LICENSE_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// How often maintenance runs while the app does.
+pub(crate) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// A check is due without an earlier one, after the interval, and when the clock went backwards.
 fn license_check_due(checked_at: Option<i64>, now: i64) -> bool {
@@ -84,6 +91,8 @@ pub enum Command {
     },
     /// The stored license key and why Threema's directory refused it, if it did.
     LicenseStatus,
+    /// Forget the stored license key, to enter another. Only on a device without an ID.
+    ForgetLicense,
     /// Whether this chat offers a spam report.
     SpamPotential {
         identity: String,
@@ -108,6 +117,8 @@ pub enum Command {
     /// Export the own ID as an ID backup string.
     ExportIdentityBackup {
         password: Zeroizing<String>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Rate a prospective Threema Safe password (`tooShort|tooLong|weak|ok`).
     SafeCheckPassword {
@@ -118,11 +129,17 @@ pub enum Command {
     /// Enable Threema Safe with a password and upload a first backup.
     SafeEnable {
         password: Zeroizing<String>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Upload a backup now.
     SafeBackupNow,
-    /// Disable Threema Safe and forget the key (the server copy expires by itself).
-    SafeDisable,
+    /// Disable Threema Safe: delete the backup from the server, then forget the key. Disabled even
+    /// if the deletion fails; the reply's `serverCopyDeleted` says how it went.
+    SafeDisable {
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
+    },
     /// Restore an ID (and profile, contacts, groups, settings) from Threema Safe.
     SafeRestore {
         identity: String,
@@ -130,6 +147,14 @@ pub enum Command {
     },
     /// Try the rest of a restored backup's import (contacts, groups, lists) now.
     SafeRetryImport,
+    SafeDeclineSetup,
+    DismissDataImportHint,
+    SafeSearchId {
+        #[serde(default)]
+        phone: String,
+        #[serde(default)]
+        email: String,
+    },
     /// Look into an Android data backup (ZIP) on the device: format version, whether it
     /// belongs to the running identity, and what it holds. Local only; nothing is imported.
     AndroidBackupInspect {
@@ -140,6 +165,10 @@ pub enum Command {
     /// `metadata` = contacts, groups, distribution lists and pictures (offline, no sending
     /// side effects, synchronous); `history` = messages, media and reactions as a background
     /// job reporting `androidBackupProgress`/`androidBackupDone` events.
+    AndroidBackupRestore {
+        path: String,
+        password: Zeroizing<String>,
+    },
     AndroidBackupImport {
         path: String,
         password: Zeroizing<String>,
@@ -154,6 +183,8 @@ pub enum Command {
     AndroidBackupExport {
         directory: Option<String>,
         password: Option<Zeroizing<String>>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Configure automatic Android-format backups: folder, password (kept in the encrypted
     /// store so unattended runs can use it), interval (`off`/`daily`/`weekly`) and how many
@@ -163,6 +194,8 @@ pub enum Command {
         password: Option<Zeroizing<String>>,
         interval: Option<String>,
         keep: Option<u32>,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// The automatic-backup settings and the last run.
     AndroidBackupExportStatus,
@@ -200,6 +233,8 @@ pub enum Command {
     /// Own profile (ID, nickname, public key).
     Profile,
     /// Change the own nickname.
+    /// The user turned down the question for a nickname.
+    DeclineNickname,
     SetNickname {
         nickname: String,
     },
@@ -215,14 +250,22 @@ pub enum Command {
     LinkEmail {
         email: String,
     },
-    /// Link a phone number (national numbers use the device's region; empty: unlink). Threema
-    /// sends an SMS with a code: `linkedMobilePending` until `verifyMobile`.
+    /// Link a phone number (with its country code; empty: unlink). Threema sends an SMS with a
+    /// code: `linkedMobilePending` until `verifyMobile`.
     LinkMobile {
+        number: String,
+    },
+    /// What `LinkMobile` would make of a number (`null`: it can't be linked), for showing it
+    /// first. No network.
+    NormalizeMobile {
         number: String,
     },
     /// The SMS code of a pending phone link.
     VerifyMobile {
         code: String,
+        /// From the link in Threema's SMS.
+        #[serde(default)]
+        from_link: bool,
     },
     /// Have Threema call and read the code instead.
     CallMobile,
@@ -235,9 +278,14 @@ pub enum Command {
     /// Set the revocation password (8–256 characters; only a 4-byte hash goes to Threema).
     SetRevocationPassword {
         password: String,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// Delete the ID and all local data.
-    DeleteAllData,
+    DeleteAllData {
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
+    },
     /// The chat list; `archived`: the archived chats instead; `private`: the private chats
     /// (only while unlocked). The result also has `archivedCount` and `privateCount`.
     Conversations {
@@ -246,6 +294,14 @@ pub enum Command {
         #[serde(default)]
         private: bool,
     },
+    /// Chats and contacts by name or ID, private chats only while unlocked:
+    /// `{chats: [...], contacts: [...]}`.
+    FindChats {
+        query: String,
+    },
+    /// What the cover shows, without the list: `{unreadTotal, unreadFrom, unreadChat}` as in
+    /// `Conversations`.
+    UnreadSummary,
     /// `{lock: {keyboard, appLock, graceSecs} | null, unlocked, graceTimes}`
     /// (ADR 0009).
     LockStatus,
@@ -273,7 +329,12 @@ pub enum Command {
         private_chats: bool,
     },
     /// Lock again (grace time over, private chats left).
-    Lock,
+    /// Hide the private chats. `pendingFiles` (`{chat: count}`): files already on their way to
+    /// this core from a chat being left, which `sendFile` still takes ([`crate::app_media::WritePass`]).
+    Lock {
+        #[serde(default)]
+        pending_files: Option<std::collections::HashMap<String, u32>>,
+    },
     /// Mark a chat private or not (needs a lock; unmarking needs the app unlocked).
     SetPrivate {
         identity: String,
@@ -307,9 +368,9 @@ pub enum Command {
     Messages {
         identity: String,
         limit: Option<u32>,
-        /// Also everything newer than this message (local id), e.g. a search hit.
+        /// A window of `limit` messages around this one (local id), e.g. a search hit.
         #[serde(default)]
-        since: Option<i64>,
+        around: Option<i64>,
         /// Only the page before this message (local id) in history: scrolling back.
         #[serde(default)]
         before: Option<i64>,
@@ -369,6 +430,10 @@ pub enum Command {
         /// `opus`: attachment 0 is 16-bit mono PCM at 48 kHz, to be sent as Ogg Opus.
         #[serde(default)]
         encode: Option<String>,
+        /// The user said so: a video to send as media whose metadata can't be taken out goes as
+        /// a plain file, as it is. Without this it is refused.
+        #[serde(default)]
+        keep_metadata: bool,
     },
     /// Save a file message's file (decrypted) into `directory`; returns `{path}`.
     SaveFile {
@@ -379,8 +444,18 @@ pub enum Command {
     RetryUpload {
         message: i64,
     },
-    /// All groups.
-    Groups,
+    /// Send a failed message again, under a new message ID.
+    ResendMessage {
+        message: i64,
+    },
+    /// Stop a running upload or file download.
+    CancelTransfer {
+        message: i64,
+    },
+    /// Decrypted copies of files for another app.
+    ShareFiles {
+        messages: Vec<i64>,
+    },
     /// One group (`key`: its conversation key).
     Group {
         key: String,
@@ -407,6 +482,9 @@ pub enum Command {
     /// Address book entries to look up on Threema (hashed).
     MatchAddressBook {
         entries: Vec<crate::address_book::Entry>,
+        /// The hourly sync, not the user's request.
+        #[serde(default)]
+        automatic: bool,
     },
     /// Send a location: `latitude`, `longitude` (degrees), optional `accuracy` (m), `name`,
     /// `address`. Returns the outgoing message.
@@ -420,6 +498,14 @@ pub enum Command {
         name: Option<String>,
         #[serde(default)]
         address: Option<String>,
+    },
+    /// Places from Threema's map server around a position: by name with `query`, else nearby.
+    /// Returns `{places: [{name, latitude, longitude, distance}]}`.
+    FindPlaces {
+        latitude: f64,
+        longitude: f64,
+        #[serde(default)]
+        query: Option<String>,
     },
     /// Block (or unblock) a Threema ID: its messages are discarded and we cannot write to it.
     /// Returns the contact JSON if it is a contact, else `{}`.
@@ -464,26 +550,29 @@ pub enum Command {
         identity: String,
         offset: i64,
     },
-    /// Send a message (text or file) again to another chat; returns the new message.
-    ForwardMessage {
-        message: i64,
-        identity: String,
-    },
-    /// The unsent text of a chat's input (empty: none), kept like Android's drafts; returned as
-    /// `draft` in `conversations` and `draft` (`{text}`).
+    /// The unsent text of a chat's input (empty: none), with its mentions as `@[ID]` and the
+    /// message it quotes (message id, hex), kept like Android's drafts; returned as `draft` and
+    /// `draftMentions` in `conversations` and by `draft`. A send of the same text takes it away.
     SetDraft {
         identity: String,
         text: String,
+        #[serde(default)]
+        quote: Option<String>,
     },
     Draft {
         identity: String,
     },
-    /// A chat's media gallery, newest first: `{messages (with mediaKind), kinds, counts}`.
-    /// `kinds` filters (default: the saved filter, see `setMediaKinds`).
+    /// A page of a chat's media gallery, newest first: `{messages (with mediaKind), kinds, counts,
+    /// next}`. `kinds` filters (default: the saved filter, see `setMediaKinds`); `before` is the
+    /// `next` of the page before.
     ChatMedia {
         identity: String,
         #[serde(default)]
         kinds: Option<Vec<String>>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        before: Option<String>,
     },
     /// The media gallery's filter (kinds of `MEDIA_KINDS`), saved for all chats like Android.
     SetMediaKinds {
@@ -507,10 +596,20 @@ pub enum Command {
         #[serde(default)]
         identity: Option<String>,
     },
-    /// Several, in the given order: `{forwarded, failed}`.
+    /// Send messages (text or file) again to another chat, in the given order: `{forwarded, failed,
+    /// errors, failedMembers, keepsMetadata}`, `errors` being the kinds of error that came up, each
+    /// once, `failedMembers` how many of a list's members a file didn't reach, `keepsMetadata` the
+    /// pictures and videos refused because they can't be cleaned, `{message, name, video}`, for the
+    /// user to be asked about.
     ForwardMessages {
         messages: Vec<i64>,
         identity: String,
+        /// What a file goes with instead of its own caption; empty for none.
+        #[serde(default)]
+        caption: Option<String>,
+        /// The user's answer for those: they go as plain files, as they are.
+        #[serde(default)]
+        keep_metadata: bool,
     },
     /// A chat's notifications: `policy` `never` (muted; until `until` ms if set) or
     /// `mentioned` (groups), none for on. Returns `{policy, until}`.
@@ -519,17 +618,31 @@ pub enum Command {
         policy: Option<String>,
         until: Option<i64>,
     },
+    /// The chats with a tone of their own, `{tones: {key: path}}`; hidden private chats not.
+    ChatTones,
+    /// A chat's own tone; `tone` empty or none: the tone of all chats.
+    SetChatTone {
+        identity: String,
+        tone: Option<String>,
+    },
+    /// Tones the app kept in its settings file before: taken over whatever the lock's state.
+    ImportChatTones {
+        tones: std::collections::HashMap<String, String>,
+    },
     /// A Threema link (`threema://…`, `threema.id/…`): what it asks for (`links::Link`).
     ParseLink {
         url: String,
     },
     /// Our contact QR code.
     MyQrCode,
-    /// A scanned contact QR code: verify (and add) the contact.
+    /// A scanned contact QR code: verify (and add) the contact. `picture`: taken from a
+    /// picture, not the camera (the middle level only).
     VerifyQrCode {
         text: String,
+        #[serde(default)]
+        picture: bool,
     },
-    /// What a scanned QR code is: `{kind: "contact" | "web" | "device" | "unknown"}`.
+    /// What a scanned QR code is and whether it can be used (docs/ffi.md).
     QrKind {
         text: String,
     },
@@ -564,6 +677,10 @@ pub enum Command {
     /// Close our poll message `message`.
     ClosePoll {
         message: i64,
+    },
+    /// The polls of a conversation.
+    Polls {
+        identity: String,
     },
     /// Set our group's picture (attachment 0: JPEG).
     SetGroupPicture {
@@ -617,27 +734,37 @@ pub enum Command {
         #[serde(default)]
         show_inactive: Option<bool>,
     },
-    /// Multi-device (Threema Desktop): `{active}`.
+    /// Multi-device (Threema Desktop): `{active, reflectedLeftOut}`.
     MultiDevice,
+    /// The user has seen how many reflected messages weren't kept: the count starts over.
+    ClearReflectedLeftOut,
     /// The device group's devices: `{devices: [{id, current, label, platform, ...}]}`.
     LinkedDevices,
     /// Remove devices (hex ids) from the device group; returns the remaining devices.
     DropDevices {
         ids: Vec<String>,
     },
-    /// Remove all devices including this one: multi-device off.
-    DeactivateMultiDevice,
+    /// Remove all devices including this one: multi-device off. With `leaveLocally` this device
+    /// only leaves on its own: the others stay linked.
+    DeactivateMultiDevice {
+        #[serde(default)]
+        leave_locally: bool,
+    },
     /// Linking Threema Desktop: the scanned code; connects to it and returns
     /// `{choices: [[emoji ×3] ×3], correct}` for the emoji check.
     StartLinking {
         code: String,
+        /// The app lock's PIN (`App::check_pin`).
+        pin: Option<Zeroizing<String>>,
     },
     /// The user picked the right emojis: multi-device on (if it isn't), send the data. Returns
     /// the linked devices once the new device has registered.
     ConfirmLinking,
     CancelLinking,
     /// Calls (ADR 0012, see app_calls.rs and docs/ffi.md).
-    CallTurnServers,
+    CallTurnServers {
+        identity: String,
+    },
     CallStart {
         identity: String,
         sdp: String,
@@ -645,17 +772,28 @@ pub enum Command {
         video: bool,
     },
     CallAccept {
+        call_id: u32,
         sdp: String,
         #[serde(default)]
         video: bool,
     },
-    CallReject,
-    CallHangUp,
-    CallTimeout,
+    CallReject {
+        call_id: u32,
+    },
+    CallHangUp {
+        call_id: u32,
+    },
+    CallFailed {
+        call_id: u32,
+        reason: String,
+    },
+    CallTimeout {
+        call_id: u32,
+    },
     CallCandidates {
+        call_id: u32,
         candidates: Vec<crate::calls::Candidate>,
     },
-    CallState,
     CallConnected {
         #[serde(default)]
         relayed: bool,
@@ -669,6 +807,12 @@ pub enum Command {
     },
     SetVideoQuality {
         quality: String,
+    },
+    /// The country choice of address book numbers without a country code.
+    AddressBookCountry,
+    /// `country`: a region of the list, or empty for automatic.
+    SetAddressBookCountry {
+        country: String,
     },
     GroupCallRefresh {
         conversation: String,
@@ -695,6 +839,9 @@ pub enum Command {
     GroupCallTick,
     /// Threema Web (ADR 0013), see app_web.rs (`session`: `id` is the request's own).
     WebSessions,
+    WebSetEnabled {
+        enabled: bool,
+    },
     WebPair {
         qr: String,
         #[serde(default)]
@@ -709,8 +856,19 @@ pub enum Command {
     WebDelete {
         session: i64,
     },
+    WebDeleteAll,
+    WebRename {
+        session: i64,
+        label: String,
+    },
     WebAcceptCertificate {
         session: i64,
+    },
+    WebDeclineCertificate {
+        session: i64,
+    },
+    WebRemoveServer {
+        host: String,
     },
     /// Favourite GIFs: `{favourites: [{id, width, height}]}`, newest first.
     GifFavourites,
@@ -753,6 +911,12 @@ pub enum Command {
     CheckForUpdate,
     /// Settings → Advanced: how much is logged (`warn`, `info`, `debug`; device-local, kept by
     /// the bridge and passed in the start configuration too).
+    /// Settings → Image size, for pictures the browser sends: the longest side in pixels, 0 for as
+    /// large as they are. The UI has the setting and tells us when we start and when it changes;
+    /// until then the default holds.
+    SetImageSize {
+        side: u32,
+    },
     SetLogLevel {
         level: String,
     },
@@ -774,7 +938,8 @@ pub enum Command {
     },
     /// Remove the in-app log files.
     LogClear,
-    /// Settings → Advanced: `{ipv6}` (Android's "IPv6 for messages", on by default here).
+    /// Settings → Advanced: `{ipv6}` (Android's "IPv6 for messages", also for calls here, on by
+    /// default).
     NetworkSettings,
     /// Change it; the chat server connection starts again with the other hosts.
     SetNetworkSettings {
@@ -836,10 +1001,10 @@ pub enum Command {
     EmptyConversation {
         identity: String,
     },
-    /// Current connection state.
-    ConnectionState,
-    /// Reconnect now if disconnected.
+    /// "Connect now": reconnect now if disconnected, also while a server asked us to stay away.
     Reconnect,
+    /// The same without the user asking: timer, network change, back in the app.
+    Wake,
 }
 
 #[derive(Deserialize)]
@@ -869,6 +1034,10 @@ pub enum ApiError {
     /// Network/TLS problem.
     #[error("{0}")]
     Network(String),
+    /// A Threema server answered with an unexpected status or something unreadable. The text is
+    /// for the log's kind of reader; the UI has its own.
+    #[error("{0}")]
+    ServerTrouble(String),
     /// Wrong backup password or damaged backup.
     #[error("backup could not be decrypted")]
     BackupDecrypt,
@@ -879,9 +1048,27 @@ pub enum ApiError {
     /// merged into this one.
     #[error("backup belongs to another identity")]
     BackupOtherIdentity,
+    /// A Data backup without an ID was to bring one.
+    #[error("this backup holds no Threema ID")]
+    BackupNoIdentity,
     /// An Android data backup that cannot be read (damaged, truncated, not a backup).
     #[error("{0}")]
     BackupInvalid(String),
+    /// A data backup that could not be written into its folder.
+    #[error("{0}")]
+    BackupWrite(String),
+    /// The folder's storage has no room for a data backup.
+    #[error("no room for the backup")]
+    BackupNoRoom,
+    /// A data backup is being written already (one at a time).
+    #[error("a backup is already running")]
+    BackupRunning,
+    /// A data backup needs a folder, and none was given or stored.
+    #[error("no backup folder chosen")]
+    BackupNoFolder,
+    /// A data backup needs a password, and none was given or stored.
+    #[error("no backup password")]
+    BackupNoPassword,
     /// Password too short.
     #[error("password too short")]
     PasswordTooShort,
@@ -894,9 +1081,18 @@ pub enum ApiError {
     /// Threema Safe backup larger than the server allows.
     #[error("{0}")]
     SafeTooLarge(String),
+    /// A Threema Safe backup that decrypts but can't be read.
+    #[error("{0}")]
+    SafeDamaged(String),
+    /// Creating or restoring an ID while this device has one (removing it needs the PIN).
+    #[error("this device already has an ID")]
+    IdentityExists,
     /// Threema ID has the wrong format.
     #[error("invalid Threema ID")]
     IdentityFormat,
+    /// Nothing to look for an ID with: neither a usable phone number nor an e-mail address.
+    #[error("no phone number or e-mail address to search with")]
+    IdSearchInput,
     /// The ID does not exist or was revoked.
     #[error("this Threema ID does not exist or was revoked")]
     ContactInvalid,
@@ -909,6 +1105,9 @@ pub enum ApiError {
     /// Message text too long.
     #[error("message too long")]
     MessageTooLong,
+    /// Closing this poll would not fit a message, with everyone's votes in it.
+    #[error("poll results too long")]
+    PollResultsTooLong,
     /// Not a Threema contact QR code.
     #[error("not a Threema contact code")]
     QrInvalid,
@@ -916,6 +1115,11 @@ pub enum ApiError {
     LinkInvalid,
     #[error("this contact is blocked")]
     ContactBlocked,
+    #[error("this contact's ID was revoked")]
+    ContactRevoked,
+    /// "Block unknown senders" is on, and this is neither a direct contact nor in a group with us.
+    #[error("this person is blocked as an unknown sender")]
+    ContactUnknown,
     #[error("the file has not been downloaded")]
     FileNotDownloaded,
     #[error("this message cannot be forwarded")]
@@ -923,6 +1127,9 @@ pub enum ApiError {
     /// The code's key isn't the contact's: not the right person or device.
     #[error("the code does not match this contact")]
     QrMismatch,
+    /// The contact code carries an expiry that has passed.
+    #[error("the code has expired")]
+    QrExpired,
     /// No such group.
     #[error("no such group")]
     GroupNotFound,
@@ -935,6 +1142,9 @@ pub enum ApiError {
     /// File larger than Threema's blob limit (100 MB).
     #[error("file too large")]
     FileTooLarge,
+    /// The copies for sharing don't fit in memory.
+    #[error("too much to share at once")]
+    ShareTooLarge,
     /// Linking: not a Threema Desktop code / a Threema Web code / an app version we can't link.
     #[error("not a device linking code")]
     LinkUnknownCode,
@@ -945,6 +1155,19 @@ pub enum ApiError {
     /// Linking failed on the way (network, the other device).
     #[error("linking failed: {0}")]
     LinkFailed(String),
+    /// Linking failed with the ID already handed over; the device group was removed again.
+    #[error("linking failed after the handover; the device group was removed")]
+    LinkRemoved,
+    /// Linking failed with the ID already handed over, and the new device may be in the group.
+    #[error("linking failed after the handover; the new device may be linked")]
+    LinkUncertain,
+    /// A video to send as media whose metadata can't be taken out (docs/decisions/0025): only with
+    /// `keepMetadata`, as a plain file.
+    #[error("the video keeps its metadata")]
+    VideoKeepsMetadata,
+    /// A picture someone else sent, to forward as media, whose metadata can't be taken out.
+    #[error("the picture keeps its metadata")]
+    PictureKeepsMetadata,
     /// Only GIFs can be favourite GIFs.
     #[error("not a GIF")]
     NotGif,
@@ -955,13 +1178,18 @@ pub enum ApiError {
     GroupCallFull,
     #[error("group call version not supported")]
     GroupCallVersion,
-    /// Threema Web: not its code / another protocol version / no such session.
+    /// Threema Web: not its code / another protocol version / no such session / this browser is
+    /// already in the list / switched off.
     #[error("not a Threema Web code")]
     WebCodeInvalid,
     #[error("Threema Web version not supported")]
     WebVersion,
     #[error("no such Threema Web session")]
     WebSessionNotFound,
+    #[error("this browser already has a Threema Web session")]
+    WebAlreadyPaired,
+    #[error("Threema Web is off")]
+    WebDisabled,
     /// The contact's app can't do this (edit or delete for everyone).
     #[error("not supported by the contact")]
     NotSupportedByContact,
@@ -998,6 +1226,19 @@ pub enum ApiError {
     /// The lock can't be removed while there are private chats.
     #[error("there are private chats")]
     PrivateChatsExist,
+    /// The directory said too many requests.
+    #[error("rate limited")]
+    RateLimited,
+    /// The directory said no and gave no reason.
+    #[error("the server gave no reason")]
+    ServerUnexplained,
+    /// The directory didn't take a spam report.
+    #[error("report not accepted")]
+    ReportRefused,
+    /// The encrypted store failed in a way the UI tells apart (`StoreError::kind`). The message
+    /// is only a code for support.
+    #[error("{code}")]
+    StoreFailed { kind: &'static str, code: String },
     /// Bad request from the UI or internal failure.
     #[error("{0}")]
     Internal(String),
@@ -1011,20 +1252,33 @@ impl ApiError {
             Self::LicenseFormat => "licenseFormat",
             Self::Server(_) => "server",
             Self::Network(_) => "network",
+            Self::ServerTrouble(_) => "serverTrouble",
             Self::BackupDecrypt => "backupDecrypt",
             Self::BackupVersion(_) => "backupVersion",
             Self::BackupOtherIdentity => "backupIdentity",
+            Self::BackupNoIdentity => "backupNoIdentity",
             Self::BackupInvalid(_) => "backupInvalid",
+            Self::BackupWrite(_) => "backupWrite",
+            Self::BackupNoRoom => "backupNoRoom",
+            Self::BackupRunning => "backupRunning",
+            Self::BackupNoFolder => "backupNoFolder",
+            Self::BackupNoPassword => "backupNoPassword",
             Self::PasswordTooShort => "passwordTooShort",
             Self::PasswordTooLong => "passwordTooLong",
             Self::SafeNotFound => "safeNotFound",
             Self::SafeTooLarge(_) => "safeTooLarge",
+            Self::SafeDamaged(_) => "safeDamaged",
             Self::IdentityFormat => "identityFormat",
+            Self::IdSearchInput => "idSearchInput",
             Self::ContactInvalid => "contactInvalid",
             Self::ContactIsSelf => "contactIsSelf",
             Self::ContactNotFound => "contactNotFound",
             Self::MessageTooLong => "messageTooLong",
+            Self::PollResultsTooLong => "pollResultsTooLong",
             Self::FileTooLarge => "fileTooLarge",
+            Self::ShareTooLarge => "shareTooLarge",
+            Self::VideoKeepsMetadata => "videoKeepsMetadata",
+            Self::PictureKeepsMetadata => "pictureKeepsMetadata",
             Self::NotGif => "notGif",
             Self::GroupCallNotRunning => "groupCallNotRunning",
             Self::GroupCallFull => "groupCallFull",
@@ -1032,17 +1286,24 @@ impl ApiError {
             Self::WebCodeInvalid => "webCodeInvalid",
             Self::WebVersion => "webVersion",
             Self::WebSessionNotFound => "webSessionNotFound",
+            Self::WebAlreadyPaired => "webAlreadyPaired",
+            Self::WebDisabled => "webDisabled",
             Self::LinkUnknownCode => "linkUnknownCode",
             Self::LinkWebCode => "linkWebCode",
             Self::LinkVersion => "linkVersion",
             Self::LinkFailed(_) => "linkFailed",
+            Self::LinkRemoved => "linkRemoved",
+            Self::LinkUncertain => "linkUncertain",
             Self::GroupNotFound => "groupNotFound",
             Self::QrInvalid => "qrInvalid",
             Self::LinkInvalid => "linkInvalid",
             Self::FileNotDownloaded => "fileNotDownloaded",
             Self::ContactBlocked => "contactBlocked",
+            Self::ContactRevoked => "contactRevoked",
+            Self::ContactUnknown => "contactUnknown",
             Self::NotForwardable => "notForwardable",
             Self::QrMismatch => "qrMismatch",
+            Self::QrExpired => "qrExpired",
             Self::GroupLeft => "groupLeft",
             Self::NotGroupCreator => "notGroupCreator",
             Self::ReactionNotSupported => "reactionNotSupported",
@@ -1056,15 +1317,32 @@ impl ApiError {
             Self::NoVerification => "noVerification",
             Self::PinTooShort => "pinTooShort",
             Self::LockNeeded => "lockNeeded",
+            Self::IdentityExists => "identityExists",
             Self::PrivateChatsExist => "privateChatsExist",
+            Self::RateLimited => "rateLimited",
+            Self::ServerUnexplained => "serverUnexplained",
+            Self::ReportRefused => "reportRefused",
+            Self::StoreFailed { kind, .. } => kind,
             Self::Internal(_) => "internal",
+        }
+    }
+
+    /// Opening the store: whatever the reason, it is why the app doesn't start.
+    fn store_failed(error: &StoreError) -> Self {
+        Self::StoreFailed {
+            kind: error.kind(),
+            code: error.code(),
         }
     }
 }
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
-        Self::Internal(error.to_string())
+        if error.kind() == "store" {
+            Self::Internal(error.to_string())
+        } else {
+            Self::store_failed(&error)
+        }
     }
 }
 
@@ -1073,7 +1351,12 @@ impl From<DirectoryError> for ApiError {
         match error {
             DirectoryError::Network(e) => Self::Network(e.to_string()),
             DirectoryError::Server(message) => Self::Server(message),
-            other => Self::Internal(other.to_string()),
+            DirectoryError::RateLimited => Self::RateLimited,
+            DirectoryError::Unexplained => Self::ServerUnexplained,
+            DirectoryError::ReportRefused => Self::ReportRefused,
+            other @ (DirectoryError::Status(_) | DirectoryError::InvalidResponse(_)) => {
+                Self::ServerTrouble(other.to_string())
+            }
         }
     }
 }
@@ -1089,6 +1372,38 @@ pub fn normalize_license_key(input: &str) -> Option<String> {
             .enumerate()
             .all(|(i, b)| i == 5 || b.is_ascii_uppercase() || b.is_ascii_digit());
     valid.then_some(key)
+}
+
+/// Up to 0.2.0 a busy directory, or one that gave no reason, counted as refusing the license, and
+/// that stuck until the user checked the key. Those were our words, never the directory's.
+fn forget_false_refusal(store: &Store) -> Result<(), StoreError> {
+    const NOT_REFUSALS: [&str; 2] = [
+        "Too many requests, please try again later.",
+        "Unknown server error",
+    ];
+    if store
+        .setting(keys::LICENSE_REFUSED)?
+        .is_some_and(|refused| NOT_REFUSALS.contains(&refused.as_str()))
+    {
+        store.delete_setting(keys::LICENSE_REFUSED)?;
+    }
+    Ok(())
+}
+
+/// What creating an ID says to the user. libthreema flattens the directory's own words into
+/// `ServerError` along with every other server problem, so its prefix is what tells them apart
+/// (a test keeps an eye on it). Only those words are for the user to read.
+fn create_identity_error(error: CspE2eProtocolError) -> ApiError {
+    const DIRECTORYS_WORDS: &str = "Custom (possibly localized) error from server: ";
+    match error {
+        CspE2eProtocolError::NetworkError(message) => ApiError::Network(message),
+        CspE2eProtocolError::RateLimitExceeded => ApiError::RateLimited,
+        CspE2eProtocolError::ServerError(message) => match message.strip_prefix(DIRECTORYS_WORDS) {
+            Some(words) => ApiError::Server(words.to_owned()),
+            None => ApiError::Internal(message),
+        },
+        other => ApiError::Internal(other.to_string()),
+    }
 }
 
 fn random_device_id() -> String {
@@ -1107,57 +1422,142 @@ fn random_device_id() -> String {
     )
 }
 
-/// The core. Lives on the core thread only (libthreema state is not `Send`).
-pub struct App {
+/// The part of the core that a command or a round of maintenance keeps using while it waits for
+/// the network, beside the core loop: tasks hold on to this, and whatever else they want done
+/// comes back to the loop (`crate::detached`). Everything in it is good for use at any `.await`,
+/// as no borrow of its cells is held across one (clippy's `await_holding_refcell_ref`).
+pub struct Shared {
     pub(crate) store: std::rc::Rc<Store>,
     pub(crate) https: HttpsClient,
     pub(crate) version: ClientVersion,
     pub(crate) config: Arc<Config>,
     /// Channel to the running chat server connection, if any.
-    pub(crate) connection:
+    pub(crate) connection: std::cell::RefCell<
         Option<tokio::sync::mpsc::UnboundedSender<crate::connection::ToConnection>>,
+    >,
     /// Last known connection state, for `connectionState`.
-    pub connection_state: &'static str,
+    pub connection_state: std::cell::Cell<&'static str>,
     /// Encrypted files of messages (shared with the bridge's image provider).
     pub(crate) media: Arc<crate::media::MediaStore>,
     /// Media downloads report their progress here (into the core loop).
     pub(crate) media_events: tokio::sync::mpsc::UnboundedSender<crate::providers::CoreEvent>,
+    /// Contacts the request being handled changed beyond what its command says of itself, such as
+    /// making them direct, for the other devices.
+    pub(crate) made_direct: std::cell::RefCell<Vec<String>>,
+    /// Contacts this command made that the other devices don't have yet: they go as a `Create`,
+    /// as those devices ignore an update of someone unknown (`ReflectedContactSyncTask`).
+    pub(crate) new_contacts: std::cell::RefCell<Vec<String>>,
+    /// Chats a message brought back from the archive during the current command.
+    pub(crate) unarchived: std::cell::RefCell<Vec<String>>,
+    /// This build has a media engine (ADR 0012).
+    pub(crate) calls_supported: bool,
+    /// Group calls: the SFU credentials while they last.
+    pub(crate) sfu: std::rc::Rc<std::cell::RefCell<crate::app_group_calls::SfuCache>>,
+    pub(crate) group_calls_watched:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    pub(crate) group_call_tasks: crate::app_group_calls::GroupCallTasks,
+    /// Cached TURN servers, with their expiry (ms).
+    pub(crate) turn_servers: std::cell::RefCell<Option<(crate::directory::TurnServers, i64)>>,
+    /// Device linking between the scan and the emoji confirmation.
+    pub(crate) pending_link: std::cell::RefCell<Option<crate::rendezvous::RendezvousLink>>,
+    /// Events for the UI caused by handling a command (e.g. a Safe import the command ran);
+    /// the core loop emits and clears them after every command.
+    pub(crate) pending_ui_events: std::cell::RefCell<Vec<&'static str>>,
+    /// When the pending Safe import was last tried automatically (reconnect rate limit).
+    pub(crate) last_import_attempt: std::cell::Cell<Option<tokio::time::Instant>>,
+    /// When this device last looked whether it is alone in its device group.
+    pub(crate) last_group_check: std::cell::Cell<Option<tokio::time::Instant>>,
+    /// Private chats readable (ADR 0009); memory only, starts locked.
+    pub(crate) unlocked: std::cell::Cell<bool>,
+    /// Counts locks, chats marked private and deletions of all data: a share asked for before one
+    /// of those is refused when its turn comes or its copies are written (ADR 0031).
+    pub(crate) shares_voided: std::rc::Rc<std::cell::Cell<u64>>,
+    /// Set as the process ends: a share still being written takes its copies back itself.
+    pub(crate) shares_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the wall-clock sweep of shared copies runs ([`crate::app_media::keep_sweeping`]).
+    pub(crate) share_sweep_running: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The app's data directory (store, media, the in-app log).
+    pub(crate) data_dir: PathBuf,
+    /// A data backup added contacts: what they support is unknown until the next refresh.
+    pub(crate) imported_contacts_unchecked: std::cell::Cell<bool>,
+    /// In the core loop, from the UI: what waits or takes long goes beside the loop. Others
+    /// asking the same (Threema Web) need the answer in place.
+    pub(crate) in_background: std::cell::Cell<bool>,
+}
+
+impl core::ops::Deref for App {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
+}
+
+/// The core. Lives on the core thread only (libthreema state is not `Send`).
+pub struct App {
+    /// What work beside the core loop (a task with a network wait) needs as well.
+    pub(crate) shared: std::rc::Rc<Shared>,
+    /// Its task, to stop it wherever it is.
+    pub(crate) connection_task: Option<tokio::task::JoinHandle<()>>,
+    /// When maintenance last ran, by the clock.
+    pub(crate) maintenance_ran_at: std::time::SystemTime,
+    /// A wake-up found it overdue.
+    pub(crate) maintenance_overdue: bool,
+    /// Uploads and downloads running.
+    pub(crate) transfers: crate::app_media::RunningTransfers,
+    /// A wake-up is over but for those: `wakeSettled` follows when they have ended.
+    pub(crate) wake_settled_held: bool,
     media_events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::providers::CoreEvent>>,
+    /// Files of hidden private chats still on their way to the core.
+    pub(crate) write_pass: Option<crate::app_media::WritePass>,
     /// Binary attachments of the request being handled (e.g. `sendFile`: file, thumbnail).
     pub(crate) attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
-    /// Calls (ADR 0012): this build has a media engine; the current call, its SDP rules and
-    /// cached TURN servers (with their expiry, ms).
-    pub(crate) calls_supported: bool,
+    /// The request being handled.
+    pub(crate) current_request: u64,
+    /// What it changes for the other devices.
+    pub(crate) current_change: Option<crate::app_multidevice::SyncChange>,
+    /// Commands and maintenance waiting for the network beside the core loop.
+    pub(crate) detached: crate::detached::DetachedWork,
+    /// How many times we left a group call: a join that was under way is no use by now.
+    pub(crate) group_call_leaves: u64,
+    /// The groups whose call we are joining, with the SFU still to answer.
+    pub(crate) group_calls_joining: Vec<String>,
+    /// Settings → Image size (`setImageSize`).
+    pub(crate) image_size: u32,
+    /// The command handled went to a blocking thread: its reply comes later.
+    pub(crate) reply_later: bool,
+    /// How many of those are still to be finished.
+    pub(crate) file_work_running: usize,
+    /// One at a time.
+    pub(crate) file_work_turn: std::rc::Rc<tokio::sync::Semaphore>,
+    pub(crate) file_work_done:
+        tokio::sync::mpsc::UnboundedSender<crate::app_media::FinishedFileWork>,
+    file_work_done_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>>,
     /// The build may check for updates (ADR 0014); a check is under way.
     pub(crate) update_check_built: bool,
     pub(crate) update_check_running: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The user asked for the running check, by starting it or while it ran.
+    pub(crate) update_check_manual: std::rc::Rc<std::cell::Cell<bool>>,
     pub(crate) calls: crate::calls::Calls,
     pub(crate) call_patcher: Option<crate::sdp::SdpPatcher>,
     pub(crate) call_media: crate::app_calls::CallMedia,
-    /// Group calls: the SFU credentials while they last.
-    pub(crate) sfu: std::rc::Rc<std::cell::RefCell<crate::app_group_calls::SfuCache>>,
     pub(crate) group_call: Option<crate::app_group_calls::ActiveGroupCall>,
     /// Threema Web sessions running (ADR 0013).
     pub(crate) web: crate::app_web::WebSessions,
-    pub(crate) turn_servers: Option<(crate::directory::TurnServers, i64)>,
-    /// Device linking between the scan and the emoji confirmation.
-    pub(crate) pending_link: Option<crate::rendezvous::RendezvousLink>,
-    /// Events for the UI caused by handling a command (e.g. a Safe import the command ran);
-    /// the core loop emits and clears them after every command.
-    pub(crate) pending_ui_events: Vec<&'static str>,
     /// A running Android history import's cancel flag (set true when it ends).
     pub(crate) android_import: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     /// A running Android-format export's done flag.
     pub(crate) android_export: Option<std::rc::Rc<std::cell::Cell<bool>>>,
-    /// When the pending Safe import was last tried automatically (reconnect rate limit).
-    pub(crate) last_import_attempt: Option<tokio::time::Instant>,
-    /// Private chats readable (ADR 0009); memory only, starts locked.
-    pub(crate) unlocked: bool,
+    /// Tells the running export to give up (the ID is being removed).
+    pub(crate) android_export_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// When the core loop next looks for failed transfers to try again.
+    pub(crate) transfer_retry_at: Option<tokio::time::Instant>,
     /// On an unmetered network (Wi-Fi/Ethernet, from the bridge): auto-download policy.
     pub(crate) on_wifi: bool,
     pub(crate) pictures_dir: Option<PathBuf>,
-    /// The app's data directory (store, media, the in-app log).
-    pub(crate) data_dir: PathBuf,
+    /// `deleteAllData` went through: this core only waits for the bridge to stop it.
+    pub(crate) identity_removed: bool,
 }
 
 impl App {
@@ -1169,10 +1569,11 @@ impl App {
         std::fs::create_dir_all(&start.data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
         let media = crate::media::MediaStore::open(&start.data_dir, db_key)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        Self::with_media(start, db_key, Arc::new(media))
+        Self::with_media(start, db_key, Arc::new(media), &|| {})
     }
 
-    /// Like [`Self::new`] with a media store the caller shares (with the bridge).
+    /// Like [`Self::new`] with a media store the caller shares (with the bridge). `upgrading` is
+    /// called before the store's schema is brought up to date, which can take a while.
     ///
     /// # Errors
     /// Store or TLS setup failures.
@@ -1180,11 +1581,16 @@ impl App {
         start: &StartConfig,
         db_key: &[u8; 32],
         media: Arc<crate::media::MediaStore>,
+        upgrading: &dyn Fn(),
     ) -> Result<Self, ApiError> {
         std::fs::create_dir_all(&start.data_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
         let (media_events, media_events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let store = std::rc::Rc::new(Store::open(&start.data_dir.join("threesea.db"), db_key)?);
-        let app = Self {
+        let (file_work_done, file_work_done_rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Store::open_with(&start.data_dir.join("threesea.db"), db_key, upgrading)
+            .map(std::rc::Rc::new)
+            .map_err(|error| ApiError::store_failed(&error))?;
+        forget_false_refusal(&store).map_err(|error| ApiError::store_failed(&error))?;
+        let shared = Shared {
             store,
             https: HttpsClient::new().map_err(|e| ApiError::Internal(e.to_string()))?,
             version: ClientVersion {
@@ -1196,42 +1602,81 @@ impl App {
                 arch: std::env::consts::ARCH.to_owned(),
             },
             config: Arc::new(Config::from(ConfigEnvironment::Production)),
-            connection: None,
-            connection_state: "disconnected",
+            connection: std::cell::RefCell::default(),
+            connection_state: std::cell::Cell::new("disconnected"),
             media,
             media_events,
-            media_events_rx: Some(media_events_rx),
-            attachments: Vec::new(),
-            pending_link: None,
+            made_direct: std::cell::RefCell::default(),
+            new_contacts: std::cell::RefCell::default(),
+            unarchived: std::cell::RefCell::default(),
             calls_supported: start.calls,
-            update_check_built: start.update_check,
+            sfu: std::rc::Rc::default(),
+            group_calls_watched: std::rc::Rc::default(),
+            group_call_tasks: crate::app_group_calls::GroupCallTasks::default(),
+            turn_servers: std::cell::RefCell::default(),
+            pending_link: std::cell::RefCell::default(),
+            pending_ui_events: std::cell::RefCell::default(),
+            last_import_attempt: std::cell::Cell::default(),
+            last_group_check: std::cell::Cell::default(),
+            unlocked: std::cell::Cell::default(),
+            shares_voided: std::rc::Rc::default(),
+            shares_closed: Arc::default(),
+            share_sweep_running: std::rc::Rc::default(),
+            data_dir: start.data_dir.clone(),
+            imported_contacts_unchecked: std::cell::Cell::new(false),
+            in_background: std::cell::Cell::new(false),
+        };
+        let app = Self {
+            shared: std::rc::Rc::new(shared),
+            connection_task: None,
+            maintenance_ran_at: std::time::SystemTime::now(),
+            maintenance_overdue: false,
+            transfers: crate::app_media::RunningTransfers::default(),
+            wake_settled_held: false,
+            media_events_rx: Some(media_events_rx),
+            write_pass: None,
+            attachments: Vec::new(),
+            current_request: 0,
+            current_change: None,
+            detached: crate::detached::DetachedWork::default(),
+            group_call_leaves: 0,
+            group_calls_joining: Vec::new(),
+            image_size: crate::web::images::SENT_MAX,
+            reply_later: false,
+            file_work_running: 0,
+            file_work_turn: std::rc::Rc::new(tokio::sync::Semaphore::new(1)),
+            file_work_done,
+            file_work_done_rx: Some(file_work_done_rx),
+            // A store's build has no update check, whatever the bridge says (ADR 0014).
+            update_check_built: start.update_check && cfg!(not(feature = "store")),
             update_check_running: std::rc::Rc::default(),
+            update_check_manual: std::rc::Rc::default(),
             calls: crate::calls::Calls::default(),
             call_patcher: None,
             call_media: crate::app_calls::CallMedia::default(),
-            sfu: std::rc::Rc::default(),
             group_call: None,
             web: crate::app_web::WebSessions::default(),
-            turn_servers: None,
-            pending_ui_events: Vec::new(),
             android_import: None,
             android_export: None,
-            last_import_attempt: None,
-            unlocked: false,
+            android_export_cancel: Arc::default(),
+            transfer_retry_at: None,
             on_wifi: false,
             pictures_dir: start.pictures_dir.clone(),
-            data_dir: start.data_dir.clone(),
+            identity_removed: false,
         };
         app.apply_display_settings()?;
+        app.apply_picture_gate();
         app.apply_network_settings()?;
         app.apply_multi_device();
         Ok(app)
     }
+}
 
+impl Shared {
     /// Turn forward security off or on again, like [`Self::activate_multi_device`] does for
     /// a device group: off announces it (feature mask without FS), terminates every session
     /// with DisabledByLocal once connected, and reconnects so the running session follows.
-    async fn set_forward_security(&mut self, on: bool) -> Result<Value, ApiError> {
+    async fn set_forward_security(&self, on: bool) -> Result<Value, ApiError> {
         if on {
             self.store.delete_setting(keys::FORWARD_SECURITY)?;
             // Off and on again before the next login: nothing to end (unless multi-device
@@ -1253,7 +1698,9 @@ impl App {
         self.tell_connection(crate::connection::ToConnection::Reconnect);
         Ok(json!({ "on": on }))
     }
+}
 
+impl App {
     /// Settings → Advanced → Log → "Save support package": the facts a report needs, then
     /// the log, as one text file in `directory` (sharing it stays the user's step). Nothing
     /// in it is personal: versions, model, flags, and the log's fixed texts, kinds, codes
@@ -1285,7 +1732,7 @@ impl App {
             } else {
                 "off"
             },
-            self.connection_state,
+            self.connection_state.get(),
         );
         let name = format!(
             "threesea-log-{}.txt",
@@ -1296,7 +1743,10 @@ impl App {
             &path,
             header + &crate::runtime::log_text(&self.data_dir, usize::MAX),
         )
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(kind = ?e.kind(), "support package not written");
+            ApiError::Internal(e.to_string())
+        })?;
         Ok(json!({ "path": path.to_string_lossy() }))
     }
 
@@ -1318,18 +1768,34 @@ impl App {
         self.media_events_rx.take()
     }
 
+    pub(crate) fn take_file_work(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::app_media::FinishedFileWork>> {
+        self.file_work_done_rx.take()
+    }
+}
+
+impl Shared {
     /// Remember events the current command caused, for [`Self::take_ui_events`].
-    pub(crate) fn note_ui_events(&mut self, events: &[&'static str]) {
+    pub(crate) fn note_ui_events(&self, events: &[&'static str]) {
+        // What a round beside the loop found (a restored backup, the directory): a contact may be
+        // there for a reflected message that waited for one.
+        if events.contains(&"contactsChanged") {
+            self.apply_waiting_reflected();
+        }
+        let mut pending = self.pending_ui_events.borrow_mut();
         for event in events {
-            if !self.pending_ui_events.contains(event) {
-                self.pending_ui_events.push(event);
+            if !pending.contains(event) {
+                pending.push(event);
             }
         }
     }
+}
 
+impl App {
     /// The events the last command caused (emitted by the core loop after the reply).
     pub fn take_ui_events(&mut self) -> Vec<&'static str> {
-        std::mem::take(&mut self.pending_ui_events)
+        self.pending_ui_events.take()
     }
 
     /// [`Self::handle`] with binary attachments for the command.
@@ -1342,6 +1808,20 @@ impl App {
         let reply = self.handle(request_json).await;
         self.attachments.clear();
         reply
+    }
+
+    /// [`Self::handle_with`] for the UI's requests in the core loop. `None`: the command's long
+    /// part went elsewhere, and the core loop replies when it is done
+    /// ([`Self::finish_file_work`], [`Self::finish_detached`]).
+    pub(crate) async fn handle_from_ui(
+        &mut self,
+        request_json: &str,
+        attachments: Vec<zeroize::Zeroizing<Vec<u8>>>,
+    ) -> Option<String> {
+        self.in_background.set(true);
+        let reply = self.handle_with(request_json, attachments).await;
+        self.in_background.set(false);
+        (!std::mem::take(&mut self.reply_later)).then_some(reply)
     }
 
     /// Parse and execute one request; returns the reply JSON.
@@ -1359,17 +1839,56 @@ impl App {
                 .to_string();
             }
         };
-        let change = sync_change(&request.command);
-        match self.execute(request.command).await {
+        self.current_change = sync_change(&self.store, &request.command);
+        self.current_request = request.id;
+        let outcome = self.execute(request.command).await;
+        let change = self.current_change.take();
+        if self.reply_later {
+            return String::new();
+        }
+        self.reply(request.id, change, outcome).await
+    }
+
+    /// What follows a command, whatever became of it, and its reply JSON.
+    pub(crate) async fn reply(
+        &mut self,
+        request: u64,
+        change: Option<crate::app_multidevice::SyncChange>,
+        outcome: Result<Value, ApiError>,
+    ) -> String {
+        let new_contacts = self.new_contacts.take();
+        if !new_contacts.is_empty() {
+            let change = crate::app_multidevice::SyncChange::NewContacts(new_contacts);
+            self.reflect_change(change, &json!({})).await;
+            self.apply_waiting_reflected();
+        }
+        let made_direct = self.made_direct.take();
+        if !made_direct.is_empty() {
+            let change = crate::app_multidevice::SyncChange::Contacts(made_direct);
+            self.reflect_change(change, &json!({})).await;
+        }
+        for conversation in self.unarchived.take() {
+            let change = crate::app_multidevice::SyncChange::Conversation(conversation);
+            self.reflect_change(change, &json!({})).await;
+        }
+        match outcome {
             Ok(result) => {
                 if let Some(change) = change {
                     self.reflect_change(change, &result).await;
                 }
-                json!({"reply": request.id, "ok": true, "result": result})
+                json!({"reply": request, "ok": true, "result": result})
             }
             Err(error) => {
-                tracing::info!(kind = error.kind(), "command failed");
-                json!({"reply": request.id, "ok": false,
+                if matches!(error, ApiError::RateLimited) {
+                    self.store.rest_directory_calls();
+                }
+                // Nothing else tells these apart for a support package: the user sees one sentence.
+                if matches!(error, ApiError::Internal(_)) {
+                    tracing::warn!(kind = error.kind(), "command failed");
+                } else {
+                    tracing::info!(kind = error.kind(), "command failed");
+                }
+                json!({"reply": request, "ok": false,
                     "error": {"kind": error.kind(), "message": error.to_string()}})
             }
         }
@@ -1379,39 +1898,106 @@ impl App {
     async fn execute(&mut self, command: Command) -> Result<Value, ApiError> {
         match command {
             Command::Status => self.status(),
-            Command::CheckLicense { license_key } => self.check_license(&license_key).await,
+            Command::CheckLicense { license_key } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.check_license(&license_key).await
+                })
+                .await
+            }
             Command::LicenseStatus => self.license_status(),
+            Command::ForgetLicense => self.forget_license(),
             Command::SpamPotential { identity } => self.spam_potential(&identity),
             Command::DismissSpam { identity } => self.dismiss_spam(&identity),
             Command::ReportSpam { identity, block } => self.report_spam(&identity, block).await,
-            Command::CreateIdentity => self.create_identity().await,
-            Command::RestoreIdentityBackup { backup, password } => {
-                self.restore_identity_backup(backup, password).await
+            Command::CreateIdentity => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.create_identity().await },
+                )
+                .await
             }
-            Command::ExportIdentityBackup { password } => {
-                self.export_identity_backup(password).await
+            Command::RestoreIdentityBackup { backup, password } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.restore_identity_backup(backup, password).await
+                })
+                .await
+            }
+            Command::ExportIdentityBackup { password, pin } => {
+                self.check_pin(pin)?;
+                self.detached(Lane::Free, |app| async move {
+                    app.export_identity_backup(password).await
+                })
+                .await
+            }
+            Command::SafeDeclineSetup => self.safe_decline_setup(),
+            Command::DismissDataImportHint => self.dismiss_data_import_hint(),
+            Command::SafeSearchId { phone, email } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.safe_search_id(&phone, &email).await
+                })
+                .await
             }
             Command::SafeCheckPassword { password } => Ok(Self::safe_check_password(&password)),
             Command::SafeStatus => self.safe_status(),
-            Command::SafeEnable { password } => self.safe_enable(password).await,
-            Command::SafeBackupNow => self.safe_backup_now().await,
-            Command::SafeDisable => self.safe_disable(),
+            Command::SafeEnable { password, pin } => {
+                self.check_pin(pin)?;
+                self.detached(Lane::InTurn, |app| async move {
+                    app.safe_enable(password).await
+                })
+                .await
+            }
+            Command::SafeBackupNow => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.safe_backup_now().await },
+                )
+                .await
+            }
+            Command::SafeDisable { pin } => {
+                self.check_pin(pin)?;
+                self.detached(Lane::InTurn, |app| async move { app.safe_disable().await })
+                    .await
+            }
             Command::SafeRestore { identity, password } => {
-                self.safe_restore(&identity, password).await
+                self.detached(Lane::InTurn, |app| async move {
+                    app.safe_restore(&identity, password).await
+                })
+                .await
             }
             Command::SafeRetryImport => {
-                let events = self.try_pending_import().await;
-                self.note_ui_events(&events);
-                self.safe_status()
+                self.detached(Lane::InTurn, |app| async move {
+                    let events = app.try_pending_import().await;
+                    app.note_ui_events(&events);
+                    app.safe_status()
+                })
+                .await
             }
             Command::AndroidBackupInspect { path, password } => {
-                self.android_backup_inspect(path, password).await
+                self.detached(Lane::Free, |app| async move {
+                    app.android_backup_inspect(path, password).await
+                })
+                .await
+            }
+            Command::AndroidBackupRestore { path, password } => {
+                self.detached(Lane::InTurn, |app| async move {
+                    app.android_backup_restore(path, password).await
+                })
+                .await
             }
             Command::AndroidBackupImport {
                 path,
                 password,
                 scope,
-            } => self.android_backup_import(path, password, &scope).await,
+            } => {
+                if scope == "history" {
+                    self.android_backup_import_history(path, password)
+                } else {
+                    self.detached(Lane::InTurn, |app| async move {
+                        app.android_backup_import(path, password, &scope).await
+                    })
+                    .await
+                }
+            }
             Command::AndroidBackupCancel => {
                 if let Some(cancel) = &self.android_import {
                     cancel.set(true);
@@ -1421,23 +2007,48 @@ impl App {
             Command::AndroidBackupExport {
                 directory,
                 password,
-            } => self.android_backup_export(directory, password),
+                pin,
+            } => {
+                self.check_pin(pin)?;
+                self.android_backup_export(directory, password)
+            }
             Command::AndroidBackupSchedule {
                 directory,
                 password,
                 interval,
                 keep,
-            } => self.android_backup_schedule(directory, password, interval, keep),
+                pin,
+            } => {
+                self.check_pin(pin)?;
+                self.android_backup_schedule(directory, password, interval, keep)
+            }
             Command::AndroidBackupExportStatus => self.android_export_status(),
             Command::Contacts => self.contacts_json(),
             Command::Contact { identity } => self.contact_json(&identity),
-            Command::AddContact { identity } => self.add_contact(&identity).await,
+            Command::AddContact { identity } => {
+                self.detached(Lane::Free, |app| async move {
+                    let result = app.add_contact(&identity).await?;
+                    let added = result["identity"].as_str().unwrap_or_default().to_owned();
+                    if app.sync_included_again(&added)? {
+                        let change = crate::app_multidevice::SyncChange::Settings;
+                        app.reflect_change(change, &json!({})).await;
+                    }
+                    Ok(result)
+                })
+                .await
+            }
             Command::UpdateContact {
                 identity,
                 first_name,
                 last_name,
             } => self.update_contact(&identity, first_name, last_name),
-            Command::DeleteContact { identity } => self.delete_contact(&identity),
+            Command::DeleteContact { identity } => {
+                let result = self.delete_contact(&identity)?;
+                // It is on the address book's exclusion list now, which they keep too.
+                let change = crate::app_multidevice::SyncChange::Settings;
+                self.reflect_change(change, &json!({})).await;
+                Ok(result)
+            }
             Command::SetContactPolicies {
                 identity,
                 read_receipts,
@@ -1446,24 +2057,68 @@ impl App {
             Command::ClearContactPolicies => self.clear_contact_policies(),
             Command::Profile => {
                 // A pending e-mail link may have been confirmed meanwhile.
-                let _ = self.check_email_link().await;
-                self.profile_json()
+                if self.store.setting(keys::LINKED_EMAIL_PENDING)?.is_some() {
+                    self.detached(Lane::Free, |app| async move {
+                        let _ = app.check_email_link().await;
+                        app.profile_json()
+                    })
+                    .await
+                } else {
+                    self.profile_json()
+                }
             }
-            Command::RevocationStatus { cached } => self.revocation_status(cached).await,
-            Command::LinkEmail { email } => self.link_email(&email).await,
-            Command::LinkMobile { number } => self.link_mobile(&number).await,
-            Command::VerifyMobile { code } => self.verify_mobile(&code).await,
-            Command::CallMobile => self.call_mobile().await,
-            Command::SetRevocationPassword { password } => {
-                self.set_revocation_password(&password).await
+            Command::RevocationStatus { cached } => {
+                self.detached(Lane::Free, move |app| async move {
+                    app.revocation_status(cached).await
+                })
+                .await
+            }
+            Command::LinkEmail { email } => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.link_email(&email).await },
+                )
+                .await
+            }
+            Command::LinkMobile { number } => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.link_mobile(&number).await },
+                )
+                .await
+            }
+            Command::NormalizeMobile { number } => Ok(json!({
+                "number": crate::address_book::international_phone(&number),
+            })),
+            Command::VerifyMobile { code, from_link } => {
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.verify_mobile(&code, from_link).await
+                })
+                .await
+            }
+            Command::CallMobile => {
+                self.detached(Lane::InTurn, |app| async move { app.call_mobile().await })
+                    .await
+            }
+            Command::SetRevocationPassword { password, pin } => {
+                self.check_pin(pin)?;
+                self.detached(Lane::InTurn, |app| async move {
+                    app.set_revocation_password(&password).await
+                })
+                .await
             }
             Command::SetNickname { nickname } => self.set_nickname(&nickname),
+            Command::DeclineNickname => self.decline_nickname(),
             Command::Settings => self.settings_json(),
             Command::SetSetting { name, value } => self.set_app_setting(&name, value),
-            Command::DeleteAllData => self.delete_all_data(),
+            Command::DeleteAllData { pin } => {
+                self.check_pin(pin)?;
+                self.delete_all_data().await
+            }
             Command::Conversations { archived, private } => {
                 self.conversations_json(archived, private)
             }
+            Command::UnreadSummary => self.unread_summary_json(),
             Command::LockStatus => self.lock_status(),
             Command::SetLock {
                 enabled,
@@ -1484,25 +2139,36 @@ impl App {
                 self.set_lock(lock)
             }
             Command::Unlock { pin, private_chats } => {
+                // Nothing to check a PIN against: no PIN opens anything. Private marks can exist
+                // without a lock (Safe restore, a linked device); a PIN set now opens them.
+                if self.store.lock()?.is_none() {
+                    return Err(ApiError::LockNeeded);
+                }
                 self.check_lock(Some(&pin))?;
+                self.write_pass = None;
                 if private_chats {
-                    self.unlocked = true;
+                    self.unlocked.set(true);
                     self.update_media_gate();
+                    // Their names again, in a private group's call that went on.
+                    self.emit_group_call_participants();
                 }
                 self.lock_status()
             }
-            Command::Lock => {
-                self.unlocked = false;
+            Command::Lock { pending_files } => {
+                self.unlocked.set(false);
+                // A share asked for before goes nowhere; one made stays until its deadline, for the
+                // app it went to (ADR 0031).
+                self.void_shares();
                 self.update_media_gate();
+                self.group_calls_locked();
+                if let Some(files) = pending_files {
+                    self.grant_write_pass(files);
+                }
                 self.lock_status()
             }
-            Command::SetPrivate { identity, private } => {
-                let result = self.set_private(&identity, private);
-                self.update_media_gate();
-                result
-            }
+            Command::SetPrivate { identity, private } => self.set_private(&identity, private),
             Command::SetArchived { identity, archived } => {
-                let key = self.conversation(&identity)?.0;
+                let key = self.visible_conversation(&identity)?.0;
                 self.store.set_archived(&key, archived)?;
                 // Chats were once seen landing in the archive unasked (an unexplained oddity).
                 tracing::info!(archived, "chat archive state set from the UI");
@@ -1518,13 +2184,14 @@ impl App {
             Command::Messages {
                 identity,
                 limit,
-                since,
+                around,
                 before,
                 after,
-            } => self.messages_json(&identity, limit, since, before, after),
+            } => self.messages_json(&identity, limit, around, before, after),
             Command::SearchMessages { query, identity } => {
                 self.search_messages(&query, identity.as_deref())
             }
+            Command::FindChats { query } => self.find_chats_json(&query),
             Command::SendText {
                 identity,
                 text,
@@ -1537,13 +2204,29 @@ impl App {
             Command::MarkRead { identity } => self.mark_read(&identity),
             Command::SetTyping { identity, typing } => self.set_typing(&identity, typing),
             Command::DownloadFile { message } => self.download_file(message),
-            Command::Groups => self.groups_json(),
-            Command::Group { key } => self.group_info(&key),
+            // A hidden private group or list is as closed as a hidden chat, and answers as one that
+            // isn't there: its name and members are what the chat list leaves out.
+            Command::Group { key } => {
+                self.check_visible_group(&key)?;
+                self.group_info(&key)
+            }
             Command::CreateGroup { name, members } => self.create_group(&name, &members),
-            Command::RenameGroup { key, name } => self.rename_group(&key, &name),
-            Command::SetGroupMembers { key, members } => self.set_group_members(&key, &members),
-            Command::LeaveGroup { key } => self.leave_group(&key),
-            Command::SetGroupPicture { key } => self.set_group_picture(&key).await,
+            Command::RenameGroup { key, name } => {
+                self.check_visible_group(&key)?;
+                self.rename_group(&key, &name)
+            }
+            Command::SetGroupMembers { key, members } => {
+                self.check_visible_group(&key)?;
+                self.set_group_members(&key, &members)
+            }
+            Command::LeaveGroup { key } => {
+                self.check_visible_group(&key)?;
+                self.leave_group(&key)
+            }
+            Command::SetGroupPicture { key } => {
+                self.check_visible_group(&key)?;
+                self.set_group_picture(&key).await
+            }
             Command::SendLocation {
                 identity,
                 latitude,
@@ -1561,20 +2244,34 @@ impl App {
                     "address": address,
                 }),
             ),
+            Command::FindPlaces {
+                latitude,
+                longitude,
+                query,
+            } => {
+                self.detached(Lane::Free, move |app| async move {
+                    crate::places::find(&app.https, latitude, longitude, query.as_deref()).await
+                })
+                .await
+            }
             Command::CreateDistributionList { name, members } => {
                 self.create_distribution_list(&name, &members)
             }
-            Command::DistributionList { key } => self.distribution_list_json(&key),
+            Command::DistributionList { key } => {
+                self.check_visible_group(&key)?;
+                self.distribution_list_json(&key)
+            }
             Command::UpdateDistributionList { key, name, members } => {
+                self.check_visible_group(&key)?;
                 self.update_distribution_list(&key, name.as_deref(), members.as_deref())
             }
             Command::SetPinned { identity, pinned } => {
-                let key = self.conversation(&identity)?.0;
+                let key = self.visible_conversation(&identity)?.0;
                 self.store.set_pinned(&key, pinned)?;
                 Ok(json!({}))
             }
             Command::MovePinned { identity, offset } => {
-                let key = self.conversation(&identity)?.0;
+                let key = self.visible_conversation(&identity)?.0;
                 self.store.move_pinned(&key, offset)?;
                 Ok(json!({}))
             }
@@ -1585,28 +2282,24 @@ impl App {
             }
             Command::SyncExcluded => self.sync_excluded_json(),
             Command::RefreshContacts => {
-                let changed = self.refresh_contacts(true).await?;
-                Ok(json!({ "changed": changed }))
+                self.detached(Lane::InTurn, |app| async move {
+                    let changed = app.refresh_contacts(true).await?;
+                    Ok(json!({ "changed": changed }))
+                })
+                .await
             }
-            Command::ForwardMessage { message, identity } => {
-                self.forward_message(message, &identity)
-            }
-            Command::SetDraft { identity, text } => {
-                let key = self.readable_conversation(&identity)?.0;
-                let draft_key = format!("draft:{key}");
-                if text.trim().is_empty() {
-                    self.store.delete_setting(&draft_key)?;
-                } else {
-                    self.store.set_setting(&draft_key, &text)?;
-                }
-                Ok(json!({}))
-            }
-            Command::Draft { identity } => {
-                let key = self.conversation(&identity)?.0;
-                self.check_readable(&key)?;
-                Ok(json!({ "text": self.store.setting(&format!("draft:{key}"))? }))
-            }
-            Command::ChatMedia { identity, kinds } => self.chat_media(&identity, kinds),
+            Command::SetDraft {
+                identity,
+                text,
+                quote,
+            } => self.set_draft(&identity, &text, quote.as_deref()),
+            Command::Draft { identity } => self.draft(&identity),
+            Command::ChatMedia {
+                identity,
+                kinds,
+                limit,
+                before,
+            } => self.chat_media(&identity, kinds, limit, before.as_deref()),
             Command::SetMediaKinds { kinds } => {
                 let kinds: Vec<&str> = crate::messages::MEDIA_KINDS
                     .into_iter()
@@ -1623,10 +2316,23 @@ impl App {
                 }
                 None => Ok(Value::Null),
             },
-            Command::SetVoiceListened { message } => Ok(self
-                .store
-                .set_listened(message)?
-                .map_or(Value::Null, |m| self.store.message_json(&m))),
+            Command::SetVoiceListened { message } => {
+                // It changes and returns the message: not one of a hidden private chat.
+                if let Some(m) = self.store.message(message)? {
+                    self.check_readable(&m.conversation)?;
+                }
+                let changed = self.store.set_listened(message)?;
+                // It may have been played elsewhere than in its chat (the media page), which has
+                // to know as well.
+                if let Some(changed) = &changed {
+                    let _ = self
+                        .media_events
+                        .send(crate::providers::CoreEvent::MessagesChanged(vec![
+                            changed.clone(),
+                        ]));
+                }
+                Ok(changed.map_or(Value::Null, |m| self.store.message_json(&m)))
+            }
             Command::SetStarred { message, starred } => {
                 // It returns the message: not one of a hidden private chat.
                 if let Some(m) = self.store.message(message)? {
@@ -1640,31 +2346,92 @@ impl App {
             Command::StarredMessages { identity } => {
                 self.starred_messages_json(identity.as_deref())
             }
-            Command::ForwardMessages { messages, identity } => {
-                let (mut forwarded, mut failed) = (0, 0);
+            Command::ForwardMessages {
+                messages,
+                identity,
+                caption,
+                keep_metadata,
+            } => {
+                let (mut forwarded, mut failed, mut failed_members) = (0, 0, 0);
+                let mut errors: Vec<&str> = Vec::new();
+                let mut keeps_metadata = Vec::new();
                 for message in messages {
-                    match self.forward_message(message, &identity) {
-                        Ok(_) => forwarded += 1,
+                    match Box::pin(self.forward_message(
+                        message,
+                        &identity,
+                        caption.clone(),
+                        keep_metadata,
+                    ))
+                    .await
+                    {
+                        Ok(sent) => {
+                            forwarded += 1;
+                            failed_members += sent["failedMembers"].as_u64().unwrap_or(0);
+                        }
                         Err(error) => {
                             tracing::warn!(%error, "forwarding failed");
                             failed += 1;
+                            if !errors.contains(&error.kind()) {
+                                errors.push(error.kind());
+                            }
+                            if matches!(
+                                error,
+                                ApiError::PictureKeepsMetadata | ApiError::VideoKeepsMetadata
+                            ) {
+                                // Read already: these come only after the chat was found readable.
+                                let body = self.store.message(message)?.map(|m| m.body);
+                                let body: Value = body
+                                    .and_then(|body| serde_json::from_str(&body).ok())
+                                    .unwrap_or_default();
+                                keeps_metadata.push(json!({
+                                    "message": message,
+                                    "name": body["name"].as_str().unwrap_or_default(),
+                                    "video": matches!(error, ApiError::VideoKeepsMetadata),
+                                }));
+                            }
                         }
                     }
                 }
-                Ok(json!({ "forwarded": forwarded, "failed": failed }))
+                Ok(
+                    json!({ "forwarded": forwarded, "failed": failed, "errors": errors,
+                           "failedMembers": failed_members, "keepsMetadata": keeps_metadata }),
+                )
             }
             Command::SetChatNotifications {
                 identity,
                 policy,
                 until,
             } => self.set_chat_notifications(&identity, policy.as_deref(), until),
+            Command::ChatTones => self.chat_tones(),
+            Command::SetChatTone { identity, tone } => {
+                self.set_chat_tone(&identity, tone.as_deref())
+            }
+            Command::ImportChatTones { tones } => {
+                for (conversation, tone) in &tones {
+                    self.store.set_chat_tone(conversation, Some(tone))?;
+                }
+                Ok(json!({}))
+            }
             Command::ParseLink { url } => crate::links::parse(&url)
                 .map(|link| link.to_json())
                 .ok_or(ApiError::LinkInvalid),
             Command::MyQrCode => self.my_qr_code(),
-            Command::MatchAddressBook { entries } => self.match_address_book(entries).await,
-            Command::VerifyQrCode { text } => self.verify_qr_code(&text).await,
-            Command::QrKind { text } => Ok(json!({ "kind": qr_kind(&text) })),
+            Command::MatchAddressBook { entries, automatic } => {
+                if automatic && self.store.directory_resting() {
+                    return Err(ApiError::RateLimited);
+                }
+                self.detached(Lane::InTurn, |app| async move {
+                    app.match_address_book(entries).await
+                })
+                .await
+            }
+            Command::VerifyQrCode { text, picture } => {
+                self.detached(Lane::Free, move |app| async move {
+                    app.verify_qr_code(&text, picture).await
+                })
+                .await
+            }
+            Command::QrKind { text } => self.classify_qr(&text),
             Command::SetProfilePicture => self.set_profile_picture(),
             Command::RemoveProfilePicture => self.remove_profile_picture(),
             Command::SetProfilePictureShare { share, recipients } => {
@@ -1682,7 +2449,16 @@ impl App {
             } => self.create_poll(&identity, &description, &choices, multiple, announce),
             Command::Vote { message, choices } => self.vote(message, &choices),
             Command::ClosePoll { message } => self.close_poll(message),
-            Command::RemoveGroupPicture { key } => self.remove_group_picture(&key),
+            Command::Polls { identity } => self.polls_json(&identity),
+            Command::RemoveGroupPicture { key } => {
+                self.check_visible_group(&key)?;
+                // In turn: behind a new picture still on its way up, or that one would win.
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.remove_group_picture(&key) },
+                )
+                .await
+            }
             Command::SendFile {
                 identity,
                 path,
@@ -1694,20 +2470,42 @@ impl App {
                 height,
                 duration,
                 encode,
-            } => self.send_file(crate::app_media::OutgoingFile {
-                identity,
-                path,
-                name,
-                media_type,
-                caption,
-                rendering,
-                width,
-                height,
-                duration,
-                encode,
-            }),
+                keep_metadata,
+            } => {
+                let file = crate::app_media::OutgoingFile {
+                    identity,
+                    path,
+                    name,
+                    media_type,
+                    caption,
+                    rendering,
+                    width,
+                    height,
+                    duration,
+                    encode,
+                    keep_metadata,
+                };
+                // Only this command: nothing else that ends in sending a file uses a pass.
+                let under_pass = self.take_write_pass(&file.identity);
+                if self.in_background.get() {
+                    self.send_file_in_background(file, under_pass)
+                } else if under_pass {
+                    Box::pin(self.send_file_under_pass(file)).await
+                } else {
+                    Box::pin(self.send_file(file)).await
+                }
+            }
             Command::RetryUpload { message } => self.retry_upload(message),
-            Command::SaveFile { message, directory } => self.save_file(message, &directory),
+            Command::ResendMessage { message } => self.resend_message(message),
+            Command::CancelTransfer { message } => self.cancel_transfer(message),
+            Command::ShareFiles { messages } => self.share_files_in_background(messages),
+            Command::SaveFile { message, directory } => {
+                if self.in_background.get() {
+                    self.save_file_in_background(message, directory)
+                } else {
+                    Box::pin(self.save_file(message, directory)).await
+                }
+            }
             Command::EditMessage {
                 identity,
                 message_id,
@@ -1735,34 +2533,88 @@ impl App {
                 Ok(json!({}))
             }
             Command::MultiDevice => self.multi_device_json(),
-            Command::LinkedDevices => self.linked_devices().await,
-            Command::DropDevices { ids } => self.drop_devices(&ids).await,
-            Command::DeactivateMultiDevice => self.deactivate_multi_device().await,
-            Command::StartLinking { code } => self.start_linking(&code).await,
-            Command::ConfirmLinking => self.confirm_linking().await,
-            Command::CancelLinking => {
-                if let Some(link) = self.pending_link.take() {
-                    link.close().await;
-                }
-                Ok(json!({}))
+            Command::ClearReflectedLeftOut => {
+                self.store.clear_reflected_left_out()?;
+                self.multi_device_json()
             }
-            Command::CallTurnServers => self.call_turn_servers().await,
+            Command::LinkedDevices => {
+                self.detached(Lane::Free, |app| async move {
+                    app.linked_devices_checked().await
+                })
+                .await
+            }
+            Command::DropDevices { ids } => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.drop_devices(&ids).await },
+                )
+                .await
+            }
+            Command::DeactivateMultiDevice { leave_locally } => {
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.deactivate_multi_device(leave_locally).await
+                })
+                .await
+            }
+            Command::StartLinking { code, pin } => {
+                self.check_pin(pin)?;
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.start_linking(&code).await },
+                )
+                .await
+            }
+            Command::ConfirmLinking => {
+                self.detached(
+                    Lane::InTurn,
+                    |app| async move { app.confirm_linking().await },
+                )
+                .await
+            }
+            Command::CancelLinking => {
+                // In turn: a page closing while the connection comes up asks this before there is
+                // anything to cancel.
+                self.detached(Lane::InTurn, |app| async move {
+                    let link = app.pending_link.take();
+                    if let Some(link) = link {
+                        link.close().await;
+                    }
+                    Ok(json!({}))
+                })
+                .await
+            }
+            Command::CallTurnServers { identity } => {
+                self.detached(Lane::Free, |app| async move {
+                    app.call_turn_servers(&identity).await
+                })
+                .await
+            }
             Command::CallStart {
                 identity,
                 sdp,
                 video,
             } => self.call_start(&identity, &sdp, video),
-            Command::CallAccept { sdp, video } => self.call_accept(&sdp, video),
-            Command::CallReject => Ok(self.call_reject()),
-            Command::CallHangUp => Ok(self.call_hang_up()),
-            Command::CallTimeout => Ok(self.call_timeout()),
-            Command::CallCandidates { candidates } => Ok(self.call_candidates(candidates)),
-            Command::CallState => Ok(self.call_state()),
+            Command::CallAccept {
+                call_id,
+                sdp,
+                video,
+            } => self.call_accept(call_id, &sdp, video),
+            Command::CallReject { call_id } => Ok(self.call_reject(call_id)),
+            Command::CallHangUp { call_id } => Ok(self.call_hang_up(call_id)),
+            Command::CallFailed { call_id, reason } => Ok(self.call_failed(call_id, &reason)),
+            Command::CallTimeout { call_id } => Ok(self.call_timeout(call_id)),
+            Command::CallCandidates {
+                call_id,
+                candidates,
+            } => Ok(self.call_candidates(call_id, candidates)),
             Command::CallConnected { relayed } => Ok(self.call_connected(relayed)),
             Command::CallChannel { data } => self.call_channel(&data),
             Command::CallCapture { device, on } => self.call_capture(&device, on),
             Command::SetVideoQuality { quality } => self.set_video_quality(&quality),
+            Command::AddressBookCountry => self.address_book_country_json(),
+            Command::SetAddressBookCountry { country } => self.set_address_book_country(&country),
             Command::GroupCallRefresh { conversation } => {
+                self.check_visible_group(&conversation)?;
                 Ok(self.group_call_refresh(&conversation))
             }
             Command::GroupCallJoin {
@@ -1770,8 +2622,8 @@ impl App {
                 fingerprint,
                 create,
             } => {
-                self.group_call_join(&conversation, &fingerprint, create)
-                    .await
+                self.check_visible_group(&conversation)?;
+                Box::pin(self.group_call_join(conversation, fingerprint, create)).await
             }
             Command::GroupCallChannel { data } => self.group_call_channel(&data),
             Command::GroupCallLeave => Ok(self.group_call_leave()),
@@ -1779,11 +2631,16 @@ impl App {
             Command::GroupCallCamera { on } => Ok(self.group_call_camera(on)),
             Command::GroupCallTick => self.group_call_tick(),
             Command::WebSessions => self.web_sessions_json(),
+            Command::WebSetEnabled { enabled } => self.web_set_enabled(enabled),
             Command::WebPair { qr, allow_host } => self.web_pair(&qr, allow_host),
             Command::WebStart { session } => self.web_start(session),
             Command::WebStop { session } => Ok(self.web_stop(session)),
             Command::WebDelete { session } => self.web_delete(session),
+            Command::WebDeleteAll => self.web_delete_all(),
+            Command::WebRename { session, label } => self.web_rename(session, &label),
             Command::WebAcceptCertificate { session } => self.web_accept_certificate(session),
+            Command::WebDeclineCertificate { session } => Ok(self.web_decline_certificate(session)),
+            Command::WebRemoveServer { host } => self.web_remove_server(&host),
             Command::GifFavourites => self.gif_favourites_json(),
             Command::RecentEmoji => self.recent_emoji_json(),
             Command::UseEmoji { emoji } => self.use_emoji(&emoji),
@@ -1797,7 +2654,7 @@ impl App {
             Command::SendGifFavourite {
                 identity,
                 favourite,
-            } => self.send_gif_favourite(identity, favourite),
+            } => Box::pin(self.send_gif_favourite(identity, favourite)).await,
             Command::UpdateSettings => self.update_settings_json(),
             Command::SetUpdateCheck { enabled } => {
                 if !self.update_check_built {
@@ -1814,6 +2671,10 @@ impl App {
                 self.start_update_check(true);
                 self.update_settings_json()
             }
+            Command::SetImageSize { side } => {
+                self.image_size = side;
+                Ok(json!({}))
+            }
             Command::SetLogLevel { level } => {
                 crate::runtime::set_log_level(&level);
                 Ok(json!({}))
@@ -1823,7 +2684,12 @@ impl App {
                     && self.store.multi_device()?.is_none(),
                 "multiDevice": self.store.multi_device()?.is_some(),
             })),
-            Command::SetForwardSecurity { on } => self.set_forward_security(on).await,
+            Command::SetForwardSecurity { on } => {
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.set_forward_security(on).await
+                })
+                .await
+            }
             Command::LogText => Ok(json!({
                 // A small tail: the page lays the whole text out at once.
                 "text": crate::runtime::log_text(&self.data_dir, 64 * 1024),
@@ -1894,8 +2760,11 @@ impl App {
                 me,
                 offset_minutes,
             } => {
-                self.export_chat(&identity, media, &directory, password, me, offset_minutes)
-                    .await
+                self.detached(Lane::InTurn, move |app| async move {
+                    app.export_chat(&identity, media, &directory, password, me, offset_minutes)
+                        .await
+                })
+                .await
             }
             Command::StorageInfo => Ok(json!({
                 "mediaBytes": self.media.size(),
@@ -1903,16 +2772,15 @@ impl App {
             })),
             Command::CleanUp { days, messages } => self.clean_up(days, messages),
             Command::EmptyConversation { identity } => {
-                let key = self.readable_conversation(&identity)?.0;
-                self.check_readable(&key)?;
+                let key = self.readable_chat(&identity)?.0;
                 self.store.empty_conversation(&key)?;
                 let store = std::rc::Rc::clone(&self.store);
                 self.media
                     .remove_orphans(|id| store.message_exists(id).unwrap_or(true));
                 Ok(json!({}))
             }
-            Command::ConnectionState => Ok(self.connection_json()),
-            Command::Reconnect => Ok(self.wake_connection()),
+            Command::Reconnect => Ok(self.connect_now()),
+            Command::Wake => Ok(self.wake_connection()),
         }
     }
 
@@ -1928,7 +2796,9 @@ impl App {
             "identity": identity.map(|i| i.threema_id),
         }))
     }
+}
 
+impl Shared {
     fn device_id(&self) -> Result<String, ApiError> {
         if let Some(id) = self.store.setting(keys::DEVICE_ID)? {
             return Ok(id);
@@ -1938,7 +2808,7 @@ impl App {
         Ok(id)
     }
 
-    async fn check_license(&mut self, input: &str) -> Result<Value, ApiError> {
+    async fn check_license(&self, input: &str) -> Result<Value, ApiError> {
         let license_key =
             Zeroizing::new(normalize_license_key(input).ok_or(ApiError::LicenseFormat)?);
         let device_id = self.device_id()?;
@@ -1958,7 +2828,9 @@ impl App {
         Ok(self.store.setting(keys::LICENSE_KEY)?.is_some()
             && self.store.setting(keys::LICENSE_REFUSED)?.is_none())
     }
+}
 
+impl App {
     fn license_status(&self) -> Result<Value, ApiError> {
         Ok(json!({
             "key": self.store.setting(keys::LICENSE_KEY)?,
@@ -1966,10 +2838,51 @@ impl App {
         }))
     }
 
+    /// The way back from the ID step when the directory turns the key down there: until an ID
+    /// exists, nothing else depends on it.
+    fn forget_license(&mut self) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
+        self.store.delete_setting(keys::LICENSE_KEY)?;
+        self.store.delete_setting(keys::LICENSE_REFUSED)?;
+        self.store.delete_setting(keys::LICENSE_CHECKED_AT)?;
+        self.status()
+    }
+
     /// Ask the directory about the stored license again, at most daily (Android: whenever its
     /// main screen opens; we run for weeks, and many starts shouldn't mean many requests). Returns
     /// whether the license was refused just now.
+    #[cfg(test)]
     pub(crate) async fn recheck_license(&mut self) -> Result<bool, ApiError> {
+        let refused = self.shared.ask_about_license().await?;
+        if refused {
+            self.license_refused();
+        }
+        Ok(refused)
+    }
+
+    /// See [`Shared::note_license_answer`].
+    #[cfg(test)]
+    fn apply_license_answer(
+        &mut self,
+        answer: Result<directory::LicenseOk, DirectoryError>,
+    ) -> Result<bool, ApiError> {
+        let refused = self.shared.note_license_answer(answer)?;
+        if refused {
+            self.license_refused();
+        }
+        Ok(refused)
+    }
+
+    /// Nothing goes to Threema's servers from here on.
+    pub(crate) fn license_refused(&mut self) {
+        self.web_stop_all(crate::app_web::StopReason::Stop);
+        self.stop_connection();
+    }
+}
+
+impl Shared {
+    /// [`App::recheck_license`]'s work; what follows a refusal is up to the caller.
+    pub(crate) async fn ask_about_license(&self) -> Result<bool, ApiError> {
         let Some(license_key) = self.store.setting(keys::LICENSE_KEY)?.map(Zeroizing::new) else {
             return Ok(false);
         };
@@ -1977,19 +2890,22 @@ impl App {
             .store
             .setting(keys::LICENSE_CHECKED_AT)?
             .and_then(|at| at.parse().ok());
-        if !license_check_due(checked_at, crate::messages::now_ms()) {
+        if !license_check_due(checked_at, crate::messages::now_ms())
+            || self.store.directory_resting()
+        {
             return Ok(false);
         }
         let device_id = self.device_id()?;
         let answer =
             directory::check_license(&self.https, &license_key, &device_id, &self.version).await;
-        self.apply_license_answer(answer)
+        self.note_license_answer(answer)
     }
 
     /// Only the directory's own "no" counts, like Android: being offline or a server having a bad
-    /// day must not cost anyone their messages. Those try again at the next maintenance.
-    fn apply_license_answer(
-        &mut self,
+    /// day must not cost anyone their messages. Those try again at the next maintenance. Whether
+    /// that "no" came.
+    fn note_license_answer(
+        &self,
         answer: Result<directory::LicenseOk, DirectoryError>,
     ) -> Result<bool, ApiError> {
         match answer {
@@ -2003,15 +2919,26 @@ impl App {
             Err(DirectoryError::Server(message)) => {
                 tracing::warn!("the directory refused the license");
                 self.store.set_setting(keys::LICENSE_REFUSED, &message)?;
-                self.web_stop_all();
-                self.stop_connection();
                 Ok(true)
             }
+            Err(DirectoryError::RateLimited) => {
+                self.store.rest_directory_calls();
+                Ok(false)
+            }
+            // A server without words for it, or no answer at all: that's not about the key.
             Err(error) => {
                 tracing::info!(%error, "license check not answered");
                 Ok(false)
             }
         }
+    }
+
+    /// The error for the UI from a directory call that runs by itself: a 429 also starts the rest.
+    pub(crate) fn directory_error(&self, error: DirectoryError) -> ApiError {
+        if matches!(error, DirectoryError::RateLimited) {
+            self.store.rest_directory_calls();
+        }
+        error.into()
     }
 
     pub(crate) fn license(&self) -> Result<SerialLicense, ApiError> {
@@ -2024,7 +2951,26 @@ impl App {
         })
     }
 
-    async fn create_identity(&mut self) -> Result<Value, ApiError> {
+    /// Creating or restoring replaces the stored ID, so it starts only on a device without one:
+    /// taking an ID off the device goes through the PIN (ADR 0009), not around it.
+    pub(crate) fn check_no_identity(&self) -> Result<(), ApiError> {
+        if self.store.identity()?.is_some() {
+            return Err(ApiError::IdentityExists);
+        }
+        Ok(())
+    }
+
+    /// The one way a created or restored ID gets stored. Asked again here because the network
+    /// waits since the first check: the old ID's key would be gone from the device, and a later
+    /// automatic Safe backup would put the new one over its copy.
+    fn store_new_identity(&self, identity: &StoredIdentity) -> Result<(), ApiError> {
+        self.check_no_identity()?;
+        self.store.set_identity(identity)?;
+        Ok(())
+    }
+
+    async fn create_identity(&self) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
         let mut task = CreateIdentityTask::new(CreateIdentityContext {
             client_info: self.version.client_info(),
             config: Arc::clone(&self.config),
@@ -2036,29 +2982,32 @@ impl App {
             client_key,
             server_group,
         } = loop {
-            match task.poll().map_err(|e| ApiError::Server(e.to_string()))? {
+            match task.poll().map_err(create_identity_error)? {
                 CreateIdentityLoop::Instruction(instruction) => {
                     let result = self.https.send(instruction.request).await;
                     task.response(CreateIdentityResponse { result })
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                        .map_err(create_identity_error)?;
                 }
                 CreateIdentityLoop::Done(result) => break result,
             }
         };
-        self.store.set_identity(&StoredIdentity {
+        self.store_new_identity(&StoredIdentity {
             threema_id: identity.to_string(),
             client_key: Zeroizing::new(*client_key.as_bytes()),
             server_group: server_group.to_string(),
         })?;
+        self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
+        self.note_new_identity()?;
         tracing::info!("identity created");
         Ok(json!({ "identity": identity.to_string() }))
     }
 
     async fn restore_identity_backup(
-        &mut self,
+        &self,
         backup: Zeroizing<String>,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
+        self.check_no_identity()?;
         // Libre requires a valid license before an ID can be used, also when restoring.
         let _ = self.license()?;
         // Key derivation is deliberately slow: keep it off the core loop.
@@ -2070,6 +3019,8 @@ impl App {
         .map_err(|_| ApiError::BackupDecrypt)?;
         let threema_id = data.threema_id.to_string();
         self.adopt_identity(&threema_id, &data.client_key).await?;
+        // An ID backup holds no nickname. Threema Safe has its own, if the backup had one.
+        self.store.set_setting(keys::NICKNAME_UNANSWERED, "ask")?;
         tracing::info!("identity restored");
         Ok(json!({ "identity": threema_id }))
     }
@@ -2078,13 +3029,24 @@ impl App {
     /// linked e-mail/phone via `identity/fetch_priv` (as `UserServiceImpl.restoreIdentity`), then
     /// store it.
     pub(crate) async fn adopt_identity(
-        &mut self,
+        &self,
         threema_id: &str,
         client_key: &ClientKey,
     ) -> Result<(), ApiError> {
+        self.check_no_identity()?;
         let private =
             directory::fetch_identity_private(&self.https, threema_id, client_key).await?;
-        self.store.set_identity(&StoredIdentity {
+        self.store_adopted_identity(threema_id, client_key, private)
+    }
+
+    /// The local half of [`Self::adopt_identity`].
+    pub(crate) fn store_adopted_identity(
+        &self,
+        threema_id: &str,
+        client_key: &ClientKey,
+        private: directory::PrivateIdentityData,
+    ) -> Result<(), ApiError> {
+        self.store_new_identity(&StoredIdentity {
             threema_id: threema_id.to_owned(),
             client_key: Zeroizing::new(*client_key.as_bytes()),
             server_group: private.server_group,
@@ -2101,8 +3063,8 @@ impl App {
         Ok(())
     }
 
-    async fn export_identity_backup(
-        &mut self,
+    pub(crate) async fn export_identity_backup(
+        &self,
         password: Zeroizing<String>,
     ) -> Result<Value, ApiError> {
         if password.chars().count() < MIN_BACKUP_PASSWORD_LENGTH {
@@ -2121,18 +3083,25 @@ impl App {
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        Ok(json!({ "backup": backup }))
+        self.end_backup_reminder()?;
+        let (size, bits) =
+            crate::qr::modules(&backup).ok_or_else(|| ApiError::Internal("QR code".into()))?;
+        Ok(json!({ "backup": backup, "qr": { "size": size, "bits": bits } }))
     }
 }
 
 /// What a command changes that other devices of the group keep too (multi-device).
-fn sync_change(command: &Command) -> Option<crate::app_multidevice::SyncChange> {
+pub(crate) fn sync_change(
+    store: &crate::store::Store,
+    command: &Command,
+) -> Option<crate::app_multidevice::SyncChange> {
     use crate::app_multidevice::SyncChange;
     Some(match command {
-        Command::AddContact { identity }
+        // The command takes it as it comes (spaces, lower case), and so must this.
+        Command::DeleteContact { identity }
         | Command::UpdateContact { identity, .. }
         | Command::SetContactPolicies { identity, .. } => {
-            SyncChange::Contacts(vec![identity.clone()])
+            SyncChange::Contacts(vec![crate::contacts::parse_identity(identity)?.to_string()])
         }
         Command::SetPrivate { identity, .. }
         | Command::SetArchived { identity, .. }
@@ -2140,22 +3109,36 @@ fn sync_change(command: &Command) -> Option<crate::app_multidevice::SyncChange> 
         | Command::SetChatNotifications { identity, .. } => {
             SyncChange::Conversation(identity.clone())
         }
+        // Its pin or archive mark goes with it. (Of a left group the other devices hear nothing
+        // from this, as the row is gone by then.)
+        Command::DeleteConversation { identity } if chat_is_marked(store, identity) => {
+            SyncChange::Conversation(identity.clone())
+        }
         Command::CreateGroup { .. } => SyncChange::Group {
             key: None,
             created: true,
+            previous_members: None,
         },
-        Command::RenameGroup { key, .. }
-        | Command::SetGroupMembers { key, .. }
-        | Command::LeaveGroup { key } => SyncChange::Group {
+        Command::RenameGroup { key, .. } | Command::LeaveGroup { key } => SyncChange::Group {
             key: Some(key.clone()),
             created: false,
+            previous_members: None,
+        },
+        // The list as it is before the command runs: the difference goes along.
+        Command::SetGroupMembers { key, .. } => SyncChange::Group {
+            key: Some(key.clone()),
+            created: false,
+            previous_members: store.group(key).ok().flatten().map(|group| group.members),
         },
         Command::SetSetting { .. }
         | Command::SetBlocked { .. }
         | Command::SetSyncExcluded { .. } => SyncChange::Settings,
         Command::SetNickname { .. }
         | Command::SetProfilePictureShare { .. }
-        | Command::SetProfilePictureRecipient { .. } => SyncChange::Profile { picture: false },
+        | Command::SetProfilePictureRecipient { .. }
+        | Command::LinkEmail { .. }
+        | Command::LinkMobile { .. }
+        | Command::VerifyMobile { .. } => SyncChange::Profile { picture: false },
         Command::SetProfilePicture | Command::RemoveProfilePicture => {
             SyncChange::Profile { picture: true }
         }
@@ -2166,27 +3149,182 @@ fn sync_change(command: &Command) -> Option<crate::app_multidevice::SyncChange> 
     })
 }
 
-/// What a scanned QR code is: a contact's (`3mid:`), Threema Web's, or Threema for Desktop's
-/// linking code.
-fn qr_kind(text: &str) -> &'static str {
+fn chat_is_marked(store: &crate::store::Store, conversation: &str) -> bool {
+    let among = |chats: Result<Vec<String>, _>| {
+        chats.is_ok_and(|chats| chats.iter().any(|chat| chat == conversation))
+    };
+    among(store.pinned_chats()) || among(store.archived_chats())
+}
+
+/// What a scanned QR code is, for the one place that decides what to do with it, however it
+/// reached the scanner: `kind` (`contact`, `web`, `device`, `link`, `idBackup`, `unknown`), and `error`, the
+/// error kind to show instead when the code can't be used. No network, nothing stored.
+pub(crate) fn qr_kind(text: &str, now_seconds: i64) -> Value {
+    use crate::{links::Link, rendezvous::LinkError, web::qr::QrError};
+
+    let text = text.trim();
+    if crate::qr::is_identity_backup(text) {
+        return json!({ "kind": "idBackup" });
+    }
     if text.starts_with("3mid:") {
-        "contact"
-    } else if crate::web::qr::parse(text).is_ok() {
-        "web"
-    } else if crate::rendezvous::parse_join_code(text).is_ok() {
-        "device"
-    } else {
-        "unknown"
+        return match crate::qr::parse(text) {
+            None => json!({ "kind": "contact", "error": ApiError::QrInvalid.kind() }),
+            Some(code) if code.is_expired(now_seconds) => {
+                json!({ "kind": "contact", "error": ApiError::QrExpired.kind(), "identity": code.identity })
+            }
+            Some(code) => json!({ "kind": "contact", "identity": code.identity }),
+        };
+    }
+    match crate::web::qr::parse(text) {
+        Ok(qr) => {
+            return json!({ "kind": "web", "host": qr.host });
+        }
+        // Any long enough Base64 has "a version": only a small number looks like Threema Web's.
+        Err(QrError::Version(version)) if (1..=0xff).contains(&version) => {
+            return json!({ "kind": "web", "error": ApiError::WebVersion.kind() });
+        }
+        Err(_) => {}
+    }
+    match crate::rendezvous::parse_join_code(text) {
+        Ok(_) => return json!({ "kind": "device" }),
+        // The join prefix leaves no doubt what it is.
+        Err(LinkError::Version) => {
+            return json!({ "kind": "device", "error": ApiError::LinkVersion.kind() });
+        }
+        Err(_) => {}
+    }
+    match crate::links::parse(text) {
+        Some(
+            Link::Contact { identity, .. }
+            | Link::Add { identity }
+            | Link::Compose {
+                identity: Some(identity),
+                ..
+            },
+        ) => json!({ "kind": "link", "identity": identity }),
+        _ => json!({ "kind": "unknown" }),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    fn web_code(version: u16, options: u8, host: &str) -> String {
+        let mut bytes = version.to_be_bytes().to_vec();
+        bytes.push(options);
+        bytes.extend([1; 32]);
+        bytes.extend([2; 32]);
+        bytes.extend([0; 32]);
+        bytes.extend(443_u16.to_be_bytes());
+        bytes.extend(host.as_bytes());
+        data_encoding::BASE64.encode(&bytes)
+    }
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn kind(text: &str) -> serde_json::Value {
+        super::qr_kind(text, NOW)
+    }
+
+    /// Without a case the user gets "Something went wrong.": fine for these two only. `internal` is
+    /// that case, and `parseLink`'s caller doesn't show its error.
+    #[test]
+    fn every_error_kind_has_a_text() {
+        let source = include_str!("app.rs");
+        let start = source.find("fn kind(&self) -> &'static str").unwrap();
+        let end = start + source[start..].find("fn store_failed").unwrap();
+        let texts = include_str!("../../qml/components/Errors.js");
+        let kinds = source[start..end]
+            .lines()
+            .filter_map(|line| line.split("=> \"").nth(1)?.split('"').next());
+        let missing: Vec<_> = kinds
+            .filter(|kind| !["internal", "linkInvalid"].contains(kind))
+            .filter(|kind| !texts.contains(&format!("case \"{kind}\":")))
+            .collect();
+        assert_eq!(missing, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn an_id_backup_is_told_apart_from_other_codes() {
+        let backup = vec!["AB2C"; 20].join("-");
+        assert_eq!(kind(&backup)["kind"], "idBackup");
+        assert_eq!(kind(&vec!["AB2C"; 26].join("-"))["kind"], "idBackup");
+        assert_eq!(kind(&vec!["AB2C"; 21].join("-"))["kind"], "unknown");
+    }
+
     #[test]
     fn qr_kinds() {
-        assert_eq!(super::qr_kind("3mid:ECHOECHO,4a6a1b34"), "contact");
-        assert_eq!(super::qr_kind("https://example.org"), "unknown");
-        assert_eq!(super::qr_kind(""), "unknown");
+        let key = "ab".repeat(32);
+        let contact = kind(&format!("3mid:abcd1234,{key}"));
+        assert_eq!(contact["kind"], "contact");
+        assert_eq!(contact["identity"], "ABCD1234");
+        assert!(contact.get("error").is_none());
+        assert_eq!(kind("https://example.org")["kind"], "unknown");
+        assert_eq!(kind("")["kind"], "unknown");
+    }
+
+    #[test]
+    fn a_damaged_or_expired_contact_code_says_so() {
+        let key = "ab".repeat(32);
+        assert_eq!(kind("3mid:ABCD1234,4a6a1b34")["error"], "qrInvalid");
+        let past = kind(&format!("3mid:ABCD1234,{key},{}", NOW - 1));
+        assert_eq!(past["kind"], "contact");
+        assert_eq!(past["error"], "qrExpired");
+        let future = kind(&format!("3mid:ABCD1234,{key},{}", NOW + 1));
+        assert!(future.get("error").is_none());
+        let unreadable = kind(&format!("3mid:ABCD1234,{key},soon"));
+        assert!(unreadable.get("error").is_none());
+    }
+
+    #[test]
+    fn a_web_code_says_where_it_goes() {
+        let code = kind(&web_code(2, 0x02, "saltyrtc-01.threema.ch"));
+        assert_eq!(code["kind"], "web");
+        assert_eq!(code["host"], "saltyrtc-01.threema.ch");
+    }
+
+    #[test]
+    fn only_a_small_version_makes_a_web_code_of_another_version() {
+        let old = kind(&web_code(1, 0, "x.threema.ch"));
+        assert_eq!(old["kind"], "web");
+        assert_eq!(old["error"], "webVersion");
+        // Long enough Base64 starting with anything else is not Threema Web's.
+        assert_eq!(
+            kind(&web_code(0x4142, 0, "x.threema.ch"))["kind"],
+            "unknown"
+        );
+        assert_eq!(kind(&web_code(0, 0, "x.threema.ch"))["kind"], "unknown");
+    }
+
+    #[test]
+    fn a_join_code_of_another_version_is_still_a_device_code() {
+        let good = kind(&crate::rendezvous::test_join_code(2));
+        assert_eq!(good["kind"], "device");
+        assert!(good.get("error").is_none());
+        let old = kind(&crate::rendezvous::test_join_code(1));
+        assert_eq!(old["kind"], "device");
+        assert_eq!(old["error"], "linkVersion");
+    }
+
+    #[test]
+    fn links_with_an_id_are_links_and_others_unknown() {
+        for text in [
+            "https://threema.id/ABCD1234",
+            "https://threema.id/ABCD1234?text=hello",
+            "threema://add?id=ABCD1234",
+            "https://go.threema.ch/add?id=ABCD1234",
+            "threema://compose?id=ABCD1234",
+        ] {
+            let code = kind(text);
+            assert_eq!(code["kind"], "link", "{text}");
+            assert_eq!(code["identity"], "ABCD1234", "{text}");
+        }
+        for text in [
+            "threema://compose?text=hello",
+            "threema://license?key=ABCDE-12345",
+            "https://threema.id/short",
+        ] {
+            assert_eq!(kind(text)["kind"], "unknown", "{text}");
+        }
     }
 
     use super::*;
@@ -2206,7 +3344,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn no_session_termination_left_once_forward_security_is_back() {
         let fs_terminate = crate::multidevice::SETTING_FS_TERMINATE;
-        let (_dir, mut app) = app();
+        let (_dir, app) = app();
         // A linking that activated multi-device and was rolled back.
         app.activate_multi_device().await.unwrap();
         assert!(app.store.setting(fs_terminate).unwrap().is_some());
@@ -2294,6 +3432,48 @@ mod tests {
         assert!(license_check_due(Some(1000), 999), "the clock went back");
     }
 
+    /// The chat's window: a jump gets a bounded page around its target and says what lies
+    /// beyond it, also with a lot unread; the ordinary opening still reaches the first unread.
+    #[test]
+    fn messages_around_a_message_stay_a_window() {
+        let (_dir, app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let ids: Vec<i64> = (0..400_u64)
+            .map(|n| {
+                app.store
+                    .insert_incoming("ABCD1234", n + 1, "text", "x", 10)
+                    .unwrap()
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        let rows = |value: &Value| -> Vec<i64> {
+            let rows = value["messages"].as_array().unwrap();
+            rows.iter().map(|m| m["id"].as_i64().unwrap()).collect()
+        };
+
+        let jump = app
+            .messages_json("ABCD1234", Some(60), Some(ids[100]), None, None)
+            .unwrap();
+        assert_eq!(rows(&jump), ids[70..=130]);
+        assert_eq!(jump["reachesNewest"], false);
+        assert_eq!(jump["firstUnread"], ids[0]);
+
+        let near_end = app
+            .messages_json("ABCD1234", Some(60), Some(ids[390]), None, None)
+            .unwrap();
+        assert_eq!(rows(&near_end), ids[360..]);
+        assert_eq!(near_end["reachesNewest"], true);
+
+        let opening = app
+            .messages_json("ABCD1234", Some(60), None, None, None)
+            .unwrap();
+        assert_eq!(rows(&opening), ids, "widened to reach the first unread");
+        assert_eq!(opening["reachesNewest"], true);
+    }
+
     /// With an ID and a key, in the state of a running app.
     fn licensed_app() -> (tempfile::TempDir, App) {
         let (dir, app) = app();
@@ -2323,6 +3503,8 @@ mod tests {
         for answer in [
             DirectoryError::Status(500),
             DirectoryError::InvalidResponse("garbled".into()),
+            DirectoryError::RateLimited,
+            DirectoryError::Unexplained,
         ] {
             assert!(!app.apply_license_answer(Err(answer)).unwrap());
             assert_eq!(state(&mut app), "ready");
@@ -2352,6 +3534,428 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn too_many_requests_leaves_the_connection_running() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                assert!(app.ensure_connection().is_some(), "licensed: connects");
+                assert!(
+                    !app.apply_license_answer(Err(DirectoryError::RateLimited))
+                        .unwrap()
+                );
+                assert!(app.connection.borrow().is_some(), "still running");
+                assert_eq!(app.store.setting(keys::LICENSE_REFUSED).unwrap(), None);
+                assert_eq!(app.store.setting(keys::LICENSE_CHECKED_AT).unwrap(), None);
+                assert_eq!(state(&mut app), "ready");
+            })
+            .await;
+    }
+
+    /// Asking during a rest doesn't lengthen it: the hourly address book sync would otherwise keep
+    /// it going for as long as the phone stays awake, license recheck included.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_directory_rest_ends_when_it_said_it_would() {
+        let (_dir, mut app) = licensed_app();
+        let automatic = r#"{"id":1,"cmd":"matchAddressBook","entries":[],"automatic":true}"#;
+        let until = (crate::messages::now_ms() + 600_000).to_string();
+        app.store
+            .set_setting(keys::DIRECTORY_RETRY_AFTER, &until)
+            .unwrap();
+        let reply: Value = serde_json::from_str(&app.handle(automatic).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "rateLimited");
+        app.store.rest_directory_calls();
+        assert_eq!(
+            app.store.setting(keys::DIRECTORY_RETRY_AFTER).unwrap(),
+            Some(until),
+            "neither the sync's own refusal nor another 429 moves the end"
+        );
+
+        // Over: the sync goes again, and a new 429 starts a new rest.
+        let over = (crate::messages::now_ms() - 1).to_string();
+        app.store
+            .set_setting(keys::DIRECTORY_RETRY_AFTER, &over)
+            .unwrap();
+        let reply: Value = serde_json::from_str(&app.handle(automatic).await).unwrap();
+        assert_eq!(reply["ok"], true);
+        app.store.rest_directory_calls();
+        assert!(app.store.directory_resting());
+    }
+
+    /// A lookup is quiet work: `wakeSettled` waits for it, and the removal of the ID drops it. Its
+    /// task doesn't get a turn in this test, so no request goes out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_member_lookups_are_kept_track_of_and_go_with_the_id() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                let mut done = app.take_detached_work().unwrap();
+                app.fetch_members(vec!["EFGH5678".to_owned()]);
+                assert_eq!(app.detached.quiet_running, 1);
+
+                app.drop_detached_work();
+                assert_eq!(app.detached.quiet_running, 0);
+                let nothing =
+                    tokio::time::timeout(std::time::Duration::from_millis(50), done.recv()).await;
+                assert!(nothing.is_err(), "the lookup is gone");
+
+                // Queued before the wipe, read after it: nothing is noted for the ID that went.
+                app.identity_removed = true;
+                app.fetch_members(vec!["IJKL9012".to_owned()]);
+                assert_eq!(app.detached.quiet_running, 0);
+                assert!(!app.member_lookups_due().contains(&"IJKL9012".to_owned()));
+            })
+            .await;
+    }
+
+    /// What is due goes through the core loop, which tracks it: this can run on a task beside the
+    /// loop, and there is no `LocalSet` here, so a task spawned on the spot would panic.
+    #[test]
+    fn group_member_lookups_due_are_handed_to_the_loop() {
+        let (_dir, mut app) = licensed_app();
+        let mut events = app.take_media_events().unwrap();
+        app.store
+            .owe_member_lookups(&["EFGH5678".to_owned()])
+            .unwrap();
+        app.resume_picture_downloads();
+        let handed = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+            crate::providers::CoreEvent::UnknownMembers(identities) => Some(identities),
+            _ => None,
+        });
+        assert_eq!(handed.unwrap(), ["EFGH5678"]);
+    }
+
+    /// Without another device, too, a group's unknown member isn't lost to a rest or a failed
+    /// request: messages to them wait for the contact.
+    #[test]
+    fn group_members_looked_up_during_a_rest_wait_for_its_end() {
+        let (_dir, mut app) = licensed_app();
+        assert!(app.store.multi_device().unwrap().is_none());
+        app.store.rest_directory_calls();
+        app.fetch_members(vec!["EFGH5678".to_owned(), "IJKL9012".to_owned()]);
+        app.fetch_members(vec!["EFGH5678".to_owned()]);
+        assert_eq!(app.member_lookups_due(), ["EFGH5678", "IJKL9012"]);
+
+        // Any answer ends the wait: a contact, or that the directory doesn't know the ID.
+        let found = crate::contacts::test_contact("EFGH5678");
+        assert!(
+            !crate::sync::members_looked_up(
+                &app.store,
+                vec![
+                    (
+                        "EFGH5678".to_owned(),
+                        crate::contacts::Lookup::Found(Box::new(found))
+                    ),
+                    ("IJKL9012".to_owned(), crate::contacts::Lookup::Invalid),
+                ],
+            )
+            .unwrap()
+            .queued
+        );
+        assert!(app.store.contact("EFGH5678").unwrap().is_some());
+        assert!(app.member_lookups_due().is_empty());
+        assert_eq!(app.store.setting(keys::MEMBER_LOOKUPS_OWED).unwrap(), None);
+    }
+
+    /// Nothing automatic asks the directory during a rest. Without the gates these would either
+    /// reach the server or, offline, leave an error behind.
+    #[tokio::test(flavor = "current_thread")]
+    async fn automatic_directory_calls_rest_after_too_many_requests() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                assert!(!app.store.directory_resting());
+                assert!(
+                    !app.apply_license_answer(Err(DirectoryError::RateLimited))
+                        .unwrap()
+                );
+                assert!(app.store.directory_resting(), "the 429 starts the rest");
+
+                app.store
+                    .set_setting(keys::LINKED_EMAIL_PENDING, "1")
+                    .unwrap();
+                app.store
+                    .set_setting(keys::LINKED_EMAIL, "someone@example.org")
+                    .unwrap();
+                app.store
+                    .set_setting(
+                        keys::SAFE_PENDING_IMPORT,
+                        r#"{"contacts":[{"identity":"EFGH5678"}]}"#,
+                    )
+                    .unwrap();
+
+                assert!(!app.recheck_license().await.unwrap());
+                assert!(!app.check_email_link().await.unwrap());
+                app.publish_feature_mask().await.unwrap();
+                assert_eq!(
+                    app.store.setting(keys::PUBLISHED_FEATURE_MASK).unwrap(),
+                    None,
+                    "publishes after the rest"
+                );
+
+                app.maintenance().await;
+                assert_eq!(app.store.setting(keys::SAFE_IMPORT_ERROR).unwrap(), None);
+                assert!(app.on_connected().await.is_empty());
+                assert_eq!(app.store.setting(keys::SAFE_IMPORT_ERROR).unwrap(), None);
+                assert_eq!(app.store.setting(keys::LICENSE_CHECKED_AT).unwrap(), None);
+
+                // The hourly address book sync stays home; the user's own request goes on.
+                let reply: Value = serde_json::from_str(
+                    &app.handle(
+                        r#"{"id":1,"cmd":"matchAddressBook","entries":[],"automatic":true}"#,
+                    )
+                    .await,
+                )
+                .unwrap();
+                assert_eq!(reply["error"]["kind"], "rateLimited");
+                let reply: Value = serde_json::from_str(
+                    &app.handle(r#"{"id":2,"cmd":"matchAddressBook","entries":[]}"#)
+                        .await,
+                )
+                .unwrap();
+                assert_eq!(reply["ok"], true);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_second_id_takes_the_place_of_the_first() {
+        let (_dir, app) = licensed_app();
+        let other = StoredIdentity {
+            threema_id: "EFGH5678".into(),
+            client_key: Zeroizing::new([8; 32]),
+            server_group: "31".into(),
+        };
+        // Refused before any request: nothing reaches the directory.
+        assert!(matches!(
+            app.adopt_identity("EFGH5678", &ClientKey::from([8; 32]))
+                .await,
+            Err(ApiError::IdentityExists)
+        ));
+        assert!(matches!(
+            app.store_new_identity(&other),
+            Err(ApiError::IdentityExists)
+        ));
+        assert_eq!(
+            app.store.identity().unwrap().unwrap().threema_id,
+            "ABCD1234"
+        );
+    }
+
+    #[test]
+    fn the_license_key_can_be_changed_until_there_is_an_id() {
+        let (_dir, mut app) = app();
+        app.store
+            .set_setting(keys::LICENSE_KEY, "ABCDE-12345")
+            .unwrap();
+        assert_eq!(state(&mut app), "needsIdentity");
+        assert_eq!(app.forget_license().unwrap()["state"], "needsLicense");
+        assert_eq!(app.store.setting(keys::LICENSE_KEY).unwrap(), None);
+
+        let (_dir, mut app) = licensed_app();
+        assert!(matches!(
+            app.forget_license(),
+            Err(ApiError::IdentityExists)
+        ));
+        assert_eq!(state(&mut app), "ready");
+    }
+
+    #[test]
+    fn a_new_or_restored_id_is_asked_for_a_nickname_once() {
+        fn ask(app: &App) -> bool {
+            app.profile_json().unwrap()["askNickname"] == true
+        }
+        let unanswered = |app: &App| app.store.setting(keys::NICKNAME_UNANSWERED).unwrap();
+
+        // No question for an ID from before there was one.
+        let (_dir, mut app) = licensed_app();
+        assert!(!ask(&app));
+
+        // Leaving the profile page's empty field is no answer.
+        app.store
+            .set_setting(keys::NICKNAME_UNANSWERED, "ask")
+            .unwrap();
+        assert!(ask(&app));
+        app.set_nickname("  ").unwrap();
+        assert_eq!(unanswered(&app).as_deref(), Some("ask"));
+
+        // Not now: not asked again, and still nothing is removed at contacts.
+        app.decline_nickname().unwrap();
+        assert!(!ask(&app));
+        assert_eq!(unanswered(&app).as_deref(), Some("asked"));
+
+        // A name answers it, and taking it away later is meant.
+        app.set_nickname("Tester").unwrap();
+        assert_eq!(unanswered(&app), None);
+        app.set_nickname("").unwrap();
+        assert_eq!(app.store.setting(keys::NICKNAME).unwrap(), None);
+        assert_eq!(unanswered(&app), None);
+        app.decline_nickname().unwrap();
+        assert_eq!(unanswered(&app), None, "nothing to decline any more");
+    }
+
+    /// Runs libthreema's real task against these answers: what comes out of it is what the user
+    /// would read.
+    fn create_identity_answered(answers: Vec<libthreema::https::HttpsResult>) -> ApiError {
+        let (_dir, app) = app();
+        app.store
+            .set_setting(keys::LICENSE_KEY, "ABCDE-12345")
+            .unwrap();
+        let mut task = CreateIdentityTask::new(CreateIdentityContext {
+            client_info: app.version.client_info(),
+            config: Arc::clone(&app.config),
+            flavor: Flavor::Consumer,
+            serial_license: Some(app.license().unwrap()),
+        });
+        let mut answers = answers.into_iter();
+        loop {
+            match task.poll().map_err(create_identity_error) {
+                Ok(CreateIdentityLoop::Instruction(_)) => {
+                    let result = answers.next().expect("asked once too often");
+                    if let Err(error) = task
+                        .response(CreateIdentityResponse { result })
+                        .map_err(create_identity_error)
+                    {
+                        return error;
+                    }
+                }
+                Ok(CreateIdentityLoop::Done(_)) => panic!("an ID was created"),
+                Err(error) => return error,
+            }
+        }
+    }
+
+    fn status(status: u16, body: &str) -> libthreema::https::HttpsResult {
+        Ok(libthreema::https::HttpsResponse {
+            status,
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn creating_an_id_says_what_went_wrong_in_our_words() {
+        assert!(matches!(
+            create_identity_answered(vec![Err(libthreema::https::HttpsError::Unreachable(
+                "details".into()
+            ))]),
+            ApiError::Network(_)
+        ));
+        assert!(matches!(
+            create_identity_answered(vec![status(429, "")]),
+            ApiError::RateLimited
+        ));
+        assert!(matches!(
+            create_identity_answered(vec![status(500, "")]),
+            ApiError::Internal(_)
+        ));
+
+        // The directory's own words come through without libthreema's decoration.
+        let challenge = json!({
+            "token": data_encoding::BASE64.encode(b"challenge"),
+            "tokenRespKeyPub": data_encoding::BASE64.encode(&[2; 32]),
+        })
+        .to_string();
+        let refused = create_identity_answered(vec![
+            status(200, &challenge),
+            status(200, r#"{"success":false,"error":"This key is used up."}"#),
+        ]);
+        assert!(
+            matches!(&refused, ApiError::Server(words) if words == "This key is used up."),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_sms_link_says_confirmed_when_the_number_already_is() {
+        let (_dir, mut app) = licensed_app();
+        let link = r#"{"id":1,"cmd":"verifyMobile","code":"1234","fromLink":true}"#;
+        let typed = r#"{"id":2,"cmd":"verifyMobile","code":"1234"}"#;
+
+        // Nothing linked: there is nothing to confirm, whichever way the code came.
+        let reply: Value = serde_json::from_str(&app.handle(link).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "noVerification");
+
+        // Tapped twice, or after typing the code.
+        app.store
+            .set_setting(keys::LINKED_MOBILE, "41790000000")
+            .unwrap();
+        let reply: Value = serde_json::from_str(&app.handle(link).await).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["result"]["linkedMobile"], "41790000000");
+
+        // The dialog is only there with something pending, and keeps its error.
+        let reply: Value = serde_json::from_str(&app.handle(typed).await).unwrap();
+        assert_eq!(reply["error"]["kind"], "noVerification");
+    }
+
+    #[test]
+    fn a_refusal_that_was_never_the_directorys_is_forgotten() {
+        let (_dir, mut app) = licensed_app();
+        for text in [
+            "Too many requests, please try again later.",
+            "Unknown server error",
+        ] {
+            app.store.set_setting(keys::LICENSE_REFUSED, text).unwrap();
+            forget_false_refusal(&app.store).unwrap();
+            assert_eq!(state(&mut app), "ready", "{text}");
+        }
+        let real = "This license key is invalid or expired.";
+        app.store.set_setting(keys::LICENSE_REFUSED, real).unwrap();
+        forget_false_refusal(&app.store).unwrap();
+        assert_eq!(state(&mut app), "needsLicense");
+    }
+
+    #[test]
+    fn rate_limits_and_silence_have_their_own_kinds() {
+        for (error, kind) in [
+            (DirectoryError::RateLimited, "rateLimited"),
+            (DirectoryError::Unexplained, "serverUnexplained"),
+            (DirectoryError::ReportRefused, "reportRefused"),
+            (DirectoryError::Server("Its words".into()), "server"),
+        ] {
+            assert_eq!(ApiError::from(error).kind(), kind);
+        }
+    }
+
+    /// What goes on after a refusal: a login in progress would go through with the old key, and
+    /// send what is queued. So it is stopped where it stands, not only told at its next read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_login_in_progress_ends_with_the_stop() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                let (login_answer, login) = tokio::sync::oneshot::channel::<()>();
+                app.connection_task = Some(tokio::task::spawn_local(async move {
+                    let _ = login.await;
+                    panic!("the login went on");
+                }));
+                tokio::task::yield_now().await;
+                app.stop_connection();
+                app.connection_gone().await;
+                assert!(login_answer.send(()).is_err(), "nobody waits for it now");
+            })
+            .await;
+    }
+
+    /// The wipe can't begin inside what the task had open, and comes after all it writes on its
+    /// way out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_wipe_waits_until_the_connection_is_gone() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_dir, mut app) = licensed_app();
+                let store = std::rc::Rc::clone(&app.store);
+                app.connection_task = Some(tokio::task::spawn_local(async move {
+                    let _step = store.step().unwrap();
+                    std::future::pending::<()>().await;
+                }));
+                tokio::task::yield_now().await;
+                app.delete_all_data().await.unwrap();
+                assert!(app.store.identity().unwrap().is_none());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn no_connection_after_the_directorys_no() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -2359,7 +3963,10 @@ mod tests {
                 assert!(app.ensure_connection().is_some(), "licensed: connects");
                 let no = DirectoryError::Server("no".into());
                 assert!(app.apply_license_answer(Err(no)).unwrap());
-                assert!(app.connection.is_none(), "the running one is stopped");
+                assert!(
+                    app.connection.borrow().is_none(),
+                    "the running one is stopped"
+                );
                 assert!(app.ensure_connection().is_none(), "and none starts");
                 assert!(app.maintenance().await.is_empty(), "nothing else goes out");
             })
@@ -2401,6 +4008,77 @@ mod tests {
         assert_eq!(reply["reply"], 4);
         assert_eq!(reply["error"]["kind"], "internal");
         assert!(!reply.to_string().contains("secret"));
+    }
+
+    /// The page of a table, unreadable from now on.
+    fn damage_table(path: &std::path::Path, key: &[u8; 32], table: &str) {
+        let store = Store::open(path, key).unwrap();
+        let root: usize = store
+            .conn
+            .query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(store);
+        let mut raw = std::fs::read(path).unwrap();
+        raw[(root - 1) * 4096 + 100..(root - 1) * 4096 + 200].fill(0xA5);
+        std::fs::write(path, raw).unwrap();
+    }
+
+    fn start_config(dir: &std::path::Path) -> StartConfig {
+        serde_json::from_value(json!({
+            "dataDir": dir,
+            "appVersion": "0.0.0",
+            "language": "en",
+            "country": "CH",
+            "model": "test",
+            "osVersion": "5.1",
+        }))
+        .unwrap()
+    }
+
+    /// The core comes up and the status the bridge waits for is what fails: it gets a kind it can
+    /// show, not a spinner.
+    #[test]
+    fn a_damaged_identity_page_makes_the_status_say_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = start_config(dir.path());
+        drop(App::new(&config, &[3; 32]).unwrap());
+        damage_table(&dir.path().join("threesea.db"), &[3; 32], "identity");
+
+        let mut app = App::new(&config, &[3; 32]).unwrap();
+        let reply: Value = serde_json::from_str(
+            &tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(app.handle(r#"{"id":1,"cmd":"status"}"#)),
+        )
+        .unwrap();
+
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["error"]["kind"], "storeDamaged", "{reply}");
+        assert_eq!(reply["error"]["message"], "sqlite 11", "{reply}");
+    }
+
+    #[test]
+    fn a_store_that_fails_while_opening_gives_its_kind_and_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = start_config(dir.path());
+        drop(App::new(&config, &[3; 32]).unwrap());
+        damage_table(
+            &dir.path().join("threesea.db"),
+            &[3; 32],
+            "sqlite_autoindex_settings_1",
+        );
+
+        let error = App::new(&config, &[3; 32]).err().unwrap();
+        assert_eq!(error.kind(), "storeDamaged");
+        assert_eq!(error.to_string(), "sqlite 11");
+
+        let error = App::new(&config, &[4; 32]).err().unwrap();
+        assert_eq!(error.kind(), "storeKey");
     }
 
     /// What the user waits for between tapping the icon and seeing the chat list: opening the
@@ -2524,6 +4202,56 @@ mod tests {
         });
     }
 
+    /// The cover's count on its own says what the chat list's reply says, and like it never
+    /// counts or names an archived or a private chat.
+    #[test]
+    fn unread_summary_says_what_the_chat_list_says() {
+        let (_dir, app) = app();
+        let same_as_the_list = |app: &App| {
+            let list = app.conversations_json(false, false).unwrap();
+            let summary = app.unread_summary_json().unwrap();
+            assert_eq!(summary["unreadTotal"], list["unreadTotal"]);
+            assert_eq!(summary["unreadFrom"], list["unreadFrom"]);
+            assert_eq!(summary["unreadChat"], list["unreadChat"]);
+            summary
+        };
+        assert_eq!(same_as_the_list(&app)["unreadTotal"], 0);
+        assert!(same_as_the_list(&app)["unreadFrom"].is_null());
+
+        let mut uid = 0;
+        for (at, id) in [(1, "AAAAAAAA"), (2, "BBBBBBBB"), (3, "CCCCCCCC")] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+            for _ in 0..2 {
+                uid += 1;
+                app.store
+                    .insert_incoming(id, uid, "text", "words", at)
+                    .unwrap();
+            }
+        }
+        let summary = same_as_the_list(&app);
+        assert_eq!(summary["unreadTotal"], 6);
+        assert_eq!(summary["unreadFrom"], "CCCCCCCC");
+        assert_eq!(
+            summary["unreadChat"], "CCCCCCCC",
+            "the cover opens the chat it names"
+        );
+
+        app.store.set_private("CCCCCCCC", true).unwrap();
+        let summary = same_as_the_list(&app);
+        assert_eq!(summary["unreadTotal"], 4);
+        assert_eq!(
+            summary["unreadFrom"], "BBBBBBBB",
+            "a private chat isn't named"
+        );
+
+        app.store.set_archived("BBBBBBBB", true).unwrap();
+        let summary = same_as_the_list(&app);
+        assert_eq!(summary["unreadTotal"], 2);
+        assert_eq!(summary["unreadFrom"], "AAAAAAAA", "nor an archived one");
+    }
+
     /// The emulator's demo data (feature `demo`): a chat list to work against, and gone again
     /// on demand.
     #[cfg(feature = "demo")]
@@ -2549,6 +4277,9 @@ mod tests {
         // Bruno's one, Carla's three, Farid's one and the group's two.
         assert_eq!(list["unreadTotal"], 7);
         assert_eq!(list["unreadFrom"], "Carla Mendes");
+        let summary = app.unread_summary_json().unwrap();
+        assert_eq!(summary["unreadTotal"], list["unreadTotal"]);
+        assert_eq!(summary["unreadFrom"], list["unreadFrom"]);
         assert_eq!(chats[0]["displayName"], "Ada Lindqvist", "pinned first");
 
         let long = app
@@ -2557,7 +4288,7 @@ mod tests {
         assert_eq!(long["messages"].as_array().unwrap().len(), 20);
 
         // The pictures and the voice message are on the device, not on a server.
-        let media = app.chat_media("DEMO0006", None).unwrap();
+        let media = app.chat_media("DEMO0006", None, None, None).unwrap();
         let ids: Vec<i64> = media["messages"]
             .as_array()
             .unwrap()
@@ -2639,6 +4370,951 @@ mod tests {
         }
     }
 
+    /// A deleted chat's notification goes too, and with it the token of its actions.
+    #[test]
+    fn deleting_a_chat_tells_the_ui() {
+        let (_dir, mut app) = app();
+        let mut events = app.take_media_events().unwrap();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        app.delete_conversation("ABCD1234").unwrap();
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "conversationRead");
+        assert_eq!(event["identity"], "ABCD1234");
+        // An open chat page stops keeping its draft.
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "chatDeleted");
+        assert_eq!(event["identity"], "ABCD1234");
+    }
+
+    /// The picture is on the disk, whichever device deleted the group.
+    #[test]
+    fn a_group_deleted_on_another_device_leaves_no_picture_behind() {
+        let (_dir, mut app) = app();
+        let mut events = app.take_media_events().unwrap();
+        let key = "g:BBBBBBBB:0000000000000007".to_owned();
+        app.media.write_picture(&key, b"picture").unwrap();
+
+        app.on_core_event(&crate::providers::CoreEvent::GroupDeleted(key.clone()));
+        assert!(app.media.read_picture(&key).unwrap().is_none());
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "conversationRead");
+
+        // A hidden private group: its name stays out of what the UI hears.
+        app.store.set_private(&key, true).unwrap();
+        app.unlocked.set(false);
+        let event = events.try_recv().unwrap().to_json(&app.store, true);
+        assert_eq!(event["event"], "chatDeleted");
+        app.on_core_event(&crate::providers::CoreEvent::GroupDeleted(key));
+        assert!(events.try_recv().is_err());
+    }
+
+    fn call(app: &mut App, request: serde_json::Value) -> serde_json::Value {
+        let reply = rt().block_on(app.handle(&request.to_string()));
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    fn app_with_draft(text: &str) -> (tempfile::TempDir, App) {
+        let (dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let reply = call(
+            &mut app,
+            json!({"id": 1, "cmd": "setDraft", "identity": "ABCD1234", "text": text}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        (dir, app)
+    }
+
+    fn stored_draft(app: &mut App) -> serde_json::Value {
+        call(
+            app,
+            json!({"id": 2, "cmd": "draft", "identity": "ABCD1234"}),
+        )["result"]
+            .clone()
+    }
+
+    /// A draft comes back as it was written: mentions as tags with the names beside them, and
+    /// what it quotes.
+    #[test]
+    fn a_draft_keeps_its_mentions_and_quote() {
+        let (_dir, mut app) = app_with_draft("first");
+        let quoted = app
+            .store
+            .insert_incoming("ABCD1234", 0x1234, "text", "the quoted one", 1)
+            .unwrap()
+            .unwrap();
+        let mut named = crate::contacts::test_contact("EFGH5678");
+        named.nickname = Some("Anna".into());
+        app.store.upsert_contact(&named).unwrap();
+        let text = "@[EFGH5678] and @[@@@@@@@@], please look";
+        let reply = call(
+            &mut app,
+            json!({"id": 3, "cmd": "setDraft", "identity": "ABCD1234", "text": text,
+                   "quote": format!("{:016x}", quoted.message_id)}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+
+        let draft = stored_draft(&mut app);
+        assert_eq!(draft["text"], text);
+        assert_eq!(draft["mentions"]["EFGH5678"], "~Anna");
+        assert_eq!(draft["quote"]["id"], quoted.id);
+
+        // The chat list says the names too.
+        let list = app.conversations_json(false, false).unwrap();
+        let entry = list["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["identity"] == "ABCD1234")
+            .unwrap();
+        assert_eq!(entry["draft"], text);
+        assert_eq!(entry["draftMentions"]["EFGH5678"], "~Anna");
+
+        // Without a quote the old one goes; a draft that isn't one any more takes it along.
+        call(
+            &mut app,
+            json!({"id": 4, "cmd": "setDraft", "identity": "ABCD1234", "text": "second"}),
+        );
+        assert_eq!(stored_draft(&mut app)["quote"], serde_json::Value::Null);
+        call(
+            &mut app,
+            json!({"id": 5, "cmd": "setDraft", "identity": "ABCD1234", "text": "third",
+                   "quote": format!("{:016x}", quoted.message_id)}),
+        );
+        call(
+            &mut app,
+            json!({"id": 6, "cmd": "setDraft", "identity": "ABCD1234", "text": "  "}),
+        );
+        let draft = stored_draft(&mut app);
+        assert_eq!(draft["text"], serde_json::Value::Null);
+        assert_eq!(draft["quote"], serde_json::Value::Null);
+        assert_eq!(
+            app.store.setting("draftQuote:ABCD1234").unwrap(),
+            None,
+            "nothing is left of the quote"
+        );
+    }
+
+    /// A draft whose quoted message is gone is still the text.
+    #[test]
+    fn a_draft_outlives_its_quoted_message() {
+        let (_dir, mut app) = app_with_draft("first");
+        call(
+            &mut app,
+            json!({"id": 3, "cmd": "setDraft", "identity": "ABCD1234", "text": "kept",
+                   "quote": "00000000000000ff"}),
+        );
+        let draft = stored_draft(&mut app);
+        assert_eq!(draft["text"], "kept");
+        assert_eq!(draft["quote"], serde_json::Value::Null);
+    }
+
+    /// The draft goes when the core has the message, and not before: a refused text is still
+    /// there after the app ended, and another draft written meanwhile stays.
+    #[test]
+    fn only_an_accepted_send_takes_its_draft_away() {
+        let long = "x".repeat(6001);
+        let (_dir, mut app) = app_with_draft(&long);
+        let reply = call(
+            &mut app,
+            json!({"id": 3, "cmd": "sendText", "identity": "ABCD1234", "text": long}),
+        );
+        assert_eq!(reply["error"]["kind"], "messageTooLong", "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], long);
+
+        call(
+            &mut app,
+            json!({"id": 4, "cmd": "setDraft", "identity": "ABCD1234", "text": "typed on"}),
+        );
+        let reply = call(
+            &mut app,
+            json!({"id": 5, "cmd": "sendText", "identity": "ABCD1234", "text": "something else"}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], "typed on");
+
+        call(
+            &mut app,
+            json!({"id": 6, "cmd": "setDraft", "identity": "ABCD1234", "text": " hello \n",
+                   "quote": "00000000000000ff"}),
+        );
+        let reply = call(
+            &mut app,
+            json!({"id": 7, "cmd": "sendText", "identity": "ABCD1234", "text": "hello"}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], serde_json::Value::Null);
+        assert_eq!(app.store.setting("draftQuote:ABCD1234").unwrap(), None);
+    }
+
+    /// The same for a file's caption, which goes out with the file.
+    #[test]
+    fn only_an_accepted_file_takes_its_caption_draft_away() {
+        let long = "x".repeat(6001);
+        let (_dir, mut app) = app_with_draft(&long);
+        let send = |app: &mut App, caption: &str| {
+            let request = json!({"id": 3, "cmd": "sendFile", "identity": "ABCD1234",
+                                 "rendering": "file", "mediaType": "text/plain",
+                                 "name": "a.txt", "caption": caption})
+            .to_string();
+            // The upload it spawns goes with the set: this answers without waiting for anything.
+            let local = tokio::task::LocalSet::new();
+            let reply = rt().block_on(
+                local.run_until(app.handle_with(&request, vec![vec![1_u8, 2, 3].into()])),
+            );
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap()
+        };
+        let reply = send(&mut app, &long);
+        assert_eq!(reply["error"]["kind"], "messageTooLong", "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], long);
+
+        call(
+            &mut app,
+            json!({"id": 4, "cmd": "setDraft", "identity": "ABCD1234", "text": "a caption"}),
+        );
+        let reply = send(&mut app, "");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], "a caption");
+        let reply = send(&mut app, "a caption");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(stored_draft(&mut app)["text"], serde_json::Value::Null);
+    }
+
+    /// A caption within its limit can be too long once escaped for the message's JSON: refused
+    /// before anything is stored or uploaded, 1:1 and in a group, and not failing at sending.
+    #[test]
+    fn a_caption_too_long_once_escaped_is_refused_up_front() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact("ABCD1234"))
+            .unwrap();
+        let group = "g:ABCD1234:0000000000000001";
+        app.store
+            .upsert_group(&crate::groups::Group {
+                key: group.to_owned(),
+                identity: crate::groups::parse_key(group).unwrap(),
+                name: "Crew".into(),
+                members: vec!["ABCD1234".to_owned()],
+                left: false,
+                created_at: 1,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+        let escaped = "a\n".repeat(3000);
+        assert_eq!(escaped.len(), 6000);
+        for chat in ["ABCD1234", group] {
+            let reply = send_file(&mut app, chat, &escaped);
+            assert_eq!(reply["error"]["kind"], "messageTooLong", "{reply}");
+            assert_eq!(stored_messages(&app, chat), 0);
+
+            let reply = send_file(&mut app, chat, &"a".repeat(6000));
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(stored_messages(&app, chat), 1);
+        }
+    }
+
+    /// Private chats ABCD1234 (with a message) and EFGH5678, a plain chat IJKL9012, hidden with a
+    /// pass for `files` files of ABCD1234.
+    fn app_with_write_pass(files: u32) -> (tempfile::TempDir, App) {
+        let (dir, mut app) = app();
+        let set = json!({"id": 1, "cmd": "setLock", "enabled": true, "pin": "2468"});
+        assert_eq!(call(&mut app, set)["ok"], true);
+        for id in ["ABCD1234", "EFGH5678", "IJKL9012"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+            app.store
+                .insert_incoming(id, 1, "text", "secret words", 1)
+                .unwrap();
+        }
+        app.store.set_private("ABCD1234", true).unwrap();
+        app.store.set_private("EFGH5678", true).unwrap();
+        let lock = json!({"id": 2, "cmd": "lock", "pendingFiles": {"ABCD1234": files}});
+        let reply = call(&mut app, lock);
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(!app.unlocked.get(), "the lock takes effect at once");
+        (dir, app)
+    }
+
+    fn send_file(app: &mut App, identity: &str, caption: &str) -> serde_json::Value {
+        let request = json!({"id": 3, "cmd": "sendFile", "identity": identity,
+                             "rendering": "file", "mediaType": "text/plain",
+                             "name": "a.txt", "caption": caption})
+        .to_string();
+        let local = tokio::task::LocalSet::new();
+        let reply = rt()
+            .block_on(local.run_until(app.handle_with(&request, vec![vec![1_u8, 2, 3].into()])));
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    fn stored_messages(app: &App, identity: &str) -> usize {
+        app.store.conversation_messages(identity, 10).unwrap().len()
+    }
+
+    /// A request as the core loop handles it; `None` while its reply is still to come.
+    async fn from_ui(app: &mut App, request: serde_json::Value) -> Option<serde_json::Value> {
+        let attachments = vec![vec![1_u8, 2, 3].into()];
+        let reply = app
+            .handle_from_ui(&request.to_string(), attachments)
+            .await?;
+        Some(serde_json::from_str(&reply).unwrap())
+    }
+
+    fn file_request(id: u64, identity: &str, name: &str) -> serde_json::Value {
+        json!({"id": id, "cmd": "sendFile", "identity": identity, "rendering": "file",
+               "mediaType": "text/plain", "name": name, "caption": ""})
+    }
+
+    #[test]
+    fn a_file_from_the_ui_holds_up_no_command_behind_it() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "IJKL9012", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            assert_eq!(stored_messages(&app, "IJKL9012"), 1, "not stored yet");
+            let next = from_ui(&mut app, json!({"id": 4, "cmd": "lockStatus"})).await;
+            assert_eq!(next.unwrap()["ok"], true);
+
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["reply"], 3);
+            assert_eq!(reply["result"]["kind"], "file", "{reply}");
+            let id = reply["result"]["id"].as_i64().unwrap();
+            assert_eq!(stored_messages(&app, "IJKL9012"), 2);
+            let stored = app.media.read(id, crate::media::MediaPart::File);
+            assert_eq!(stored.unwrap().unwrap().as_slice(), [1, 2, 3]);
+            assert_eq!(app.file_work_running, 0);
+        }));
+    }
+
+    #[test]
+    fn files_from_the_ui_are_stored_in_the_order_they_came() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            for (id, name) in [(3, "first.txt"), (4, "second.txt"), (5, "third.txt")] {
+                assert!(
+                    from_ui(&mut app, file_request(id, "IJKL9012", name))
+                        .await
+                        .is_none()
+                );
+            }
+            // All of them before the first finishes, whose upload would go to the network.
+            let finished = [
+                done.recv().await.unwrap(),
+                done.recv().await.unwrap(),
+                done.recv().await.unwrap(),
+            ];
+            for (finished, id) in finished.into_iter().zip([3, 4, 5]) {
+                let reply: serde_json::Value =
+                    serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+                assert_eq!(reply["reply"], id, "{reply}");
+            }
+        }));
+    }
+
+    /// Refused at once: there is nothing to wait for.
+    #[test]
+    fn a_file_from_the_ui_for_a_hidden_chat_is_refused_as_ever() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let local = tokio::task::LocalSet::new();
+        let reply = rt()
+            .block_on(local.run_until(from_ui(&mut app, file_request(3, "EFGH5678", "a.txt"))))
+            .unwrap();
+        assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        assert_eq!(stored_messages(&app, "EFGH5678"), 1);
+    }
+
+    /// Under a pass, too, it goes to the blocking thread, and the answer tells nothing.
+    #[test]
+    fn a_file_under_a_pass_from_the_ui_answers_as_under_a_pass() {
+        let (_dir, mut app) = app_with_write_pass(1);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "ABCD1234", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["result"], json!({}));
+        }));
+        assert_eq!(
+            app.store
+                .conversation_messages("ABCD1234", 10)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// The app is locked while a file is on its way: it was sent while it could be, and it counts,
+    /// but the answer says nothing of the chat and the UI's readers don't get at it.
+    #[test]
+    fn a_chat_hidden_while_a_file_was_on_its_way_stays_hidden() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "ABCD1234", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["result"], json!({}), "not a word of the chat");
+        }));
+        let messages = app.store.conversation_messages("ABCD1234", 10).unwrap();
+        assert_eq!(messages.len(), 2);
+        let file = messages
+            .iter()
+            .find(|message| message.kind == "file")
+            .unwrap();
+        assert!(!app.media.shown(file.id), "the readers stay out");
+    }
+
+    /// A list's members get their copies by reading its own back, which a hidden one refuses.
+    #[test]
+    fn a_list_hidden_while_a_file_was_on_its_way_refuses_it() {
+        let (_dir, mut app) = app_with_write_pass(0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let list = app
+            .store
+            .create_distribution_list("List", vec!["IJKL9012".to_owned()])
+            .unwrap()
+            .key;
+        let private = json!({"id": 4, "cmd": "setPrivate", "identity": list, "private": true});
+        assert_eq!(call(&mut app, private)["ok"], true);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(5, &list, "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let lock = from_ui(&mut app, json!({"id": 6, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+        assert_eq!(stored_messages(&app, &list), 0);
+    }
+
+    /// A contact removed while its file was prepared: nothing of the file stays on the disk.
+    #[test]
+    fn a_file_whose_chat_went_meanwhile_leaves_nothing() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let mut done = app.take_file_work().unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(
+                from_ui(&mut app, file_request(3, "IJKL9012", "a.txt"))
+                    .await
+                    .is_none()
+            );
+            let finished = done.recv().await.unwrap();
+            app.store.delete_contact("IJKL9012").unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], false, "{reply}");
+        }));
+        let left = std::fs::read_dir(dir.path().join("media")).unwrap().count();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn saving_a_file_from_the_ui_answers_when_it_is_written() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let message = app
+            .store
+            .insert_incoming(
+                "IJKL9012",
+                2,
+                "file",
+                &json!({"name": "a.txt", "mediaType": "text/plain"}).to_string(),
+                1,
+            )
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media
+            .write(message, crate::media::MediaPart::File, b"content")
+            .unwrap();
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": downloads});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(from_ui(&mut app, request).await.is_none());
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["reply"], 3);
+            let path = reply["result"]["path"].as_str().unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), b"content");
+        }));
+    }
+
+    /// Saved just as the chat was hidden: the answer would name the file.
+    #[test]
+    fn a_file_saved_as_its_chat_is_hidden_is_not_named() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let message = app
+            .store
+            .insert_incoming(
+                "ABCD1234",
+                2,
+                "file",
+                &json!({"name": "a.txt", "mediaType": "text/plain"}).to_string(),
+                1,
+            )
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media
+            .write(message, crate::media::MediaPart::File, b"content")
+            .unwrap();
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": dir.path()});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            assert!(from_ui(&mut app, request).await.is_none());
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+    }
+
+    /// Waiting behind another file while the app locks: its plain text stays where it is.
+    #[test]
+    fn a_file_to_save_that_waited_through_the_lock_is_not_written() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let message = stored_file(&app, "ABCD1234", 2);
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": downloads});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            let turn = std::rc::Rc::clone(&app.file_work_turn);
+            let before_us = turn.acquire().await.unwrap();
+            assert!(from_ui(&mut app, request).await.is_none());
+            tokio::task::yield_now().await;
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"}))
+                .await
+                .unwrap();
+            assert_eq!(lock["ok"], true);
+            drop(before_us);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+        let written = std::fs::read_dir(&downloads).unwrap().count();
+        assert_eq!(written, 0, "nothing of it left the store");
+    }
+
+    /// Its message deleted while it waited, and the row id taken by another chat's message.
+    #[test]
+    fn a_file_to_save_whose_row_came_back_is_not_the_new_file() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let downloads = dir.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let message = stored_file(&app, "IJKL9012", 2);
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "saveFile", "message": message,
+                             "directory": downloads});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            let turn = std::rc::Rc::clone(&app.file_work_turn);
+            let before_us = turn.acquire().await.unwrap();
+            assert!(from_ui(&mut app, request).await.is_none());
+            app.store.remove_message(message).unwrap();
+            let again = stored_file(&app, "QRST7890", 3);
+            assert_eq!(again, message, "the row id came back");
+            drop(before_us);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["ok"], false, "{reply}");
+        }));
+        assert_eq!(std::fs::read_dir(&downloads).unwrap().count(), 0);
+    }
+
+    fn stored_file(app: &App, identity: &str, message_id: u64) -> i64 {
+        let body = json!({"name": "a.txt", "mediaType": "text/plain"}).to_string();
+        app.store
+            .upsert_contact(&crate::contacts::test_contact(identity))
+            .unwrap();
+        let id = app
+            .store
+            .insert_incoming(identity, message_id, "file", &body, 1)
+            .unwrap()
+            .unwrap()
+            .id;
+        app.media
+            .write(id, crate::media::MediaPart::File, b"content")
+            .unwrap();
+        id
+    }
+
+    /// Shares of this thread go into a folder of the test's own.
+    fn share_into(dir: &tempfile::TempDir) -> PathBuf {
+        let folder = dir.path().join("shared");
+        std::fs::create_dir(&folder).unwrap();
+        crate::app_media::SHARE_FOLDER_FOR_TESTS
+            .with(|shared| *shared.borrow_mut() = Some(folder.clone()));
+        folder
+    }
+
+    fn shares_in(folder: &std::path::Path) -> usize {
+        std::fs::read_dir(folder).unwrap().count()
+    }
+
+    /// `shareFiles` from the UI, with its answer.
+    fn share(app: &mut App, message: i64) -> serde_json::Value {
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "shareFiles", "messages": [message]});
+        let local = tokio::task::LocalSet::new();
+        let reply = rt().block_on(local.run_until(async {
+            assert!(from_ui(app, request).await.is_none());
+            let finished = done.recv().await.unwrap();
+            app.finish_file_work(finished).await
+        }));
+        app.file_work_done_rx = Some(done);
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    /// The other app may read the copy after the lock, even one at once; marking a chat private and
+    /// deleting all data take it.
+    #[test]
+    fn a_shared_file_outlives_the_lock_but_not_a_private_mark_or_deleting_the_data() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "IJKL9012", 2);
+        let reply = share(&mut app, message);
+        assert_eq!(reply["ok"], true, "{reply}");
+        let path = reply["result"]["files"][0].as_str().unwrap().to_owned();
+        assert!(path.ends_with("/a.txt"), "{path}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"content");
+        assert_eq!(reply["result"]["mimeType"], "text/plain");
+        call(&mut app, json!({"id": 4, "cmd": "lock"}));
+        assert!(std::path::Path::new(&path).exists(), "the lock leaves it");
+
+        app.mark_private("QRST7890", true).unwrap();
+        assert_eq!(
+            shares_in(&folder),
+            0,
+            "a chat marked private takes them all"
+        );
+
+        assert_eq!(share(&mut app, message)["ok"], true);
+        assert_eq!(shares_in(&folder), 1);
+        rt().block_on(app.delete_all_data()).unwrap();
+        assert_eq!(shares_in(&folder), 0, "deleting the data takes them");
+    }
+
+    /// A chat marked private on a linked device takes the copies as one marked here does, and a
+    /// share on its way with them.
+    #[test]
+    fn a_private_mark_from_a_linked_device_takes_the_shared_files() {
+        use libthreema::protobuf::{
+            d2d::{ContactSync, contact_sync},
+            d2d_sync::{self, ConversationCategory},
+        };
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "IJKL9012", 2);
+        assert_eq!(share(&mut app, message)["ok"], true);
+        assert_eq!(shares_in(&folder), 1);
+        let voided = app.shares_voided.get();
+        let sync = ContactSync {
+            action: Some(contact_sync::Action::Update(contact_sync::Update {
+                contact: Some(d2d_sync::Contact {
+                    identity: "IJKL9012".into(),
+                    conversation_category: Some(ConversationCategory::Protected as i32),
+                    ..Default::default()
+                }),
+            })),
+        };
+        let mut events = Vec::new();
+        crate::sync::contact_sync(&app.store, sync, &mut events).unwrap();
+        for event in &events {
+            app.gate_media(event);
+        }
+        assert_eq!(shares_in(&folder), 0);
+        assert_ne!(
+            app.shares_voided.get(),
+            voided,
+            "a share on its way is refused"
+        );
+    }
+
+    /// Waiting behind other file work while the app locks: nothing is written, whatever chat.
+    #[test]
+    fn a_share_that_waited_through_the_lock_is_not_written() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "IJKL9012", 2);
+        let mut done = app.take_file_work().unwrap();
+        let request = json!({"id": 3, "cmd": "shareFiles", "messages": [message]});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(async {
+            let turn = std::rc::Rc::clone(&app.file_work_turn);
+            let before_us = turn.acquire().await.unwrap();
+            assert!(from_ui(&mut app, request).await.is_none());
+            tokio::task::yield_now().await;
+            let lock = from_ui(&mut app, json!({"id": 4, "cmd": "lock"})).await;
+            assert_eq!(lock.unwrap()["ok"], true);
+            drop(before_us);
+            let finished = done.recv().await.unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_str(&app.finish_file_work(finished).await).unwrap();
+            assert_eq!(reply["error"]["kind"], "locked", "{reply}");
+        }));
+        assert_eq!(shares_in(&folder), 0);
+    }
+
+    /// A private chat's file goes under a name that says nothing; while the chats are hidden, not
+    /// at all.
+    #[test]
+    fn a_private_chats_file_is_shared_under_a_plain_name() {
+        let (dir, mut app) = app_with_write_pass(0);
+        let folder = share_into(&dir);
+        let message = stored_file(&app, "ABCD1234", 2);
+        assert_eq!(share_locked(&mut app, message)["error"]["kind"], "locked");
+        assert_eq!(shares_in(&folder), 0);
+        let unlock = json!({"id": 2, "cmd": "unlock", "pin": "2468", "privateChats": true});
+        assert_eq!(call(&mut app, unlock)["ok"], true);
+        let reply = share(&mut app, message);
+        let path = reply["result"]["files"][0].as_str().unwrap();
+        assert!(path.ends_with("/file.txt"), "{path}");
+    }
+
+    /// One the command refuses at once has no work to wait for.
+    fn share_locked(app: &mut App, message: i64) -> serde_json::Value {
+        let request = json!({"id": 3, "cmd": "shareFiles", "messages": [message]});
+        let local = tokio::task::LocalSet::new();
+        rt().block_on(local.run_until(from_ui(app, request)))
+            .unwrap()
+    }
+
+    /// With a pass running nothing but the counted files gets through: the chat is hidden from
+    /// the moment of the lock, for listing, reading and every other way of writing.
+    #[test]
+    fn a_write_pass_opens_nothing() {
+        let (_dir, mut app) = app_with_write_pass(5);
+        let message = app.store.conversation_messages("ABCD1234", 1).unwrap()[0].id;
+        let plain = app.store.conversation_messages("IJKL9012", 1).unwrap()[0].id;
+        for request in [
+            json!({"cmd": "conversations", "private": true}),
+            json!({"cmd": "messages", "identity": "ABCD1234", "limit": 10}),
+            json!({"cmd": "message", "message": message}),
+            json!({"cmd": "draft", "identity": "ABCD1234"}),
+            json!({"cmd": "setDraft", "identity": "ABCD1234", "text": "x"}),
+            json!({"cmd": "quotedMessage", "identity": "ABCD1234", "messageId": "0000000000000001"}),
+            json!({"cmd": "markRead", "identity": "ABCD1234"}),
+            json!({"cmd": "sendText", "identity": "ABCD1234", "text": "x"}),
+            json!({"cmd": "deleteConversation", "identity": "ABCD1234"}),
+        ] {
+            let mut request = request;
+            request["id"] = 4.into();
+            let reply = call(&mut app, request.clone());
+            assert_eq!(reply["error"]["kind"], "locked", "{request}: {reply}");
+            assert!(!reply.to_string().contains("secret words"), "{reply}");
+        }
+        // Forwarding counts its failures instead of answering with one, in both directions.
+        for (forwarded, target) in [(plain, "ABCD1234"), (message, "IJKL9012")] {
+            let before = stored_messages(&app, target);
+            let request = json!({"id": 4, "cmd": "forwardMessages", "messages": [forwarded],
+                "identity": target});
+            let reply = call(&mut app, request);
+            assert_eq!(reply["result"]["forwarded"], 0, "{reply}");
+            assert_eq!(reply["result"]["failed"], 1, "{reply}");
+            assert_eq!(reply["result"]["errors"], json!(["locked"]), "{reply}");
+            assert!(!reply.to_string().contains("secret words"), "{reply}");
+            assert_eq!(stored_messages(&app, target), before, "nothing arrived");
+        }
+        // The chat list doesn't show it, and nothing used up the pass.
+        let list = app.conversations_json(false, false).unwrap();
+        let chats = list["conversations"].as_array().unwrap();
+        assert!(chats.iter().all(|chat| chat["identity"] != "ABCD1234"));
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 5);
+    }
+
+    /// Exactly the counted files, to exactly that chat; the answer says nothing of the chat, and
+    /// the file is as hidden as the rest of it.
+    #[test]
+    fn a_write_pass_takes_only_the_counted_files() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        for caption in ["first", "second"] {
+            let reply = send_file(&mut app, "ABCD1234", caption);
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["result"], json!({}), "the answer tells nothing");
+        }
+        assert_eq!(stored_messages(&app, "ABCD1234"), 3);
+        let newest = app.store.conversation_messages("ABCD1234", 1).unwrap()[0].id;
+        assert!(!app.media.shown(newest), "its media stay hidden");
+        assert_eq!(
+            send_file(&mut app, "ABCD1234", "third")["error"]["kind"],
+            "locked"
+        );
+        assert_eq!(stored_messages(&app, "ABCD1234"), 3);
+        assert!(app.write_pass.as_ref().unwrap().files.is_empty());
+        assert!(!app.unlocked.get());
+    }
+
+    #[test]
+    fn a_write_pass_is_for_one_chat() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        let reply = send_file(&mut app, "EFGH5678", "elsewhere");
+        assert_eq!(reply["error"]["kind"], "locked");
+        assert_eq!(stored_messages(&app, "EFGH5678"), 1);
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 2);
+        // A chat that isn't hidden sends as ever, and takes nothing from the pass.
+        let reply = send_file(&mut app, "IJKL9012", "plain");
+        assert!(reply["result"]["id"].is_i64(), "{reply}");
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 2);
+    }
+
+    /// A refused file uses up its place: it was that file the pass was for. It says only what is
+    /// wrong with what was sent.
+    #[test]
+    fn a_write_pass_is_used_up_by_a_refused_file() {
+        let (_dir, mut app) = app_with_write_pass(1);
+        let reply = send_file(&mut app, "ABCD1234", &"x".repeat(6001));
+        assert_eq!(reply["error"]["kind"], "messageTooLong");
+        assert_eq!(
+            send_file(&mut app, "ABCD1234", "again")["error"]["kind"],
+            "locked"
+        );
+    }
+
+    #[test]
+    fn a_write_pass_expires() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        assert_eq!(send_file(&mut app, "ABCD1234", "in time")["ok"], true);
+        app.write_pass.as_mut().unwrap().expires = std::time::Instant::now();
+        let reply = send_file(&mut app, "ABCD1234", "too late");
+        assert_eq!(reply["error"]["kind"], "locked");
+        assert!(app.write_pass.is_none());
+    }
+
+    #[test]
+    fn unlocking_or_removing_the_data_clears_a_write_pass() {
+        let unlock = |app: &mut App, private: bool| {
+            let unlock = json!({"id": 5, "cmd": "unlock", "pin": "2468", "privateChats": private});
+            assert_eq!(call(app, unlock)["ok"], true);
+        };
+        for private in [false, true] {
+            let (_dir, mut app) = app_with_write_pass(2);
+            unlock(&mut app, private);
+            assert!(app.write_pass.is_none(), "{private}");
+            call(&mut app, json!({"id": 6, "cmd": "lock"}));
+            assert_eq!(
+                send_file(&mut app, "ABCD1234", "x")["error"]["kind"],
+                "locked"
+            );
+        }
+        // A wrong PIN clears nothing.
+        let (_dir, mut app) = app_with_write_pass(2);
+        let wrong = json!({"id": 5, "cmd": "unlock", "pin": "1111", "privateChats": true});
+        assert_eq!(call(&mut app, wrong)["ok"], false);
+        assert!(app.write_pass.is_some());
+        rt().block_on(app.delete_all_data()).unwrap();
+        assert!(app.write_pass.is_none());
+    }
+
+    #[test]
+    fn a_lock_without_files_takes_no_pass_away() {
+        let (_dir, mut app) = app_with_write_pass(2);
+        call(&mut app, json!({"id": 6, "cmd": "lock"}));
+        assert_eq!(app.write_pass.as_ref().unwrap().files["ABCD1234"], 2);
+    }
+
+    /// A lock without files gives no pass; there is none for a chat that isn't hidden, or for a
+    /// list, whose members' copies would have to read the hidden one.
+    #[test]
+    fn a_write_pass_is_given_only_for_hidden_chats_with_files() {
+        let (_dir, mut app) = app();
+        call(&mut app, json!({"id": 6, "cmd": "lock"}));
+        assert!(app.write_pass.is_none());
+        for id in ["ABCD1234", "IJKL9012"] {
+            app.store
+                .upsert_contact(&crate::contacts::test_contact(id))
+                .unwrap();
+        }
+        let key = app
+            .store
+            .create_distribution_list("A list", vec!["ABCD1234".into()])
+            .unwrap()
+            .key;
+        app.store.set_private(&key, true).unwrap();
+        let lock = json!({"id": 8, "cmd": "lock",
+                          "pendingFiles": {"IJKL9012": 1, key.as_str(): 1, "ZZZZZZZZ": 1}});
+        assert_eq!(call(&mut app, lock)["ok"], true);
+        assert!(app.write_pass.is_none());
+    }
+
+    /// A deleted chat takes its draft along: nothing comes back when it is opened again.
+    #[test]
+    fn deleting_a_chat_takes_its_draft_along() {
+        let (_dir, mut app) = app_with_draft("first");
+        call(
+            &mut app,
+            json!({"id": 3, "cmd": "setDraft", "identity": "ABCD1234", "text": "unsent",
+                   "quote": "00000000000000ff"}),
+        );
+        app.delete_conversation("ABCD1234").unwrap();
+        assert_eq!(app.store.setting("draft:ABCD1234").unwrap(), None);
+        assert_eq!(app.store.setting("draftQuote:ABCD1234").unwrap(), None);
+    }
+
     /// Exporting a chat: the messages as text and, if wanted, the media that are here
     /// (Android's "Export chat").
     #[test]
@@ -2672,7 +5348,7 @@ mod tests {
                 "ABCD1234",
                 3,
                 "location",
-                &json!({"lat": 59.9, "lon": 10.7, "name": "North pier"}).to_string(),
+                &json!({"latitude": 59.9, "longitude": 10.7, "name": "North pier"}).to_string(),
                 1_700_000_060_000,
             )
             .unwrap();
@@ -2764,6 +5440,52 @@ mod tests {
         let file = std::fs::File::open(reply["path"].as_str().unwrap()).unwrap();
         let zip = zip::ZipArchive::new(file).unwrap();
         assert_eq!(zip.len(), 1, "messages.txt only");
+
+        // A password is a real one or none at all; nothing is written for a short one.
+        let before = std::fs::read_dir(&out).unwrap().count();
+        let short = Some(Zeroizing::new("1234567".to_owned()));
+        assert!(matches!(
+            rt.block_on(app.export_chat("ABCD1234", false, &out, short, None, None)),
+            Err(ApiError::PasswordTooShort)
+        ));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), before);
+        // Counted in characters, not bytes.
+        let short = Some(Zeroizing::new("äöüäöüä".to_owned()));
+        assert!(matches!(
+            rt.block_on(app.export_chat("ABCD1234", false, &out, short, None, None)),
+            Err(ApiError::PasswordTooShort)
+        ));
+        let long = Some(Zeroizing::new("12345678".to_owned()));
+        let reply = rt
+            .block_on(app.export_chat("ABCD1234", false, &out, long, None, None))
+            .unwrap();
+        let file = std::fs::File::open(reply["path"].as_str().unwrap()).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert!(matches!(
+            zip.by_name("messages.txt").map(|_| ()),
+            Err(zip::result::ZipError::UnsupportedArchive(_))
+        ));
+        let empty = Some(Zeroizing::new(String::new()));
+        assert!(
+            rt.block_on(app.export_chat("ABCD1234", false, &out, empty, None, None))
+                .is_ok()
+        );
+
+        // What an export killed half way left behind goes with the next one, and nothing else.
+        let folder = std::path::Path::new(&out);
+        let leftover = folder.join("threesea-chat-20261104-120000.zip.part");
+        let kept = [
+            folder.join("threesea-chat-notes.zip"),
+            folder.join("holiday.zip.part"),
+        ];
+        std::fs::write(&leftover, b"messages").unwrap();
+        for file in &kept {
+            std::fs::write(file, b"the user's").unwrap();
+        }
+        rt.block_on(app.export_chat("ABCD1234", false, &out, None, None, None))
+            .unwrap();
+        assert!(!leftover.exists());
+        assert!(kept.iter().all(|file| file.exists()));
     }
 
     /// The cover names the chat that still has something unread, not whoever wrote last: reading
@@ -2813,6 +5535,131 @@ mod tests {
         let list = app.conversations_json(false, false).unwrap();
         assert_eq!(list["unreadTotal"], 0);
         assert_eq!(list["unreadFrom"], Value::Null);
+        assert_eq!(list["unreadChat"], Value::Null);
+    }
+
+    /// One of the contact list's own, not only known from a group.
+    fn direct_contact(identity: &str) -> libthreema::model::contact::Contact {
+        let mut contact = crate::contacts::test_contact(identity);
+        contact.acquaintance_level =
+            libthreema::protobuf::d2d_sync::contact::AcquaintanceLevel::Direct;
+        contact
+    }
+
+    /// A group with a name and something in its chat.
+    fn named_group(app: &App, name: &str) -> String {
+        let group = crate::groups::Group {
+            key: "g:BBBBBBBB:00000000c0ffee77".to_owned(),
+            identity: libthreema::common::GroupIdentity {
+                creator_identity: "BBBBBBBB".parse().unwrap(),
+                group_id: 0xc0ff_ee77,
+            },
+            name: name.to_owned(),
+            members: vec!["BBBBBBBB".to_owned()],
+            left: false,
+            created_at: 1,
+            picture: None,
+            picture_version: 0,
+        };
+        app.store.upsert_group(&group).unwrap();
+        app.store
+            .insert_incoming(&group.key, 9, "text", "hello", 5_000)
+            .unwrap();
+        group.key
+    }
+
+    #[test]
+    fn chats_and_contacts_are_found_by_name_and_id() {
+        let (_dir, mut app) = app();
+        for (identity, first, last) in [
+            ("ABCD1234", "Jos\u{e9}", "Garc\u{ed}a"),
+            ("BCDE2345", "Anna", "Berg"),
+            ("CDEF3456", "Anneli", "Ohlsson"),
+        ] {
+            app.store.upsert_contact(&direct_contact(identity)).unwrap();
+            app.update_contact(identity, Some(first.to_owned()), Some(last.to_owned()))
+                .unwrap();
+        }
+        // A chat only with Jos\u{e9} and Anna: Anneli is just a contact.
+        for (uid, identity) in [(1, "ABCD1234"), (2, "BCDE2345")] {
+            app.store
+                .insert_incoming(identity, uid, "text", "hello", 1_000 * uid as i64)
+                .unwrap();
+        }
+        let group = named_group(&app, "Annual dinner");
+        let keys = |value: &Value| -> Vec<String> {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["identity"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let found = app.find_chats_json("ann").unwrap();
+        assert_eq!(keys(&found["contacts"]), ["CDEF3456"], "{found}");
+        assert!(
+            keys(&found["chats"]).contains(&"BCDE2345".to_owned()),
+            "{found}"
+        );
+        assert!(keys(&found["chats"]).contains(&group), "{found}");
+        let group_row = found["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["identity"] == group.as_str())
+            .unwrap();
+        assert_eq!(group_row["group"], true);
+        assert_eq!(group_row["displayName"], "Annual dinner");
+
+        // Without its accents, in any case and order, and by ID.
+        for query in ["jose", "GARCIA JOSE", "abcd12"] {
+            let found = app.find_chats_json(query).unwrap();
+            assert_eq!(keys(&found["chats"]), ["ABCD1234"], "{query}: {found}");
+            assert_eq!(keys(&found["contacts"]), Vec::<String>::new(), "{query}");
+        }
+        // A group's key is not a name.
+        let part_of_key = group.rsplit(':').next().unwrap()[..4].to_owned();
+        let found = app.find_chats_json(&part_of_key).unwrap();
+        assert!(!keys(&found["chats"]).contains(&group), "{found}");
+
+        // Too short to mean anything, and nobody by that name.
+        assert_eq!(
+            keys(&app.find_chats_json(" a ").unwrap()["contacts"]).len(),
+            0
+        );
+        let nobody = app.find_chats_json("zzzz").unwrap();
+        assert_eq!(nobody, json!({ "chats": [], "contacts": [] }));
+    }
+
+    /// A hidden private chat stays out of a search by name as it does of the list, a group's above
+    /// all: its name is nowhere else. A contact stays what the contact list shows anyway.
+    #[test]
+    fn a_hidden_private_chat_is_not_found_by_name() {
+        let (_dir, mut app) = app();
+        app.store
+            .upsert_contact(&direct_contact("ABCD1234"))
+            .unwrap();
+        app.update_contact("ABCD1234", Some("Hanna".to_owned()), None)
+            .unwrap();
+        app.store
+            .insert_incoming("ABCD1234", 1, "text", "hello", 1_000)
+            .unwrap();
+        let group = named_group(&app, "Hanna's hidden hangout");
+        app.store.set_private(&group, true).unwrap();
+        app.store.set_private("ABCD1234", true).unwrap();
+        app.unlocked.set(false);
+
+        let hidden = app.find_chats_json("han").unwrap();
+        assert_eq!(hidden["chats"], json!([]), "{hidden}");
+        assert_eq!(hidden["contacts"][0]["identity"], "ABCD1234", "{hidden}");
+        assert_eq!(hidden["contacts"].as_array().unwrap().len(), 1, "{hidden}");
+        assert_eq!(app.find_chats_json("hangout").unwrap()["chats"], json!([]));
+
+        app.unlocked.set(true);
+        let open = app.find_chats_json("han").unwrap();
+        assert_eq!(open["chats"].as_array().unwrap().len(), 2, "{open}");
+        assert_eq!(open["contacts"], json!([]), "{open}");
     }
 
     #[test]
@@ -2860,6 +5707,7 @@ mod tests {
         assert_eq!(data.client_key.as_bytes(), &[5; 32]);
 
         // Restoring needs a license first.
+        let (_fresh_dir, mut app) = self::app();
         let reply: Value = serde_json::from_str(&rt.block_on(app.handle(&json!({
             "id": 3, "cmd": "restoreIdentityBackup", "backup": backup, "password": "correct horse"
         }).to_string())))
@@ -2867,3 +5715,7 @@ mod tests {
         assert_eq!(reply["error"]["kind"], "noLicense");
     }
 }
+
+#[cfg(test)]
+#[path = "app_command_table_tests.rs"]
+mod command_table_tests;

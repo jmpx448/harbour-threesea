@@ -30,6 +30,11 @@ those folders, plus Pictures, Videos and Music).
      number of chats, group chats, media files and pictures.
    - These show on their own screen. Swiping back ("Cancel") imports nothing. With another
      Threema ID, "Import" cannot be accepted: the import only merges into the same ID.
+   - This also shows the reader accepts how Android lays out its archive: it refuses entries
+     that share bytes, and only synthetic archives have been through that so far. Do this with
+     one ordinary backup and, if you can make one, one over 4 GiB (ZIP64, a phone with many
+     media files). A refusal on such a file is a bug in the reader: note the size and the log
+     line.
 2. Swipe forward ("Import"). The progress screen first takes over contacts, groups, lists and
    pictures, then the message history and media with a progress bar ("Chat x of y", media,
    the number of messages so far). When done it goes back to the backup page by itself.
@@ -37,11 +42,15 @@ those folders, plus Pictures, Videos and Music).
    - Tap "Stop" halfway once, or close the app from the cover; then check the backup again
      and import again: it should continue and end with the same totals, nothing twice.
 3. The results on the backup page:
-   - "Imported": counts for added and "Already on this device"; "Conflicting keys" should be
-     0. "Replay protection entries": the number of used nonces taken over. Should be above 0
-     for any phone that received messages.
-   - "Message history": imported messages, media files, reactions, polls; "Not supported"
+   - "Imported": counts for added and "Already on this device"; "Contacts with a different
+     key" should not show. The log's "Android backup metadata imported" line has the number
+     of used nonces taken over (`nonces`): above 0 for any phone that received messages.
+   - "Message history": imported messages, media files, reactions, polls; "Messages left out"
      only for status lines (e.g. group status lines), and the modified-poll lines.
+   - Rows like "Chats left out", "Groups left out" or "Entries left out" show only above 0, and
+     the headline then says the backup is imported except for what is listed. Note any you see.
+   - A contact added by the import offers editing and deleting messages shortly after the
+     import, when online, without pulling the Contacts page.
 4. Look at the result:
    - The chat list: old chats appear, with their latest message. Your live messages from
      before the import are still there, in time order around the old ones.
@@ -71,9 +80,14 @@ device as the main one.
 4. After the restore, check on Android:
    - Your ID and nickname; contacts with their names and verification levels; groups with
      members; distribution lists.
+   - The chat list holds the 1:1 chats, without a new message having arrived, and groups and lists
+     sort by their newest message (the file's last update).
    - A few chats: texts in order, photos/videos/files open, voice messages play, quotes,
      stars, reactions, a poll with its votes.
    - Group and contact pictures.
+   - The chat of a contact deleted while that chat was private, or of one without a contact row
+     before: it is in the list, and the person is a contact again (on Android a hidden contact's
+     chat can't be opened, so the file writes them as not hidden; a restore here does the same).
 5. Send yourself one message from another device right after the restore: it should arrive
    once (the used nonces went along). Older messages must not show up a second time.
 6. Afterwards, on that Android device, the ID is now active there as well: unless you use

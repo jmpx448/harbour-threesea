@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "threesebackend.h"
 
+#include <algorithm>
+#include <memory>
+
 #include <QCoreApplication>
 #include <QBuffer>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDateTime>
 #include <QImage>
 #include <QImageReader>
 #include <QGuiApplication>
+#include <QQuickWindow>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -21,17 +27,28 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QThreadPool>
-#include <QTransform>
 #include <QUrl>
+#include <QWindow>
 
+#include <notification.h>
 #include <threesea_core.h>
 
 #include "contactlistmodel.h"
+#include "coreresult.h"
+#include "endofprocess.h"
 #include "filepreparer.h"
+#include "filetype.h"
+#include "peerimage.h"
+#include "photoedit.h"
 #include "voicerecorder.h"
 #include "secretstore.h"
 
 namespace {
+
+// The largest a picture of a message is edited at: what leaves is at most what Settings say (1600
+// px by default), and cutting a part out of it should still leave something to see.
+const int EditedPictureMaxSide = 4096;
+
 
 QString takeCoreString(char *s)
 {
@@ -40,10 +57,20 @@ QString takeCoreString(char *s)
     return result;
 }
 
+QString mapCacheFile()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/map/tiles.db");
+}
+
 QString dataDir()
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
+
+// In the settings from the moment the core has wiped until the new key and database are there.
+// Found at a start: the app died in between, and goes on with the rest. The value is whether
+// linked devices remain.
+const QString RemovalPendingKey = QStringLiteral("removalPending");
 
 QString databasePath()
 {
@@ -78,30 +105,127 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     , m_contacts(new ContactListModel(this))
     , m_voiceRecorder(new VoiceRecorder(this))
 {
+    loadBubbleSettings();
     m_unreadTimer.setSingleShot(true);
     m_unreadTimer.setInterval(50);
     connect(&m_unreadTimer, &QTimer::timeout, this, [this]() {
         QJSValue none;
-        call(QStringLiteral("conversations"), QVariantMap(), none);
+        call(QStringLiteral("unreadSummary"), QVariantMap(), none);
     });
+    // With a window up, the start's error page has Try again; without one nothing would.
+    m_secrets->askAgainIfDismissed(10000, []() {
+        const QWindowList windows = QGuiApplication::topLevelWindows();
+        return std::none_of(windows.begin(), windows.end(), [](QWindow *window) { return window->isVisible(); });
+    });
+    connect(m_secrets, &SecretStore::confirmationNeeded, this, [this]() { setAwaitingKeyConfirmation(true); });
+    connect(m_secrets, &SecretStore::keyReady, this, [this]() { setAwaitingKeyConfirmation(false); });
+    connect(m_secrets, &SecretStore::failed, this, [this]() { setAwaitingKeyConfirmation(false); });
     connect(m_secrets, &SecretStore::keyReady, this, &ThreeseBackend::startCore);
     connect(m_secrets, &SecretStore::wrappedKeyReady, this, [this](QByteArray blob, bool keyboard) {
         Q_UNUSED(keyboard)
+        setAwaitingKeyConfirmation(false);
         m_wrappedKey = blob;
         m_state = QStringLiteral("locked");
         emit dataEncryptionChanged();
         emit stateChanged();
     });
+    m_mediaReads.setMaxThreadCount(1);
     connect(this, &ThreeseBackend::keyWorkDone, this, &ThreeseBackend::onKeyWorkDone, Qt::QueuedConnection);
     m_network = new QNetworkConfigurationManager(this);
     connect(m_network, &QNetworkConfigurationManager::configurationChanged, this, &ThreeseBackend::reportNetwork);
     connect(m_network, &QNetworkConfigurationManager::onlineStateChanged, this, &ThreeseBackend::reportNetwork);
+    m_networkWakeTimer.setSingleShot(true);
+    m_networkWakeTimer.setInterval(2000);
+    connect(&m_networkWakeTimer, &QTimer::timeout, this, [this]() {
+        if (m_state == QLatin1String("ready")) {
+            emit networkChangedSettled();
+        }
+    });
     connect(m_secrets, &SecretStore::failed, this, &ThreeseBackend::fail);
-    m_secrets->loadKey(!QFile::exists(databasePath()));
+    // The core's own mark: killed after it began to wipe, before the bridge heard of it.
+    const int removalMark = threesea_data_removal_mark(dataDir().toUtf8().constData());
+    if (removalMark >= 0 && !QSettings().contains(RemovalPendingKey)) {
+        QSettings settings;
+        settings.setValue(RemovalPendingKey, removalMark == 1);
+        settings.sync();
+    }
+    if (QSettings().contains(RemovalPendingKey)) {
+        m_removingData = true;
+        m_state = QStringLiteral("removing");
+        QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+    } else {
+        m_secrets->loadKey(!QFile::exists(databasePath()));
+    }
+}
+
+void ThreeseBackend::prepareToEnd()
+{
+    m_ending = true;
+}
+
+bool ThreeseBackend::shutdown()
+{
+    m_dbKey.fill('\0');
+    // What the closing pages handed over is on its way through a FilePreparer. A photo takes about
+    // a second; this and the rest stay under the 15 s after which the Full flavour's update kills
+    // the process.
+    deliverUnderWay(this, [this]() { return !m_filesPreparing.isEmpty(); }, 3000);
+    // A reader of a large media file holds this until it has gone through the whole file, which is
+    // outside every limit of the stop. Not having it means leaving with the core still running,
+    // which the store takes like any crash.
+    if (!m_coreLock.tryLockForWrite(2000)) {
+        qWarning("threesea: a media read holds up the end");
+        // The core goes on until the process ends, so what it has been given can still get there.
+        deliverUnderWay(this, [this]() { return !m_mustArrive.isEmpty(); }, 3000);
+        tellWhatIsLost();
+        return false;
+    }
+    bool clean = true;
+    if (m_core) {
+        clean = threesea_core_quit(m_core);
+        m_core = nullptr;
+    }
+    m_coreLock.unlock();
+    // Its last answers: they say what got there.
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
+    tellWhatIsLost();
+    // Without the core lock: a task reading media would wait for it. Scrypt takes seconds, and a
+    // task left running would report to this object, which goes with the engine. The application
+    // would wait for these in its destructor as well, however long a video being scaled takes.
+    const bool workersDone = QThreadPool::globalInstance()->waitForDone(2000);
+    // A read still on its turn finds no core now and ends at once.
+    const bool readsDone = m_mediaReads.waitForDone(1000);
+    return workersDone && readsDone && clean;
+}
+
+// The window has gone, so this says it itself. Its text has no words of the user's in it.
+void ThreeseBackend::tellWhatIsLost()
+{
+    if (m_mustArrive.isEmpty()) {
+        return;
+    }
+    qWarning("threesea: ended with %d files or drafts unfinished", m_mustArrive.size());
+    //% "Threesea ended before it was done"
+    const QString summary = qtTrId("threesea-la-ended-early");
+    //% "Your last files or draft did not reach the chat. Add them again there."
+    const QString body = qtTrId("threesea-la-ended-early-body");
+    QDBusMessage notify = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("/org/freedesktop/Notifications"),
+        QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("Notify"));
+    QVariantMap hints;
+    hints.insert(QStringLiteral("x-nemo-preview-summary"), summary);
+    hints.insert(QStringLiteral("x-nemo-preview-body"), body);
+    notify << QStringLiteral("Threesea") << 0u << QStringLiteral("harbour-threesea") << summary << body
+           << QStringList() << hints << -1;
+    QDBusConnection::sessionBus().call(notify, QDBus::Block, 1000);
 }
 
 ThreeseBackend::~ThreeseBackend()
 {
+    // They read through this object and the core.
+    m_mediaReads.waitForDone();
+    // Worker tasks report to this object; shutdown() has seen them off on the usual way out.
+    QThreadPool::globalInstance()->waitForDone();
     m_dbKey.fill('\0');
     QWriteLocker locker(&m_coreLock);
     if (m_core) {
@@ -157,6 +281,10 @@ QString ThreeseBackend::startConfigJson() const
 void ThreeseBackend::unlockDatabase(const QString &passphrase, const QJSValue &callback)
 {
     if (m_state != QLatin1String("locked")) {
+        // Nothing to open any more; the page waiting for this answer must not wait forever.
+        if (callback.isCallable()) {
+            QJSValue(callback).call(QJSValueList() << false);
+        }
         return;
     }
     const quint64 id = m_nextId++;
@@ -249,11 +377,21 @@ void ThreeseBackend::setKeyEncryption(bool encrypt, const QString &passphrase, b
 void ThreeseBackend::reportNetwork()
 {
     bool unmetered = false;
+    QStringList active;
     for (const QNetworkConfiguration &config : m_network->allConfigurations(QNetworkConfiguration::Active)) {
+        active.append(config.identifier());
         const auto bearer = config.bearerType();
         if (bearer == QNetworkConfiguration::BearerWLAN || bearer == QNetworkConfiguration::BearerEthernet) {
             unmetered = true;
         }
+    }
+    // A socket on the old network hangs without a word, and a wait for the next attempt goes on
+    // although the network is back. Only what is in use counts: a Wi-Fi scan's findings are
+    // changes too. Together with the core's echo this tells within seconds.
+    active.sort();
+    if (active != m_activeNetworks) {
+        m_activeNetworks = active;
+        m_networkWakeTimer.start();
     }
     if (m_state != QLatin1String("ready")) {
         return;
@@ -290,6 +428,9 @@ void ThreeseBackend::checkPassphrase(const QString &passphrase, const QJSValue &
 
 void ThreeseBackend::onKeyWorkDone(quint64 id, const QByteArray &result)
 {
+    if (m_ending) {
+        return;
+    }
     auto work = m_keyWork.take(id);
     if (work) {
         work(result);
@@ -299,6 +440,183 @@ void ThreeseBackend::onKeyWorkDone(quint64 id, const QByteArray &result)
 static QString captureDir()
 {
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/capture");
+}
+
+void ThreeseBackend::removeAllData(const QString &pin)
+{
+    if (!m_core || m_removingData) {
+        return;
+    }
+    m_removingData = true;
+    m_stateBeforeRemoval = m_state;
+    m_state = QStringLiteral("removing");
+    emit stateChanged();
+    // The PIN first: a refusal must leave a running call and a recording alone. `unlock` without
+    // `privateChats` only checks it; with no lock there is nothing to check.
+    request(QStringLiteral("unlock"), QVariantMap{{QStringLiteral("pin"), pin}},
+            [this, pin](bool ok, const QVariantMap &result, const QString &kind) {
+                if (!ok && kind != QLatin1String("lockNeeded")) {
+                    dataRemovalRefused(result, kind);
+                    return;
+                }
+                // First, so that their last commands reach the core ahead of the removal.
+                emit dataRemovalStarted();
+                requestDataRemoval(pin);
+            });
+}
+
+void ThreeseBackend::dataRemovalRefused(const QVariantMap &error, const QString &kind)
+{
+    m_removingData = false;
+    m_state = m_stateBeforeRemoval;
+    emit stateChanged();
+    emit dataRemovalFailed(kind, error.value(QStringLiteral("message")).toString());
+}
+
+void ThreeseBackend::requestDataRemoval(const QString &pin)
+{
+    // The core stops what runs, leaves the device group (that can take a while) and wipes.
+    request(QStringLiteral("deleteAllData"), QVariantMap{{QStringLiteral("pin"), pin}},
+            [this](bool ok, const QVariantMap &result, const QString &kind) {
+                if (!ok) {
+                    dataRemovalRefused(result, kind);
+                    return;
+                }
+                QSettings settings;
+                settings.setValue(RemovalPendingKey, result.value(QStringLiteral("linkedDevicesRemain")).toBool());
+                settings.sync();
+                stopCore();
+                m_discardCoreMessages = true;
+                // After everything the old core has posted.
+                QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+            });
+}
+
+void ThreeseBackend::retryDataRemoval()
+{
+    if (!dataRemovalStuck()) {
+        return;
+    }
+    m_state = QStringLiteral("removing");
+    emit stateChanged();
+    QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+}
+
+void ThreeseBackend::startFresh()
+{
+    // The kinds StartupPage offers it for: the data is there but its key doesn't open it, or it
+    // is damaged. Not for a newer version's data or a full disk, which an update or some space
+    // brings back, nor for "store", any other SQLite error (a failed upgrade a fixed release opens).
+    static const QStringList kinds{QStringLiteral("storeKey"), QStringLiteral("storeDamaged"),
+                                   QStringLiteral("keyMissing")};
+    const bool locked = m_state == QLatin1String("locked");
+    const bool failed = m_state == QLatin1String("error") && kinds.contains(m_errorKind);
+    if (m_removingData || m_ending || !(locked || failed)) {
+        return;
+    }
+    qInfo("threesea: starting fresh (%s)", locked ? "locked" : qPrintable(m_errorKind)); // log-ok: a state or an error kind
+    // A core that came up and failed has stopped by now; none is there while locked. The removal
+    // mark first: from here on a start finishes it. Nobody was told to leave the group.
+    stopCore();
+    m_discardCoreMessages = true;
+    {
+        QSettings settings;
+        settings.setValue(RemovalPendingKey, false);
+        settings.sync();
+    }
+    m_removingData = true;
+    m_errorKind.clear();
+    m_errorText.clear();
+    m_state = QStringLiteral("removing");
+    emit stateChanged();
+    QMetaObject::invokeMethod(this, "finishDataRemoval", Qt::QueuedConnection);
+}
+
+void ThreeseBackend::stopCore()
+{
+    QWriteLocker locker(&m_coreLock);
+    if (m_core) {
+        // Blocks until the core thread has stopped; no callbacks afterwards.
+        threesea_core_stop(m_core);
+        m_core = nullptr;
+    }
+}
+
+void ThreeseBackend::finishDataRemoval()
+{
+    // The core's mark brings this back at the next start.
+    if (m_ending) {
+        return;
+    }
+    // A new core that died on its start, when trying again.
+    stopCore();
+    m_discardCoreMessages = false;
+    // Listeners close what still shows or plays something of the ID.
+    if (!m_dataRemovedSent) {
+        m_dataRemovedSent = true;
+        emit dataRemoved(QSettings().value(RemovalPendingKey).toBool());
+    }
+
+    m_unreadTimer.stop();
+    m_callbacks.clear();
+    m_mustArrive.clear();
+    m_nativeCallbacks.clear();
+    m_statusRequests.clear();
+    m_contactRequests.clear();
+    m_keyWork.clear();
+    dropHeldPictures();
+    m_tempSources.clear();
+    m_chatTones.clear();
+    m_firstLiveId = m_nextId;
+    m_identity.clear();
+    m_unreadCount = 0;
+    m_unreadFrom.clear();
+    m_unreadChat.clear();
+    m_connectionState = QStringLiteral("disconnected");
+    m_contacts->update(QVariantList());
+    m_dbKey.fill('\0');
+    m_dbKey.clear();
+    m_wrappedKey.clear();
+    m_unlockedAtStart = false;
+
+    // All of them, the device's own too: chat IDs in the notification tokens, the address book
+    // opt-in (the next ID is asked again), the wallpaper. Most getters read them live, so the
+    // signals below bring the UI along.
+    {
+        QSettings settings;
+        const QVariant pending = settings.value(RemovalPendingKey);
+        settings.clear();
+        settings.setValue(RemovalPendingKey, pending);
+        settings.sync();
+    }
+    loadBubbleSettings();
+    applyQtLogLevel();
+    updateQuitOnClose();
+
+    // Captures, a voice recording: all this app keeps there is plain files of the ID.
+    QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively();
+    const bool removed = threesea_data_remove(dataDir().toUtf8().constData());
+    // On a full disk the mark and the clearing above may have stayed in memory, and the core's
+    // mark file is gone now: with the space just freed they reach the disk before anything else.
+    QSettings().sync();
+
+    emit unreadCountChanged();
+    emit unreadFromChanged();
+    emit unreadChatChanged();
+    emit connectionStateChanged();
+    emit keepRunningChanged();
+    emit logLevelChanged();
+    emit notificationSettingsChanged();
+    emit addressBookSyncedAtChanged();
+    emit dataEncryptionChanged();
+    if (!removed) {
+        // A new key couldn't open what stayed. The user can try again, or the next start does.
+        fail(QStringLiteral("removingData"));
+        return;
+    }
+    m_state = QStringLiteral("starting");
+    emit stateChanged();
+    m_secrets->replaceKey();
 }
 
 void ThreeseBackend::startCore(QByteArray key)
@@ -314,16 +632,84 @@ void ThreeseBackend::startCore(QByteArray key)
     key.fill('\0');
     locker.unlock();
     if (!m_core) {
-        fail(QStringLiteral("core start"));
+        // If the core could still say why, its `fatal` follows.
+        fail(QStringLiteral("coreStart"));
+        return;
+    }
+    QJSValue none;
+    call(QStringLiteral("setImageSize"), QVariantMap{{QStringLiteral("side"), imageSize()}}, none);
+}
+
+void ThreeseBackend::fail(const QString &kind, const QString &detail)
+{
+    m_errorKind = kind;
+    m_errorText = detail.isEmpty() ? kind : kind + QLatin1Char(' ') + detail;
+    qWarning("threesea: startup failed: %s", qPrintable(m_errorText)); // log-ok: the app's own codes and core error kinds
+    setUpgrading(false);
+    m_state = QStringLiteral("error");
+    // Nothing runs, so nothing is there to keep running for, and with the process staying the next
+    // launch would only show this window again: closing it must end the process.
+    QGuiApplication::setQuitOnLastWindowClosed(true);
+    emit stateChanged();
+}
+
+void ThreeseBackend::retryStart()
+{
+    if (m_state != QLatin1String("error") || m_removingData) {
+        return;
+    }
+    // A core can be there: one that came up but whose status failed.
+    stopCore();
+    m_discardCoreMessages = true;
+    m_errorKind.clear();
+    m_errorText.clear();
+    m_state = QStringLiteral("starting");
+    updateQuitOnClose();
+    emit stateChanged();
+    // After everything the old core has posted.
+    QMetaObject::invokeMethod(this, "startAgain", Qt::QueuedConnection);
+}
+
+void ThreeseBackend::startAgain()
+{
+    if (m_ending) {
+        return;
+    }
+    m_discardCoreMessages = false;
+    m_callbacks.clear();
+    m_mustArrive.clear();
+    m_nativeCallbacks.clear();
+    m_statusRequests.clear();
+    m_contactRequests.clear();
+    m_firstLiveId = m_nextId;
+    m_dbKey.fill('\0');
+    m_dbKey.clear();
+    m_wrappedKey.clear();
+    m_unlockedAtStart = false;
+    m_secrets->loadKey(!QFile::exists(databasePath()));
+}
+
+void ThreeseBackend::setAwaitingKeyConfirmation(bool awaiting)
+{
+    if (awaiting != m_awaitingKeyConfirmation) {
+        m_awaitingKeyConfirmation = awaiting;
+        emit awaitingKeyConfirmationChanged();
     }
 }
 
-void ThreeseBackend::fail(const QString &reason)
+void ThreeseBackend::setUpgrading(bool upgrading)
 {
-    qWarning("threesea: startup failed: %s", qPrintable(reason)); // log-ok: the app's own codes and core error kinds
-    m_state = QStringLiteral("error");
-    m_errorText = reason;
-    emit stateChanged();
+    if (upgrading != m_upgrading) {
+        m_upgrading = upgrading;
+        emit upgradingChanged();
+    }
+}
+
+void ThreeseBackend::failFromCore(const QJsonObject &error)
+{
+    const QString kind = error.value(QStringLiteral("kind")).toString();
+    // The store's kinds have a code as their message; an internal error's could say anything.
+    fail(kind, kind == QLatin1String("internal") ? QString() : error.value(QStringLiteral("message")).toString());
 }
 
 void ThreeseBackend::onCoreMessage(void *userData, const char *json)
@@ -336,10 +722,17 @@ void ThreeseBackend::onCoreMessage(void *userData, const char *json)
 void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool asPhoto, const QString &caption,
                               const QJSValue &callback)
 {
+    const quint64 id = m_nextId++;
+    if (m_core || m_ending) {
+        m_mustArrive.insert(id);
+    }
+    // Picker results are file:// URLs.
+    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_tempSources.insert(id, localPath);
     if (!m_core) {
+        answerNoCore(callback, id);
         return;
     }
-    const quint64 id = m_nextId++;
     if (callback.isCallable()) {
         m_callbacks.insert(id, callback);
     }
@@ -349,65 +742,179 @@ void ThreeseBackend::sendFile(const QString &identity, const QString &path, bool
     request.insert(QStringLiteral("identity"), identity);
     request.insert(QStringLiteral("caption"), caption);
     request.insert(QStringLiteral("rendering"), asPhoto ? QStringLiteral("media") : QStringLiteral("file"));
-    // Picker results are file:// URLs.
-    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_filesPreparing.insert(id, identity);
     auto *preparer = new FilePreparer(localPath, request);
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
     QThreadPool::globalInstance()->start(preparer);
 }
 
 
+QString ThreeseBackend::sharedFileKind(const QString &path) const
+{
+    const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    if (FileType::isInside(local, dataDir())
+            || FileType::isInside(local, QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+            || FileType::isInside(local, QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation))) {
+        return QStringLiteral("own");
+    }
+    return FileType::sharedKind(FileType::mediaTypeOf(QFileInfo(local)));
+}
+
 QString ThreeseBackend::captureFile(const QString &extension) const
 {
     QDir().mkpath(captureDir());
+    // Plain files until they are stored encrypted: ours only.
+    QFile::setPermissions(captureDir(), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
     return captureDir() + QStringLiteral("/capture-%1.%2")
             .arg(QDateTime::currentMSecsSinceEpoch())
             .arg(extension);
 }
 
-QString ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rotation) const
+void ThreeseBackend::editPhoto(const QString &path, const QRectF &crop, int rotation, const QVariantList &marks,
+                               const QJSValue &callback)
 {
     const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
-    // With the EXIF rotation applied, like the preview (Qt Quick does it) and FilePreparer:
-    // without it a camera photo would be cut in the wrong place and come out sideways.
-    QImageReader reader(local);
-    reader.setAutoTransform(true);
-    QImage image = reader.read();
-    if (image.isNull()) {
-        qWarning("photo could not be read for editing");
-        return QString();
-    }
-    if (rotation % 360 != 0) {
-        QTransform turn;
-        turn.rotate(rotation);
-        image = image.transformed(turn, Qt::SmoothTransformation);
-    }
-    // The crop comes in fractions of the turned picture, so it survives any scaling the view did.
-    const QRect cut = QRect(qRound(crop.x() * image.width()), qRound(crop.y() * image.height()),
-                            qRound(crop.width() * image.width()), qRound(crop.height() * image.height()))
-            .intersected(image.rect());
-    if (cut.width() < 1 || cut.height() < 1) {
-        return QString();
-    }
-    if (cut != image.rect()) {
-        image = image.copy(cut);
-    }
-    const QString out = captureFile(QStringLiteral("jpg"));
-    // High quality: what is sent is re-encoded once more by FilePreparer.
-    if (!image.save(out, "JPEG", 95)) {
-        qWarning("edited photo could not be written");
-        return QString();
-    }
-    return out;
+    const quint64 id = m_nextId++;
+    m_keyWork.insert(id, [this, callback](const QByteArray &result) {
+        const QString out = QString::fromUtf8(result);
+        QJSValue answer;
+        if (callback.isCallable()) {
+            answer = QJSValue(callback).call(QJSValueList() << out);
+        }
+        if (!out.isEmpty() && !(answer.isString() && answer.toString() == out)) {
+            removeCapture(out);
+        }
+    });
+    // A camera photo takes seconds to decode, turn and encode.
+    QThreadPool::globalInstance()->start(new Task([this, id, local, crop, rotation, marks]() {
+        // With the EXIF rotation applied, like the preview (Qt Quick does it) and FilePreparer:
+        // without it a camera photo would be cut in the wrong place and come out sideways.
+        QImageReader reader(local);
+        reader.setAutoTransform(true);
+        const QImage image = reader.read();
+        const QImage result = image.isNull() ? QImage() : PhotoEdit::edited(image, crop, rotation, marks);
+        QString out;
+        if (image.isNull()) {
+            qWarning("photo could not be read for editing");
+        } else if (!result.isNull()) {
+            out = captureFile(PhotoEdit::extensionFor(result));
+            if (!PhotoEdit::write(result, out)) {
+                qWarning("edited photo could not be written");
+                out.clear();
+            }
+        }
+        emit keyWorkDone(id, out.toUtf8());
+    }));
 }
 
-void ThreeseBackend::removeCapture(const QString &path) const
+int ThreeseBackend::holdPicture(qint64 message, const QRectF &crop, int rotation, const QVariantList &marks)
+{
+    const QByteArray data = readMedia(message, false);
+    if (data.isEmpty()) {
+        qWarning("picture of a message could not be read for editing");
+        return 0;
+    }
+    const int held = m_nextHeldPicture++;
+    m_heldPictures.insert(held, HeldPicture { data, crop, rotation, marks });
+    return held;
+}
+
+void ThreeseBackend::dropHeldPicture(int held)
+{
+    QByteArray data = m_heldPictures.take(held).data;
+    data.fill('\0');
+}
+
+void ThreeseBackend::dropHeldPictures()
+{
+    for (const int held : m_heldPictures.keys()) {
+        dropHeldPicture(held);
+    }
+}
+
+void ThreeseBackend::sendHeldPicture(int held, const QString &identity, const QString &caption,
+                                     const QJSValue &callback)
+{
+    const quint64 id = m_nextId++;
+    if (m_core || m_ending) {
+        m_mustArrive.insert(id);
+    }
+    if (!m_core) {
+        dropHeldPicture(held);
+        answerNoCore(callback, id);
+        return;
+    }
+    if (callback.isCallable()) {
+        m_callbacks.insert(id, callback);
+    }
+    QVariantMap request;
+    request.insert(QStringLiteral("id"), static_cast<double>(id));
+    request.insert(QStringLiteral("cmd"), QStringLiteral("sendFile"));
+    request.insert(QStringLiteral("identity"), identity);
+    // The core checks it as any file's caption: refused if the message wouldn't fit a frame.
+    request.insert(QStringLiteral("caption"), caption);
+    request.insert(QStringLiteral("rendering"), QStringLiteral("media"));
+    m_filesPreparing.insert(id, identity);
+    m_wipeWhenPrepared.insert(id);
+    // One buffer, whatever gets copied on the way, so that wiping it really wipes it.
+    const HeldPicture source = m_heldPictures.take(held);
+    auto bytes = std::make_shared<QByteArray>(source.data);
+    const QRectF crop = source.crop;
+    const int rotation = source.rotation;
+    const QVariantList marks = source.marks;
+    auto picture = [bytes, crop, rotation, marks]() {
+        // From someone else, so read as everything from someone else is. Crop and marks are
+        // fractions, and what leaves is smaller than this anyway: a huge picture decodes scaled
+        // down, not at up to 400 MB.
+        QString problem;
+        QImage image = PeerImage::decode(*bytes, QSize(EditedPictureMaxSide, EditedPictureMaxSide), &problem);
+        std::fill_n(const_cast<char *>(bytes->constData()), bytes->size(), '\0');
+        if (image.isNull()) {
+            qWarning("picture of a message could not be decoded for editing");
+            return QImage();
+        }
+        const QImage result = PhotoEdit::edited(image, crop, rotation, marks);
+        PhotoEdit::wipe(image);
+        return result;
+    };
+    auto *preparer = new FilePreparer(picture, request);
+    connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
+    QThreadPool::globalInstance()->start(preparer);
+}
+
+void ThreeseBackend::removeTempSources(quint64 id, const QJSValue &callbackAnswer)
+{
+    // A callback that took a refused file back says so by returning its path. Anything else, such
+    // as the error of a function whose page has gone, keeps nothing: nothing stays for nobody.
+    const QString answer = callbackAnswer.isString() ? callbackAnswer.toString() : QString();
+    const QString kept = answer.startsWith(QLatin1String("file://")) ? QUrl(answer).toLocalFile() : answer;
+    const QStringList paths = m_tempSources.values(id);
+    m_tempSources.remove(id);
+    for (const QString &path : paths) {
+        if (path != kept) {
+            removeCapture(path);
+        }
+    }
+}
+
+void ThreeseBackend::lockWithFilesOnTheirWay()
+{
+    QVariantMap args;
+    if (!m_filesPreparing.isEmpty()) {
+        QVariantMap files;
+        for (const QString &identity : m_filesPreparing) {
+            files.insert(identity, files.value(identity).toInt() + 1);
+        }
+        args.insert(QStringLiteral("pendingFiles"), files);
+    }
+    call(QStringLiteral("lock"), args);
+}
+
+bool ThreeseBackend::removeCapture(const QString &path) const
 {
     const QString local = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
     const QFileInfo info(local);
-    if (info.absolutePath() == QDir(captureDir()).absolutePath()) {
-        QFile::remove(local);
-    }
+    return info.absolutePath() == QDir(captureDir()).absolutePath() && QFile::remove(local);
 }
 
 QVariantList ThreeseBackend::alertTones() const
@@ -439,23 +946,56 @@ QString ThreeseBackend::toneTitle(const QString &path) const
 
 QString ThreeseBackend::chatTone(const QString &identity) const
 {
-    return QSettings().value(QStringLiteral("chatTones/") + identity).toString();
+    return m_chatTones.value(identity).toString();
 }
 
 void ThreeseBackend::setChatTone(const QString &identity, const QString &path)
 {
-    QSettings settings;
     if (path.isEmpty()) {
-        settings.remove(QStringLiteral("chatTones/") + identity);
+        m_chatTones.remove(identity);
     } else {
-        settings.setValue(QStringLiteral("chatTones/") + identity, path);
+        m_chatTones.insert(identity, path);
     }
+    call(QStringLiteral("setChatTone"),
+         QVariantMap{{QStringLiteral("identity"), identity}, {QStringLiteral("tone"), path}}, QJSValue());
     emit notificationSettingsChanged();
+}
+
+void ThreeseBackend::refreshChatTones()
+{
+    request(QStringLiteral("chatTones"), QVariantMap(), [this](bool ok, const QVariantMap &result, const QString &) {
+        if (ok) {
+            m_chatTones = result.value(QStringLiteral("tones")).toMap();
+        }
+    });
+}
+
+void ThreeseBackend::importOldChatTones()
+{
+    // Until 0.2.0 the tones lay in the plain settings file, under the chat's ID or group key.
+    const QString group = QStringLiteral("chatTones");
+    QSettings settings;
+    settings.beginGroup(group);
+    QVariantMap tones;
+    for (const QString &identity : settings.allKeys()) {
+        tones.insert(identity, settings.value(identity));
+    }
+    settings.endGroup();
+    if (tones.isEmpty()) {
+        return;
+    }
+    request(QStringLiteral("importChatTones"), QVariantMap{{QStringLiteral("tones"), tones}},
+            [group](bool ok, const QVariantMap &, const QString &) {
+                if (ok) {
+                    QSettings().remove(group);
+                }
+            });
 }
 
 void ThreeseBackend::addGifFavourite(const QString &path, const QJSValue &callback)
 {
     if (!m_core) {
+        answerNoCore(callback);
         return;
     }
     const quint64 id = m_nextId++;
@@ -474,12 +1014,19 @@ void ThreeseBackend::addGifFavourite(const QString &path, const QJSValue &callba
 }
 
 void ThreeseBackend::sendVideo(const QString &identity, const QString &path, const QVariant &frame,
-                               double seconds, const QString &caption, const QJSValue &callback)
+                               double seconds, const QString &caption, const QJSValue &callback,
+                               bool keepMetadata)
 {
+    const quint64 id = m_nextId++;
+    if (m_core || m_ending) {
+        m_mustArrive.insert(id);
+    }
+    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    m_tempSources.insert(id, localPath);
     if (!m_core) {
+        answerNoCore(callback, id);
         return;
     }
-    const quint64 id = m_nextId++;
     if (callback.isCallable()) {
         m_callbacks.insert(id, callback);
     }
@@ -492,18 +1039,21 @@ void ThreeseBackend::sendVideo(const QString &identity, const QString &path, con
     if (seconds > 0) {
         request.insert(QStringLiteral("duration"), seconds);
     }
-    const QString localPath = path.startsWith(QLatin1String("file://")) ? QUrl(path).toLocalFile() : path;
+    if (keepMetadata) {
+        request.insert(QStringLiteral("keepMetadata"), true);
+    }
     // Where a scaled-down copy may go (Settings → Media & storage → Video size). Nothing is
     // written unless the video is really scaled; the file goes once the core has read it.
     const QString scratch = captureFile(QStringLiteral("mp4"));
     m_tempSources.insert(id, scratch);
+    m_filesPreparing.insert(id, identity);
     auto *preparer = new FilePreparer(localPath, request, scratch);
     preparer->setVideoFrame(frame.value<QImage>());
     connect(preparer, &FilePreparer::prepared, this, &ThreeseBackend::filePrepared, Qt::QueuedConnection);
     QThreadPool::globalInstance()->start(preparer);
 }
 
-QObject *ThreeseBackend::voiceRecorder() const
+VoiceRecorder *ThreeseBackend::voiceRecorder() const
 {
     return m_voiceRecorder;
 }
@@ -562,12 +1112,13 @@ void ThreeseBackend::sendSquarePicture(const QString &path, QVariantMap request,
     image = image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side)
                 .scaled(512, 512, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                 .convertToFormat(QImage::Format_RGB32);
+    image = PhotoEdit::withoutMetadata(image);
     QByteArray jpeg;
     QBuffer buffer(&jpeg);
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "JPEG", 85);
     // Threema Safe's format (safe-backup.schema.yml): JPEG, q=60, at most 400×400, no metadata
-    // (Qt writes none).
+    // (Qt writes what the image still carries: none, since withoutMetadata above).
     QByteArray safeJpeg;
     if (safeCopy) {
         QBuffer safeBuffer(&safeJpeg);
@@ -607,9 +1158,19 @@ QString decodeQrImage(QImage image)
 
 }
 
-QString ThreeseBackend::decodeQr(const QVariant &image) const
+void ThreeseBackend::decodeQr(const QVariant &image, const QJSValue &callback)
 {
-    return decodeQrImage(image.value<QImage>());
+    const quint64 id = m_nextId++;
+    m_keyWork.insert(id, [callback](const QByteArray &text) {
+        if (callback.isCallable()) {
+            QJSValue(callback).call(QJSValueList() << QString::fromUtf8(text));
+        }
+    });
+    // Several frames a second: not on the thread that draws the viewfinder.
+    const QImage frame = image.value<QImage>();
+    QThreadPool::globalInstance()->start(new Task([this, id, frame]() {
+        emit keyWorkDone(id, decodeQrImage(frame).toUtf8());
+    }));
 }
 
 QString ThreeseBackend::decodeQrFile(const QString &path) const
@@ -665,20 +1226,42 @@ void ThreeseBackend::sendVoice(const QString &identity, int durationMs, const QJ
 void ThreeseBackend::filePrepared(const QVariantMap &request, const QByteArray &data, const QByteArray &thumbnail,
                                   const QString &error)
 {
-    if (!error.isEmpty()) {
-        const quint64 id = request.value(QStringLiteral("id")).toULongLong();
-        // Nothing was sent, so nothing will answer and clean up after it.
-        const QString temp = m_tempSources.take(id);
-        if (!temp.isEmpty()) {
-            removeCapture(temp);
+    const quint64 id = request.value(QStringLiteral("id")).toULongLong();
+    m_filesPreparing.remove(id);
+    // threesea_core_send_data copies. The worker that made these is done with them too.
+    struct Wiping {
+        bool wanted;
+        const QByteArray &data;
+        const QByteArray &thumbnail;
+        ~Wiping()
+        {
+            if (wanted) {
+                std::fill_n(const_cast<char *>(data.constData()), data.size(), '\0');
+                std::fill_n(const_cast<char *>(thumbnail.constData()), thumbnail.size(), '\0');
+            }
         }
+    } wiping { m_wipeWhenPrepared.remove(id), data, thumbnail };
+    if (id < m_firstLiveId) {
+        return;
+    }
+    if (!error.isEmpty()) {
+        // Whoever asked has gone; it stays among what is lost.
+        if (m_ending) {
+            return;
+        }
+        m_mustArrive.remove(id);
+        // Nothing was sent, so nothing will answer and clean up after it.
+        QJSValue answer;
         QJSValue callback = m_callbacks.take(id);
         if (callback.isCallable()) {
-            callback.call(QJSValueList() << false << QJSValue() << QStringLiteral("internal") << error);
+            const QString kind = error == FilePreparer::pictureKeepsMetadata() ? error : QStringLiteral("internal");
+            answer = callback.call(QJSValueList() << false << QJSValue() << kind << error);
         }
+        removeTempSources(id, answer);
         return;
     }
     if (!m_core) {
+        answerNoCore(m_callbacks.take(id), id);
         return;
     }
     QByteArray json = QJsonDocument(QJsonObject::fromVariantMap(request)).toJson(QJsonDocument::Compact);
@@ -711,9 +1294,28 @@ void ThreeseBackend::request(const QString &command, const QVariantMap &args, Na
     call(command, args, QJSValue());
 }
 
+void ThreeseBackend::answerNoCore(const QJSValue &callback, quint64 id)
+{
+    if (!callback.isCallable()) {
+        removeTempSources(id);
+        return;
+    }
+    // Later, like any answer of the core: callers go on after the call before they expect one.
+    QJSValue answer = callback;
+    QTimer::singleShot(0, this, [this, answer, id]() mutable {
+        QJSValueList arguments;
+        arguments << QJSValue(false);
+        arguments << m_engine->toScriptValue(QVariantMap());
+        arguments << QJSValue(QStringLiteral("internal"));
+        arguments << QJSValue(QStringLiteral("the app's core is not running"));
+        removeTempSources(id, answer.call(arguments));
+    });
+}
+
 void ThreeseBackend::call(const QString &command, const QVariantMap &args, const QJSValue &callback)
 {
     if (!m_core) {
+        answerNoCore(callback);
         return;
     }
     const quint64 id = m_nextId++;
@@ -726,8 +1328,13 @@ void ThreeseBackend::call(const QString &command, const QVariantMap &args, const
     }
     request.insert(QStringLiteral("id"), static_cast<double>(id));
     request.insert(QStringLiteral("cmd"), command);
+    if (m_ending && command == QLatin1String("setDraft")) {
+        m_mustArrive.insert(id);
+    }
     if (command == QLatin1String("status")) {
         m_statusRequests.insert(id);
+    } else if (command == QLatin1String("contacts")) {
+        m_contactRequests.insert(id);
     }
     if (callback.isCallable()) {
         m_callbacks.insert(id, callback);
@@ -735,6 +1342,11 @@ void ThreeseBackend::call(const QString &command, const QVariantMap &args, const
     QByteArray json = QJsonDocument(request).toJson(QJsonDocument::Compact);
     threesea_core_send(m_core, json.constData());
     json.fill('\0'); // may contain a license key or password
+    // Private chats' tones are known only while those chats are readable.
+    if (command == QLatin1String("unlock") || command == QLatin1String("lock")
+        || command == QLatin1String("setPrivate")) {
+        refreshChatTones();
+    }
 }
 
 void ThreeseBackend::refresh()
@@ -746,6 +1358,113 @@ void ThreeseBackend::refresh()
 bool ThreeseBackend::notificationsEnabled() const
 {
     return QSettings().value(QStringLiteral("notifications"), true).toBool();
+}
+
+void ThreeseBackend::loadBubbleSettings()
+{
+    const QSettings settings;
+    const bool threema = settings.value(QStringLiteral("threemaEmoji"), true).toBool();
+    const bool bigger = settings.value(QStringLiteral("biggerEmojis"), true).toBool();
+    const int size = qBound(0, settings.value(QStringLiteral("chatFontSize"), 1).toInt(), 2);
+    const bool play = settings.value(QStringLiteral("autoPlayGifs"), true).toBool();
+    const bool cache = settings.value(QStringLiteral("imageCache"), false).toBool();
+    if (threema != m_threemaEmoji) {
+        m_threemaEmoji = threema;
+        emit threemaEmojiChanged();
+    }
+    if (bigger != m_biggerEmojis) {
+        m_biggerEmojis = bigger;
+        emit biggerEmojisChanged();
+    }
+    if (size != m_chatFontSize) {
+        m_chatFontSize = size;
+        emit chatFontSizeChanged();
+    }
+    if (play != m_autoPlayGifs) {
+        m_autoPlayGifs = play;
+        emit autoPlayGifsChanged();
+    }
+    if (cache != m_imageCache) {
+        m_imageCache = cache;
+        emit imageCacheChanged();
+    }
+}
+
+void ThreeseBackend::setThreemaEmoji(bool threema)
+{
+    if (threema != m_threemaEmoji) {
+        QSettings().setValue(QStringLiteral("threemaEmoji"), threema);
+        m_threemaEmoji = threema;
+        emit threemaEmojiChanged();
+    }
+}
+
+void ThreeseBackend::setBiggerEmojis(bool bigger)
+{
+    if (bigger != m_biggerEmojis) {
+        QSettings().setValue(QStringLiteral("biggerEmojis"), bigger);
+        m_biggerEmojis = bigger;
+        emit biggerEmojisChanged();
+    }
+}
+
+void ThreeseBackend::setChatFontSize(int size)
+{
+    size = qBound(0, size, 2);
+    if (size != m_chatFontSize) {
+        QSettings().setValue(QStringLiteral("chatFontSize"), size);
+        m_chatFontSize = size;
+        emit chatFontSizeChanged();
+    }
+}
+
+void ThreeseBackend::setAutoPlayGifs(bool play)
+{
+    if (play != m_autoPlayGifs) {
+        QSettings().setValue(QStringLiteral("autoPlayGifs"), play);
+        m_autoPlayGifs = play;
+        emit autoPlayGifsChanged();
+    }
+}
+
+void ThreeseBackend::setImageCache(bool cache)
+{
+    if (cache != m_imageCache) {
+        QSettings().setValue(QStringLiteral("imageCache"), cache);
+        m_imageCache = cache;
+        emit imageCacheChanged();
+        if (!cache) {
+            purgeImageCacheSoon();
+        }
+    }
+}
+
+void ThreeseBackend::keepOnLockScreen(QObject *notification)
+{
+    // The lock screen lists 100 and up; x-nemo.messaging.im has 120. What is set here stands over
+    // the category's.
+    if (auto *n = qobject_cast<Notification *>(notification)) {
+        n->setHintValue(QStringLiteral("x-nemo-priority"), 120);
+    }
+}
+
+void ThreeseBackend::purgeImageCache()
+{
+    for (QWindow *window : QGuiApplication::topLevelWindows()) {
+        if (auto *view = qobject_cast<QQuickWindow *>(window)) {
+            view->releaseResources();
+        }
+    }
+    // The map's tiles go at the same moments (the lock, a chat going private, the setting off):
+    // a map opened before its chat went private wrote to the file (ADR 0032). A map still open
+    // keeps its handle on the removed file until it closes; the next one starts a new file.
+    QDir(QFileInfo(mapCacheFile()).absolutePath()).removeRecursively();
+}
+
+// Once the bubbles have let go of what they showed with the cache (their pictures load anew).
+void ThreeseBackend::purgeImageCacheSoon()
+{
+    QTimer::singleShot(500, this, &ThreeseBackend::purgeImageCache);
 }
 
 void ThreeseBackend::setNotificationsEnabled(bool enabled)
@@ -780,6 +1499,16 @@ QString storedLogLevel()
 QString ThreeseBackend::logLevel() const
 {
     return storedLogLevel();
+}
+
+void ThreeseBackend::setImageSize(int side)
+{
+    QSettings().setValue(QStringLiteral("imageSize"), side);
+    if (m_core) {
+        QJSValue none;
+        call(QStringLiteral("setImageSize"), QVariantMap{{QStringLiteral("side"), side}}, none);
+    }
+    emit notificationSettingsChanged();
 }
 
 void ThreeseBackend::setLogLevel(const QString &level)
@@ -820,8 +1549,19 @@ void ThreeseBackend::setKeepRunning(bool keep)
         return;
     }
     QSettings().setValue(QStringLiteral("keepRunning"), keep);
-    QGuiApplication::setQuitOnLastWindowClosed(!keep);
+    updateQuitOnClose();
     emit keepRunningChanged();
+}
+
+void ThreeseBackend::setSendingInTurn(bool sending)
+{
+    m_sendingInTurn = sending;
+    updateQuitOnClose();
+}
+
+void ThreeseBackend::updateQuitOnClose()
+{
+    QGuiApplication::setQuitOnLastWindowClosed(!keepRunning() && !m_sendingInTurn);
 }
 
 QObject *ThreeseBackend::contacts() const
@@ -844,23 +1584,58 @@ void ThreeseBackend::refreshContacts()
 
 void ThreeseBackend::handleMessage(const QByteArray &json)
 {
+    if (m_discardCoreMessages) {
+        return;
+    }
     const QJsonObject message = QJsonDocument::fromJson(json).object();
+    if (m_ending) {
+        // Nobody is left to tell, and only whether it got there counts.
+        if (message.contains(QStringLiteral("reply")) && message.value(QStringLiteral("ok")).toBool()) {
+            const quint64 id = static_cast<quint64>(message.value(QStringLiteral("reply")).toDouble());
+            m_mustArrive.remove(id);
+            removeTempSources(id);
+        }
+        return;
+    }
 
     if (message.contains(QStringLiteral("event"))) {
         const QString name = message.value(QStringLiteral("event")).toString();
         if (name == QLatin1String("started")) {
+            setUpgrading(false);
+            if (m_removingData) {
+                // New database, new key, a core running on them: nothing left to finish.
+                QSettings settings;
+                settings.remove(RemovalPendingKey);
+                settings.sync();
+                m_removingData = false;
+                m_dataRemovedSent = false;
+                QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+            }
             refresh();
+        } else if (name == QLatin1String("upgrading")) {
+            setUpgrading(true);
         } else if (name == QLatin1String("fatal")) {
-            fail(message.value(QStringLiteral("kind")).toString());
+            failFromCore(message);
         } else if (name == QLatin1String("licenseChanged")) {
             refresh();
         } else if (name == QLatin1String("contactsChanged")) {
             refreshContacts();
+        } else if (name == QLatin1String("chatDeleted")) {
+            // A group's or list's tone may have gone with it.
+            refreshChatTones();
         } else if (name == QLatin1String("connectionState")) {
             m_connectionState = message.value(QStringLiteral("state")).toString();
             emit connectionStateChanged();
+        } else if (name == QLatin1String("privateChanged") && message.value(QStringLiteral("private")).toBool()) {
+            // Here or on a linked device: what its open chat or an earlier visit left in Qt's cache.
+            purgeImageCacheSoon();
         }
-        if (name == QLatin1String("messageAdded") || name == QLatin1String("started")) {
+        // The cover's count and name, whether or not a chat list is looking (it only reloads when
+        // seen): what brings or takes unread chats, and what renames them.
+        if (name == QLatin1String("messageAdded") || name == QLatin1String("started")
+            || name == QLatin1String("contactsChanged") || name == QLatin1String("groupsChanged")
+            || name == QLatin1String("chatsChanged") || name == QLatin1String("privateChanged")
+            || name == QLatin1String("chatDeleted")) {
             refreshUnread();
         }
         emit coreEvent(name, message.toVariantMap());
@@ -868,23 +1643,41 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
     }
 
     const quint64 id = static_cast<quint64>(message.value(QStringLiteral("reply")).toDouble());
+    m_mustArrive.remove(id);
     const bool ok = message.value(QStringLiteral("ok")).toBool();
     const QJsonObject result = message.value(QStringLiteral("result")).toObject();
     const QJsonObject error = message.value(QStringLiteral("error")).toObject();
 
     // Status replies drive the onboarding state machine. Only those: message replies have a
     // (delivery) `state` too.
-    if (ok && m_statusRequests.remove(id)) {
+    const bool statusReply = m_statusRequests.remove(id) && !m_removingData;
+    if (statusReply && !ok) {
+        // The core is up and can't read what it needs to go on. Only at the start: a status that
+        // fails later must not take a running app to the error page.
+        if (m_state == QLatin1String("starting")) {
+            failFromCore(error);
+        }
+    } else if (statusReply) {
         const QString previous = m_state;
         m_state = result.value(QStringLiteral("state")).toString();
         m_identity = result.value(QStringLiteral("identity")).toString();
+        if (previous == QLatin1String("error")) {
+            // The core could read after all. It runs now, so the window closing must not end it.
+            m_errorKind.clear();
+            m_errorText.clear();
+            QGuiApplication::setQuitOnLastWindowClosed(!keepRunning());
+        }
         emit stateChanged();
         if (m_state == QLatin1String("ready") && previous != m_state) {
             refreshContacts();
             reportNetwork();
+            importOldChatTones();
+            refreshChatTones();
+        } else if (m_state != QLatin1String("ready")) {
+            m_chatTones.clear();
         }
     }
-    // Conversation list replies (from any caller) keep the unread total and the name on the cover
+    // Conversation list and unreadSummary replies keep the unread total and the chat on the cover
     // current. The core counts the chat list in every one of these lists, so the archive's and
     // the private chats' own replies don't change them.
     if (ok && result.contains(QStringLiteral("unreadTotal"))) {
@@ -898,29 +1691,38 @@ void ThreeseBackend::handleMessage(const QByteArray &json)
             m_unreadFrom = from;
             emit unreadFromChanged();
         }
+        const QString chat = result.value(QStringLiteral("unreadChat")).toString();
+        if (chat != m_unreadChat) {
+            m_unreadChat = chat;
+            emit unreadChatChanged();
+        }
     }
-    // Contact list replies (from any caller) feed the shared model.
-    if (ok && result.contains(QStringLiteral("contacts"))) {
+    // Contact list replies feed the shared model. By request, not by the look of the reply: the
+    // summaries of a backup import and a Safe restore have a `contacts` of their own.
+    if (m_contactRequests.remove(id) && ok) {
         m_contacts->update(result.value(QStringLiteral("contacts")).toArray().toVariantList());
-    }
-
-    // A scaled-down video the core has now read into its own store.
-    const QString temp = m_tempSources.take(id);
-    if (!temp.isEmpty()) {
-        removeCapture(temp);
     }
 
     const NativeCallback native = m_nativeCallbacks.take(id);
     if (native) {
-        native(ok, result.toVariantMap(), error.value(QStringLiteral("kind")).toString());
+        // On failure: the error's `kind` and `message`.
+        native(ok, ok ? result.toVariantMap() : error.toVariantMap(), error.value(QStringLiteral("kind")).toString());
     }
+    QJSValue answer;
     QJSValue callback = m_callbacks.take(id);
     if (callback.isCallable()) {
         QJSValueList arguments;
         arguments << QJSValue(ok);
-        arguments << m_engine->toScriptValue(result.toVariantMap());
+        arguments << coreResultForScript(m_engine, message.value(QStringLiteral("result")));
         arguments << QJSValue(error.value(QStringLiteral("kind")).toString());
         arguments << QJSValue(error.value(QStringLiteral("message")).toString());
-        callback.call(arguments);
+        answer = callback.call(arguments);
     }
+    // What the core has now read into its own store; a refused file only if nobody took it back.
+    removeTempSources(id, ok ? QJSValue() : answer);
+}
+
+QString ThreeseBackend::mapCache() const
+{
+    return mapCacheFile();
 }

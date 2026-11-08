@@ -5,19 +5,23 @@
 use std::rc::Rc;
 
 use libthreema::{
-    common::ThreemaId,
+    common::{
+        ThreemaId,
+        keys::{ClientKey, PublicKey},
+    },
     csp_e2e::fs::{
-        FsSessionStore, FsStatus,
+        Encapsulation, EncapsulationError, FsSessionStore, FsStatus, encapsulate,
         ratchet::Ratchet,
         session::{Session, SessionId, SessionState, Versions},
+        terminate_all, terminate_all_with_cause,
     },
     model::provider::ProviderError,
+    protobuf::{common::GroupIdentity, csp_e2e_fs::terminate},
 };
 use rusqlite::{OptionalExtension as _, Row, params};
-use zeroize::Zeroize as _;
 
 use crate::{
-    providers::{CoreEvent, EventSink},
+    providers::{CoreEvent, EventSink, foreign},
     store::{Store, StoreError},
 };
 
@@ -46,13 +50,18 @@ fn bad(column: usize) -> rusqlite::Error {
     rusqlite::Error::InvalidColumnType(column, "fs session".into(), rusqlite::types::Type::Blob)
 }
 
+/// Read in place: no heap copy of the key to wipe or to forget.
 fn key32(row: &Row<'_>, column: usize) -> rusqlite::Result<Option<[u8; 32]>> {
-    let Some(mut bytes) = row.get::<_, Option<Vec<u8>>>(column)? else {
+    let Some(bytes) = row
+        .get_ref(column)?
+        .as_blob_or_null()
+        .map_err(|_| bad(column))?
+    else {
         return Ok(None);
     };
-    let key = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| bad(column));
-    bytes.zeroize();
-    key.map(Some)
+    <[u8; 32]>::try_from(bytes)
+        .map(Some)
+        .map_err(|_| bad(column))
 }
 
 fn ratchet(row: &Row<'_>, key_column: usize) -> rusqlite::Result<Option<Ratchet>> {
@@ -61,6 +70,12 @@ fn ratchet(row: &Row<'_>, key_column: usize) -> rusqlite::Result<Option<Ratchet>
     };
     let counter = row.get::<_, i64>(key_column + 1)?.cast_unsigned();
     Ok(Some(Ratchet { counter, chain_key }))
+}
+
+fn ratchet_columns(ratchet: Option<&Ratchet>) -> (Option<&[u8]>, Option<i64>) {
+    ratchet
+        .map(|ratchet| (&ratchet.chain_key[..], ratchet.counter.cast_signed()))
+        .unzip()
 }
 
 fn from_row(row: &Row<'_>, my_identity: ThreemaId) -> rusqlite::Result<Session> {
@@ -85,13 +100,42 @@ fn from_row(row: &Row<'_>, my_identity: ThreemaId) -> rusqlite::Result<Session> 
     })
 }
 
+/// A row that can't be a session, as opposed to a database that can't be read. It is treated as
+/// no session and removed, so that the peer's messages are rejected and ours start a new one: left
+/// in place, it would stop the whole connection on every login, for everyone.
+fn is_damaged(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::InvalidColumnType(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..)
+            | rusqlite::Error::FromSqlConversionFailure(..)
+    )
+}
+
 impl Store {
     fn fs_sessions(&self, peer: &str, my_identity: ThreemaId) -> Result<Vec<Session>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM fs_sessions WHERE peer = ?1"
+            "SELECT {COLUMNS}, rowid FROM fs_sessions WHERE peer = ?1"
         ))?;
-        let rows = statement.query_map([peer], |row| from_row(row, my_identity))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let rows = statement.query_map([peer], |row| {
+            Ok((row.get::<_, i64>(15)?, from_row(row, my_identity)))
+        })?;
+        let mut sessions = Vec::new();
+        let mut damaged = Vec::new();
+        for row in rows {
+            let (rowid, session) = row?;
+            match session {
+                Ok(session) => sessions.push(session),
+                Err(error) if is_damaged(&error) => damaged.push(rowid),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for rowid in damaged {
+            tracing::warn!("removing a damaged forward secrecy session");
+            self.conn
+                .execute("DELETE FROM fs_sessions WHERE rowid = ?1", [rowid])?;
+        }
+        Ok(sessions)
     }
 
     /// Everyone we have an FS session with.
@@ -102,17 +146,10 @@ impl Store {
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
-
-    /// Delete all FS sessions with `peer` (contact deleted).
-    pub fn delete_fs_sessions(&self, peer: &str) -> Result<(), StoreError> {
-        self.conn
-            .execute("DELETE FROM fs_sessions WHERE peer = ?1", [peer])?;
-        Ok(())
-    }
 }
 
-fn storage(error: impl std::fmt::Display) -> ProviderError {
-    ProviderError::InvalidState(format!("storage: {error}"))
+fn storage(error: impl Into<StoreError>) -> ProviderError {
+    foreign(error.into())
 }
 
 fn is_4dh(session: &Session) -> bool {
@@ -129,15 +166,23 @@ pub struct StoreFs {
 
 impl FsSessionStore for StoreFs {
     fn get(&self, peer: ThreemaId, id: SessionId) -> Result<Option<Session>, ProviderError> {
-        self.store
-            .conn
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM fs_sessions WHERE peer = ?1 AND session_id = ?2"),
-                params![peer.to_string(), &id.0[..]],
-                |row| from_row(row, self.my_identity),
-            )
-            .optional()
-            .map_err(storage)
+        let session = self.store.conn.query_row(
+            &format!("SELECT {COLUMNS} FROM fs_sessions WHERE peer = ?1 AND session_id = ?2"),
+            params![peer.to_string(), &id.0[..]],
+            |row| from_row(row, self.my_identity),
+        );
+        if session.as_ref().is_err_and(is_damaged) {
+            tracing::warn!("removing a damaged forward secrecy session");
+            self.store
+                .conn
+                .execute(
+                    "DELETE FROM fs_sessions WHERE peer = ?1 AND session_id = ?2",
+                    params![peer.to_string(), &id.0[..]],
+                )
+                .map_err(storage)?;
+            return Ok(None);
+        }
+        session.optional().map_err(storage)
     }
 
     fn get_best(&self, peer: ThreemaId) -> Result<Option<Session>, ProviderError> {
@@ -151,15 +196,11 @@ impl FsSessionStore for StoreFs {
     }
 
     fn store(&mut self, session: &Session) -> Result<(), ProviderError> {
-        let ratchet = |r: &Option<Ratchet>| {
-            r.as_ref()
-                .map(|r| (r.chain_key.to_vec(), r.counter.cast_signed()))
-                .unzip()
-        };
-        let (my_2dh_key, my_2dh_counter) = ratchet(&session.my_ratchet_2dh);
-        let (my_4dh_key, my_4dh_counter) = ratchet(&session.my_ratchet_4dh);
-        let (peer_2dh_key, peer_2dh_counter) = ratchet(&session.peer_ratchet_2dh);
-        let (peer_4dh_key, peer_4dh_counter) = ratchet(&session.peer_ratchet_4dh);
+        // Keys are bound by reference: a copy would stay in freed memory after they ratcheted on.
+        let (my_2dh_key, my_2dh_counter) = ratchet_columns(session.my_ratchet_2dh.as_ref());
+        let (my_4dh_key, my_4dh_counter) = ratchet_columns(session.my_ratchet_4dh.as_ref());
+        let (peer_2dh_key, peer_2dh_counter) = ratchet_columns(session.peer_ratchet_2dh.as_ref());
+        let (peer_4dh_key, peer_4dh_counter) = ratchet_columns(session.peer_ratchet_4dh.as_ref());
         let result = self.store.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO fs_sessions ({COLUMNS})
@@ -168,7 +209,10 @@ impl FsSessionStore for StoreFs {
             params![
                 session.peer_identity.to_string(),
                 &session.id.0[..],
-                session.my_ephemeral_private_key.map(|key| key.to_vec()),
+                session
+                    .my_ephemeral_private_key
+                    .as_ref()
+                    .map(|key| &key[..]),
                 &session.my_ephemeral_public_key[..],
                 session.versions.map(|v| v.local),
                 session.versions.map(|v| v.remote),
@@ -218,9 +262,15 @@ impl FsSessionStore for StoreFs {
         Ok(deleted)
     }
 
-    fn enqueue_control(&mut self, peer: ThreemaId, envelope: Vec<u8>) -> Result<(), ProviderError> {
+    fn enqueue_control(
+        &mut self,
+        peer: ThreemaId,
+        peer_public_key: Option<PublicKey>,
+        envelope: Vec<u8>,
+    ) -> Result<(), ProviderError> {
         self.events.borrow_mut().push(CoreEvent::FsControl {
             peer: peer.to_string(),
+            peer_key: peer_public_key,
             envelope,
         });
         Ok(())
@@ -237,27 +287,146 @@ impl FsSessionStore for StoreFs {
 
 /// Two parties with our real stores exchange FS payloads through libthreema's incoming message
 /// task (no network): exactly the bytes the connection would send.
+/// `peer` has no forward secrecy any more, as found from outside the connection: end its sessions.
+/// Returns the `Terminate` envelopes to send.
+///
+/// # Errors
+///
+/// Storage failures.
+pub fn end_sessions(
+    store: &Rc<Store>,
+    my_identity: ThreemaId,
+    peer: ThreemaId,
+) -> Result<Vec<Vec<u8>>, ProviderError> {
+    let events = EventSink::default();
+    let mut fs = StoreFs {
+        store: Rc::clone(store),
+        my_identity,
+        events: Rc::clone(&events),
+    };
+    terminate_all_with_cause(&mut fs, peer, terminate::Cause::DisabledByRemote)?;
+    let envelopes = events
+        .borrow_mut()
+        .drain(..)
+        .filter_map(|event| match event {
+            CoreEvent::FsControl { envelope, .. } => Some(envelope),
+            _ => None,
+        })
+        .collect();
+    Ok(envelopes)
+}
+
+/// Start a session with `peer` if there is none, for a device that lost the old ones: the peer
+/// learns at once instead of rejecting its next message (the new-session half of Android's
+/// `runFsRefreshSteps`; a session that exists was made after the restore, so it needs nothing).
+/// Returns the `Init` to send, if any.
+///
+/// # Errors
+///
+/// [`EncapsulationError`] if the session can't be made or stored.
+pub fn start_session(
+    store: &Rc<Store>,
+    my_identity: ThreemaId,
+    client_key: &ClientKey,
+    peer: ThreemaId,
+    peer_public_key: &PublicKey,
+    now_ms: u64,
+) -> Result<Vec<Vec<u8>>, EncapsulationError> {
+    // The envelope's own type is never encapsulated: nothing but the session's prelude comes out.
+    const NEVER_ENCAPSULATED: u8 = 0xa0;
+    let mut fs = StoreFs {
+        store: Rc::clone(store),
+        my_identity,
+        events: EventSink::default(),
+    };
+    if fs.get_best(peer)?.is_some() {
+        return Ok(Vec::new());
+    }
+    let encapsulation = encapsulate(
+        &mut fs,
+        my_identity,
+        client_key,
+        peer,
+        peer_public_key,
+        NEVER_ENCAPSULATED,
+        &[],
+        None,
+        now_ms,
+    )?;
+    Ok(encapsulation.prelude)
+}
+
+/// [`fs::encapsulate`] for the connection: a session that can't be used (not one of the states a
+/// session can be in) is ended, with a Terminate for the peer, and replaced by a new one, so that
+/// one bad session costs a reset line and not this contact's messages. With `true` if that
+/// happened. An error now is about this contact alone: it must not stop the connection.
+///
+/// # Errors
+///
+/// [`EncapsulationError`] if storing failed, or a new session failed too.
+#[expect(clippy::too_many_arguments, reason = "what encapsulating takes")]
+pub fn encapsulate_or_replace(
+    fs: &mut StoreFs,
+    client_key: &ClientKey,
+    peer: ThreemaId,
+    peer_public_key: &PublicKey,
+    inner_type: u8,
+    inner_data: &[u8],
+    group_identity: Option<GroupIdentity>,
+    now_ms: u64,
+) -> Result<(Encapsulation, bool), EncapsulationError> {
+    let my_identity = fs.my_identity;
+    let attempt = |fs: &mut StoreFs| {
+        encapsulate(
+            fs,
+            my_identity,
+            client_key,
+            peer,
+            peer_public_key,
+            inner_type,
+            inner_data,
+            group_identity.clone(),
+            now_ms,
+        )
+    };
+    match attempt(fs) {
+        Ok(encapsulation) => Ok((encapsulation, false)),
+        Err(EncapsulationError::Session(error)) => {
+            tracing::warn!(%error, "replacing an unusable forward secrecy session");
+            terminate_all(fs, peer)?;
+            Ok((attempt(fs)?, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
 
     use libthreema::{
         common::{
-            ClientInfo, FeatureMask, MessageId, Nonce, ThreemaId,
+            ClientInfo, Delta, FeatureMask, MessageId, Nonce, ThreemaId,
             config::{Config, ConfigEnvironment, Flavor},
             keys::ClientKey,
         },
         csp::payload::MessageWithMetadataBox,
         csp_e2e::{
-            CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit, fs,
+            CspE2eContextInit, CspE2eProtocol, CspE2eProtocolContextInit,
+            contacts::lookup::ContactsLookupResponse,
+            fs,
             message::task::{
-                incoming::IncomingMessageLoop,
+                incoming::{
+                    IncomingMessageInstruction, IncomingMessageLoop, IncomingMessageResponse,
+                },
                 outgoing::{
-                    encode_contact_message_body, encode_outgoing_contact_message_encapsulated,
+                    encode_contact_message_body, encode_outgoing_contact_message,
+                    encode_outgoing_contact_message_encapsulated,
                     encode_outgoing_fs_control_message,
                 },
             },
         },
+        https::HttpsResponse,
         model::{
             contact::ContactInit,
             message::{
@@ -309,6 +478,10 @@ mod tests {
 
     impl Party {
         fn new(id: &str, key: [u8; 32], peer: (&str, [u8; 32])) -> Self {
+            Self::build(id, key, peer, false)
+        }
+
+        fn build(id: &str, key: [u8; 32], peer: (&str, [u8; 32]), fs_off: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let store = Rc::new(Store::open(&dir.path().join("t.db"), &[4; 32]).unwrap());
             let id = ThreemaId::try_from(id).unwrap();
@@ -330,6 +503,7 @@ mod tests {
                         my_identity: id,
                         events: Rc::clone(&events),
                     }))),
+                    fs_answering_only: fs_off,
                 },
                 d2x: None,
                 shortcut: Box::new(NoShortcuts),
@@ -343,6 +517,7 @@ mod tests {
                     store: Rc::clone(&store),
                     events: Rc::clone(&events),
                     user: id,
+                    from_sync: false,
                 })),
             });
             Self {
@@ -379,6 +554,7 @@ mod tests {
                 &to_key,
                 inner_type,
                 &inner_data,
+                None,
                 1,
             )
             .unwrap();
@@ -400,7 +576,7 @@ mod tests {
                 encode_outgoing_contact_message_encapsulated(
                     self.id,
                     &key,
-                    Some("Nick"),
+                    Delta::Update("Nick"),
                     to.id,
                     &to_key,
                     &message,
@@ -461,6 +637,617 @@ mod tests {
             }
             (texts, replies)
         }
+    }
+
+    /// The session is the first thing an encapsulated message writes, so with the disk full this
+    /// is what the connection sees of it: it has to know that as a store failure.
+    #[test]
+    fn a_session_write_that_fails_is_reported_as_a_store_failure() {
+        let (alice, mut bob) = established();
+        let payloads = alice.send_text(&bob, "hi");
+        bob.store
+            .conn
+            .execute_batch("PRAGMA query_only = ON")
+            .unwrap();
+        let mut task = bob
+            .e2e
+            .handle_incoming_message(payloads.into_iter().next_back().unwrap());
+        let Err(error) = task.poll(bob.e2e.context()) else {
+            panic!("expected a failure");
+        };
+        let error = error.to_string();
+        assert_eq!(
+            crate::providers::storage_code(&error).map(|code| code & 0xff),
+            Some(8),
+            "SQLITE_READONLY: {error}"
+        );
+    }
+
+    /// Alice starts a session with Bob: what she sends, ready for Bob's `receive`.
+    fn first_message(alice: &Party, bob: &Party) -> Vec<MessageWithMetadataBox> {
+        alice.send_text(bob, "hello")
+    }
+
+    fn session_count(party: &Party, peer: &Party) -> usize {
+        party
+            .store
+            .fs_sessions(&peer.id.to_string(), party.id)
+            .unwrap()
+            .len()
+    }
+
+    /// As the app writes it (`App::set_blocked`).
+    fn block(party: &Party, peer: &Party) {
+        let settings = crate::safe::backup::Settings {
+            blocked_contacts: vec![peer.id.to_string()],
+            ..Default::default()
+        };
+        party
+            .store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::to_string(&settings).unwrap(),
+            )
+            .unwrap();
+    }
+
+    fn make_group_member(party: &Party, peer: &Party) {
+        let identity = libthreema::common::GroupIdentity {
+            creator_identity: peer.id,
+            group_id: 1,
+        };
+        party
+            .store
+            .upsert_group(&crate::groups::Group {
+                key: crate::groups::key(&identity),
+                identity,
+                name: String::new(),
+                members: vec![peer.id.to_string()],
+                left: false,
+                created_at: 0,
+                picture: None,
+                picture_version: 0,
+            })
+            .unwrap();
+    }
+
+    fn pair() -> (Party, Party) {
+        let (alice_key, bob_key) = ([1; 32], [2; 32]);
+        (
+            Party::new("ABCD1234", alice_key, ("EFGH5678", bob_key)),
+            Party::new("EFGH5678", bob_key, ("ABCD1234", alice_key)),
+        )
+    }
+
+    /// Nothing but the acknowledgement: no session, no control message, no status event.
+    fn assert_no_trace(receiver: &mut Party, sender: &Party) {
+        let payloads = first_message(sender, receiver);
+        for payload in payloads {
+            let mut task = receiver.e2e.handle_incoming_message(payload);
+            let IncomingMessageLoop::Done(result) = task.poll(receiver.e2e.context()).unwrap()
+            else {
+                panic!("no instruction expected");
+            };
+            assert!(result.outgoing_message_ack.is_some());
+        }
+        assert_eq!(session_count(receiver, sender), 0);
+        assert!(receiver.events.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_blocked_contact_gets_no_session_and_no_answer() {
+        let (alice, mut bob) = pair();
+        block(&bob, &alice);
+        assert_no_trace(&mut bob, &alice);
+    }
+
+    #[test]
+    fn an_unknown_sender_keeps_a_session_with_block_unknown_on_but_gets_no_text_through() {
+        let (alice, mut bob) = pair();
+        let mut known = bob.store.contact("ABCD1234").unwrap().unwrap();
+        known.acquaintance_level = pc::AcquaintanceLevel::GroupOrDeleted;
+        bob.store.upsert_contact(&known).unwrap();
+        let settings = crate::safe::backup::Settings {
+            block_unknown: true,
+            ..Default::default()
+        };
+        bob.store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::to_string(&settings).unwrap(),
+            )
+            .unwrap();
+        // Their group-setup is exempt and may be encapsulated, so the session has to exist.
+        let (texts, _) = bob.receive(&alice, first_message(&alice, &bob));
+        assert_eq!(session_count(&bob, &alice), 1);
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn a_blocked_group_member_keeps_a_session_for_the_exempt_messages() {
+        let (alice, mut bob) = pair();
+        block(&bob, &alice);
+        make_group_member(&bob, &alice);
+        let (_, replies) = bob.receive(&alice, first_message(&alice, &bob));
+        assert_eq!(session_count(&bob, &alice), 1);
+        assert_eq!(replies.len(), 1, "the Accept");
+    }
+
+    /// Both sides in RL44, the events drained.
+    fn established() -> (Party, Party) {
+        let (mut alice, mut bob) = pair();
+        let (_, accept) = bob.receive(&alice, first_message(&alice, &bob));
+        let _ = alice.receive(&bob, accept);
+        let _ = bob.receive(&alice, alice.send_text(&bob, "4DH"));
+        let _ = alice.receive(&bob, bob.send_text(&alice, "4DH too"));
+        (alice, bob)
+    }
+
+    /// What the connection sends with forward secrecy off or for a contact without it.
+    fn plain_text(from: &Party, to: &Party) -> MessageWithMetadataBox {
+        let message = OutgoingMessage {
+            id: MessageId::random(),
+            overrides: MessageOverrides::default(),
+            created_at: 1_700_000_000_000,
+            body: OutgoingMessageBody::Contact(OutgoingContactMessageBody {
+                receiver_identity: to.id,
+                body: ContactMessageBody::Text(TextMessage {
+                    text: "plain".to_owned(),
+                }),
+            }),
+        };
+        encode_outgoing_contact_message(
+            from.id,
+            &ClientKey::from(from.key),
+            Delta::Remove,
+            to.id,
+            &ClientKey::from(to.key).public_key(),
+            &message,
+            Nonce::random(),
+        )
+        .unwrap()
+    }
+
+    /// The statuses a payload leaves behind, passed through the incoming task.
+    fn statuses(receiver: &mut Party, payload: MessageWithMetadataBox) -> Vec<FsStatus> {
+        let mut task = receiver.e2e.handle_incoming_message(payload);
+        let IncomingMessageLoop::Done(_) = task.poll(receiver.e2e.context()).unwrap() else {
+            panic!("no instruction expected");
+        };
+        receiver
+            .events
+            .borrow_mut()
+            .drain(..)
+            .filter_map(|event| match event {
+                CoreEvent::FsStatus { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_plain_message_on_a_live_session_is_reported_and_still_arrives() {
+        let (alice, mut bob) = established();
+        let texts = |bob: &Party| -> i64 {
+            bob.store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE body = 'plain'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(texts(&bob), 0);
+        let plain = plain_text(&alice, &bob);
+        let found = statuses(&mut bob, plain);
+        assert_eq!(found, vec![FsStatus::MessageWithoutFs]);
+        assert_eq!(texts(&bob), 1);
+
+        // Its receipts and typing add no rows, so these don't add a line per receipt.
+        let chat = alice.id.to_string();
+        assert!(
+            !bob.store
+                .newest_is_status(&chat, "fsMessageWithoutFs")
+                .unwrap()
+        );
+        bob.store
+            .insert_status(&chat, "fsMessageWithoutFs")
+            .unwrap();
+        assert!(
+            bob.store
+                .newest_is_status(&chat, "fsMessageWithoutFs")
+                .unwrap()
+        );
+        assert!(!bob.store.newest_is_status(&chat, "fsReset").unwrap());
+    }
+
+    /// The same box once more, under the message ID given, which isn't encrypted: anyone on the
+    /// way can change it.
+    fn replayed(payload: &MessageWithMetadataBox, id: MessageId) -> MessageWithMetadataBox {
+        let mut bytes = payload.bytes.clone();
+        // Sender, receiver, then the message ID (csp.struct.yml `message-with-metadata-box`).
+        bytes[16..24].copy_from_slice(&id.0.to_le_bytes());
+        MessageWithMetadataBox {
+            sender_identity: payload.sender_identity,
+            id,
+            flags: payload.flags,
+            bytes,
+        }
+    }
+
+    /// A message recorded and delivered again is acknowledged and dropped: under its own message ID,
+    /// under another, and after the chat it was in was deleted, when only its used nonce is left.
+    #[test]
+    fn a_message_delivered_again_shows_once() {
+        let (alice, mut bob) = pair();
+        let payload = plain_text(&alice, &bob);
+        let copies = [
+            replayed(&payload, payload.id),
+            replayed(&payload, MessageId(payload.id.0 ^ 1)),
+            replayed(&payload, payload.id),
+        ];
+
+        let (texts, _) = bob.receive(&alice, vec![payload]);
+        assert_eq!(texts, ["plain"]);
+        for (round, again) in copies.into_iter().enumerate() {
+            if round == 2 {
+                bob.store.delete_conversation("ABCD1234").unwrap();
+            }
+            let (texts, replies) = bob.receive(&alice, vec![again]);
+            assert!(texts.is_empty() && replies.is_empty(), "round {round}");
+        }
+        assert_eq!(bob.store.message_count("ABCD1234").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_plain_message_is_no_news_without_a_session() {
+        let (alice, mut bob) = pair();
+        let plain = plain_text(&alice, &bob);
+        assert_eq!(statuses(&mut bob, plain), Vec::new());
+    }
+
+    #[test]
+    fn a_blocked_senders_plain_message_is_not_reported() {
+        let (alice, mut bob) = established();
+        block(&bob, &alice);
+        let plain = plain_text(&alice, &bob);
+        assert_eq!(statuses(&mut bob, plain), Vec::new());
+    }
+
+    #[test]
+    fn with_forward_security_off_a_message_is_rejected_so_that_it_can_be_sent_again() {
+        let (alice_key, bob_key) = ([1; 32], [2; 32]);
+        let mut alice = Party::new("ABCD1234", alice_key, ("EFGH5678", bob_key));
+        let mut bob = Party::build("EFGH5678", bob_key, ("ABCD1234", alice_key), true);
+
+        // A contact with our old feature mask: Init and message, neither of them readable here.
+        let (texts, replies) = bob.receive(&alice, first_message(&alice, &bob));
+        assert!(texts.is_empty());
+        assert_eq!(replies.len(), 1, "only the message gets an answer");
+        assert_eq!(session_count(&bob, &alice), 0);
+
+        // It ends her session and tells her connection that the message was rejected.
+        assert_eq!(session_count(&alice, &bob), 1);
+        let reject = replies.into_iter().next().unwrap();
+        let found = statuses(&mut alice, reject);
+        assert!(matches!(
+            found.as_slice(),
+            [FsStatus::MessageRejected {
+                session_known: true,
+                ..
+            }]
+        ));
+        assert_eq!(session_count(&alice, &bob), 0);
+
+        // Sent again without forward secrecy, it arrives.
+        let plain = plain_text(&alice, &bob);
+        let (texts, _) = bob.receive(&alice, vec![plain]);
+        assert_eq!(texts, vec!["plain".to_owned()]);
+    }
+
+    #[test]
+    fn session_keys_survive_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Rc::new(Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap());
+        let me: ThreemaId = "ABCD1234".parse().unwrap();
+        let peer: ThreemaId = "EFGH5678".parse().unwrap();
+        let mut fs = StoreFs {
+            store: Rc::clone(&store),
+            my_identity: me,
+            events: EventSink::default(),
+        };
+        let id = SessionId([7; 16]);
+        let session = Session {
+            id,
+            my_identity: me,
+            peer_identity: peer,
+            my_ephemeral_private_key: Some([1; 32]),
+            my_ephemeral_public_key: [2; 32],
+            versions: None,
+            last_outgoing_message_at: 5,
+            my_ratchet_2dh: Some(Ratchet {
+                counter: 3,
+                chain_key: [4; 32],
+            }),
+            my_ratchet_4dh: None,
+            peer_ratchet_2dh: None,
+            peer_ratchet_4dh: Some(Ratchet {
+                counter: 6,
+                chain_key: [8; 32],
+            }),
+        };
+        fs.store(&session).unwrap();
+        let back = fs.get(peer, id).unwrap().unwrap();
+        assert_eq!(back.my_ephemeral_private_key, Some([1; 32]));
+        assert_eq!(back.my_ephemeral_public_key, [2; 32]);
+        assert_eq!(back.my_ratchet_2dh.as_ref().unwrap().chain_key, [4; 32]);
+        assert_eq!(back.my_ratchet_2dh.as_ref().unwrap().counter, 3);
+        assert!(back.my_ratchet_4dh.is_none());
+        assert_eq!(back.peer_ratchet_4dh.as_ref().unwrap().chain_key, [8; 32]);
+        // A key of the wrong size is a damaged session, not a short key.
+        store
+            .conn
+            .execute("UPDATE fs_sessions SET my_2dh_key = x'0404'", [])
+            .unwrap();
+        assert!(fs.get(peer, id).unwrap().is_none());
+    }
+
+    /// What libthreema does with a sender it doesn't know: ask the directory, then go on.
+    fn answer_directory(party: &mut Party, payload: MessageWithMetadataBox, sender: &Party) {
+        let public_key = data_encoding::HEXLOWER
+            .decode(
+                ClientKey::from(sender.key)
+                    .public_key()
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let public_key = data_encoding::BASE64.encode(&public_key);
+        let mut task = party.e2e.handle_incoming_message(payload);
+        loop {
+            match task.poll(party.e2e.context()).unwrap() {
+                IncomingMessageLoop::Done(result) => {
+                    assert!(result.outgoing_message_ack.is_some());
+                    break;
+                }
+                IncomingMessageLoop::Instruction(IncomingMessageInstruction::FetchSender(_)) => {
+                    let body = serde_json::json!({ "identities": [{
+                        "identity": sender.id.to_string(),
+                        "type": 0,
+                        "publicKey": public_key,
+                        "state": 0,
+                        "featureMask": FeatureMask::FORWARD_SECURITY_SUPPORT,
+                    }] });
+                    task.response(IncomingMessageResponse::FetchSender(
+                        ContactsLookupResponse {
+                            directory_result: Ok(HttpsResponse {
+                                status: 200,
+                                body: body.to_string().into_bytes(),
+                            }),
+                            work_directory_result: None,
+                        },
+                    ))
+                    .unwrap();
+                }
+                IncomingMessageLoop::Instruction(_) => panic!("only the lookup is expected"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stranger_who_writes_first_gets_the_accept_so_the_first_reply_is_not_rejected() {
+        let (alice_key, bob_key) = ([1; 32], [2; 32]);
+        let mut alice = Party::new("ABCD1234", alice_key, ("EFGH5678", bob_key));
+        // Bob has someone else as a contact, and no idea who Alice is.
+        let mut bob = Party::new("EFGH5678", bob_key, ("IJKL9012", [3; 32]));
+        let config = Config::from(ConfigEnvironment::Production);
+
+        let init = alice.send_text(&bob, "hello").swap_remove(0);
+        answer_directory(&mut bob, init, &alice);
+        assert!(bob.store.contact("ABCD1234").unwrap().is_none());
+
+        let event = bob
+            .events
+            .borrow_mut()
+            .drain(..)
+            .find_map(|event| match event {
+                CoreEvent::FsControl {
+                    peer_key, envelope, ..
+                } => Some((peer_key, envelope)),
+                _ => None,
+            });
+        let (peer_key, envelope) = event.expect("the Accept");
+        let (to, key) =
+            crate::providers::control_receiver(&bob.store, &config, "ABCD1234", peer_key)
+                .unwrap()
+                .expect("goes out without a contact");
+        assert_eq!(to, alice.id);
+        assert!(key == ClientKey::from(alice.key).public_key());
+
+        // She gets it, and is in the state in which Bob's 4DH reply is no surprise.
+        let accept = bob.control(&alice, &envelope);
+        let _ = alice.receive(&bob, vec![accept]);
+        let session = alice.fs().get_best(bob.id).unwrap().unwrap();
+        assert_eq!(session.state(), Ok(SessionState::RL44));
+
+        // The same stranger with unknown senders blocked hears nothing, and keeps the session.
+        bob.store
+            .set_setting(
+                crate::store::keys::APP_SETTINGS,
+                &serde_json::json!({ "blockUnknown": true }).to_string(),
+            )
+            .unwrap();
+        assert!(
+            crate::providers::control_receiver(&bob.store, &config, "ABCD1234", peer_key)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_session_started_without_a_message_is_accepted_and_carries_the_next_one() {
+        let (mut alice, mut bob) = pair();
+        let bob_key = ClientKey::from(bob.key).public_key();
+        let inits = start_session(
+            &alice.store,
+            alice.id,
+            &ClientKey::from(alice.key),
+            bob.id,
+            &bob_key,
+            1,
+        )
+        .unwrap();
+        assert_eq!(inits.len(), 1, "the Init and nothing else");
+        // Nothing more with a session in place.
+        assert!(
+            start_session(
+                &alice.store,
+                alice.id,
+                &ClientKey::from(alice.key),
+                bob.id,
+                &bob_key,
+                1,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(session_count(&alice, &bob), 1);
+
+        let init = alice.control(&bob, &inits[0]);
+        let (_, accept) = bob.receive(&alice, vec![init]);
+        assert_eq!(accept.len(), 1, "the Accept");
+        let _ = alice.receive(&bob, accept);
+        let (texts, _) = bob.receive(&alice, alice.send_text(&bob, "hi"));
+        assert_eq!(texts, ["hi"]);
+        let (texts, _) = alice.receive(&bob, bob.send_text(&alice, "hi too"));
+        assert_eq!(texts, ["hi too"]);
+        assert_eq!(session_count(&alice, &bob), 1);
+    }
+
+    #[test]
+    fn ending_sessions_from_outside_gives_the_terminates_to_send() {
+        let (alice, bob) = established();
+        assert_eq!(session_count(&alice, &bob), 1);
+        let id = alice.fs().get_best(bob.id).unwrap().unwrap().id;
+        let envelopes = end_sessions(&alice.store, alice.id, bob.id).unwrap();
+        assert_eq!(session_count(&alice, &bob), 0);
+        assert_eq!(envelopes.len(), 1);
+        let (_, replies) = {
+            let mut bob = bob;
+            let terminate = alice.control(&bob, &envelopes[0]);
+            let answer = bob.receive(&alice, vec![terminate]);
+            assert!(bob.fs().get(alice.id, id).unwrap().is_none());
+            answer
+        };
+        assert!(replies.is_empty(), "a Terminate gets no answer");
+    }
+
+    #[test]
+    fn a_damaged_session_counts_as_none_and_goes_away() {
+        let (alice, bob) = established();
+        let chat = bob.id.to_string();
+        assert_eq!(session_count(&alice, &bob), 1);
+        let good = alice.fs().get_best(bob.id).unwrap().unwrap();
+        let store = |id: &[u8; 16]| {
+            let mut copy = good.clone();
+            copy.id = SessionId(*id);
+            alice.fs().store(&copy).unwrap();
+        };
+        store(&[9; 16]);
+        store(&[10; 16]);
+        assert_eq!(session_count(&alice, &bob), 3);
+        let damage = |id: &[u8]| {
+            alice
+                .store
+                .conn
+                .execute(
+                    "UPDATE fs_sessions SET my_ephemeral_public = x'01' WHERE session_id = ?1",
+                    [id],
+                )
+                .unwrap();
+        };
+
+        // Looking one up by its ID.
+        damage(&[9; 16]);
+        assert!(
+            alice
+                .fs()
+                .get(bob.id, SessionId([9; 16]))
+                .unwrap()
+                .is_none()
+        );
+        // Looking for the best: what is good is still there.
+        damage(&[10; 16]);
+        let best = alice.fs().get_best(bob.id).unwrap().unwrap();
+        assert_eq!(best.id, good.id);
+        let left: i64 = alice
+            .store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM fs_sessions WHERE peer = ?1",
+                [&chat],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn an_unusable_session_is_replaced_and_the_peer_told() {
+        let (alice, bob) = pair();
+        let peer_key = ClientKey::from(bob.key).public_key();
+        let key = ClientKey::from(alice.key);
+        let send = || {
+            encapsulate_or_replace(
+                &mut alice.fs(),
+                &key,
+                bob.id,
+                &peer_key,
+                0x01,
+                b"hello",
+                None,
+                1,
+            )
+            .unwrap()
+        };
+
+        // The first message starts a session, nothing to replace.
+        let (first, replaced) = send();
+        assert!(!replaced);
+        assert_eq!(first.prelude.len(), 1);
+        let (second, replaced) = send();
+        assert!(!replaced);
+        assert!(second.prelude.is_empty(), "the session is reused");
+        assert!(alice.events.borrow().is_empty());
+
+        // No ratchets at all: not a state a session can be in.
+        let old = alice.fs().get_best(bob.id).unwrap().unwrap();
+        alice
+            .store
+            .conn
+            .execute(
+                "UPDATE fs_sessions SET my_2dh_key = NULL, my_2dh_counter = NULL,
+                     my_4dh_key = NULL, my_4dh_counter = NULL,
+                     peer_2dh_key = NULL, peer_2dh_counter = NULL,
+                     peer_4dh_key = NULL, peer_4dh_counter = NULL",
+                [],
+            )
+            .unwrap();
+        let (third, replaced) = send();
+        assert!(replaced);
+        assert_eq!(third.prelude.len(), 1, "the new session's Init");
+        assert!(third.envelope.is_some(), "and the message in it");
+        let new = alice.fs().get_best(bob.id).unwrap().unwrap();
+        assert_ne!(new.id, old.id);
+        assert_eq!(session_count(&alice, &bob), 1);
+        let terminates = alice
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, CoreEvent::FsControl { .. }))
+            .count();
+        assert_eq!(terminates, 1, "the old session's Terminate");
     }
 
     #[test]

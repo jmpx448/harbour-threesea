@@ -12,15 +12,97 @@ use zeroize::{Zeroize as _, Zeroizing};
 /// Store errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// The key does not open the database (wrong key or corrupted file).
+    /// SQLite says this isn't a database: the key doesn't fit, or the file's first page is damaged.
+    /// With SQLCipher nobody can tell the two apart.
     #[error("database key rejected")]
     WrongKey,
     /// The database has a newer schema than this app understands.
     #[error("database schema {0} is newer than supported")]
     TooNew(i64),
+    /// The schema upgrade ran out of room and was rolled back, so nothing has changed.
+    #[error("no room for the database upgrade: {0}")]
+    UpgradeNoRoom(rusqlite::Error),
     /// Any other SQLite error.
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+}
+
+/// SQLite calls it that when it writes. Opening a store on a full disk fails earlier, on growing the
+/// WAL's shared memory file (measured on a full tmpfs).
+fn is_disk_full(error: &rusqlite::Error) -> bool {
+    error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)
+        || matches!(error, rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_IOERR_SHMSIZE)
+}
+
+/// Whether a failure with this SQLite code ([`StoreError::sqlite_code`]) comes from what was being
+/// stored, so that trying again won't help (a broken rule, a bad type, something too big; `0`: what
+/// isn't SQLite's as such). Anything else may be the device's state of the moment (a full disk, an
+/// I/O error, damage someone can repair): that is never a reason to give up on anything.
+#[must_use]
+pub fn fails_every_time(code: i32) -> bool {
+    use rusqlite::ffi::{SQLITE_CONSTRAINT, SQLITE_ERROR, SQLITE_MISMATCH, SQLITE_TOOBIG};
+    let primary = code & 0xff;
+    primary == 0
+        || primary == SQLITE_ERROR
+        || primary == SQLITE_TOOBIG
+        || primary == SQLITE_CONSTRAINT
+        || primary == SQLITE_MISMATCH
+}
+
+impl StoreError {
+    /// What went wrong as the UI tells it apart (`Errors.js`); `store` when there is nothing more
+    /// to say. SQLCipher reports damage on any page but the first as corruption.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        use rusqlite::ErrorCode as Code;
+        match self {
+            Self::WrongKey => "storeKey",
+            Self::TooNew(_) => "storeTooNew",
+            Self::UpgradeNoRoom(_) => "upgradeNoRoom",
+            Self::Sqlite(error) if is_disk_full(error) => "diskFull",
+            Self::Sqlite(error) => match error.sqlite_error_code() {
+                Some(Code::NotADatabase) => "storeKey",
+                Some(Code::DatabaseCorrupt) => "storeDamaged",
+                Some(
+                    Code::SystemIoFailure
+                    | Code::CannotOpen
+                    | Code::PermissionDenied
+                    | Code::ReadOnly
+                    | Code::DatabaseBusy
+                    | Code::DatabaseLocked
+                    | Code::OutOfMemory,
+                ) => "storeUnreadable",
+                _ => "store",
+            },
+        }
+    }
+
+    /// SQLite's extended result code; `0` for what didn't come from SQLite as such.
+    #[must_use]
+    pub fn sqlite_code(&self) -> i32 {
+        match self {
+            Self::UpgradeNoRoom(rusqlite::Error::SqliteFailure(error, _))
+            | Self::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => error.extended_code,
+            Self::WrongKey | Self::TooNew(_) | Self::UpgradeNoRoom(_) | Self::Sqlite(_) => 0,
+        }
+    }
+
+    /// For the log and for support: numbers only, SQLite's own texts can name columns.
+    #[must_use]
+    pub fn code(&self) -> String {
+        let sqlite = |error: &rusqlite::Error| match error {
+            rusqlite::Error::SqliteFailure(failure, _) => {
+                format!("sqlite {}", failure.extended_code)
+            }
+            _ => String::new(),
+        };
+        match self {
+            Self::WrongKey => String::new(),
+            Self::TooNew(version) => format!("schema {version}"),
+            Self::UpgradeNoRoom(error) | Self::Sqlite(error) => sqlite(error),
+        }
+    }
 }
 
 /// Persisted own identity.
@@ -115,6 +197,32 @@ const MIGRATIONS: &[&str] = &[
     crate::messages::MIGRATION_MARKED_UNREAD,
     // 33: per-chat summary (newest message, unread count), kept by triggers
     crate::messages::MIGRATION_CHAT_SUMMARIES,
+    // 34: per-chat notification tones (until now in the plain settings file)
+    crate::chat_notifications::MIGRATION_TONES,
+    // 35: groups say whether we were removed; the creator back where a group sync dropped them
+    crate::groups::MIGRATION_SYNC,
+    // 36: outgoing messages say whether a send has begun
+    crate::messages::MIGRATION_WRITTEN_OUT,
+    // 37: received messages the other devices of the group haven't been told of yet
+    crate::messages::MIGRATION_AWAITING_REFLECTION,
+    // 38: whom a restore left without a picture, in place of asking everyone without one
+    crate::profile_pictures::MIGRATION_RESTORED,
+    // 39: pictures another device of the group changed, until they are stored here
+    crate::profile_pictures::MIGRATION_SYNCED_PICTURES,
+    // 40: who is to get a group's picture once it has been uploaded anew; a newer one on its way
+    crate::groups::MIGRATION_PICTURE_SENDS,
+    // 41: a count of the changes to what Threema Web's receivers are made of, kept by triggers
+    crate::app_web_data::MIGRATION_RECEIVER_GENERATION,
+    // 42: incoming messages say whether their sender wants no receipts
+    crate::messages::MIGRATION_NO_RECEIPTS,
+    // 43: indexes for what is looked for often and is rarely there
+    crate::messages::MIGRATION_LOOKUP_INDEXES,
+    // 44: the start's clean-up of file messages without reading all messages
+    crate::messages::MIGRATION_FILE_MESSAGES,
+    // 45: reflected incoming messages waiting for their sender's contact
+    crate::multidevice::MIGRATION_REFLECTED_WAITING,
+    // 46: the names the user gave Threema Web sessions
+    crate::web::MIGRATION_LABEL,
 ];
 
 /// Setting keys.
@@ -125,6 +233,8 @@ pub mod keys {
     pub const VIDEO_QUALITY: &str = "videoQuality";
     /// Group calls ("0" off; default on). Android's synced group call policy, not in Safe.
     pub const GROUP_CALLS: &str = "groupCalls";
+    /// Threema Web ("0" off: no pairing, connecting or wake-ups; default on).
+    pub const WEB_ENABLED: &str = "webEnabled";
     /// Directory match token (address book matching).
     pub const MATCH_TOKEN: &str = "matchToken";
     /// Our profile picture's version (changes with it; absent: none).
@@ -136,6 +246,12 @@ pub mod keys {
     pub const LICENSE_REFUSED: &str = "license_refused";
     /// When the directory last accepted the stored license (ms since the epoch).
     pub const LICENSE_CHECKED_AT: &str = "license_checked_at";
+    /// Until when automatic directory calls rest after a 429 (ms since the epoch).
+    pub const DIRECTORY_RETRY_AFTER: &str = "directory_retry_after";
+    /// Group members still to be looked up (JSON list of IDs), see `owe_member_lookups`.
+    pub const MEMBER_LOOKUPS_OWED: &str = "member_lookups_owed";
+    /// How many reflected messages found no room to wait for their sender's contact.
+    pub const REFLECTED_LEFT_OUT: &str = "reflected_left_out";
     /// Random persistent device id sent with license checks (like Android's `DeviceIdProvider`).
     pub const DEVICE_ID: &str = "device_id";
     /// App settings as the Threema Safe `settings` object (JSON). One source of truth that
@@ -150,8 +266,13 @@ pub mod keys {
     pub const PUBLISHED_FEATURE_MASK: &str = "published_feature_mask";
     /// Unix time of the last daily contact refresh (feature masks, revocations).
     pub const CONTACTS_REFRESHED_AT: &str = "contacts_refreshed_at";
+    /// Seconds between contact refreshes, when the directory has a say in it (`checkInterval`).
+    pub const CONTACTS_CHECK_INTERVAL: &str = "contacts_check_interval";
     /// Public nickname.
     pub const NICKNAME: &str = "nickname";
+    /// A new or ID-backup-restored ID whose user hasn't said what to do about a nickname: messages
+    /// leave contacts' stored name alone. `ask`: to be asked; `asked`: declined for now.
+    pub const NICKNAME_UNANSWERED: &str = "nickname_unanswered";
     /// App lock: wrong PINs since the last pause, when the current pause ends (ms), and which
     /// pause is next (see `App::check_lock`).
     pub const PIN_FAILED_ATTEMPTS: &str = "pin_failed_attempts";
@@ -170,6 +291,8 @@ pub mod keys {
     /// Linked e-mail / mobile number (from `identity/fetch_priv`).
     pub const LINKED_EMAIL: &str = "linked_email";
     pub const LINKED_MOBILE: &str = "linked_mobile";
+    /// The region of address book numbers without a country code, if the user chose one.
+    pub const ADDRESS_BOOK_COUNTRY: &str = "address_book_country";
     /// "1" while a linked e-mail waits for its confirmation link.
     pub const LINKED_EMAIL_PENDING: &str = "linked_email_pending";
     /// A phone number waiting for its SMS code: the number (E.164 without `+`) and the
@@ -213,6 +336,15 @@ pub mod keys {
     pub const SAFE_HASH: &str = "safe_hash";
     /// Threema Safe: last error kind, absent if the last attempt worked.
     pub const SAFE_LAST_ERROR: &str = "safe_last_error";
+    /// A restore from a Data backup brought the ID, and its import hasn't finished: for the hint on
+    /// the chat list. Holds nothing about the file or its password.
+    pub const DATA_IMPORT_UNFINISHED: &str = "data_import_unfinished";
+    /// A new ID's question whether to turn Threema Safe on: present until it is answered.
+    pub const SAFE_SETUP_UNANSWERED: &str = "safe_setup_unanswered";
+    /// A new ID with no backup of any kind yet: unix time of the next reminder.
+    pub const BACKUP_REMINDER_AT: &str = "backup_reminder_at";
+    /// Threema Safe: unix time of the first failed upload since the last one that worked.
+    pub const SAFE_FIRST_FAILURE: &str = "safe_first_failure";
     /// Threema Safe: server limits from `GET config`.
     pub const SAFE_MAX_BYTES: &str = "safe_max_bytes";
     pub const SAFE_RETENTION_DAYS: &str = "safe_retention_days";
@@ -221,6 +353,9 @@ pub mod keys {
     /// Restored Safe data not yet imported (contacts/groups/lists/settings JSON) — kept until
     /// contact and group storage exist, and carried into new backups so nothing is lost.
     pub const SAFE_PENDING_IMPORT: &str = "safe_pending_import";
+    /// Forward secrecy answers and statuses a connection ended on, as JSON
+    /// (`connection::carried_to_json`): until the next one has handled them.
+    pub const FS_EVENTS_CARRIED: &str = "fs_events_carried";
     /// Why the last pending Safe import attempt failed (an error kind; absent after success).
     pub const SAFE_IMPORT_ERROR: &str = "safe_import_error";
     /// Android-format backups written by us: target folder, schedule (`off`/`daily`/`weekly`),
@@ -231,10 +366,28 @@ pub mod keys {
     pub const ANDROID_EXPORT_INTERVAL: &str = "android_export_interval";
     pub const ANDROID_EXPORT_KEEP: &str = "android_export_keep";
     pub const ANDROID_EXPORT_LAST: &str = "android_export_last";
+    /// How many chats the last backup had to leave out (`export::CHATS_WITHOUT_CONTACT`).
+    pub const ANDROID_EXPORT_LEFT_OUT: &str = "android_export_left_out";
+    /// The same for private chats, which `androidBackupExportStatus` adds only while they are open.
+    pub const ANDROID_EXPORT_LEFT_OUT_PRIVATE: &str = "android_export_left_out_private";
+    /// How many media files the last backup couldn't read (`export::FILES_UNREADABLE`).
+    pub const ANDROID_EXPORT_FILES_LEFT_OUT: &str = "android_export_files_left_out";
+    /// The same for files of private chats.
+    pub const ANDROID_EXPORT_FILES_LEFT_OUT_PRIVATE: &str = "android_export_files_left_out_private";
+    /// When the schedule last started a backup, whatever became of it.
+    pub const ANDROID_EXPORT_ATTEMPT: &str = "android_export_attempt";
     pub const ANDROID_EXPORT_ERROR: &str = "android_export_error";
     /// What the pending Safe import did (JSON counts: imported, skipped and why), for the
     /// status page.
     pub const SAFE_IMPORT_SUMMARY: &str = "safe_import_summary";
+    /// A restore's setup steps still to run (`App::restore_setup_step`): `start`, or the JSON list
+    /// of contacts still to go.
+    pub const SAFE_RESTORE_SETUP: &str = "safe_restore_setup";
+    /// Our picture changed and the other devices of the group don't have it yet (the groups'
+    /// are in `group_picture_syncs`): `app_multidevice::reflect_own_picture`.
+    pub const OWN_PICTURE_SYNC_OWED: &str = "own_picture_sync_owed";
+    /// Set by store migration 35: see `sync::reflect_group_contacts_once`.
+    pub const GROUP_CONTACTS_TO_REFLECT: &str = "group_contacts_to_reflect";
 }
 
 /// The encrypted store.
@@ -243,6 +396,74 @@ pub struct Store {
     /// Messages another device forwarded whose notification waits (multi-device): if they
     /// are read there meanwhile, the phone stays silent. In memory only.
     pub(crate) held_notifications: std::cell::RefCell<std::collections::HashSet<i64>>,
+    /// IDs the directory just said don't exist, with when (`groups::recently_invalid`). In memory
+    /// only: a day's worth, bounded by what may be looked up.
+    pub(crate) invalid_ids: std::cell::RefCell<std::collections::HashMap<String, i64>>,
+    /// The current hour's group member lookups: when it began, and how many so far.
+    pub(crate) member_lookups: std::cell::Cell<(i64, usize)>,
+}
+
+/// What the WAL may keep of its file once its contents are in the database: SQLite would otherwise
+/// keep its largest size so far until the last connection closes, and on the Full flavour that is
+/// never. Several times the 4 MiB at which SQLite checkpoints by itself.
+const WAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
+
+/// Writes that stand or fall together: what isn't [`Step::commit`]ted is undone when this goes out
+/// of scope. A step inside a step is a savepoint, so a function that needs one can be called from
+/// a larger one; there is one connection and a step never spans an `await`, so nothing else writes
+/// meanwhile.
+pub(crate) struct Step<'a> {
+    conn: &'a Connection,
+    nested: bool,
+    open: bool,
+}
+
+impl Step<'_> {
+    pub(crate) fn commit(mut self) -> Result<(), StoreError> {
+        self.conn.execute_batch(if self.nested {
+            "RELEASE store_step"
+        } else {
+            "COMMIT"
+        })?;
+        self.open = false;
+        Ok(())
+    }
+}
+
+impl Drop for Step<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            // Fails only if SQLite has rolled back by itself (a full disk, say): then it's undone.
+            let _ = self.conn.execute_batch(if self.nested {
+                "ROLLBACK TO store_step; RELEASE store_step"
+            } else {
+                "ROLLBACK"
+            });
+        }
+    }
+}
+
+/// Below this share of free pages (in percent) a rewrite gives back too little to wait for.
+const SHRINK_MIN_FREE_PERCENT: i64 = 25;
+/// VACUUM's copy of the live pages lies in memory: SQLCipher builds keep temporary data out of
+/// plain files (`SQLITE_TEMP_STORE=2`). More than this could run a phone out of memory, 32-bit ones
+/// above all.
+const SHRINK_LIVE_BYTES_MAX: i64 = 128 * 1024 * 1024;
+
+fn worth_shrinking(total_pages: i64, free_pages: i64, page_size: i64) -> bool {
+    free_pages * 100 >= total_pages * SHRINK_MIN_FREE_PERCENT
+        && free_pages > 0
+        && (total_pages - free_pages).saturating_mul(page_size) <= SHRINK_LIVE_BYTES_MAX
+}
+
+/// How long automatic directory calls rest after a 429. Maintenance runs hourly, so together
+/// that's about one request an hour or two while the directory is limiting us.
+const DIRECTORY_REST_MS: i64 = 3_600_000;
+
+/// A date further off than a rest lasts comes from a clock that was wrong then, and must not stop
+/// the calls for however long that was.
+fn directory_resting_at(until: Option<i64>, now: i64) -> bool {
+    until.is_some_and(|until| now < until && until - now <= DIRECTORY_REST_MS)
 }
 
 impl Store {
@@ -251,6 +472,19 @@ impl Store {
     /// # Errors
     /// [`StoreError::WrongKey`] if the key does not match an existing database.
     pub fn open(path: &Path, key: &[u8; 32]) -> Result<Self, StoreError> {
+        Self::open_with(path, key, &|| {})
+    }
+
+    /// Like [`Self::open`]; `upgrading` is called before an existing database's schema is brought
+    /// up to date, which can take a while.
+    ///
+    /// # Errors
+    /// See [`Self::open`].
+    pub fn open_with(
+        path: &Path,
+        key: &[u8; 32],
+        upgrading: &dyn Fn(),
+    ) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         let mut pragma = Zeroizing::new(format!(
             "PRAGMA key = \"x'{}'\";",
@@ -258,32 +492,84 @@ impl Store {
         ));
         conn.execute_batch(&pragma)?;
         pragma.zeroize();
-        // Fails with "file is not a database" if the key is wrong.
-        if conn
-            .query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-            .is_err()
-        {
-            return Err(StoreError::WrongKey);
-        }
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        // Fails with "file is not a database" if the key is wrong. Any other failure says nothing
+        // about the key: a full disk or an I/O error must not read as a wrong one.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|error| {
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::NotADatabase) {
+                    StoreError::WrongKey
+                } else {
+                    StoreError::Sqlite(error)
+                }
+            })?;
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
+             PRAGMA journal_size_limit = {WAL_SIZE_LIMIT};"
+        ))?;
         let mut store = Self {
             conn,
             held_notifications: std::cell::RefCell::default(),
+            invalid_ids: std::cell::RefCell::default(),
+            member_lookups: std::cell::Cell::default(),
         };
-        store.migrate()?;
+        store.migrate(MIGRATIONS, upgrading)?;
         Ok(store)
     }
 
-    fn migrate(&mut self) -> Result<(), StoreError> {
+    /// Begin writes that stand or fall together ([`Step`]).
+    pub(crate) fn step(&self) -> Result<Step<'_>, StoreError> {
+        let nested = !self.conn.is_autocommit();
+        self.conn.execute_batch(if nested {
+            "SAVEPOINT store_step"
+        } else {
+            "BEGIN"
+        })?;
+        Ok(Step {
+            conn: &self.conn,
+            nested,
+            open: true,
+        })
+    }
+
+    fn migrate(&mut self, migrations: &[&str], upgrading: &dyn Fn()) -> Result<(), StoreError> {
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let target = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
+        let target = i64::try_from(migrations.len()).unwrap_or(i64::MAX);
         if version > target {
             return Err(StoreError::TooNew(version));
         }
+        if version == target {
+            return Ok(());
+        }
+        if version > 0 {
+            upgrading();
+        }
+        self.apply_migrations(migrations, version)
+            .map_err(|error| match error {
+                StoreError::Sqlite(error) if is_disk_full(&error) => {
+                    StoreError::UpgradeNoRoom(error)
+                }
+                other => other,
+            })?;
+        // A row-rewriting migration leaves a WAL about as large as the data it touched, and the
+        // file would otherwise stay that large for as long as the app runs.
+        if let Err(error) = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        {
+            // The upgrade itself is committed; the next checkpoint gets another go at it.
+            let code = StoreError::Sqlite(error).code();
+            tracing::warn!(code, "checkpoint after the store upgrade failed");
+        }
+        Ok(())
+    }
+
+    fn apply_migrations(&mut self, migrations: &[&str], version: i64) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
-        for (index, sql) in MIGRATIONS
+        for (index, sql) in migrations
             .iter()
             .enumerate()
             .skip(usize::try_from(version).unwrap_or(0))
@@ -293,6 +579,16 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Goes up with every change to what Threema Web's receivers are made of
+    /// ([`crate::app_web_data::MIGRATION_RECEIVER_GENERATION`]).
+    pub(crate) fn receiver_generation(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM receiver_generation", [], |row| {
+                row.get(0)
+            })?)
     }
 
     /// Read a setting.
@@ -335,6 +631,69 @@ impl Store {
     }
 
     /// Write a setting.
+    /// The directory said too many requests: what runs by itself leaves it alone for a while.
+    /// What the user asks for still goes, and is told what the directory says. Best effort. A rest
+    /// under way keeps its end: otherwise whatever keeps asking would keep it going for good, and
+    /// the license recheck is among what waits.
+    pub fn rest_directory_calls(&self) {
+        if self.directory_resting() {
+            return;
+        }
+        tracing::warn!("the directory says too many requests, automatic calls rest");
+        let until = crate::messages::now_ms() + DIRECTORY_REST_MS;
+        if let Err(error) = self.set_setting(keys::DIRECTORY_RETRY_AFTER, &until.to_string()) {
+            tracing::warn!(%error, "noting the directory's rate limit failed");
+        }
+    }
+
+    /// Group members who have no contact yet and still need their lookup: a rest or a failed
+    /// request doesn't lose them. Noted before asking, and kept until the directory has answered
+    /// for them. Without another device too; `group_member_lookups` is what the devices are owed.
+    pub fn owe_member_lookups(&self, identities: &[String]) -> Result<(), StoreError> {
+        let mut owed: std::collections::BTreeSet<String> =
+            self.owed_member_lookups()?.into_iter().collect();
+        owed.extend(identities.iter().cloned());
+        self.set_owed_member_lookups(&owed)
+    }
+
+    pub fn owed_member_lookups(&self) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .setting(keys::MEMBER_LOOKUPS_OWED)?
+            .and_then(|owed| serde_json::from_str(&owed).ok())
+            .unwrap_or_default())
+    }
+
+    /// The directory has answered for these, whatever it said.
+    pub fn member_lookups_answered(&self, identities: &[&str]) -> Result<(), StoreError> {
+        let mut owed: std::collections::BTreeSet<String> =
+            self.owed_member_lookups()?.into_iter().collect();
+        for identity in identities {
+            owed.remove(*identity);
+        }
+        self.set_owed_member_lookups(&owed)
+    }
+
+    fn set_owed_member_lookups(
+        &self,
+        owed: &std::collections::BTreeSet<String>,
+    ) -> Result<(), StoreError> {
+        if owed.is_empty() {
+            return self.delete_setting(keys::MEMBER_LOOKUPS_OWED);
+        }
+        let owed = serde_json::to_string(owed).expect("a list of strings");
+        self.set_setting(keys::MEMBER_LOOKUPS_OWED, &owed)
+    }
+
+    /// Whether automatic directory calls are resting.
+    pub fn directory_resting(&self) -> bool {
+        let until = self
+            .setting(keys::DIRECTORY_RETRY_AFTER)
+            .ok()
+            .flatten()
+            .and_then(|until| until.parse().ok());
+        directory_resting_at(until, crate::messages::now_ms())
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -357,6 +716,11 @@ impl Store {
 
     /// Delete everything (identity, contacts, messages, settings, …) but keep the schema: every
     /// table is emptied, so tables added by later migrations can never be left out here.
+    ///
+    /// All or nothing: on an error the transaction rolls back and the ID is still there. Once it
+    /// has committed the deletion counts as done; shrinking the file afterwards can fail for
+    /// lack of space, just when someone removes everything because the phone is full, and is
+    /// only logged. The bridge replaces the file and its key next (`threesea_data_remove`).
     pub fn wipe(&self) -> Result<(), StoreError> {
         let tables: Vec<String> = {
             // Not the search index's own tables (its virtual table and its shadow tables):
@@ -368,16 +732,59 @@ impl Store {
             let rows = statement.query_map([], |row| row.get(0))?;
             rows.collect::<Result<_, _>>()?
         };
+        let transaction = self.conn.unchecked_transaction()?;
         // Deferred foreign keys: the deletion order doesn't matter inside the transaction.
-        let mut sql = String::from("BEGIN; PRAGMA defer_foreign_keys = ON;");
+        let mut sql = String::from("PRAGMA defer_foreign_keys = ON;");
         for table in &tables {
             sql.push_str(&format!(" DELETE FROM \"{table}\";"));
         }
-        sql.push_str(
-            " INSERT INTO messages_search (messages_search) VALUES ('delete-all'); COMMIT; VACUUM;",
-        );
-        self.conn.execute_batch(&sql)?;
+        sql.push_str(" INSERT INTO messages_search (messages_search) VALUES ('delete-all');");
+        transaction.execute_batch(&sql)?;
+        transaction.commit()?;
+        self.held_notifications.borrow_mut().clear();
+        self.invalid_ids.borrow_mut().clear();
+        self.shrink();
         Ok(())
+    }
+
+    /// [`Self::shrink`] if enough of the file is free for it to matter and the copy fits in memory
+    /// (`worth_shrinking`). Otherwise later writes reuse the free pages.
+    pub fn shrink_if_worthwhile(&self) {
+        let pages = self.conn.query_row(
+            "SELECT c.page_count, f.freelist_count, CAST(s.page_size AS INTEGER)
+             FROM pragma_page_count() c, pragma_freelist_count() f, pragma_page_size() s",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        );
+        match pages {
+            Ok((total, free, page_size)) if worth_shrinking(total, free, page_size) => {
+                self.shrink();
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "reading the free pages failed"),
+        }
+    }
+
+    /// Give the space of deleted rows back to the system: they still lie in the free pages and the
+    /// write-ahead log until these two ran. Rewrites the whole file, and the core waits for it, so
+    /// for what the user just asked to be gone, not for routine deletions. Needs free space for
+    /// the copy, which can run out just when someone clears up a full phone: then the file stays
+    /// as big as it was and later writes reuse its free pages, so this is only logged.
+    fn shrink(&self) {
+        for (step, sql) in [
+            ("vacuum", "VACUUM;"),
+            ("checkpoint", "PRAGMA wal_checkpoint(TRUNCATE);"),
+        ] {
+            if let Err(error) = self.conn.execute_batch(sql) {
+                tracing::warn!(step, %error, "the database could not be shrunk");
+            }
+        }
     }
 
     /// Remove a setting.
@@ -385,6 +792,21 @@ impl Store {
         self.conn
             .execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(())
+    }
+
+    /// The own e-mail address and number as far as they are confirmed: what backups and linked
+    /// devices may hold (Android: only `LinkingState_LINKED`). One still waiting for its
+    /// confirmation may be a typo, and a restore would link it again, with a mail or an SMS.
+    pub fn confirmed_links(&self) -> Result<(Option<String>, Option<String>), StoreError> {
+        let email = match self.setting(keys::LINKED_EMAIL_PENDING)? {
+            Some(_) => None,
+            None => self.setting(keys::LINKED_EMAIL)?,
+        };
+        let mobile = match self.setting(keys::LINKED_MOBILE_PENDING)? {
+            Some(_) => None,
+            None => self.setting(keys::LINKED_MOBILE)?,
+        };
+        Ok((email, mobile))
     }
 
     /// The own identity, if one exists.
@@ -437,6 +859,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_rest_ends_also_when_the_clock_was_wrong() {
+        let now = 1_700_000_000_000;
+        assert!(!directory_resting_at(None, now));
+        assert!(directory_resting_at(Some(now + 1), now));
+        assert!(directory_resting_at(Some(now + DIRECTORY_REST_MS), now));
+        assert!(!directory_resting_at(Some(now), now), "over");
+        assert!(
+            !directory_resting_at(Some(now + DIRECTORY_REST_MS + 1), now),
+            "set by a clock ahead of this one"
+        );
+    }
 
     #[test]
     fn forward_security_setting() {
@@ -545,4 +980,351 @@ mod tests {
         assert_eq!(store.identity().unwrap().map(|i| i.threema_id), None);
         store.set_setting(keys::LICENSE_KEY, "NEWKE-YHERE").unwrap();
     }
+
+    fn store_with_identity(path: &Path) -> Store {
+        let store = Store::open(path, &[1; 32]).unwrap();
+        store
+            .set_identity(&StoredIdentity {
+                threema_id: "ECHOECHO".into(),
+                client_key: Zeroizing::new([7; 32]),
+                server_group: "a1".into(),
+            })
+            .unwrap();
+        store
+            .insert_incoming("ECHOECHO", 1, "text", "secret words", 1)
+            .unwrap();
+        store
+    }
+
+    /// The rows must not stay readable with the old key in the main file: not in the free pages
+    /// and not behind a write-ahead log that a later checkpoint would have folded in. The closed
+    /// earlier session matters: without it the rows never reached the main file and any wipe
+    /// looks clean.
+    #[test]
+    fn wipe_leaves_nothing_in_the_main_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        drop(store_with_identity(&path));
+
+        let store = Store::open(&path, &[1; 32]).unwrap();
+        assert!(store.identity().unwrap().is_some());
+        store.wipe().unwrap();
+
+        // The main file alone, as a copy would be taken while the app still runs.
+        let copy = dir.path().join("copy.db");
+        std::fs::copy(&path, &copy).unwrap();
+        let copied = Store::open(&copy, &[1; 32]).unwrap();
+        assert!(copied.identity().unwrap().is_none());
+        assert!(
+            copied
+                .conversation_messages("ECHOECHO", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("t.db-wal")).map_or(0, |wal| wal.len()),
+            0,
+            "the write-ahead log is emptied too"
+        );
+    }
+
+    /// A group sync from another device can delete a group, inside the step that applies it.
+    #[test]
+    fn deleting_chats_works_inside_a_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        let step = store.step().unwrap();
+        store.delete_group("g:ABCD1234:0000000000000007").unwrap();
+        store.delete_conversation("ABCD1234").unwrap();
+        store.delete_distribution_list("d:1").unwrap();
+        step.commit().unwrap();
+        assert!(store.conn.is_autocommit());
+    }
+
+    #[test]
+    fn only_failures_of_the_data_itself_count_as_failing_every_time() {
+        use rusqlite::ffi;
+        for code in [
+            0,
+            ffi::SQLITE_ERROR,
+            ffi::SQLITE_TOOBIG,
+            ffi::SQLITE_CONSTRAINT,
+            ffi::SQLITE_CONSTRAINT_TRIGGER,
+            ffi::SQLITE_MISMATCH,
+        ] {
+            assert!(fails_every_time(code), "{code}");
+        }
+        for code in [
+            ffi::SQLITE_FULL,
+            ffi::SQLITE_IOERR,
+            ffi::SQLITE_IOERR_SHMSIZE,
+            ffi::SQLITE_READONLY,
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_NOMEM,
+            ffi::SQLITE_CANTOPEN,
+            ffi::SQLITE_CORRUPT,
+            ffi::SQLITE_NOTADB,
+        ] {
+            assert!(!fails_every_time(code), "{code}");
+        }
+    }
+
+    /// A step undoes what it didn't commit, and one inside another only its own part.
+    #[test]
+    fn steps_nest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        let get = |key| store.setting(key).unwrap();
+
+        let outer = store.step().unwrap();
+        store.set_setting("kept", "1").unwrap();
+        let inner = store.step().unwrap();
+        store.set_setting("undone", "1").unwrap();
+        drop(inner);
+        let inner = store.step().unwrap();
+        store.set_setting("kept too", "1").unwrap();
+        inner.commit().unwrap();
+        outer.commit().unwrap();
+        assert!(store.conn.is_autocommit());
+        assert!(get("kept").is_some() && get("kept too").is_some());
+        assert!(get("undone").is_none());
+
+        // What an inner step committed goes with the outer one.
+        let outer = store.step().unwrap();
+        let inner = store.step().unwrap();
+        store.set_setting("gone", "1").unwrap();
+        inner.commit().unwrap();
+        drop(outer);
+        assert!(store.conn.is_autocommit());
+        assert!(get("gone").is_none());
+    }
+
+    /// A deletion that fails changes nothing and leaves no transaction open.
+    #[test]
+    fn failed_wipe_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        store.set_setting(keys::LICENSE_KEY, "ABCDE-FGHIJ").unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE DELETE ON settings
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        assert!(store.wipe().is_err());
+
+        assert!(store.conn.is_autocommit(), "no transaction left open");
+        assert!(store.identity().unwrap().is_some());
+        assert_eq!(
+            store.setting(keys::LICENSE_KEY).unwrap().as_deref(),
+            Some("ABCDE-FGHIJ")
+        );
+    }
+
+    #[test]
+    fn shrinking_is_for_a_large_share_of_a_database_that_fits_in_memory() {
+        let page = 4096;
+        let megabyte = 1024 * 1024 / page;
+        assert!(!worth_shrinking(1000, 0, page), "nothing free");
+        assert!(!worth_shrinking(1000, 249, page), "too little free");
+        assert!(worth_shrinking(1000, 250, page));
+        assert!(worth_shrinking(1000, 1000, page), "everything free");
+        assert!(worth_shrinking(128 * megabyte * 2, 128 * megabyte, page));
+        assert!(
+            !worth_shrinking(129 * megabyte * 2, 129 * megabyte, page),
+            "the copy would be too large for memory"
+        );
+    }
+
+    /// A store on disk, closed again with everything in the main file.
+    fn closed_store(path: &Path) {
+        drop(store_with_identity(path));
+    }
+
+    fn open_error(path: &Path, key: &[u8; 32]) -> StoreError {
+        match Store::open(path, key) {
+            Ok(_) => panic!("the store opened"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn a_key_that_does_not_fit_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        closed_store(&path);
+        let error = open_error(&path, &[2; 32]);
+        assert!(matches!(error, StoreError::WrongKey), "{error}");
+        assert_eq!(error.kind(), "storeKey");
+        assert_eq!(error.code(), "");
+    }
+
+    #[test]
+    fn a_damaged_first_page_reads_like_a_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        closed_store(&path);
+        let mut raw = std::fs::read(&path).unwrap();
+        raw[100..200].fill(0xA5);
+        std::fs::write(&path, raw).unwrap();
+        assert_eq!(open_error(&path, &[1; 32]).kind(), "storeKey");
+    }
+
+    #[test]
+    fn damage_behind_the_first_page_is_damage_and_not_a_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        closed_store(&path);
+        let mut raw = std::fs::read(&path).unwrap();
+        for page in raw[4096..].chunks_mut(4096) {
+            page[100..200].fill(0xA5);
+        }
+        std::fs::write(&path, raw).unwrap();
+        let error = open_error(&path, &[1; 32]);
+        assert_eq!(error.kind(), "storeDamaged", "{error}");
+        assert_eq!(error.code(), "sqlite 11");
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_opened_is_no_key_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be.
+        let error = open_error(dir.path(), &[1; 32]);
+        assert_eq!(error.kind(), "storeUnreadable", "{error}");
+    }
+
+    #[test]
+    fn a_full_disk_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        // How SQLite's limit looks to the caller is what a full disk looks like: SQLITE_FULL.
+        store
+            .conn
+            .execute_batch("PRAGMA max_page_count = 1")
+            .unwrap();
+        let error = store.set_setting("key", &"x".repeat(100_000)).unwrap_err();
+        assert_eq!(error.kind(), "diskFull", "{error}");
+
+        // A store reopened on a full disk, as measured on a full tmpfs.
+        let error = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_SHMSIZE),
+            None,
+        ));
+        assert_eq!(error.kind(), "diskFull");
+        assert_eq!(error.code(), "sqlite 4874");
+    }
+
+    #[test]
+    fn a_newer_schema_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let newer = MIGRATIONS.len() + 1;
+        Store::open(&path, &[1; 32])
+            .unwrap()
+            .conn
+            .execute_batch(&format!("PRAGMA user_version = {newer}"))
+            .unwrap();
+        let error = open_error(&path, &[1; 32]);
+        assert_eq!(error.kind(), "storeTooNew");
+        assert_eq!(error.code(), format!("schema {newer}"));
+    }
+
+    #[test]
+    fn an_upgrade_says_so_first_and_a_new_database_or_a_current_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let told = std::cell::Cell::new(0);
+        let tell = || told.set(told.get() + 1);
+        let mut store = Store::open_with(&path, &[1; 32], &tell).unwrap();
+        assert_eq!(told.get(), 0, "a new database has nothing to upgrade");
+        drop(store);
+        store = Store::open_with(&path, &[1; 32], &tell).unwrap();
+        assert_eq!(told.get(), 0, "up to date");
+
+        let mut next = MIGRATIONS.to_vec();
+        next.push("CREATE TABLE later (a INTEGER)");
+        store.migrate(&next, &tell).unwrap();
+        assert_eq!(told.get(), 1);
+        store.migrate(&next, &tell).unwrap();
+        assert_eq!(told.get(), 1, "done");
+    }
+
+    #[test]
+    fn an_upgrade_without_room_says_so_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("t.db"), &[1; 32]).unwrap();
+        let pages: i64 = store
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        store
+            .conn
+            .execute_batch(&format!("PRAGMA max_page_count = {pages}"))
+            .unwrap();
+        let mut next = MIGRATIONS.to_vec();
+        next.push(
+            "CREATE TABLE later (a TEXT);
+             INSERT INTO later VALUES (zeroblob(1000000));",
+        );
+
+        let error = store.migrate(&next, &|| {}).unwrap_err();
+
+        assert_eq!(error.kind(), "upgradeNoRoom", "{error}");
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, i64::try_from(MIGRATIONS.len()).unwrap());
+        assert!(
+            store.conn.prepare("SELECT a FROM later").is_err(),
+            "rolled back"
+        );
+    }
+
+    #[test]
+    fn an_upgrade_leaves_no_large_wal_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let mut store = Store::open(&path, &[1; 32]).unwrap();
+        let limit: i64 = store
+            .conn
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(limit, WAL_SIZE_LIMIT);
+
+        let mut next = MIGRATIONS.to_vec();
+        next.push(
+            "CREATE TABLE later (a BLOB);
+             INSERT INTO later VALUES (zeroblob(30000000));",
+        );
+        store.migrate(&next, &|| {}).unwrap();
+
+        let wal = std::fs::metadata(dir.path().join("t.db-wal"))
+            .unwrap()
+            .len();
+        assert_eq!(wal, 0);
+    }
+
+    /// VACUUM can't run (here: a statement in progress; on the phone: no space left) and the
+    /// deletion stands all the same.
+    #[test]
+    fn wipe_survives_a_failing_vacuum() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_identity(&dir.path().join("t.db"));
+        let mut reading = store.conn.prepare("SELECT 1 FROM sqlite_master").unwrap();
+        let mut rows = reading.query([]).unwrap();
+        assert!(rows.next().unwrap().is_some());
+
+        store.wipe().unwrap();
+
+        drop(rows);
+        assert!(store.identity().unwrap().is_none());
+    }
 }
+
+#[cfg(test)]
+#[path = "store_upgrade_tests.rs"]
+mod upgrade_tests;

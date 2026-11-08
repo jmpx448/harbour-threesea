@@ -24,6 +24,9 @@ Item {
     // Without the title line (e.g. an editable name in `content` instead).
     property bool showTitle: true
     signal pictureClicked()
+    // Holding the description down (a Threema ID, to copy or share).
+    property bool descriptionHoldable: false
+    signal descriptionHeld()
     // Room above the card (page indicators, the pin, a display cutout); 0 under a page header
     // (the own card on the contacts page), which brings its own cutout padding.
     property real topSpace: Theme.itemSizeLarge + cutout.inset
@@ -112,7 +115,13 @@ Item {
                     text: root.description
                     font.pixelSize: Theme.fontSizeSmall
                     truncationMode: TruncationMode.Fade
-                    color: Theme.secondaryColor
+                    color: descriptionArea.pressed ? Theme.highlightColor : Theme.secondaryColor
+                    MouseArea {
+                        id: descriptionArea
+                        anchors.fill: parent
+                        enabled: root.descriptionHoldable
+                        onPressAndHold: root.descriptionHeld()
+                    }
                 }
                 Item {
                     id: extra

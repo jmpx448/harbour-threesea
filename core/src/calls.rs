@@ -59,6 +59,18 @@ pub struct Candidate {
     pub ufrag: Option<String>,
 }
 
+impl Candidate {
+    /// Whether its address is IPv6: `candidate:<foundation> <component> <transport> <priority>
+    /// <address> <port> typ …`. An mDNS name or a damaged line counts as not.
+    #[must_use]
+    pub fn is_ipv6(&self) -> bool {
+        self.candidate
+            .split_ascii_whitespace()
+            .nth(4)
+            .is_some_and(|address| address.contains(':'))
+    }
+}
+
 /// A decoded call signal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Signal {
@@ -265,9 +277,10 @@ pub struct Call {
     /// We called.
     pub outgoing: bool,
     pub video: bool,
-    /// When it was offered and when it was accepted (ms).
+    /// When it was offered, accepted and when its media came up (ms).
     pub started_at: i64,
     pub accepted_at: Option<i64>,
+    pub connected_at: Option<i64>,
 }
 
 /// What the app has to do because of a signal or a user action.
@@ -278,17 +291,20 @@ pub enum Effect {
     /// Show the incoming call (ring) with the remote offer for the media engine.
     Incoming {
         peer: String,
+        call_id: u32,
         sdp: String,
         video: bool,
     },
     /// The peer's phone rings.
     Ringing,
-    /// The peer accepted: give the media engine their answer.
-    RemoteAnswer { sdp: String },
+    /// The peer accepted: give the media engine their answer. `video`: both sides take video.
+    RemoteAnswer { sdp: String, video: bool },
     /// Candidates for the media engine.
     RemoteCandidates(Vec<Candidate>),
     /// The call is over: stop the media, show it in the chat.
     Ended { record: CallRecord },
+    /// Show this call in the chat; the call in progress, if any, goes on.
+    RecordOnly { record: CallRecord },
 }
 
 /// How a call went, for the chat (Android shows these as status messages).
@@ -296,10 +312,11 @@ pub enum Effect {
 #[serde(rename_all = "camelCase")]
 pub struct CallRecord {
     pub peer: String,
+    pub call_id: u32,
     pub outgoing: bool,
-    /// `finished`, `missed`, `rejected`, `busy`, `aborted`, …
+    /// `finished`, `missed`, `rejected`, `busy`, `aborted`, `failed`, …
     pub result: String,
-    /// Seconds talked (finished calls).
+    /// Seconds talked: since the media came up, none if it never did.
     pub duration: Option<i64>,
     pub at: i64,
 }
@@ -313,10 +330,7 @@ pub struct Calls {
 impl Calls {
     /// A signal from `peer` at `now` (ms).
     pub fn on_signal(&mut self, peer: &str, signal: Signal, now: i64) -> Vec<Effect> {
-        let matches_current = self
-            .current
-            .as_ref()
-            .is_some_and(|call| call.peer == peer && call.call_id == signal.call_id());
+        let matches_current = self.is_current(peer, signal.call_id());
         match signal {
             Signal::Offer {
                 call_id,
@@ -327,14 +341,17 @@ impl Calls {
                     if call.peer == peer && call.call_id == call_id {
                         return Vec::new(); // repeated
                     }
-                    // One call at a time.
-                    return vec![Effect::Send {
-                        peer: peer.to_owned(),
-                        signal: Signal::Reject {
-                            call_id,
-                            reason: RejectReason::Busy,
+                    // One call at a time; the user still learns that this one tried (Android).
+                    return vec![
+                        Effect::Send {
+                            peer: peer.to_owned(),
+                            signal: Signal::Reject {
+                                call_id,
+                                reason: RejectReason::Busy,
+                            },
                         },
-                    }];
+                        missed_call(peer, call_id, now),
+                    ];
                 }
                 self.current = Some(Call {
                     peer: peer.to_owned(),
@@ -344,6 +361,7 @@ impl Calls {
                     video,
                     started_at: now,
                     accepted_at: None,
+                    connected_at: None,
                 });
                 vec![
                     Effect::Send {
@@ -352,6 +370,7 @@ impl Calls {
                     },
                     Effect::Incoming {
                         peer: peer.to_owned(),
+                        call_id,
                         sdp,
                         video,
                     },
@@ -376,13 +395,18 @@ impl Calls {
                 call.phase = Phase::Active;
                 call.accepted_at = Some(now);
                 call.video &= video;
-                vec![Effect::RemoteAnswer { sdp }]
+                vec![Effect::RemoteAnswer {
+                    sdp,
+                    video: call.video,
+                }]
             }
             Signal::Reject { reason, .. } if matches_current => {
                 let result = match reason {
                     RejectReason::Busy => "busy",
                     RejectReason::Timeout => "unanswered",
                     RejectReason::Disabled => "disabled",
+                    // Their app could not take it; nobody decided anything.
+                    RejectReason::Unknown => "failed",
                     _ => "rejected",
                 };
                 self.end(result, now)
@@ -391,23 +415,16 @@ impl Calls {
                 vec![Effect::RemoteCandidates(candidates)]
             }
             Signal::Hangup { .. } if matches_current => {
-                let result = match self.current.as_ref().map(|c| c.phase) {
-                    Some(Phase::Incoming) => "missed",
-                    Some(Phase::Outgoing { .. }) => "aborted",
-                    _ => "finished",
+                let result = match self.current.as_ref() {
+                    Some(call) if call.phase == Phase::Incoming => "missed",
+                    Some(call) if call.connected_at.is_some() => "finished",
+                    _ => "aborted",
                 };
                 self.end(result, now)
             }
-            // A hangup for a call we never saw (its offer was dropped): a missed call.
-            Signal::Hangup { .. } if self.current.is_none() => vec![Effect::Ended {
-                record: CallRecord {
-                    peer: peer.to_owned(),
-                    outgoing: false,
-                    result: "missed".into(),
-                    duration: None,
-                    at: now,
-                },
-            }],
+            // A hangup for a call we never saw (its offer was dropped): a missed call, whatever
+            // else is going on. The app sorts out the calls it does know (`on_call_signal`).
+            Signal::Hangup { call_id } => vec![missed_call(peer, call_id, now)],
             _ => Vec::new(),
         }
     }
@@ -432,6 +449,7 @@ impl Calls {
             video,
             started_at: now,
             accepted_at: None,
+            connected_at: None,
         });
         vec![Effect::Send {
             peer: peer.to_owned(),
@@ -501,13 +519,55 @@ impl Calls {
                 call_id: call.call_id,
             },
         }];
-        let result = if call.phase == Phase::Active {
+        let result = if call.connected_at.is_some() {
             "finished"
         } else {
             "aborted"
         };
         effects.extend(self.end(result, now));
         effects
+    }
+
+    /// The call can't go on (no media, no connection, the peer's certificate is wrong): the peer
+    /// is told, and the chat says it failed rather than that someone declined or hung up.
+    pub fn fail(&mut self, now: i64) -> Vec<Effect> {
+        let Some(call) = self.current.as_ref() else {
+            return Vec::new();
+        };
+        let signal = if call.phase == Phase::Incoming {
+            Signal::Reject {
+                call_id: call.call_id,
+                reason: RejectReason::Unknown,
+            }
+        } else {
+            Signal::Hangup {
+                call_id: call.call_id,
+            }
+        };
+        let mut effects = vec![Effect::Send {
+            peer: call.peer.clone(),
+            signal,
+        }];
+        effects.extend(self.end("failed", now));
+        effects
+    }
+
+    /// The media came up: the time talked counts from here.
+    pub fn connected(&mut self, now: i64) {
+        if let Some(call) = self.current.as_mut()
+            && call.phase == Phase::Active
+            && call.connected_at.is_none()
+        {
+            call.connected_at = Some(now);
+        }
+    }
+
+    /// This is the call in progress.
+    #[must_use]
+    pub fn is_current(&self, peer: &str, call_id: u32) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|call| call.peer == peer && call.call_id == call_id)
     }
 
     /// Nobody answered within the ring time (Android: 60 s): an incoming call is rejected with
@@ -554,11 +614,25 @@ impl Calls {
             record: CallRecord {
                 outgoing: call.outgoing,
                 peer: call.peer,
+                call_id: call.call_id,
                 result: result.to_owned(),
-                duration: call.accepted_at.map(|at| (now - at).max(0) / 1000),
+                duration: call.connected_at.map(|at| (now - at).max(0) / 1000),
                 at: call.started_at,
             },
         }]
+    }
+}
+
+fn missed_call(peer: &str, call_id: u32, now: i64) -> Effect {
+    Effect::RecordOnly {
+        record: CallRecord {
+            peer: peer.to_owned(),
+            call_id,
+            outgoing: false,
+            result: "missed".into(),
+            duration: None,
+            at: now,
+        },
     }
 }
 
@@ -669,9 +743,11 @@ mod tests {
         assert_eq!(
             effects,
             vec![Effect::RemoteAnswer {
-                sdp: "answer".into()
+                sdp: "answer".into(),
+                video: false,
             }]
         );
+        calls.connected(3_000);
         let effects = calls.hang_up(63_000);
         assert!(matches!(
             &effects[0],
@@ -710,7 +786,7 @@ mod tests {
             }
         ));
         assert!(matches!(&effects[1], Effect::Incoming { video: true, .. }));
-        // A second caller is busy-rejected.
+        // A second caller is busy-rejected, and the chat shows that they tried.
         let busy = calls.on_signal(
             "OTHER123",
             Signal::Offer {
@@ -730,6 +806,15 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            &busy[1],
+            Effect::RecordOnly { record }
+                if record.peer == "OTHER123" && record.call_id == 1 && record.result == "missed"
+        ));
+        assert!(
+            calls.is_current("ECHOECHO", 9),
+            "the call in progress goes on"
+        );
         // Hung up before we answered: missed.
         let effects = calls.on_signal("ECHOECHO", Signal::Hangup { call_id: 9 }, 5_000);
         let Effect::Ended { record } = &effects[0] else {
@@ -754,6 +839,7 @@ mod tests {
                 ..
             }
         ));
+        calls.connected(1_000);
         let effects = calls.on_signal("ECHOECHO", Signal::Hangup { call_id: 10 }, 11_000);
         let Effect::Ended { record } = &effects[0] else {
             panic!()
@@ -765,10 +851,138 @@ mod tests {
     }
 
     #[test]
-    fn hangup_for_an_unknown_call_is_missed() {
+    fn hangup_for_an_unknown_call_is_missed_and_ends_nothing() {
         let mut calls = Calls::default();
         let effects = calls.on_signal("ECHOECHO", Signal::Hangup { call_id: 3 }, 0);
-        assert!(matches!(&effects[0], Effect::Ended { record } if record.result == "missed"));
+        assert!(matches!(
+            &effects[..],
+            [Effect::RecordOnly { record }] if record.result == "missed" && record.call_id == 3
+        ));
+
+        // Not even the call in progress, also with the same peer.
+        calls.start("ECHOECHO", 5, "sdp".into(), false, 0);
+        let effects = calls.on_signal("ECHOECHO", Signal::Hangup { call_id: 3 }, 0);
+        assert!(matches!(&effects[..], [Effect::RecordOnly { .. }]));
+        assert!(calls.is_current("ECHOECHO", 5));
+    }
+
+    #[test]
+    fn an_answer_without_video_makes_it_an_audio_call() {
+        let mut calls = Calls::default();
+        calls.start("ECHOECHO", 5, "sdp".into(), true, 0);
+        let effects = calls.on_signal(
+            "ECHOECHO",
+            Signal::Accept {
+                call_id: 5,
+                sdp: "answer".into(),
+                video: false,
+            },
+            0,
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::RemoteAnswer {
+                sdp: "answer".into(),
+                video: false,
+            }]
+        );
+        assert!(!calls.current.unwrap().video);
+    }
+
+    #[test]
+    fn time_talked_counts_from_the_connection() {
+        let mut calls = Calls::default();
+        calls.on_signal(
+            "ECHOECHO",
+            Signal::Offer {
+                call_id: 6,
+                sdp: "o".into(),
+                video: false,
+            },
+            0,
+        );
+        // Accepted, but nothing ever connected: not a finished call of 12 seconds.
+        calls.accept("answer".into(), false, 1_000);
+        let effects = calls.hang_up(13_000);
+        assert!(matches!(
+            &effects[1],
+            Effect::Ended { record } if record.result == "aborted" && record.duration.is_none()
+        ));
+
+        calls.on_signal(
+            "ECHOECHO",
+            Signal::Offer {
+                call_id: 7,
+                sdp: "o".into(),
+                video: false,
+            },
+            0,
+        );
+        calls.accept("answer".into(), false, 1_000);
+        let effects = calls.on_signal("ECHOECHO", Signal::Hangup { call_id: 7 }, 13_000);
+        assert!(matches!(
+            &effects[0],
+            Effect::Ended { record } if record.result == "aborted" && record.duration.is_none()
+        ));
+
+        calls.start("ECHOECHO", 8, "sdp".into(), false, 0);
+        calls.on_signal(
+            "ECHOECHO",
+            Signal::Accept {
+                call_id: 8,
+                sdp: "a".into(),
+                video: false,
+            },
+            1_000,
+        );
+        calls.connected(5_000);
+        let effects = calls.hang_up(15_000);
+        assert!(matches!(
+            &effects[1],
+            Effect::Ended { record } if record.result == "finished" && record.duration == Some(10)
+        ));
+    }
+
+    #[test]
+    fn a_failure_tells_the_peer_and_is_recorded_as_one() {
+        // Before the answer went out (the engine could not start): no "declined" on either side.
+        let mut calls = Calls::default();
+        calls.on_signal(
+            "ECHOECHO",
+            Signal::Offer {
+                call_id: 6,
+                sdp: "o".into(),
+                video: false,
+            },
+            0,
+        );
+        let effects = calls.fail(1_000);
+        assert!(matches!(&effects[..], [
+            Effect::Send { signal: Signal::Reject { call_id: 6, reason: RejectReason::Unknown }, .. },
+            Effect::Ended { record }
+        ] if record.result == "failed" && !record.outgoing));
+        assert!(calls.current.is_none());
+        assert!(calls.fail(1_000).is_empty());
+
+        // After it.
+        calls.start("ECHOECHO", 7, "sdp".into(), false, 0);
+        let effects = calls.fail(1_000);
+        assert!(matches!(&effects[..], [
+            Effect::Send { signal: Signal::Hangup { call_id: 7 }, .. },
+            Effect::Ended { record }
+        ] if record.result == "failed" && record.outgoing));
+
+        // The caller's side of such a failure.
+        calls.start("ECHOECHO", 8, "sdp".into(), false, 0);
+        let effects = calls.on_signal(
+            "ECHOECHO",
+            Signal::Reject {
+                call_id: 8,
+                reason: RejectReason::Unknown,
+            },
+            0,
+        );
+        assert!(matches!(&effects[0], Effect::Ended { record } if record.result == "failed"));
     }
 
     #[test]

@@ -29,6 +29,34 @@ fn generate_identity_backup_string() {
     eprintln!("identity backup: {backup}");
 }
 
+/// Fuzzing seeds from the synthetic fixture, so the fuzzers start past the header row and the
+/// container's structure: `cargo test -p threesea-core --lib write_backup_seeds -- --ignored`
+#[test]
+#[ignore = "writes fuzzing seeds"]
+fn write_backup_seeds() {
+    let seeds = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/seeds");
+    let csv = seeds.join("backup_csv");
+    std::fs::create_dir_all(&csv).unwrap();
+    let mut archive = Archive::open(&fixture("android-backup.zip"), "test-password").unwrap();
+    let names: Vec<String> = archive
+        .entries()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .filter(|name| name.ends_with(".csv"))
+        .collect();
+    for name in names {
+        let text = archive.read_text(&name, 1 << 20).unwrap();
+        std::fs::write(csv.join(name), text.as_bytes()).unwrap();
+    }
+    let zip = seeds.join("backup_archive");
+    std::fs::create_dir_all(&zip).unwrap();
+    std::fs::copy(
+        fixture("android-backup.zip"),
+        zip.join("android-backup.zip"),
+    )
+    .unwrap();
+}
+
 #[test]
 fn reads_a_winzip_aes_archive() {
     let mut archive = Archive::open(&fixture("android-backup.zip"), "test-password").unwrap();
@@ -58,7 +86,7 @@ fn reads_a_winzip_aes_archive() {
     assert_eq!(identity.threema_id.to_string(), "ABCD1234");
 
     // The CSV dialect round-trips OpenCSV's escaping, by header name, not position.
-    let contacts = Table::parse(&archive.read_text("contacts.csv", 1 << 20).unwrap());
+    let contacts = Table::parse(&archive.read_text("contacts.csv", 1 << 20).unwrap()).unwrap();
     assert_eq!(contacts.rows.len(), 3);
     assert_eq!(
         contacts.get(&contacts.rows[0], "identity"),
@@ -83,7 +111,7 @@ fn reads_a_winzip_aes_archive() {
     assert!(parsed[2].hidden);
     assert_eq!(parsed[2].alias.as_deref(), Some("99"));
 
-    let groups = Table::parse(&archive.read_text("groups.csv", 1 << 20).unwrap());
+    let groups = Table::parse(&archive.read_text("groups.csv", 1 << 20).unwrap()).unwrap();
     assert_eq!(
         groups.get_list(&groups.rows[0], "members"),
         vec!["ABCD1234", "B0B0B0B0", "ANNANNAN", "CCCCCCCC"]
@@ -98,13 +126,14 @@ fn reads_a_winzip_aes_archive() {
     assert_eq!(parsed[1].user_state, Some(2));
     assert!(parsed[1].archived);
 
-    let lists = Table::parse(&archive.read_text("distribution_list.csv", 1 << 20).unwrap());
+    let lists =
+        Table::parse(&archive.read_text("distribution_list.csv", 1 << 20).unwrap()).unwrap();
     let (parsed, invalid) = records::distribution_lists(&lists);
     assert_eq!((parsed.len(), invalid), (1, 0));
     assert_eq!(parsed[0].id, 7);
     assert_eq!(parsed[0].members, vec!["B0B0B0B0", "ANNANNAN"]);
 
-    let messages = Table::parse(&archive.read_text("message_17.csv", 1 << 20).unwrap());
+    let messages = Table::parse(&archive.read_text("message_17.csv", 1 << 20).unwrap()).unwrap();
     assert_eq!(messages.get(&messages.rows[0], "body"), Some(TRICKY));
     assert_eq!(messages.get(&messages.rows[0], "type"), Some("TEXT"));
     assert_eq!(
@@ -181,6 +210,64 @@ fn tampering_fails_the_entry() {
     assert_eq!(read_version(&mut archive).unwrap(), 27);
 }
 
+/// A ZIP64 end: its record (with `padding` bytes of extensible data), locator and end record.
+fn zip64_end(prefix: &[u8], entries: u64, padding: usize) -> Vec<u8> {
+    let mut file = prefix.to_vec();
+    let record = file.len() as u64;
+    file.extend_from_slice(b"PK\x06\x06");
+    file.extend_from_slice(&(44 + padding as u64).to_le_bytes());
+    file.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    file.extend_from_slice(&entries.to_le_bytes());
+    file.extend_from_slice(&entries.to_le_bytes());
+    file.extend_from_slice(&0_u64.to_le_bytes());
+    file.extend_from_slice(&0_u64.to_le_bytes());
+    file.extend_from_slice(&vec![0; padding]);
+    file.extend_from_slice(b"PK\x06\x07");
+    file.extend_from_slice(&0_u32.to_le_bytes());
+    file.extend_from_slice(&record.to_le_bytes());
+    file.extend_from_slice(&1_u32.to_le_bytes());
+    file.extend_from_slice(b"PK\x05\x06");
+    file.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+    file.extend_from_slice(&[0xff; 8]);
+    file.extend_from_slice(&[0, 0]);
+    file
+}
+
+fn open_bytes(bytes: &[u8]) -> Result<Archive, ArchiveError> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("crafted.zip");
+    std::fs::write(&path, bytes).unwrap();
+    Archive::open(&path, "test-password")
+}
+
+fn too_many(result: Result<Archive, ArchiveError>) -> bool {
+    matches!(result, Err(ArchiveError::Invalid(text)) if text.starts_with("too many entries"))
+}
+
+/// Refused from the end records alone: the zip crate would build all of them in memory first.
+#[test]
+fn the_entry_count_is_checked_before_the_central_directory_is_parsed() {
+    assert!(too_many(open_bytes(&zip64_end(&[], 2_000_000, 0))));
+    assert!(too_many(open_bytes(&zip64_end(&[1; 300], 2_000_000, 0))));
+    assert!(too_many(open_bytes(&zip64_end(&[], 2_000_000, 100))));
+    // A record that is only found by searching: the locator names an earlier position.
+    let mut hidden = zip64_end(&[0; 64], 2_000_000, 0);
+    let locator = hidden.len() - 42;
+    hidden[locator + 8..locator + 16].copy_from_slice(&0_u64.to_le_bytes());
+    assert!(too_many(open_bytes(&hidden)));
+    // Far from the end, past the first chunk of the search.
+    let mut far = zip64_end(&vec![0; 3 << 20], 2_000_000, 0);
+    let locator = far.len() - 42;
+    far[locator + 8..locator + 16].copy_from_slice(&0_u64.to_le_bytes());
+    assert!(too_many(open_bytes(&far)));
+
+    // Below the bound it isn't this check that speaks, and our own archives still open.
+    assert!(!too_many(open_bytes(&zip64_end(&[], 100, 0))));
+    assert!(!too_many(open_bytes(b"too short")));
+    assert!(!too_many(open_bytes(b"")));
+    assert!(Archive::open(&fixture("android-backup.zip"), "test-password").is_ok());
+}
+
 #[test]
 fn oversized_entries_are_bounded_while_reading() {
     let mut archive = Archive::open(&fixture("android-backup.zip"), "test-password").unwrap();
@@ -206,6 +293,23 @@ fn build_zip(dir: &std::path::Path, entries: &[(&str, &[u8], bool)]) -> std::pat
     }
     writer.finish().unwrap();
     path
+}
+
+#[test]
+fn entries_larger_than_the_first_reservation_read_whole() {
+    // The buffer moves several times on the way: everything arrives, in order.
+    let dir = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..(5 << 20)).map(|i: u32| (i % 251) as u8).collect();
+    let path = build_zip(dir.path(), &[("message_media_a", &data, true)]);
+    let mut archive = Archive::open(&path, "test-password").unwrap();
+    assert_eq!(
+        archive.read("message_media_a", 8 << 20).unwrap().as_slice(),
+        data.as_slice()
+    );
+    assert!(matches!(
+        archive.read("message_media_a", (5 << 20) - 1),
+        Err(ArchiveError::TooLarge)
+    ));
 }
 
 #[test]
@@ -265,6 +369,131 @@ fn bad_containers_are_rejected() {
     // Not a ZIP at all.
     let path = dir.path().join("junk.zip");
     std::fs::write(&path, b"junk").unwrap();
+    assert!(matches!(
+        Archive::open(&path, "test-password"),
+        Err(ArchiveError::Invalid(_))
+    ));
+}
+
+#[test]
+fn duplicate_names_are_refused() {
+    // Someone without the password appends an older entry and a second central directory
+    // record: same name, different bytes, both authentic. Patching one name reproduces that.
+    let dir = tempfile::tempdir().unwrap();
+    let path = build_zip(
+        dir.path(),
+        &[
+            ("settings", b"\"version\",\"27\"\n", true),
+            ("settingz", b"\"version\",\"15\"\n", true),
+        ],
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    let mut patched = 0;
+    for start in 0..bytes.len() - 8 {
+        if &bytes[start..start + 8] == b"settingz" {
+            bytes[start..start + 8].copy_from_slice(b"settings");
+            patched += 1;
+        }
+    }
+    assert_eq!(patched, 2, "local header and central directory");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        Archive::open(&path, "test-password"),
+        Err(ArchiveError::Invalid(reason)) if reason == "duplicate entry"
+    ));
+}
+
+#[test]
+fn entries_sharing_bytes_are_refused() {
+    // Many names over one highly compressed entry: each read would inflate it again.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .with_aes_encryption(zip::AesMode::Aes256, "test-password");
+    writer.start_file("message_media_a", options).unwrap();
+    writer.write_all(&[0; 4096]).unwrap();
+    writer
+        .shallow_copy_file("message_media_a", "message_media_b")
+        .unwrap();
+    writer.finish().unwrap();
+    assert!(matches!(
+        Archive::open(&path, "test-password"),
+        Err(ArchiveError::Invalid(reason)) if reason == "overlapping entries"
+    ));
+}
+
+/// The archive rewritten the way a streaming writer lays it out: sizes and CRC zero in the local
+/// header, flag bit 3 set, and a data descriptor after each entry's data. Offsets and sizes in the
+/// central directory stay true.
+fn with_data_descriptors(zip: &[u8]) -> Vec<u8> {
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([zip[at], zip[at + 1]]));
+    let u32_at = |at: usize| u32::from_le_bytes(zip[at..at + 4].try_into().unwrap()) as usize;
+    let eocd = zip
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .unwrap();
+    let central_start = u32_at(eocd + 16);
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    let mut record = central_start;
+    for _ in 0..u16_at(eocd + 10) {
+        let compressed = u32_at(record + 20);
+        let local = u32_at(record + 42);
+        let data = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        let new_local = u32::try_from(out.len()).unwrap();
+        out.extend_from_slice(&zip[local..data + compressed]);
+        let header = &mut out[new_local as usize..];
+        header[6] |= 0x08;
+        header[14..26].fill(0);
+        out.extend_from_slice(b"PK\x07\x08");
+        out.extend_from_slice(&zip[record + 16..record + 28]);
+
+        let end = record + 46 + u16_at(record + 28) + u16_at(record + 30) + u16_at(record + 32);
+        let central_entry = central.len();
+        central.extend_from_slice(&zip[record..end]);
+        central[central_entry + 8] |= 0x08;
+        central[central_entry + 42..central_entry + 46].copy_from_slice(&new_local.to_le_bytes());
+        record = end;
+    }
+    let new_central = u32::try_from(out.len()).unwrap();
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&zip[eocd..]);
+    let new_eocd = out.len() - (zip.len() - eocd);
+    out[new_eocd + 16..new_eocd + 20].copy_from_slice(&new_central.to_le_bytes());
+    out
+}
+
+#[test]
+fn data_descriptors_between_entries_are_no_overlap() {
+    // The gap they leave lies outside what the central directory claims, so a streamed backup
+    // has to pass the refusal above and read as before.
+    let dir = tempfile::tempdir().unwrap();
+    let streamed = dir.path().join("streamed.zip");
+    let original = fixture("android-backup.zip");
+    std::fs::write(
+        &streamed,
+        with_data_descriptors(&std::fs::read(&original).unwrap()),
+    )
+    .unwrap();
+    let mut plain = Archive::open(&original, "test-password").unwrap();
+    let mut archive = Archive::open(&streamed, "test-password").unwrap();
+    let names: Vec<String> = plain.entries().iter().map(|e| e.name.clone()).collect();
+    assert!(names.len() > 3);
+    assert_eq!(archive.entries().len(), names.len());
+    for name in names {
+        assert_eq!(
+            archive.read(&name, 8 << 20).unwrap().as_slice(),
+            plain.read(&name, 8 << 20).unwrap().as_slice(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn non_ascii_names_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = build_zip(dir.path(), &[("message_m\u{e4}dia", b"x", true)]);
     assert!(matches!(
         Archive::open(&path, "test-password"),
         Err(ArchiveError::Invalid(_))

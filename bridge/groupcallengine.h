@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QList>
 #include <QMutex>
+#include <QSet>
 #include <QObject>
 #include <QScopedPointer>
 #include <QTimer>
@@ -16,6 +17,7 @@
 #include <atomic>
 
 typedef struct _GstElement GstElement;
+typedef struct _GstObject GstObject;
 typedef struct _GstPromise GstPromise;
 typedef struct _GstBin GstBin;
 typedef struct _GstWebRTCDataChannel GstWebRTCDataChannel;
@@ -48,6 +50,8 @@ public:
     // Participants came or went: the core's new remote offer.
     void updateOffer(const QString &offer);
     void sendChannel(const QByteArray &data);
+    // Also before the pipeline exists: it starts as asked, and a new call keeps this until told
+    // otherwise.
     void setMuted(bool muted);
     // Which participant sends on which MID (microphone and camera, from the core's participant
     // list).
@@ -56,6 +60,9 @@ public:
     void setCamera(bool on, bool front);
     void stop();
     bool active() const { return m_pipeline != nullptr; }
+    // What came in over the network so far (before decryption; none if that couldn't be counted):
+    // while it grows the connection is alive, whoever speaks.
+    unsigned packetsReceived() const { return m_packetsReceived; }
 
 signals:
     // The SFU's data channel is open (the SFU sends Hello on it).
@@ -76,6 +83,7 @@ private slots:
     void onChannelData(const QByteArray &data);
     void onError(const QString &reason);
     void sendConsent();
+    void onParticipantFrame(quint32 participant, const QImage &image);
 
 private:
     void setRemote(const QString &offer);
@@ -84,6 +92,7 @@ private:
     static void onRemoteSetCb(GstPromise *promise, void *self);
     static void onAnswerCreated(GstPromise *promise, void *self);
     static void onConnectionStateCb(GstElement *webrtc, GParamSpec *spec, void *self);
+    static int onNetworkBuffer(GstPad *pad, GstPadProbeInfo *info, void *self);
     static void onElementAdded(GstBin *pipeline, GstBin *bin, GstElement *element, void *self);
     static void onChannelOpenCb(GstWebRTCDataChannel *channel, void *self);
     static void onChannelDataCb(GstWebRTCDataChannel *channel, struct _GBytes *data, void *self);
@@ -108,11 +117,13 @@ private:
     void linkMicrophone();
     void removeCamera();
     quint32 participantOf(const QString &mid);
+    bool isSharedAudio(GstObject *source) const;
 
     GstElement *m_pipeline = nullptr;
     GstElement *m_webrtc = nullptr;
     GstWebRTCDataChannel *m_channel = nullptr;
     GstElement *m_micVolume = nullptr;
+    bool m_muted = false;
     unsigned m_busWatch = 0;
     // The microphone's RTP end until linkMicrophone() hands it to webrtcbin.
     GstElement *m_sendTail = nullptr;
@@ -148,6 +159,8 @@ private:
     // MID → participant, read from GStreamer threads.
     QMutex m_midsLock;
     QHash<QString, quint32> m_mids;
+    // This call's certificate and key (PEM). This copy is wiped in stop(); the copies GStreamer
+    // makes when it gets them are not cleared (see there).
     QByteArray m_certificate;
     QVariantList m_candidates;
     bool m_candidatesAdded = false;
@@ -159,6 +172,11 @@ private:
     QString m_remoteFingerprint;
     std::atomic<bool> m_verified{false};
     QList<QByteArray> m_receivedChannel;
+    std::atomic<unsigned> m_packetsReceived{0};
+    // Participants with a picture on its way to the GUI: their next ones are dropped until it got
+    // there (read from GStreamer threads).
+    QMutex m_framesLock;
+    QSet<quint32> m_pendingFrames;
     // ICE consent checks (see sendConsent) with the credentials of both sides.
     QTimer m_consent;
     QString m_localUfrag;

@@ -26,6 +26,9 @@ Dialog {
         qsTrId("threesea-me-older-all")
     ]
 
+    //% "Groups with only you in them are cleaned up too, and private chats while they are unlocked."
+    readonly property string scopeText: qsTrId("threesea-me-clean-up-scope")
+
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
@@ -37,6 +40,8 @@ Dialog {
             DialogHeader {
                 //% "Delete"
                 acceptText: qsTrId("threesea-he-delete")
+                //% "Clean up all chats"
+                title: qsTrId("threesea-he-clean-up-all-chats")
             }
 
             SectionHeader {
@@ -48,8 +53,8 @@ Dialog {
                 checked: !dialog.messages
                 //% "Media files"
                 text: qsTrId("threesea-me-clean-up-media")
-                //% "Photos, videos, voice messages and files go; the messages and their previews stay. They can be downloaded again as long as Threema still has them."
-                description: qsTrId("threesea-me-clean-up-media-description")
+                //% "Photos, videos, voice messages and files are deleted from this device, usually for good; the messages and their previews stay. Starred messages and messages still on their way keep their files."
+                description: qsTrId("threesea-me-clean-up-media-description") + " " + dialog.scopeText
                 onClicked: dialog.messages = false
             }
             TextSwitch {
@@ -57,8 +62,8 @@ Dialog {
                 checked: dialog.messages
                 //% "Messages and media"
                 text: qsTrId("threesea-me-clean-up-messages")
-                //% "Starred messages are kept."
-                description: qsTrId("threesea-me-clean-up-messages-description")
+                //% "Starred messages, open polls and messages still on their way stay."
+                description: qsTrId("threesea-me-clean-up-messages-description") + " " + dialog.scopeText
                 onClicked: dialog.messages = true
             }
 

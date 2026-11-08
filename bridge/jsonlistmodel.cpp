@@ -69,6 +69,22 @@ int JsonListModel::indexOfKey(const QVariant &key) const
     return indexOf(key, 0);
 }
 
+int JsonListModel::indexOfField(const QString &field, const QVariant &value) const
+{
+    for (int i = 0; i < m_rows.size(); ++i) {
+        const auto found = m_rows.at(i).constFind(field);
+        if (found != m_rows.at(i).constEnd() && found.value() == value) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+QVariant JsonListModel::fieldAt(int row, const QString &field) const
+{
+    return row >= 0 && row < m_rows.size() ? m_rows.at(row).value(field) : QVariant();
+}
+
 QVariantMap JsonListModel::get(int index) const
 {
     return index >= 0 && index < m_rows.size() ? m_rows.at(index) : QVariantMap();

@@ -44,6 +44,25 @@ impl App {
         Ok((key, conversation, message.id, state))
     }
 
+    /// `polls`: a chat's polls, and how many of them wait for our vote with the newest one's
+    /// question (the chat's reminder).
+    pub(crate) fn polls_json(&self, identity: &str) -> Result<Value, ApiError> {
+        let (key, _) = self.readable_chat(identity)?;
+        let me = self.own_identity()?;
+        let polls = self.store.conversation_polls(&key)?;
+        let mut waiting = polls.iter().filter(|poll| polls::awaits_vote(poll, &me));
+        let newest = waiting.next();
+        let question = newest
+            .and_then(|poll| serde_json::from_str::<Value>(&poll.body).ok())
+            .map(|state| state["description"].clone());
+        let unanswered = usize::from(newest.is_some()) + waiting.count();
+        Ok(json!({
+            "polls": self.store.messages_json(&polls),
+            "unanswered": unanswered,
+            "question": question,
+        }))
+    }
+
     /// `createPoll`.
     pub(crate) fn create_poll(
         &mut self,
@@ -96,6 +115,10 @@ impl App {
                 }
             }
             Conversation::List(_) => return Err(ApiError::NotSupportedByContact),
+            // No receivers, but our other devices hear of it, like any other change to a note.
+            Conversation::Group(group) if group.is_notes() => {
+                self.queue(&key, &conversation, OUTBOX_POLL_VOTE, &body)?;
+            }
             Conversation::Group(group) => {
                 let receivers: Vec<String> = if state["announce"] == true {
                     group.members.clone()
@@ -123,6 +146,9 @@ impl App {
         }
         if state["state"] == 1 {
             return Ok(Value::Null);
+        }
+        if !polls::closing_fits(&state) {
+            return Err(ApiError::PollResultsTooLong);
         }
         state["state"] = json!(1);
         let closed = self.store.insert_outgoing(

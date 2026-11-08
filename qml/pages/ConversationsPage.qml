@@ -18,8 +18,9 @@ Page {
     property int archivedCount: 0
     property int privateCount: 0
 
-    // Leaving the private chats hides them again.
-    Component.onDestruction: if (privateList) backend.call("lock")
+    // Leaving the private chats hides them again; the core still takes the files a chat of theirs
+    // left on their way to it.
+    Component.onDestruction: if (privateList) backend.lockWithFilesOnTheirWay()
 
     // The remorse callback for a chat command. Made here: it runs after the context menu, and with
     // it the menu's scope, is gone.
@@ -33,6 +34,11 @@ Page {
     }
 
     function openPrivate() {
+        // Marked by a restore or a linked device with no lock here yet: a PIN comes first.
+        if (!(window.lockInfo && window.lockInfo.lock)) {
+            Notices.show(qsTrId("threesea-la-private-needs-lock"), Notice.Long, Notice.Center)
+            return
+        }
         var unlock = pageStack.push(Qt.resolvedUrl("UnlockPage.qml"), {
             privateChats: true,
             //% "Private chats"
@@ -48,7 +54,7 @@ Page {
             if (ok) {
                 page.reload()
             } else if (kind === "lockNeeded") {
-                //% "Private chats need an app lock. Set up a PIN in Settings, App lock."
+                //% "Private chats need an app lock. Set one up in Settings, Security, App lock."
                 Notices.show(qsTrId("threesea-la-private-needs-lock"), Notice.Long, Notice.Center)
             } else {
                 Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
@@ -60,7 +66,8 @@ Page {
         id: conversations
         keyField: "identity"
         roles: ["identity", "displayName", "unread", "markedUnread", "lastMessage", "verification", "section",
-                "group", "senderName", "pictureVersion", "muted", "pinned", "distributionList", "draft"]
+                "group", "left", "senderName", "pictureVersion", "muted", "pinned", "distributionList", "draft",
+                "draftMentions"]
     }
 
     // New group: name and members in one dialog; its chat opens once the dialog has closed.
@@ -129,13 +136,38 @@ Page {
         onTriggered: page.load()
     }
 
+    // The list follows every change, also under other pages and with the window closed: one that
+    // caught up only on coming back jumped in front of the user (user 2026-11-07).
+
+    // Whether changed messages show in this list: of a row, only the newest message does (its
+    // delivery icon, its text). While a reload is under way the list can't tell yet which is the
+    // newest: a send's ack may overtake the reply that brings the new message.
+    function showsAnyOf(messages) {
+        if (reloadTimer.running || loadsRunning > 0) return true
+        for (var i = 0; i < messages.length; ++i) {
+            var row = conversations.indexOfKey(messages[i].conversation)
+            if (row >= 0 && conversations.get(row).lastMessage.id === messages[i].id) return true
+        }
+        return false
+    }
+    property int loadsRunning: 0
+
     function load() {
-        backend.call("conversations", { archived: page.archived, private: page.privateList }, function(ok, result) {
-            if (!ok) return
+        loadsRunning++
+        backend.call("conversations", { archived: page.archived, private: page.privateList },
+                     function(ok, result, kind, message) {
+            page.loadsRunning--
+            // Locked: the page goes anyway, and has nothing to say about that.
+            if (!ok) {
+                if (kind !== "locked") page.loadError = Errors.text(kind, message)
+                return
+            }
+            page.loadError = ""
             page.archivedCount = result.archivedCount || 0
             page.privateCount = result.privateCount || 0
             if (page.privateList) window.clearNotification("private")
-            // Day sections like Jolla Messages ("Yesterday", "Monday", "Wednesday, 14 October").
+            // Day sections like Jolla Messages ("Yesterday", "Monday", "Wednesday, 14 October"),
+            // by the same time the core orders the list by.
             // Pinned chats come first (core), under their own section.
             var list = result.conversations
             page.pinnedCount = 0
@@ -146,18 +178,32 @@ Page {
                     page.pinnedCount++
                 } else {
                     // A restored group can come without a creation date: no day section then.
-                    list[i].section = list[i].lastMessage.createdAt > 0
-                                      ? Fmt.day(list[i].lastMessage.createdAt) : ""
+                    list[i].section = list[i].lastMessage.arrivedAt > 0
+                                      ? Fmt.day(list[i].lastMessage.arrivedAt) : ""
                 }
             }
             conversations.update(list)
         })
     }
 
+    // Why the list could not be read: no chats and "no chats" are not the same.
+    property string loadError
     property int pinnedCount: 0
+    readonly property bool canLockNow: !!(window.lockInfo && window.lockInfo.lock && window.lockInfo.lock.appLock)
 
     function pin(identity, pinned) {
         backend.call("setPinned", { identity: identity, pinned: pinned }, function() { page.reload() })
+    }
+
+    function setMuted(identity, muted) {
+        backend.call("setChatNotifications", {
+            identity: identity,
+            policy: muted ? "never" : null,
+            until: muted ? Date.now() + 8 * 3600000 : null
+        }, function(ok, result, kind, message) {
+            if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            page.reload()
+        })
     }
 
     function movePinned(identity, offset) {
@@ -168,15 +214,68 @@ Page {
         pageStack.push(Qt.resolvedUrl("ChatPage.qml"), { identity: identity })
     }
 
+    // A new or restored ID is asked for a nickname once. If the update question is up first, at
+    // the next showing.
+    // What a new ID is asked on the chat list, one at a time, each pushed when the page before it
+    // has gone: nickname, Threema Safe, then the one-time update question. Coming back here runs
+    // this again, up to what is left. Under a lock or mid-transition it waits for the next time.
+    property bool firstRunDone: false
+    // Going back from the question leaves it open for the next start, not for this page's next look.
+    property bool safeSetupAsked: false
+    function firstRunSteps() {
+        backend.call("profile", {}, function(ok, profile) {
+            if (!ok || firstRunDone || !firstRunFree()) return
+            if (profile.askNickname) {
+                pageStack.push(Qt.resolvedUrl("NicknameDialog.qml"))
+                return
+            }
+            backend.call("safeStatus", {}, function(ok, safe) {
+                if (!ok || firstRunDone || !firstRunFree()) return
+                // With an app lock the app has been in use for a while, and turning Safe on needs
+                // the PIN: Settings has it, and the reminder says so.
+                if (safe.askSetup && !safeSetupAsked && !(window.lockInfo && window.lockInfo.lock)) {
+                    safeSetupAsked = true
+                    askSafeSetup()
+                    return
+                }
+                firstRunDone = true
+                window.askUpdateCheck()
+            })
+        })
+    }
+    // A restore from a Data backup was cut short: the rest of the import is waiting for the user.
+    property bool dataImportUnfinished: false
+    function checkDataImport() {
+        backend.call("profile", {}, function(ok, profile) {
+            if (ok) dataImportUnfinished = profile.dataImportUnfinished === true
+        })
+    }
+    function firstRunFree() {
+        return status === PageStatus.Active && !window.stackHeld && !pageStack.busy
+                && window.pendingDataImport === null
+    }
+    function askSafeSetup() {
+        var dialog = pageStack.push(Qt.resolvedUrl("SafePasswordDialog.qml"), { firstRun: true })
+        dialog.accepted.connect(function() {
+            if (dialog.skip) {
+                backend.call("safeDeclineSetup", {})
+                return
+            }
+            backend.call("safeEnable", { password: dialog.password, pin: "" }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+            })
+        })
+    }
+
     // Shown at once when created; coming back to it (it was just loaded the first time) reloads.
     property bool wasActive: false
     Component.onCompleted: load()
     onStatusChanged: {
         if (status === PageStatus.Active) {
             if (wasActive) reload()
-            // The main list's first showing, after setup or unlocking: the one-time update question.
-            else if (mainList) window.askUpdateCheck()
             wasActive = true
+            if (mainList && !firstRunDone) firstRunSteps()
+            if (mainList) checkDataImport()
             // Contacts are attached: swipe left (forward indicator top right), like Jolla apps.
             if (mainList && pageStack.nextPage(page) === null) pageStack.pushAttached(Qt.resolvedUrl("ContactsPage.qml"))
         }
@@ -185,11 +284,31 @@ Page {
     Connections {
         target: backend
         onCoreEvent: {
-            if (name === "messageAdded" || name === "messagesChanged" || name === "contactsChanged"
+            if (name === "messageAdded" || name === "contactsChanged"
                     || name === "conversationRead" || name === "groupsChanged" || name === "chatsChanged") {
                 page.reload()
+            } else if (name === "privateChanged") {
+                // A chat that went private must not be drawn again, not even until the reply is
+                // here. Gone from this list at once.
+                if (data.private !== page.privateList) conversations.remove(data.identity)
+                page.reload()
+            } else if (name === "messagesChanged") {
+                // A private chat's message from another device comes only as a change, with an id
+                // the list doesn't know yet, and no conversationRead follows it.
+                if (page.privateList || page.showsAnyOf(data.messages)) page.reload()
             }
         }
+    }
+
+    FontMetrics {
+        id: nameMetrics
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.fontSizeLarge
+    }
+    FontMetrics {
+        id: previewMetrics
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.fontSizeSmall
     }
 
     SilicaListView {
@@ -207,11 +326,17 @@ Page {
                 onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
             }
             MenuItem {
+                // Makes room for Connect now and Lock now (four items at most). The Contacts page
+                // has it too.
+                visible: backend.connectionState !== "disconnected" && !page.canLockNow
                 //% "New distribution list"
                 text: qsTrId("threesea-me-new-list")
                 onClicked: page.newList()
             }
             MenuItem {
+                // Offline with an app lock there are both of those to make room for; then the
+                // Contacts page has it, in place of its Refresh.
+                visible: backend.connectionState !== "disconnected" || !page.canLockNow
                 //% "New group"
                 text: qsTrId("threesea-me-new-group")
                 onClicked: page.newGroup()
@@ -220,6 +345,13 @@ Page {
                 //% "Search"
                 text: qsTrId("threesea-me-search")
                 onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"))
+            }
+            // At once, whatever the grace time says (the phone is about to change hands).
+            MenuItem {
+                visible: page.canLockNow
+                //% "Lock now"
+                text: qsTrId("threesea-me-lock-now")
+                onClicked: window.lockNow()
             }
             // Offline: try now instead of waiting for the next attempt (like Jolla Mail's Sync).
             MenuItem {
@@ -230,20 +362,77 @@ Page {
             }
         }
 
-        header: PageHeader {
-            title: page.privateList
-                   ? qsTrId("threesea-he-private-chats")
-                   : page.archived
-                   //% "Archived chats"
-                   ? qsTrId("threesea-he-archived-chats")
-                   //% "Chats"
-                   : qsTrId("threesea-he-chats")
-            description: backend.connectionState === "connected" ? ""
-                         : backend.connectionState === "connecting"
-                           //% "Connecting…"
-                           ? qsTrId("threesea-la-connecting")
-                           //% "Offline"
-                           : qsTrId("threesea-la-offline")
+        // The hint below arrives after the first layout.
+        StayAtTop { target: listView }
+
+        header: Column {
+            width: listView.width
+
+            PageHeader {
+                title: page.privateList
+                       ? qsTrId("threesea-he-private-chats")
+                       : page.archived
+                       //% "Archived chats"
+                       ? qsTrId("threesea-he-archived-chats")
+                       //% "Chats"
+                       : qsTrId("threesea-he-chats")
+                description: window.storageProblem ? qsTrId("threesea-la-storage-problem-title")
+                             : backend.connectionState === "connected" ? ""
+                             : backend.connectionState === "connecting"
+                               //% "Connecting…"
+                               ? qsTrId("threesea-la-connecting")
+                               //% "Offline"
+                               : qsTrId("threesea-la-offline")
+            }
+
+            // What the server said: too long for the header's own line, and this is the place the
+            // user looks at to find out what is going on. The server's words stay plain text.
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                visible: text.length > 0
+                height: visible ? implicitHeight + Theme.paddingMedium : 0
+                text: window.offlineReasonText
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignRight
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+            }
+
+            BackgroundItem {
+                id: dataImportHint
+                width: parent.width
+                visible: page.mainList && page.dataImportUnfinished && window.pendingDataImport === null
+                height: visible ? Math.max(hintText.implicitHeight + 2 * Theme.paddingMedium, Theme.itemSizeSmall) : 0
+                onClicked: window.pushWithPin(Qt.resolvedUrl("DataBackupPage.qml"))
+
+                Label {
+                    id: hintText
+                    x: Theme.horizontalPageMargin
+                    width: hintDismiss.x - x - Theme.paddingMedium
+                    anchors.verticalCenter: parent.verticalCenter
+                    wrapMode: Text.Wrap
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.highlightColor
+                    //% "Your Data backup isn't fully imported yet. Tap to import it again; it continues where it stopped."
+                    text: qsTrId("threesea-la-data-import-unfinished")
+                }
+
+                IconButton {
+                    id: hintDismiss
+                    anchors {
+                        right: parent.right
+                        rightMargin: Theme.paddingMedium
+                        verticalCenter: parent.verticalCenter
+                    }
+                    icon.source: "image://theme/icon-m-clear"
+                    onClicked: {
+                        page.dataImportUnfinished = false
+                        backend.call("dismissDataImportHint", {})
+                    }
+                }
+            }
         }
 
         section {
@@ -259,7 +448,9 @@ Page {
         // Unread chats are shown in the highlight colour.
         delegate: ListItem {
             id: item
-            contentHeight: Theme.itemSizeExtraLarge
+            // The same for every row, whatever its preview: the name and three lines.
+            contentHeight: Math.max(Theme.itemSizeExtraLarge,
+                                    nameMetrics.height + 3 * previewMetrics.lineSpacing + 2 * Theme.paddingSmall)
             onClicked: page.openChat(model.identity)
 
             // Unread look also for a chat the user marked unread by hand (the count stays away;
@@ -312,6 +503,16 @@ Page {
                         }
                     }
                     MenuItem {
+                        // The quick choice for a chat that won't stop; the others are on its page.
+                        visible: model.distributionList !== true
+                        text: model.muted === true
+                              //% "Notifications on"
+                              ? qsTrId("threesea-me-notifications-back-on")
+                              //% "Notifications off for 8 hours"
+                              : qsTrId("threesea-me-notifications-off-8-hours")
+                        onClicked: page.setMuted(model.identity, model.muted !== true)
+                    }
+                    MenuItem {
                         visible: !page.privateList
                         text: page.archived
                               //% "Move back to chats"
@@ -342,19 +543,32 @@ Page {
                                                       page.chatAction("emptyConversation", model.identity))
                     }
                     MenuItem {
-                        //% "Delete chat"
-                        text: qsTrId("threesea-me-delete-chat")
-                        //% "Deleting chat"
-                        onClicked: item.remorseAction(qsTrId("threesea-la-deleting-chat"),
+                        // A group goes only once left (its page does that); until then deleting
+                        // would just empty it. A list's chat goes with the list.
+                        visible: model.group !== true || model.left === true
+                        text: model.group === true
+                              ? qsTrId("threesea-me-delete-group")
+                              : model.distributionList === true
+                                ? qsTrId("threesea-me-delete-list")
+                                //% "Delete chat"
+                                : qsTrId("threesea-me-delete-chat")
+                        onClicked: item.remorseAction(model.group === true
+                                                      ? qsTrId("threesea-la-deleting-group")
+                                                      : model.distributionList === true
+                                                        ? qsTrId("threesea-la-deleting-list")
+                                                        //% "Deleting chat"
+                                                        : qsTrId("threesea-la-deleting-chat"),
                                                       page.chatAction("deleteConversation", model.identity))
                     }
                 }
             }
 
-            // Picture at the left edge like Jolla Media's lists.
+            // Picture at the left edge like Jolla Media's lists. Its size stays the one of before
+            // the third preview line; the row grows around it (user 2026-11-07).
             Thumbnail {
                 id: avatar
-                height: item.contentHeight
+                height: Theme.itemSizeExtraLarge
+                anchors.verticalCenter: parent.verticalCenter
                 group: model.group === true
                 list: model.distributionList === true
                 highlighted: item.highlighted || pressed
@@ -433,8 +647,10 @@ Page {
                             right: parent.right
                             baseline: nameLabel.baseline
                         }
-                        text: model.lastMessage.createdAt > 0
-                              ? Fmt.clock(model.lastMessage.createdAt, Format, Formatter) : ""
+                        // Under a day's section the clock is enough; "Pinned" says no day.
+                        text: model.lastMessage.arrivedAt <= 0 ? ""
+                              : item.pinned ? Fmt.time(model.lastMessage.arrivedAt, Format, Formatter)
+                              : Fmt.clock(model.lastMessage.arrivedAt, Format, Formatter)
                         font.pixelSize: Theme.fontSizeExtraSmall
                         color: item.highlighted || item.unread ? Theme.highlightColor : Theme.primaryColor
                     }
@@ -459,7 +675,7 @@ Page {
                         width: parent.width - (tick.visible ? tick.width + parent.spacing : 0)
                         // Groups: who wrote it, like Jolla Messages' group conversations.
                         // An unsent draft first, like Jolla Messages.
-                        // About as many characters as the two lines hold, from the width and
+                        // About as many characters as the lines hold, from the width and
                         // the font (measured on the emulator: a line of 534 px at a font size
                         // of 36 holds some 33 characters), a little under so the ellipsis we
                         // add still has room. What is longer is cut by us, see below.
@@ -468,7 +684,7 @@ Page {
                         readonly property string plain: Fmt.previewLine(
                             model.draft
                               //% "Draft: %1"
-                              ? qsTrId("threesea-la-draft").arg(model.draft)
+                              ? qsTrId("threesea-la-draft").arg(Fmt.withMentions(model.draft, model.draftMentions))
                               : (model.group && model.senderName && !model.lastMessage.outgoing
                                  && model.lastMessage.kind !== "status"
                                  ? model.senderName + ": " : "") + Fmt.preview(model.lastMessage),
@@ -477,7 +693,7 @@ Page {
                         readonly property bool pictures: backend.threemaEmoji && Fmt.mayHaveEmoji(plain)
                         textFormat: pictures ? Text.StyledText : Text.PlainText
                         text: pictures ? Fmt.markEmoji(Fmt.escapeHtml(plain), Math.round(font.pixelSize * 1.2)) : plain
-                        maximumLineCount: 2
+                        maximumLineCount: 3
                         wrapMode: Text.Wrap
                         // Qt puts the pictures a line away from their place when it elides
                         // text that contains them (Text.StyledText with <img>, user
@@ -519,20 +735,26 @@ Page {
         }
 
         ViewPlaceholder {
-            enabled: listView.count === 0 && page.archived
+            enabled: listView.count === 0 && page.loadError.length > 0
+            //% "The chats could not be loaded"
+            text: qsTrId("threesea-la-chats-not-loaded")
+            hintText: page.loadError
+        }
+        ViewPlaceholder {
+            enabled: listView.count === 0 && page.loadError.length === 0 && page.archived
             //% "No archived chats"
             text: qsTrId("threesea-la-no-archived")
         }
         ViewPlaceholder {
-            enabled: listView.count === 0 && page.privateList
+            enabled: listView.count === 0 && page.loadError.length === 0 && page.privateList
             //% "No private chats"
             text: qsTrId("threesea-la-no-private")
         }
         ViewPlaceholder {
-            enabled: listView.count === 0 && page.mainList
+            enabled: listView.count === 0 && page.loadError.length === 0 && page.mainList
             //% "No chats yet"
             text: qsTrId("threesea-la-no-chats")
-            //% "Pull down to write a message"
+            //% "Swipe left to choose a contact"
             hintText: qsTrId("threesea-la-no-chats-hint")
         }
 

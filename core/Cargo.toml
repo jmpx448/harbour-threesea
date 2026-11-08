@@ -15,6 +15,9 @@ crate-type = ["staticlib", "lib"]
 # Made-up chats for the emulator (`demoData`, core/src/demo.rs). Switched on for i486 only
 # (scripts/build-core.sh); never in a build for a phone.
 demo = []
+# A build for a store, which brings its own updates (ADR 0014): no GitHub update check in the
+# binary (scripts/build-core.sh sets it for STORE=1).
+store = []
 
 [dependencies]
 # Voice-message fallback where the platform has no AAC: pure-Rust Opus/Ogg (BSD-3-Clause, no
@@ -31,10 +34,19 @@ qrcode = { version = "=0.14.1", default-features = false }
 rqrr = { version = "=0.11.0", default-features = false }
 libthreema = { path = "../third_party/libthreema/lib" }
 
+# How much room a backup folder's storage has (statvfs, safe API; std has none, and libc directly
+# would need unsafe). Goes into the shipped binary with errno, both new there (until now rustix
+# was only a test dependency, through tempfile). Over libc, which every target here has.
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "use-libc"] }
+
 # Runtime + HTTPS. Same families libthreema's own CLI uses (tokio, reqwest, rustls); TLS via rustls
 # with the ring provider (no system OpenSSL on the network path), our own verifier does pinning.
 tokio = { version = "1.52", default-features = false, features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+# Blob uploads report their progress through a request body of our own (https::ProgressBody);
+# both are in the tree through reqwest already.
+http-body = "=1.1.0"
+bytes = "=1.12.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
@@ -80,4 +92,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
 
 [dev-dependencies]
+# The same rusqlite: tests count commits with its commit hook.
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher", "hooks"] }
 tempfile = "3"
+# The same tokio, its clock under the tests' control.
+tokio = { version = "1.52", default-features = false, features = ["test-util"] }
+# TLS pinning tests: certificates of a throwaway CA, made at test time, for a local TLS server, so
+# no private key lies in the repository. Over the same ring; only ever in tests.
+rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "ring"] }

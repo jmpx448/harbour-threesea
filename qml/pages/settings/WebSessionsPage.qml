@@ -1,20 +1,133 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import harbour.threesea 1.0
+import "../../components"
 import "../../components/Errors.js" as Errors
 import "../../components/Format.js" as Fmt
 
-// Threema Web (ADR 0013): the browsers this phone serves, like Linked devices. Pull down to scan
-// the code web.threema.ch shows; tap a session to connect or disconnect it; long press to remove.
+// Threema Web (ADR 0013): the switch and the browsers this phone serves, like Linked devices. Pull
+// down to scan the code web.threema.ch shows; tap a session to connect or disconnect it; long press
+// to rename or remove it, or pull down to remove them all.
 Page {
     id: page
+    // The window opens this page from its notifications, unless it is on top already.
+    objectName: "webSessions"
     allowedOrientations: Orientation.All
 
+    // The core's switch; off, nothing connects.
+    property bool webOn: true
     property var sessions: []
+    // The self-hosted servers the user allowed.
+    property var servers: []
+    // New certificates of those servers, waiting for the user's word.
+    property var certificates: []
+    property bool reviewing: false
 
-    function load() {
+    // Keyed, so a reload keeps the rows, and a running remorse with them: state events are common
+    // while a browser connects.
+    JsonListModel {
+        id: sessionRows
+        keyField: "id"
+        roles: ["id", "state", "client", "label", "host", "selfHosted", "lastConnection"]
+    }
+    onSessionsChanged: sessionRows.update(sessions)
+    JsonListModel {
+        id: serverRows
+        keyField: "host"
+        roles: ["host"]
+    }
+    onServersChanged: serverRows.update(servers.map(function(host) { return { host: host } }))
+
+    function load(done) {
         backend.call("webSessions", {}, function(ok, result) {
-            if (ok) page.sessions = result.sessions
+            if (ok) {
+                page.webOn = result.enabled
+                page.sessions = result.sessions
+                page.servers = result.servers
+                page.certificates = result.certificates
+            }
+            if (done) done()
+        })
+    }
+
+    function reviewCertificate() {
+        var certificate = certificates[0]
+        reviewing = true
+        window.webCertificateSeen()
+        var answered = function() {
+            page.reviewing = false
+            page.load()
+        }
+        var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"), { host: certificate.host })
+        dialog.accepted.connect(function() {
+            backend.call("webAcceptCertificate", { session: certificate.id }, function(ok, result, kind, message) {
+                if (!ok) {
+                    Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                } else if (result.scanAgain) {
+                    //% "The new certificate is trusted. Scan the code in the browser again to connect it."
+                    Notices.show(qsTrId("threesea-la-web-scan-again"), Notice.Long, Notice.Center)
+                }
+                answered()
+            })
+        })
+        dialog.rejected.connect(function() {
+            backend.call("webDeclineCertificate", { session: certificate.id }, answered)
+        })
+    }
+    // One at a time, and only once this page is on top: a push may have woken the session, or
+    // the scanner may still be closing.
+    Timer {
+        running: page.certificates.length > 0 && !page.reviewing
+                 && page.status === PageStatus.Active && !pageStack.busy
+        interval: 100
+        onTriggered: page.reviewCertificate()
+    }
+
+    // A session the browser never stored is gone from the list by now.
+    function showDisconnected(id) {
+        var kept = page.sessions.some(function(session) { return session.id === id })
+        Notices.show(kept
+                     //% "Threema Web disconnected. Tap the browser to connect it again."
+                     ? qsTrId("threesea-la-web-disconnected-kept")
+                     //% "Threema Web disconnected."
+                     : qsTrId("threesea-la-web-disconnected"), Notice.Long, Notice.Center)
+    }
+
+    // Here, not in the context menu: its scope is gone when the remorse runs out.
+    function removeSession(item, id) {
+        //% "Removing"
+        item.remorseAction(qsTrId("threesea-la-web-removing"), function() {
+            backend.call("webDelete", { session: id }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
+            })
+        })
+    }
+
+    function clientName(client) {
+        return client ? client.charAt(0).toUpperCase() + client.slice(1)
+                        //% "Browser"
+                      : qsTrId("threesea-la-web-browser")
+    }
+
+    function renameSession(id, label, client) {
+        var dialog = pageStack.push(Qt.resolvedUrl("WebSessionNameDialog.qml"),
+                                    { name: label, ownName: clientName(client) })
+        dialog.accepted.connect(function() {
+            backend.call("webRename", { session: id, label: dialog.name }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
+            })
+        })
+    }
+
+    function removeServer(item, host) {
+        item.remorseAction(qsTrId("threesea-la-web-removing"), function() {
+            backend.call("webRemoveServer", { host: host }, function(ok, result, kind, message) {
+                if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                page.load()
+            })
         })
     }
 
@@ -40,22 +153,19 @@ Page {
     Component.onCompleted: load()
 
     Connections {
+        target: window
+        onWebSessionsRemoved: page.load()
+    }
+
+    Connections {
         target: backend
         onCoreEvent: {
             if (name === "webSession") {
-                page.load()
-                if (data.state === "stopped" && data.error && data.error !== "certificate changed") {
-                    //% "Threema Web disconnected: %1"
-                    Notices.show(qsTrId("threesea-la-web-ended").arg(data.error), Notice.Long, Notice.Center)
-                }
+                // `error` is a code for the log's sake; a changed certificate has its own dialog.
+                var failed = data.state === "stopped" && data.error && data.error !== "certificateChanged"
+                page.load(failed ? function() { page.showDisconnected(data.id) } : undefined)
             } else if (name === "webCertificateChanged") {
-                var dialog = pageStack.push(Qt.resolvedUrl("WebHostDialog.qml"),
-                                            { host: data.host, certificateChanged: true })
-                dialog.accepted.connect(function() {
-                    backend.call("webAcceptCertificate", { session: data.id }, function(ok, result, kind, message) {
-                        if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
-                    })
-                })
+                page.load()
             }
         }
     }
@@ -63,10 +173,23 @@ Page {
     SilicaListView {
         id: list
         anchors.fill: parent
-        model: page.sessions
+        model: sessionRows
+
+        // The hint in the header appears with the first browser.
+        StayAtTop { target: list }
 
         PullDownMenu {
+            // Switched off, the browsers are still listed, and can still be removed.
+            visible: page.webOn || page.sessions.length > 0
             MenuItem {
+                visible: page.sessions.length > 0
+                //% "Remove all browsers"
+                text: qsTrId("threesea-me-web-remove-all")
+                //% "Removing all browsers"
+                onClicked: Remorse.popupAction(page, qsTrId("threesea-la-web-removing-all"), window.removeAllWebSessions)
+            }
+            MenuItem {
+                visible: page.webOn
                 //% "Scan Threema Web code"
                 text: qsTrId("threesea-me-scan-web-code")
                 onClicked: {
@@ -76,13 +199,41 @@ Page {
             }
         }
 
-        header: PageHeader {
-            //% "Threema Web"
-            title: qsTrId("threesea-he-threema-web")
+        header: Column {
+            width: parent.width
+
+            PageHeader {
+                //% "Threema Web"
+                title: qsTrId("threesea-he-threema-web")
+            }
+            TextSwitch {
+                automaticCheck: false
+                checked: page.webOn
+                //% "Threema Web"
+                text: qsTrId("threesea-la-web-enabled")
+                //% "Lets the browsers listed here connect to this phone and use your chats. Turning it off disconnects them and keeps them in the list."
+                description: qsTrId("threesea-la-web-enabled-description")
+                onClicked: backend.call("webSetEnabled", { enabled: !checked }, function(ok, result, kind, message) {
+                    if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
+                    page.load()
+                })
+            }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                visible: page.webOn && page.sessions.length > 0
+                bottomPadding: Theme.paddingMedium
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+                // A push wakes a disconnected browser's session again, as on Android.
+                //% "Tap a browser to connect or disconnect it. Threema Web must be open in the browser to connect. A disconnected browser can connect again when it is opened; removing it or turning off the switch above keeps it out."
+                text: qsTrId("threesea-la-web-tap-hint")
+            }
         }
 
         ViewPlaceholder {
-            enabled: list.count === 0
+            enabled: page.webOn && list.count === 0 && page.servers.length === 0
             //% "No browsers"
             text: qsTrId("threesea-la-web-none")
             //% "Open web.threema.ch in a browser and pull down to scan its code"
@@ -94,15 +245,18 @@ Page {
             contentHeight: Theme.itemSizeMedium
             menu: ContextMenu {
                 MenuItem {
+                    //% "Rename"
+                    text: qsTrId("threesea-me-web-rename")
+                    onClicked: page.renameSession(model.id, model.label, model.client)
+                }
+                MenuItem {
                     //% "Remove"
                     text: qsTrId("threesea-me-web-remove")
-                    onClicked: item.remorseDelete(function() {
-                        backend.call("webDelete", { session: modelData.id }, function() { page.load() })
-                    })
+                    onClicked: page.removeSession(item, model.id)
                 }
             }
-            onClicked: backend.call(modelData.state === "stopped" ? "webStart" : "webStop",
-                                    { session: modelData.id }, function(ok, result, kind, message) {
+            onClicked: backend.call(model.state === "stopped" ? "webStart" : "webStop",
+                                    { session: model.id }, function(ok, result, kind, message) {
                 if (!ok) Notices.show(Errors.text(kind, message), Notice.Long, Notice.Center)
                 page.load()
             })
@@ -112,7 +266,7 @@ Page {
                 x: Theme.horizontalPageMargin
                 anchors.verticalCenter: parent.verticalCenter
                 source: "image://theme/icon-m-website"
-                highlighted: item.highlighted || modelData.state === "connected"
+                highlighted: item.highlighted || model.state === "connected"
             }
             Column {
                 anchors {
@@ -126,17 +280,56 @@ Page {
                     width: parent.width
                     truncationMode: TruncationMode.Fade
                     color: item.highlighted ? Theme.highlightColor : Theme.primaryColor
-                    text: modelData.client
-                          ? modelData.client.charAt(0).toUpperCase() + modelData.client.slice(1)
-                          //% "Browser"
-                          : qsTrId("threesea-la-web-browser")
+                    // Typed by the user or said by the browser: text, never markup.
+                    textFormat: Text.PlainText
+                    text: model.label || page.clientName(model.client)
                 }
                 Label {
                     width: parent.width
                     truncationMode: TruncationMode.Fade
                     font.pixelSize: Theme.fontSizeExtraSmall
                     color: item.highlighted ? Theme.secondaryHighlightColor : Theme.secondaryColor
-                    text: page.stateText(modelData) + (modelData.selfHosted ? " · " + modelData.host : "")
+                    text: page.stateText(model) + (model.selfHosted ? " · " + model.host : "")
+                }
+            }
+        }
+
+        footer: Column {
+            width: parent.width
+            visible: page.servers.length > 0
+
+            SectionHeader {
+                //% "Allowed servers"
+                text: qsTrId("threesea-se-web-servers")
+            }
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryHighlightColor
+                //% "Self-hosted Threema Web servers you allowed. Removing one also removes its browsers, and the next code naming it asks again."
+                text: qsTrId("threesea-la-web-servers-description")
+            }
+            Repeater {
+                model: serverRows
+                ListItem {
+                    id: server
+                    contentHeight: Theme.itemSizeSmall
+                    menu: ContextMenu {
+                        MenuItem {
+                            text: qsTrId("threesea-me-web-remove")
+                            onClicked: page.removeServer(server, model.host)
+                        }
+                    }
+                    Label {
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * x
+                        anchors.verticalCenter: parent.verticalCenter
+                        truncationMode: TruncationMode.Fade
+                        color: server.highlighted ? Theme.highlightColor : Theme.primaryColor
+                        text: model.host
+                    }
                 }
             }
         }

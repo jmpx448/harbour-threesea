@@ -5,7 +5,8 @@ import Sailfish.Silica 1.0
 // Code entry like Sailfish's device lock: the title in the upper part, Silica's keypad (with
 // letters) at the bottom, the dots right-aligned above it with backspace next to them, cancel
 // bottom left and accept bottom right once the code is long enough. The keyboard button top left
-// switches to a passphrase field (`allowKeyboard`), like the device lock's.
+// switches to a passphrase field (`allowKeyboard`), like the device lock's; the keypad and its
+// cancel are hidden then, so cancel moves to the top right, above the keyboard.
 // `entered(pin, keyboard)` on accept; `clear()` after a wrong code. Fills its parent.
 Item {
     id: root
@@ -13,6 +14,8 @@ Item {
     property string title
     // Shown in place of the dots while nothing is entered (hints, "Wrong PIN").
     property string errorText
+    // A sentence under the title, for what the hint's single line has no room for.
+    property string note
     property int minimumLength: 4
     property bool keyboard: false
     property bool allowKeyboard: false
@@ -67,6 +70,16 @@ Item {
         icon.source: root.keyboard ? "image://theme/icon-m-dialpad" : "image://theme/icon-m-keyboard"
         onClicked: root.keyboard = !root.keyboard
     }
+    IconButton {
+        visible: root.cancellable && root.keyboard && !root.busy
+        anchors {
+            right: parent.right
+            rightMargin: Theme.horizontalPageMargin
+        }
+        y: cutout.inset + Theme.paddingLarge
+        icon.source: "image://theme/icon-m-cancel"
+        onClicked: root.canceled()
+    }
 
     Label {
         id: titleLabel
@@ -78,6 +91,21 @@ Item {
         text: root.title
         color: Theme.highlightColor
         font.pixelSize: Theme.fontSizeExtraLarge
+    }
+
+    Label {
+        visible: root.note.length > 0
+        anchors {
+            top: titleLabel.bottom
+            topMargin: Theme.paddingSmall
+        }
+        x: Theme.horizontalPageMargin
+        width: parent.width - 2 * x
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        text: root.note
+        color: Theme.secondaryHighlightColor
+        font.pixelSize: Theme.fontSizeSmall
     }
 
     // Passphrase on the keyboard.

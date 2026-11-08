@@ -2,6 +2,7 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../../components"
+import "../../components/Format.js" as Fmt
 
 // Settings → Security: the app lock, and the passphrase for the stored data (Android's
 // "Encryption of locally stored data"), which are independent of each other (ADR 0009).
@@ -57,14 +58,7 @@ Page {
             ValueButton {
                 //% "App lock"
                 label: qsTrId("threesea-he-app-lock")
-                value: !(window.lockInfo && window.lockInfo.lock)
-                       //% "Off"
-                       ? qsTrId("threesea-me-lock-off")
-                       : window.lockInfo.lock.keyboard
-                         //% "Passphrase"
-                         ? qsTrId("threesea-la-lock-passphrase")
-                         //% "PIN"
-                         : qsTrId("threesea-la-lock-pin")
+                value: Fmt.lockValue(window.lockInfo && window.lockInfo.lock)
                 onClicked: {
                     if (!(window.lockInfo && window.lockInfo.lock)) {
                         pageStack.push(Qt.resolvedUrl("../AppLockPage.qml"))
@@ -72,7 +66,7 @@ Page {
                     }
                     var unlock = pageStack.push(Qt.resolvedUrl("../UnlockPage.qml"))
                     unlock.unlocked.connect(function(pin) {
-                        pageStack.replace(Qt.resolvedUrl("../AppLockPage.qml"), { currentPin: pin })
+                        pageStack.replace(Qt.resolvedUrl("../AppLockPage.qml"), { pin: pin })
                     })
                 }
             }
@@ -89,8 +83,8 @@ Page {
                 enabled: !page.working
                 //% "Passphrase"
                 text: qsTrId("threesea-la-lock-passphrase")
-                //% "Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone, and receives messages once it is entered."
-                description: qsTrId("threesea-la-data-passphrase-description")
+                //% "Your messages are stored encrypted with a key that is kept encrypted with this passphrase. Threesea asks for it every time it starts, also after restarting the phone or deleting its data folder, and only this passphrase opens it. It receives messages once it is entered. If you forget it, pull down where it is asked for to start fresh, without what Threesea has stored on this phone: Threema Safe or an ID backup brings your ID back, a Data backup your chats."
+                description: qsTrId("threesea-la-data-passphrase-about")
                 onClicked: {
                     if (checked) page.askPassphrase(function() {
                         pageStack.pop(page)

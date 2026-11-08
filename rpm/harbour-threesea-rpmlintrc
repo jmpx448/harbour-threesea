@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# rpmlint's known noise for this package (the Jolla Store's own check, rpmvalidation, passes).
+from Config import *
+# The map renderer's libraries, private under /usr/share/harbour-threesea/lib like Pure Maps' (ADR
+# 0032): Harbour wants them there, unregistered with ldconfig and not as a library package.
+addFilter("arch-dependent-file-in-usr-share")
+addFilter("library-without-ldconfig-postin")
+addFilter("library-without-ldconfig-postun")
+addFilter("shlib-policy-name-error")
+# No %changelog in the spec: CHANGELOG.md is the record.
+addFilter("no-changelogname-tag")
+# Two emoji search lists that are the same file (gsw and de).
+addFilter("files-duplicate .*/emojis/search/gsw.csv")
