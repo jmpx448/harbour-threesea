@@ -100,6 +100,8 @@ Added:
 
 Fixed:
 
+- Full: Threesea starts again in the background when the home screen restarts. It used to end with
+  the home screen and stay away until opened, which could happen a minute after login.
 - Numbers written as `+49 (0) 171 …` keep no extra zero, when linking and in the address book.
   Hungarian national numbers lose their whole `06` prefix.
 - Linking a phone number or an e-mail address that is already linked to your ID says so, rather than

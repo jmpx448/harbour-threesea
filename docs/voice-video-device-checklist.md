@@ -1254,6 +1254,9 @@ need neither a sensor nor a real network.
    background instance after boot), then start it again.
    - Expect: the prompt again, and the app starts once it is confirmed. Note anything else, such as
      `secrets read` in the log with no prompt (docs/emulator.md has the emulator's case).
+   - Full, with the background run up: `systemctl --user restart lipstick` in the terminal.
+   - Expect: Threesea is running again without a window shortly after the home screen is back, and
+     no second prompt. The same after `pkill -KILL lipstick`.
 3. A damaged database.
    - Expect: the chat list, an unreadable chat and scrolling into a damaged part each say so once.
 4. Open with the phone's storage full.

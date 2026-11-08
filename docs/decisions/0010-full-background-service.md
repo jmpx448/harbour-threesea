@@ -30,6 +30,12 @@ match templates"), and every launch already goes through D-Bus activation (ADR 0
 - Sailfish Secrets asks "Authorize" when a new build first reads the database key, and in the
   emulator after every user-session restart, also at login for the background start (on the lock
   screen). Whether a phone with a device code asks after each boot is still to be checked.
+- Lipstick going away ends the app whatever it is doing: Qt's Wayland plugin calls `::exit(1)`
+  when the connection breaks, so the app can't stay. Lipstick can restart soon after login (seen
+  a minute after it, issue #2). The unit therefore stays active after its call
+  (`RemainAfterExit=yes`): with `Requires=lipstick.service` a restart of lipstick, explicit or by
+  its `Restart=always`, restarts the unit too, and `After=` makes that wait until lipstick is up.
+  The window isn't brought back, only the background run.
 - With "Encrypt stored data" (ADR 0009) the background start can only show "Threesea is
   locked" until the passphrase is entered.
 - Chum itself builds from source on OBS, which needs Rust ≥ 1.95 (open question in CLAUDE.md §11).
