@@ -4978,15 +4978,15 @@
         </message>
         <message id="threesea-la-key-confirmation-notification">
             <source>Threesea is waiting for your OK</source>
-            <translation type="unfinished" />
+            <translation>Threesea attend votre accord</translation>
         </message>
         <message id="threesea-la-key-confirmation-notification-body">
             <source>After a restart the phone asks once whether Threesea may read the key to its data. Confirm that to receive messages.</source>
-            <translation type="unfinished" />
+            <translation>Après un redémarrage, le téléphone demande une fois si Threesea peut lire la clé de ses données. Confirmez pour recevoir les messages.</translation>
         </message>
         <message id="threesea-la-credit-finnish">
             <source>The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.</source>
-            <translation type="unfinished" />
+            <translation>La traduction finnoise : jmpx448 (github.com/jmpx448), dont c’est la première contribution.</translation>
         </message>
     </context>
 </TS>

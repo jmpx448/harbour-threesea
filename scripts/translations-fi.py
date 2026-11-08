@@ -3651,6 +3651,15 @@ FI = {
     "threesea-la-credit-map-data":
         ("Map data © OpenMapTiles © OpenStreetMap contributors (ODbL), from Threema's map server.",
          "Karttatiedot © OpenMapTiles © OpenStreetMap-tekijät (ODbL), Threeman karttapalvelimelta."),
+    "threesea-la-key-confirmation-notification":
+        ("Threesea is waiting for your OK",
+         "Threesea odottaa vahvistustasi"),
+    "threesea-la-key-confirmation-notification-body":
+        ("After a restart the phone asks once whether Threesea may read the key to its data. Confirm that to receive messages.",
+         "Uudelleenkäynnistyksen jälkeen puhelin kysyy kerran, saako Threesea lukea tietojensa avaimen. Vahvista se, jotta voit vastaanottaa viestejä."),
+    "threesea-la-credit-finnish":
+        ("The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.",
+         "Suomennos: jmpx448 (github.com/jmpx448), ensikertalainen avustaja."),
     "threesea-me-open-in-maps":
         ("Open in maps app",
          "Avaa karttasovelluksessa"),
