@@ -37,6 +37,10 @@ match templates"), and every launch already goes through D-Bus activation (ADR 0
   `SecretStore` first reads without interaction (`PreventInteraction`, answered
   `CollectionIsLockedError` while locked), and while the prompt then waits with no window open a
   notification says what it is for. Cancelled, it is the failed start's notification.
+  Lipstick restarting takes the prompt away too, and Secrets reports that the same as a real
+  Cancel (`InteractionViewUserCanceledError`, seen on a phone, issue #2). With no window open the
+  app asks once more after 10 s, as nothing else would. So a real Cancel in the background shows
+  the prompt one more time; with a window open the start's error page has Try again.
 - Lipstick going away ends the app whatever it is doing: Qt's Wayland plugin calls `::exit(1)`
   when the connection breaks, so the app can't stay. Lipstick can restart soon after login (seen
   a minute after it, issue #2). The unit therefore stays active after its call

@@ -31,6 +31,7 @@ public:
         SecretAlreadyExistsError = 47,
         CollectionIsLockedError = 60,
         DatabaseError = 72,
+        InteractionViewUserCanceledError = 95,
     };
     Result(ResultCode code = Succeeded) : m_code(code) {}
     Result(ErrorCode error, const QString &message) : m_code(Failed), m_error(error), m_message(message) {}
@@ -211,6 +212,8 @@ struct FakeDaemon
     bool collectionLocked = false;
     int lockedAnswer = Sailfish::Secrets::Result::CollectionIsLockedError;
     int prompts = 0;
+    // So many prompts in a row end as cancelled.
+    int dismissPrompts = 0;
     // An error for the next request of that kind on that secret name (or the collection, "").
     QMap<QString, int> failCreate;
     QMap<QString, int> failRead;

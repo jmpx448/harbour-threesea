@@ -5,6 +5,7 @@
 
 #include <QFile>
 #include <QLoggingCategory>
+#include <QTimer>
 
 #include <Sailfish/Secrets/createcollectionrequest.h>
 #include <Sailfish/Secrets/deletesecretrequest.h>
@@ -62,7 +63,14 @@ SecretStore::~SecretStore() = default;
 void SecretStore::loadKey(bool allowCreate)
 {
     m_allowCreate = allowCreate;
+    m_askedAgain = false;
     ensureCollection();
+}
+
+void SecretStore::askAgainIfDismissed(int delay, std::function<bool()> mayAsk)
+{
+    m_askAgainAfter = delay;
+    m_mayAskAgain = std::move(mayAsk);
 }
 
 void SecretStore::replaceKey()
@@ -136,8 +144,21 @@ void SecretStore::fetchKey()
             return;
         }
         emit confirmationNeeded();
-        fetch(SecretName, [this](const Fetched &confirmed) { keyFetched(confirmed); });
+        askForKey();
     }, false);
+}
+
+void SecretStore::askForKey()
+{
+    fetch(SecretName, [this](const Fetched &key) {
+        if (key.dismissed && !m_askedAgain && m_mayAskAgain && m_mayAskAgain()) {
+            m_askedAgain = true;
+            qWarning("threesea: the prompt for the database key went away, asking once more");
+            QTimer::singleShot(m_askAgainAfter, this, [this]() { askForKey(); });
+            return;
+        }
+        keyFetched(key);
+    });
 }
 
 void SecretStore::keyFetched(const Fetched &key)
@@ -186,6 +207,7 @@ void SecretStore::fetch(const QString &name, std::function<void(const Fetched &)
             fetched.missing = result.errorCode() == Result::InvalidSecretError;
             fetched.locked = !mayAsk && (result.errorCode() == Result::CollectionIsLockedError
                                          || result.errorCode() == Result::OperationRequiresUserInteraction);
+            fetched.dismissed = result.errorCode() == Result::InteractionViewUserCanceledError;
             if (!fetched.missing && !fetched.locked) {
                 fetched.code = secretsCode("read", result);
             }

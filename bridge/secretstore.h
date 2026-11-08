@@ -32,6 +32,11 @@ public:
     // database with it (ADR 0018). Emits keyReady or failed.
     void replaceKey();
 
+    // A prompt that ends as cancelled may never have been answered: Secrets says the same when
+    // the system's dialog goes away with the home screen. If `mayAsk` then holds, it is shown
+    // once more after `delay` ms.
+    void askAgainIfDismissed(int delay, std::function<bool()> mayAsk);
+
 signals:
     void keyReady(QByteArray key);
     // The key is encrypted with the app lock passphrase; `keyboard`: typed, not digits.
@@ -52,12 +57,14 @@ private:
         bool missing = false;
         // Reading it needs the user's confirmation; only when the read was not to ask for one.
         bool locked = false;
+        bool dismissed = false;
         QByteArray data;
         QString code;
     };
 
     void ensureCollection();
     void fetchKey();
+    void askForKey();
     void keyFetched(const Fetched &key);
     bool readFailed(const Fetched &fetched);
     void useKey(const QByteArray &key, bool found);
@@ -71,6 +78,9 @@ private:
     Sailfish::Secrets::SecretManager *m_manager;
     bool m_allowCreate = false;
     bool m_replaceKey = false;
+    bool m_askedAgain = false;
+    int m_askAgainAfter = 0;
+    std::function<bool()> m_mayAskAgain;
 };
 
 #endif // SECRETSTORE_H

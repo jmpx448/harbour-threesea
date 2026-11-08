@@ -298,6 +298,62 @@ void lockedAfterBoot()
     check(daemon().secrets.value(Key) == OldKey, "cancelled: the key untouched");
 }
 
+const int Dismissed = Sailfish::Secrets::Result::InteractionViewUserCanceledError;
+
+Heard loadAskingAgain(bool mayAsk)
+{
+    SecretStore store;
+    store.askAgainIfDismissed(0, [mayAsk]() { return mayAsk; });
+    Heard heard;
+    listen(store, heard);
+    store.loadKey(false);
+    // The second prompt comes from a timer, when no request is running.
+    for (int turn = 0; turn < 100000 && heard.answers() == 0; ++turn) {
+        QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
+    check(heard.answers() == 1, "exactly one answer after a dismissed prompt");
+    return heard;
+}
+
+void promptDismissed()
+{
+    // Gone with the home screen, with no window up: asked again, and the key comes.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    daemon().failRead.insert(Key, Dismissed);
+    Heard heard = loadAskingAgain(true);
+    check(daemon().prompts == 2, "dismissed: a second prompt");
+    check(heard.keys == QList<QByteArray>{OldKey}, "dismissed: the key after it");
+    check(heard.failed.isEmpty(), "dismissed: no failure");
+    check(heard.confirmations == 1, "dismissed: said once");
+
+    // With a window up the error page is there to try again.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    daemon().failRead.insert(Key, Dismissed);
+    heard = loadAskingAgain(false);
+    check(daemon().prompts == 1, "window up: no second prompt");
+    check(heard.failed == QStringList{QStringLiteral("secrets")}, "window up: the failure");
+
+    // Only once: someone who cancels twice has answered.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    daemon().dismissPrompts = 2;
+    heard = loadAskingAgain(true);
+    check(daemon().prompts == 2, "twice: no third prompt");
+    check(heard.failed == QStringList{QStringLiteral("secrets")}, "twice: the failure");
+    check(heard.keys.isEmpty(), "twice: no key");
+
+    // Any other error is no dismissal.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    daemon().failRead.insert(Key, Sailfish::Secrets::Result::DaemonError);
+    heard = loadAskingAgain(true);
+    check(daemon().prompts == 1, "another error: no second prompt");
+    check(heard.failed == QStringList{QStringLiteral("secrets")}, "another error: the failure");
+}
+
 void newKeyForANewId()
 {
     withKey(OldKey);
@@ -326,6 +382,7 @@ int main(int argc, char **argv)
     interruptedReplacement();
     replacing();
     lockedAfterBoot();
+    promptDismissed();
     newKeyForANewId();
     std::printf(failures ? "%d FAILED\n" : "passed\n", failures);
     return failures ? 1 : 0;

@@ -1263,6 +1263,8 @@ need neither a sensor nor a real network.
    - Full, restart the phone and leave the prompt unanswered for a few seconds.
    - Expect: a notification "Threesea is waiting for your OK", gone once the prompt is confirmed. If
      it is cancelled, the failed start's notification comes instead.
+   - Full, the prompt unanswered with no window open: `systemctl --user restart lipstick`.
+   - Expect: the prompt comes back by itself within about 15 seconds, and no failed start.
    - Full, with the background run up: `systemctl --user restart lipstick` in the terminal.
    - Expect: Threesea is running again without a window shortly after the home screen is back, and
      no second prompt. The same after `pkill -KILL lipstick`.

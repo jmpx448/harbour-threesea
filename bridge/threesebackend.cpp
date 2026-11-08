@@ -28,6 +28,7 @@
 #include <QStandardPaths>
 #include <QThreadPool>
 #include <QUrl>
+#include <QWindow>
 
 #include <notification.h>
 #include <threesea_core.h>
@@ -110,6 +111,11 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
     connect(&m_unreadTimer, &QTimer::timeout, this, [this]() {
         QJSValue none;
         call(QStringLiteral("unreadSummary"), QVariantMap(), none);
+    });
+    // With a window up, the start's error page has Try again; without one nothing would.
+    m_secrets->askAgainIfDismissed(10000, []() {
+        const QWindowList windows = QGuiApplication::topLevelWindows();
+        return std::none_of(windows.begin(), windows.end(), [](QWindow *window) { return window->isVisible(); });
     });
     connect(m_secrets, &SecretStore::confirmationNeeded, this, [this]() { setAwaitingKeyConfirmation(true); });
     connect(m_secrets, &SecretStore::keyReady, this, [this]() { setAwaitingKeyConfirmation(false); });

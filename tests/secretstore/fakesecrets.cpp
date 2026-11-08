@@ -64,6 +64,10 @@ Result StoredSecretRequest::run()
     }
     if (daemon.collectionLocked) {
         ++daemon.prompts;
+        if (daemon.dismissPrompts > 0) {
+            --daemon.dismissPrompts;
+            return Result(Result::InteractionViewUserCanceledError, QStringLiteral("dismissed"));
+        }
     }
     Result result;
     if (failing(daemon.failRead, name, &result)) {
