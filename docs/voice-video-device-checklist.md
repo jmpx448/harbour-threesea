@@ -453,7 +453,7 @@ address only.
    - Expect: "%n new contacts…" or "%n address book entries checked, no new contacts", with a count
      near the number of address book entries that have a phone number or an e-mail address. The
      notice "No phone numbers or e-mail addresses found" with a filled address book is a bug in
-     `AddressBookReader.qml`.
+     `AddressBookReader.qml`. Matching confirmed on a phone (2026-11-08).
 7. Contacts: pull to refresh.
    - Expect: the same notice.
 8. With no network, pull to refresh.

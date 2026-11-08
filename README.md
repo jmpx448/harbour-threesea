@@ -59,7 +59,7 @@ Made-up demo data, taken in the emulator. [Which version each picture is from](d
 | Photos (cut, turn, draw on them), videos, files, voice messages (pause, listen before sending), GIFs, polls with a chat's overview, locations (your position, or a place found nearby or by name), quotes, reactions, edit, delete | ✅ |
 | Threema's text formatting (*bold*, _italic_, ~strikethrough~), emoji picker with search | ✅ |
 | Profile pictures (cut to a square, or taken with the camera), contact verification by QR code | ✅ |
-| Address book matching (opt-in, hashed) | ✅ (not yet tested on a phone with a real address book) |
+| Address book matching (opt-in, hashed) | ✅ |
 | App lock and private chats, encrypted storage (SQLCipher) | ✅ |
 | Notifications with quick reply, cover, background connection | ✅ |
 | Forward and share to several chats at once, share a message's text to other apps, export a chat as a ZIP | ✅ |

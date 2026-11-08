@@ -1516,6 +1516,9 @@ decides it, and if it fails there too, the sync has never worked on a device. `A
 reads details right after the asynchronous `ensureComplete()`; the plugin's source suggests
 `requiredProperty` already loads them, unconfirmed.
 
+Settled 2026-11-08: matching works on a phone with a real address book, so the reader does read there
+and those errors don't carry over from the emulator.
+
 ## The audit of 2026-11-04 and its fixes (2026-11-04 to 2026-11-05)
 
 A review of the whole app (AI-run, like the earlier ones) found about 570 points, from wrong texts to
