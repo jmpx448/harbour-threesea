@@ -3,7 +3,7 @@
 All notable changes. Versions follow `MAJOR.MINOR.PATCH`; each release is built from the
 `release` branch and tagged `v<version>` (see [docs/release.md](docs/release.md)).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-08
 
 A large round of fixes after a review of the whole app, and the features from Threema for Android
 that were still missing for everyday use.

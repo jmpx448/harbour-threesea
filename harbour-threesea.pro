@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 TARGET = harbour-threesea
 
-VERSION = 0.2.0
+VERSION = 0.3.0
 DEFINES += APP_VERSION=\\\"$$VERSION\\\"
 
 # i18n: id-based (qsTrId) like Jolla's apps. The base .ts carries the engineering English

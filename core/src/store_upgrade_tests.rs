@@ -20,11 +20,18 @@ const CREATOR: &str = "CREATOR1";
 const KEY: [u8; 32] = [1; 32];
 
 /// The schemas releases wrote: the version, its migration count, its schema.
-const RELEASED: &[(&str, usize, &str)] = &[(
-    "0.2.0",
-    33,
-    include_str!("../tests/fixtures/store-schema-0.2.0.sql"),
-)];
+const RELEASED: &[(&str, usize, &str)] = &[
+    (
+        "0.2.0",
+        33,
+        include_str!("../tests/fixtures/store-schema-0.2.0.sql"),
+    ),
+    (
+        "0.3.0",
+        46,
+        include_str!("../tests/fixtures/store-schema-0.3.0.sql"),
+    ),
+];
 
 fn group(id: u64) -> String {
     crate::groups::key(&GroupIdentity {
@@ -196,6 +203,11 @@ fn released_store(path: &Path, migrations: usize, schema: &str) {
     conn.execute_batch(schema).unwrap();
     conn.execute_batch(&format!("PRAGMA user_version = {migrations}"))
         .unwrap();
+    // A fixture is only the schema; this row a migration puts in, and a release past it has it.
+    if migrations >= 41 {
+        conn.execute_batch("INSERT INTO receiver_generation (value) VALUES (0)")
+            .unwrap();
+    }
     for version in 1..=migrations {
         seed(&conn, version);
     }
@@ -356,8 +368,10 @@ fn check(path: &Path, seeded: usize, walked: bool, fresh: &[String]) {
     }
     if at(8) {
         let crew = store.group(&group(7)).unwrap().unwrap();
-        assert!(
+        // Migration 35 adds them, to a store that hadn't had it.
+        assert_eq!(
             crew.members.contains(&CREATOR.to_owned()),
+            walked || seeded < 35,
             "{:?}",
             crew.members
         );
@@ -379,11 +393,14 @@ fn check(path: &Path, seeded: usize, walked: bool, fresh: &[String]) {
             store.message(6).unwrap().unwrap().sender.as_deref(),
             Some(CREATOR)
         );
-        let deleted = store.message(7).unwrap().unwrap();
-        assert_eq!(deleted.state, crate::messages::OutgoingState::Sent as i64);
-        assert!(store.pending_receivers(&group(7), 107).unwrap().is_empty());
-        let on_its_way = store.message(8).unwrap().unwrap();
-        assert!(on_its_way.written_out && on_its_way.state == 0);
+        // Migration 36 settles what was waiting, in a store that hadn't had it.
+        if walked || seeded < 36 {
+            let deleted = store.message(7).unwrap().unwrap();
+            assert_eq!(deleted.state, crate::messages::OutgoingState::Sent as i64);
+            assert!(store.pending_receivers(&group(7), 107).unwrap().is_empty());
+            let on_its_way = store.message(8).unwrap().unwrap();
+            assert!(on_its_way.written_out && on_its_way.state == 0);
+        }
         let found = store
             .search_messages("group hello", None, 10, |_| true, |_| None)
             .unwrap();

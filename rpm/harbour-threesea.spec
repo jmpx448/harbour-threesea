@@ -18,7 +18,7 @@
 %endif
 Name:       harbour-threesea
 Summary:    Unofficial Threema client for Sailfish OS
-Version:    0.2.0
+Version:    0.3.0
 Release:    1
 License:    AGPLv3
 URL:        https://github.com/penttimus/harbour-threesea
