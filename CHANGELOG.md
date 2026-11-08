@@ -102,6 +102,9 @@ Fixed:
 
 - Full: Threesea starts again in the background when the home screen restarts. It used to end with
   the home screen and stay away until opened, which could happen a minute after login.
+- Full: after a restart the phone asks once whether Threesea may read the key to its data. Sailfish
+  OS always asks this, and nothing arrives until it is answered, so a notification now says what the
+  prompt is for.
 - Numbers written as `+49 (0) 171 …` keep no extra zero, when linking and in the address book.
   Hungarian national numbers lose their whole `06` prefix.
 - Linking a phone number or an e-mail address that is already linked to your ID says so, rather than

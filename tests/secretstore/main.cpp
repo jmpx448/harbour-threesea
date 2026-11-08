@@ -50,6 +50,7 @@ struct Heard
     QList<bool> keyboard;
     QStringList failed;
     QList<bool> stored;
+    int confirmations = 0;
 
     int answers() const { return keys.size() + wrapped.size() + failed.size() + stored.size(); }
 };
@@ -78,6 +79,7 @@ void listen(SecretStore &store, Heard &heard)
     });
     QObject::connect(&store, &SecretStore::failed, [&heard](const QString &kind) { heard.failed << kind; });
     QObject::connect(&store, &SecretStore::stored, [&heard](bool ok) { heard.stored << ok; });
+    QObject::connect(&store, &SecretStore::confirmationNeeded, [&heard]() { ++heard.confirmations; });
 }
 
 Heard load(bool allowCreate)
@@ -259,6 +261,43 @@ void replacing()
     check(daemon().secrets.value(Key) == OldKey, "the old key untouched");
 }
 
+void lockedAfterBoot()
+{
+    // Unlocked: nothing to explain, and no prompt.
+    withKey(OldKey);
+    Heard heard = load(false);
+    check(heard.confirmations == 0, "unlocked: nothing said");
+    check(daemon().log.filter(QStringLiteral("read")).size() == 1, "unlocked: read once");
+
+    // Locked: said before the prompt, and the prompt brings the key.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    heard = load(false);
+    check(heard.confirmations == 1, "locked: said once");
+    check(daemon().prompts == 1, "locked: one prompt");
+    check(heard.keys == QList<QByteArray>{OldKey}, "locked: the key after the prompt");
+
+    // Only asked after the attempt without the prompt.
+    check(daemon().log.filter(QStringLiteral("read")).size() == 2, "locked: read twice");
+
+    // The same for the other way the daemon says it.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    daemon().lockedAnswer = Sailfish::Secrets::Result::OperationRequiresUserInteraction;
+    heard = load(false);
+    check(heard.confirmations == 1 && heard.keys == QList<QByteArray>{OldKey}, "needs interaction: the same");
+
+    // The prompt ends in an error: fails closed, as for any failed read.
+    withKey(OldKey);
+    daemon().collectionLocked = true;
+    daemon().failRead.insert(Key, Sailfish::Secrets::Result::DaemonError);
+    heard = load(false);
+    check(heard.confirmations == 1, "cancelled: was said");
+    check(heard.failed == QStringList{QStringLiteral("secrets")}, "cancelled: said as a failure");
+    check(heard.keys.isEmpty(), "cancelled: no key");
+    check(daemon().secrets.value(Key) == OldKey, "cancelled: the key untouched");
+}
+
 void newKeyForANewId()
 {
     withKey(OldKey);
@@ -286,6 +325,7 @@ int main(int argc, char **argv)
     wrappedKey();
     interruptedReplacement();
     replacing();
+    lockedAfterBoot();
     newKeyForANewId();
     std::printf(failures ? "%d FAILED\n" : "passed\n", failures);
     return failures ? 1 : 0;

@@ -1254,6 +1254,9 @@ need neither a sensor nor a real network.
    background instance after boot), then start it again.
    - Expect: the prompt again, and the app starts once it is confirmed. Note anything else, such as
      `secrets read` in the log with no prompt (docs/emulator.md has the emulator's case).
+   - Full, restart the phone and leave the prompt unanswered for a few seconds.
+   - Expect: a notification "Threesea is waiting for your OK", gone once the prompt is confirmed. If
+     it is cancelled, the failed start's notification comes instead.
    - Full, with the background run up: `systemctl --user restart lipstick` in the terminal.
    - Expect: Threesea is running again without a window shortly after the home screen is back, and
      no second prompt. The same after `pkill -KILL lipstick`.

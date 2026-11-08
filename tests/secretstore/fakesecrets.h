@@ -24,10 +24,12 @@ public:
     enum ErrorCode {
         NoError = 0,
         DaemonError = 5,
+        OperationRequiresUserInteraction = 14,
         InvalidSecretError = 40,
         InvalidCollectionError = 43,
         CollectionAlreadyExistsError = 46,
         SecretAlreadyExistsError = 47,
+        CollectionIsLockedError = 60,
         DatabaseError = 72,
     };
     Result(ResultCode code = Succeeded) : m_code(code) {}
@@ -148,7 +150,7 @@ class StoredSecretRequest : public Request
 public:
     explicit StoredSecretRequest(QObject *parent = nullptr) : Request(parent) {}
     void setIdentifier(const Secret::Identifier &identifier) { m_identifier = identifier; }
-    void setUserInteractionMode(SecretManager::UserInteractionMode) {}
+    void setUserInteractionMode(SecretManager::UserInteractionMode mode) { m_mode = mode; }
     Secret secret() const { return m_secret; }
 
 protected:
@@ -156,6 +158,7 @@ protected:
 
 private:
     Secret::Identifier m_identifier;
+    SecretManager::UserInteractionMode m_mode = SecretManager::PreventInteraction;
     Secret m_secret;
 };
 
@@ -203,6 +206,11 @@ struct FakeDaemon
     // unlocked (the app starts in the background, before anyone unlocks anything).
     bool collectionAsExpected = false;
     QMap<QString, QByteArray> secrets;
+    // After a boot: a read without interaction is refused, one with it shows the prompt and, if
+    // it isn't made to fail, unlocks. `lockedAnswer`: how the refusal is worded.
+    bool collectionLocked = false;
+    int lockedAnswer = Sailfish::Secrets::Result::CollectionIsLockedError;
+    int prompts = 0;
     // An error for the next request of that kind on that secret name (or the collection, "").
     QMap<QString, int> failCreate;
     QMap<QString, int> failRead;

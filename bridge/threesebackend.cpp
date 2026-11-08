@@ -110,9 +110,13 @@ ThreeseBackend::ThreeseBackend(QJSEngine *engine)
         QJSValue none;
         call(QStringLiteral("unreadSummary"), QVariantMap(), none);
     });
+    connect(m_secrets, &SecretStore::confirmationNeeded, this, [this]() { setAwaitingKeyConfirmation(true); });
+    connect(m_secrets, &SecretStore::keyReady, this, [this]() { setAwaitingKeyConfirmation(false); });
+    connect(m_secrets, &SecretStore::failed, this, [this]() { setAwaitingKeyConfirmation(false); });
     connect(m_secrets, &SecretStore::keyReady, this, &ThreeseBackend::startCore);
     connect(m_secrets, &SecretStore::wrappedKeyReady, this, [this](QByteArray blob, bool keyboard) {
         Q_UNUSED(keyboard)
+        setAwaitingKeyConfirmation(false);
         m_wrappedKey = blob;
         m_state = QStringLiteral("locked");
         emit dataEncryptionChanged();
@@ -676,6 +680,14 @@ void ThreeseBackend::startAgain()
     m_wrappedKey.clear();
     m_unlockedAtStart = false;
     m_secrets->loadKey(!QFile::exists(databasePath()));
+}
+
+void ThreeseBackend::setAwaitingKeyConfirmation(bool awaiting)
+{
+    if (awaiting != m_awaitingKeyConfirmation) {
+        m_awaitingKeyConfirmation = awaiting;
+        emit awaitingKeyConfirmationChanged();
+    }
 }
 
 void ThreeseBackend::setUpgrading(bool upgrading)

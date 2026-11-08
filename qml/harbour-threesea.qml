@@ -116,6 +116,30 @@ ApplicationWindow {
         }
     }
 
+    // After every boot the system asks once whether the app may read its key, in words that say
+    // nothing to anyone but a developer (ADR 0010), and nothing arrives until it is answered.
+    function keyConfirmationNotification() {
+        if (backend.awaitingKeyConfirmation && Qt.application.state !== Qt.ApplicationActive) {
+            keyConfirmationLater.restart()
+        } else {
+            keyConfirmationLater.stop()
+            clearNotification("keyConfirmation")
+        }
+    }
+    Timer {
+        id: keyConfirmationLater
+        // Not while the window is just being opened, like the ones above.
+        interval: 3000
+        onTriggered: {
+            if (!backend.awaitingKeyConfirmation || Qt.application.state === Qt.ApplicationActive
+                    || notifications["keyConfirmation"]) return
+            //% "Threesea is waiting for your OK"
+            plainNotification("keyConfirmation", qsTrId("threesea-la-key-confirmation-notification"),
+                              //% "After a restart the phone asks once whether Threesea may read the key to its data. Confirm that to receive messages."
+                              qsTrId("threesea-la-key-confirmation-notification-body"))
+        }
+    }
+
     // Threema's directory refused the license and nothing arrives any more: in the background
     // there is no other way to find out.
     function licenseNotification() {
@@ -368,6 +392,7 @@ ApplicationWindow {
             }
             window.lockedNotification()
             window.startFailedNotification()
+            window.keyConfirmationNotification()
             // The chat list says it now.
             if (Qt.application.state === Qt.ApplicationActive) {
                 window.clearNotification("serverMessage")
@@ -1347,8 +1372,10 @@ ApplicationWindow {
             identity = identity ? "replyNotSent:" + identity : "replyNotSent"
         } else if (!identity && actions.length > 0 && actions[0].method === "activate") {
             // The private chats' notification opens the app only, and so do the ones for the lock
-            // and for a failed start.
+            // and for a failed start. The key's confirmation isn't taken over: this run says it
+            // again if it still has to be given.
             identity = n.summary === qsTrId("threesea-la-locked-notification") ? "appLocked"
+                     : n.summary === qsTrId("threesea-la-key-confirmation-notification") ? ""
                      : n.summary === qsTrId("threesea-la-startup-failed") ? "startFailed"
                      : n.summary === qsTrId("threesea-la-license-notification")
                        && n.body === qsTrId("threesea-la-license-notification-body") ? "license"
@@ -2250,6 +2277,7 @@ ApplicationWindow {
             }
             window.offlineReason = null
         }
+        onAwaitingKeyConfirmationChanged: window.keyConfirmationNotification()
         onStateChanged: {
             // A last run's notifications, after a crash or a restart: their names and words stay
             // behind the passphrase too. They would otherwise last until it is entered.

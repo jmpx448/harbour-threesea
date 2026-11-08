@@ -36,6 +36,9 @@ signals:
     void keyReady(QByteArray key);
     // The key is encrypted with the app lock passphrase; `keyboard`: typed, not digits.
     void wrappedKeyReady(QByteArray blob, bool keyboard);
+    // The collection is locked (after every boot): the system is asking the user whether the app
+    // may read the key. One of the answers above or failed follows.
+    void confirmationNeeded();
     // `kind`: what the UI tells apart (secrets: Secrets answered with an error, keyMissing: a
     // database exists and its key is really not there). `detail`: a code for support.
     void failed(const QString &kind, const QString &detail = QString());
@@ -47,15 +50,18 @@ private:
         bool found = false;
         // Secrets says it isn't there; anything else that went wrong says nothing about that.
         bool missing = false;
+        // Reading it needs the user's confirmation; only when the read was not to ask for one.
+        bool locked = false;
         QByteArray data;
         QString code;
     };
 
     void ensureCollection();
     void fetchKey();
+    void keyFetched(const Fetched &key);
     bool readFailed(const Fetched &fetched);
     void useKey(const QByteArray &key, bool found);
-    void fetch(const QString &name, std::function<void(const Fetched &)> done);
+    void fetch(const QString &name, std::function<void(const Fetched &)> done, bool mayAsk = true);
     void write(const QString &name, const QByteArray &data, std::function<void(bool)> done);
     void remove(const QString &name, std::function<void(bool)> done);
     void replaceWith(const QByteArray &data);

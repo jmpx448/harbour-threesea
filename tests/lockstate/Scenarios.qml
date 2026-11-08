@@ -1745,6 +1745,41 @@ QtObject {
             }, 3300],
             [function() { check("no notification", window.notifications["startFailed"], undefined) }, 0],
         ],
+        // The system's prompt after a boot is explained while nobody has the window open, and the
+        // explanation goes once it has been answered.
+        keyConfirmationExplained: [
+            [function() {
+                harness.setActive(false)
+                backend.awaitingKeyConfirmation = true
+            }, 3300],
+            [function() {
+                var n = window.notifications["keyConfirmation"]
+                check("its notification", !!n, true)
+                check("its title", n.summary, "threesea-la-key-confirmation-notification")
+                backend.awaitingKeyConfirmation = false
+            }, 50],
+            [function() { check("gone once answered", window.notifications["keyConfirmation"], undefined) }, 0],
+        ],
+        // Answered at once: no notification comes after it.
+        keyConfirmationQuickAnswerStaysQuiet: [
+            [function() {
+                harness.setActive(false)
+                backend.awaitingKeyConfirmation = true
+            }, 500],
+            [function() { backend.awaitingKeyConfirmation = false }, 3300],
+            [function() { check("no notification", window.notifications["keyConfirmation"], undefined) }, 0],
+        ],
+        // With the window open the prompt explains itself.
+        keyConfirmationInFrontStaysQuiet: [
+            [function() {
+                harness.setActive(true)
+                backend.awaitingKeyConfirmation = true
+            }, 3300],
+            [function() {
+                check("no notification", window.notifications["keyConfirmation"], undefined)
+                backend.awaitingKeyConfirmation = false
+            }, 0],
+        ],
         // The store fails after the passphrase: the failure shows.
         failsAfterPassphrase: [
             [function() { backend.state = "locked" }, 100],

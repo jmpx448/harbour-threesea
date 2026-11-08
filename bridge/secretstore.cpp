@@ -127,41 +127,54 @@ bool SecretStore::readFailed(const Fetched &fetched)
 
 void SecretStore::fetchKey()
 {
+    // After every boot the collection is locked and reading brings up the system's prompt, in the
+    // system's words (ADR 0010). Trying first without it says whether that is about to happen, so
+    // that the app can say what the prompt is for.
     fetch(SecretName, [this](const Fetched &key) {
-        if (key.found) {
-            useKey(key.data, true);
+        if (!key.locked) {
+            keyFetched(key);
             return;
         }
-        if (readFailed(key)) {
-            return;
-        }
-        // Interrupted while replacing it: the staging copy is the current one.
-        fetch(StagingName, [this](const Fetched &staged) {
-            if (!staged.found) {
-                if (!readFailed(staged)) {
-                    useKey(QByteArray(), false);
-                }
-                return;
+        emit confirmationNeeded();
+        fetch(SecretName, [this](const Fetched &confirmed) { keyFetched(confirmed); });
+    }, false);
+}
+
+void SecretStore::keyFetched(const Fetched &key)
+{
+    if (key.found) {
+        useKey(key.data, true);
+        return;
+    }
+    if (readFailed(key)) {
+        return;
+    }
+    // Interrupted while replacing it: the staging copy is the current one.
+    fetch(StagingName, [this](const Fetched &staged) {
+        if (!staged.found) {
+            if (!readFailed(staged)) {
+                useKey(QByteArray(), false);
             }
-            const QByteArray data = staged.data;
-            qWarning("threesea: finishing an interrupted database key replacement");
-            write(SecretName, data, [this, data](bool ok) {
-                if (ok) {
-                    remove(StagingName, [](bool) {});
-                }
-                useKey(data, true);
-            });
+            return;
+        }
+        const QByteArray data = staged.data;
+        qWarning("threesea: finishing an interrupted database key replacement");
+        write(SecretName, data, [this, data](bool ok) {
+            if (ok) {
+                remove(StagingName, [](bool) {});
+            }
+            useKey(data, true);
         });
     });
 }
 
-void SecretStore::fetch(const QString &name, std::function<void(const Fetched &)> done)
+void SecretStore::fetch(const QString &name, std::function<void(const Fetched &)> done, bool mayAsk)
 {
     auto *request = new StoredSecretRequest(this);
     request->setManager(m_manager);
     request->setIdentifier(secretId(name));
-    request->setUserInteractionMode(SecretManager::SystemInteraction);
-    whenFinished(request, [done](StoredSecretRequest *r) {
+    request->setUserInteractionMode(mayAsk ? SecretManager::SystemInteraction : SecretManager::PreventInteraction);
+    whenFinished(request, [done, mayAsk](StoredSecretRequest *r) {
         const Result result = r->result();
         Fetched fetched;
         fetched.found = result.code() == Result::Succeeded;
@@ -171,7 +184,9 @@ void SecretStore::fetch(const QString &name, std::function<void(const Fetched &)
             // Not InvalidCollectionError: the daemon also answers that when its metadata query
             // fails, and ensureCollection has made the collection by now.
             fetched.missing = result.errorCode() == Result::InvalidSecretError;
-            if (!fetched.missing) {
+            fetched.locked = !mayAsk && (result.errorCode() == Result::CollectionIsLockedError
+                                         || result.errorCode() == Result::OperationRequiresUserInteraction);
+            if (!fetched.missing && !fetched.locked) {
                 fetched.code = secretsCode("read", result);
             }
         }

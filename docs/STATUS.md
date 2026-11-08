@@ -41,9 +41,10 @@ Verified in the emulator with a real Threema Shop license (portrait-native scree
 - ID backup exported → app data wiped → license re-entered → ID restored from the backup
   (`identity/fetch_priv` with the challenge solver) → same ID.
 
-Open finding: after a reboot, Sailfish Secrets shows its own "Authorize" prompt once before the
-app gets the database key (emulator has no device lock code). Verify on a phone with a lock code
-that the collection unlocks silently with the device; important for the Chum background service.
+Finding, settled 2026-11-08 (issue #2, a phone with a lock code): after every boot Sailfish
+Secrets shows its own "Authorize" prompt once before the app gets the database key; the collection
+does not unlock silently with the device. That is how Secrets works, ADR 0010 has the details. A
+notification now says what the prompt is for.
 
 Threema Safe (2026-10-21), verified in the emulator with the test ID:
 - KDF matches upstream's test vector; live `config` over pinned TLS.

@@ -59,10 +59,17 @@ Result StoredSecretRequest::run()
     FakeDaemon &daemon = FakeDaemon::instance();
     const QString name = m_identifier.name();
     daemon.log << QStringLiteral("read ") + name;
+    if (daemon.collectionLocked && m_mode == SecretManager::PreventInteraction) {
+        return Result(static_cast<Result::ErrorCode>(daemon.lockedAnswer), QStringLiteral("locked"));
+    }
+    if (daemon.collectionLocked) {
+        ++daemon.prompts;
+    }
     Result result;
     if (failing(daemon.failRead, name, &result)) {
         return result;
     }
+    daemon.collectionLocked = false;
     if (!daemon.collectionExists) {
         return Result(Result::InvalidCollectionError, QStringLiteral("no collection"));
     }
