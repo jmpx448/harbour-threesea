@@ -3660,6 +3660,12 @@ FI = {
     "threesea-la-credit-finnish":
         ("The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.",
          "Suomennos: jmpx448 (github.com/jmpx448), ensikertalainen avustaja."),
+    "threesea-la-starting-video-call":
+        ("Starting video call",
+         "Aloitetaan videopuhelu"),
+    "threesea-la-starting-call":
+        ("Calling",
+         "Soitetaan"),
     "threesea-me-open-in-maps":
         ("Open in maps app",
          "Avaa karttasovelluksessa"),

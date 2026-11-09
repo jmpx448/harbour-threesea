@@ -1875,6 +1875,22 @@ Page {
     }
     RemorsePopup { id: spamRemorse }
 
+    // A call starts only after a moment that can be cancelled: the call items are in the pulley,
+    // and a pull released a little too late would otherwise ring the other side at once.
+    RemorsePopup { id: callRemorse }
+
+    function startCallWithRemorse(video) {
+        var identity = page.identity
+        callRemorse.execute(video
+                            //% "Starting video call"
+                            ? qsTrId("threesea-la-starting-video-call")
+                            //% "Calling"
+                            : qsTrId("threesea-la-starting-call"),
+                            function() {
+                                if (calls.state === "idle") calls.start(identity, video)
+                            })
+    }
+
     Component.onCompleted: {
         window.openChat = identity
         load()
@@ -2162,31 +2178,22 @@ Page {
         interactive: !page.emojiPanelOpen
 
         PullDownMenu {
+            // Calls at the top and Search at the bottom: the item nearest the content is the one a
+            // slightly too long pull selects, and a call should not be that easy to start.
             MenuItem {
-                visible: page.selecting
-                //% "Cancel selection"
-                text: qsTrId("threesea-me-cancel-selection")
-                onClicked: page.endSelection()
+                visible: !page.selecting && page.canCall && window.appSettings.videoCalls !== false
+                         && page.contact.canVideoCall === true
+                enabled: calls.state === "idle"
+                //% "Video call"
+                text: qsTrId("threesea-me-video-call")
+                onClicked: page.startCallWithRemorse(true)
             }
             MenuItem {
-                visible: !page.selecting
-                //% "Select messages"
-                text: qsTrId("threesea-me-select-messages")
-                onClicked: page.selecting = true
-            }
-            MenuItem {
-                visible: !page.selecting
-                //% "Search"
-                text: qsTrId("threesea-me-search")
-                onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"),
-                                          { identity: page.identity,
-                                            chatName: page.contact.displayName || page.identity })
-            }
-            MenuItem {
-                visible: !page.selecting && page.pollCount > 0
-                //% "Polls"
-                text: qsTrId("threesea-me-polls")
-                onClicked: page.openPolls()
+                visible: !page.selecting && page.canCall && page.contact.canCall === true
+                enabled: calls.state === "idle"
+                //% "Call"
+                text: qsTrId("threesea-me-call")
+                onClicked: page.startCallWithRemorse(false)
             }
             MenuItem {
                 visible: !page.selecting && page.groupCallsOn && !page.groupCallRunning && !page.readOnly
@@ -2207,19 +2214,30 @@ Page {
                 onClicked: page.openGroupCall()
             }
             MenuItem {
-                visible: !page.selecting && page.canCall && page.contact.canCall === true
-                enabled: calls.state === "idle"
-                //% "Call"
-                text: qsTrId("threesea-me-call")
-                onClicked: calls.start(page.identity)
+                visible: !page.selecting && page.pollCount > 0
+                //% "Polls"
+                text: qsTrId("threesea-me-polls")
+                onClicked: page.openPolls()
             }
             MenuItem {
-                visible: !page.selecting && page.canCall && window.appSettings.videoCalls !== false
-                         && page.contact.canVideoCall === true
-                enabled: calls.state === "idle"
-                //% "Video call"
-                text: qsTrId("threesea-me-video-call")
-                onClicked: calls.start(page.identity, true)
+                visible: page.selecting
+                //% "Cancel selection"
+                text: qsTrId("threesea-me-cancel-selection")
+                onClicked: page.endSelection()
+            }
+            MenuItem {
+                visible: !page.selecting
+                //% "Select messages"
+                text: qsTrId("threesea-me-select-messages")
+                onClicked: page.selecting = true
+            }
+            MenuItem {
+                visible: !page.selecting
+                //% "Search"
+                text: qsTrId("threesea-me-search")
+                onClicked: pageStack.push(Qt.resolvedUrl("SearchPage.qml"),
+                                          { identity: page.identity,
+                                            chatName: page.contact.displayName || page.identity })
             }
         }
 

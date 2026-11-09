@@ -4988,5 +4988,13 @@
             <source>The Finnish translation: jmpx448 (github.com/jmpx448), a first-time contributor.</source>
             <translation>La traduction finnoise : jmpx448 (github.com/jmpx448), dont c’est la première contribution.</translation>
         </message>
+        <message id="threesea-la-starting-video-call">
+            <source>Starting video call</source>
+            <translation type="unfinished" />
+        </message>
+        <message id="threesea-la-starting-call">
+            <source>Calling</source>
+            <translation type="unfinished" />
+        </message>
     </context>
 </TS>
