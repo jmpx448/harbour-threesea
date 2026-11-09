@@ -1177,6 +1177,20 @@ ApplicationWindow {
         appIcon: "harbour-threesea"
         category: "x-nemo.messaging.im.preview"
     }
+    // The vibration-only notification has nothing to show, but until closed it stays active:
+    // notification LED apps (e.g. Inari Blue Notifier) would keep the light on after the message
+    // was read. So it is closed once the vibration has played, and the previous one before a new.
+    Timer {
+        id: previewCloseTimer
+        interval: 5000
+        onTriggered: previewNotification.close()
+    }
+    function vibrateOnly() {
+        if (previewNotification.replacesId) previewNotification.close()
+        previewNotification.replacesId = 0
+        previewNotification.publish()
+        previewCloseTimer.restart()
+    }
 
     // After a login the servers hand out what they kept, as a burst: one alert for all of it, at the
     // end, for the last message that may make itself heard. While it lasts, new messages only
@@ -1260,8 +1274,7 @@ ApplicationWindow {
         n.publish()
         if (vibrate) {
             // Nothing to show, only the vibration.
-            previewNotification.replacesId = 0
-            previewNotification.publish()
+            vibrateOnly()
         }
     }
 
@@ -1269,10 +1282,7 @@ ApplicationWindow {
     // reading gets the soft bell and the usual short vibration, nothing else.
     function inAppFeedback() {
         if (backend.inAppSounds) softSound.play()
-        if (backend.inAppVibrate) {
-            previewNotification.replacesId = 0
-            previewNotification.publish()
-        }
+        if (backend.inAppVibrate) vibrateOnly()
     }
 
     // A call rings with the app out of sight, as on a locked phone: who calls, with Answer and
